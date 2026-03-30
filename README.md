@@ -4,7 +4,7 @@
 
 AI-Native SecOps Platform
 
-![Flocks WebUI animated preview](assets/flocks.webp)
+![Flocks WebUI](assets/flocks.webp)
 
 ## Project Overview
 
@@ -172,7 +172,7 @@ default = true
 
 ## Join our community
 
-Scan the QR code with **WeCom (Enterprise WeChat)** to join our official discussion group.  
+Scan the QR code with **WeChat** to join our official discussion group.  
 
 ![WeCom official community QR code](assets/community-wecom-qr.png)
 

@@ -4,7 +4,7 @@
 
 AI 原生 SecOps 平台
 
-![Flocks Web 动效预览](assets/flocks.webp)
+![Flocks Web](assets/flocks.webp)
 
 ## 项目概览
 
@@ -168,7 +168,7 @@ default = true
 
 ## 加入社区
 
-请使用**企业微信**扫描下方二维码，加入官方交流群。  
+请使用**微信**扫描下方二维码，加入官方交流群。  
 
 ![企业微信官方交流群二维码](assets/community-wecom-qr.png)
 
