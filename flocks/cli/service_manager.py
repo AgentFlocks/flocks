@@ -601,7 +601,11 @@ def _spawn_process(command: Sequence[str], *, cwd: Path, log_path: Path) -> subp
     creationflags = 0
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
     else:
         kwargs["start_new_session"] = True
 
