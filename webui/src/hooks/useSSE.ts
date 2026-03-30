@@ -84,15 +84,18 @@ export function useSSE({
       eventSourceRef.current = null;
     }
 
-    console.log('[SSE] Creating EventSource connection to:', url);
+    if (import.meta.env.DEV) {
+      console.log('[SSE] Creating EventSource connection to:', url);
+    }
     setStatus('connecting');
-    
     const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
     
     eventSource.onopen = () => {
       if (!mountedRef.current) return;
-      console.log('[SSE] Connection opened successfully');
+      if (import.meta.env.DEV) {
+        console.log('[SSE] Connection opened successfully');
+      }
       setStatus('connected');
       retryCountRef.current = 0; // 重置重试计数
     };
@@ -103,7 +106,7 @@ export function useSSE({
       try {
         const data = JSON.parse(event.data);
         // Debug: 打印收到的 SSE 事件
-        if (data.type === 'message.part.updated') {
+        if (import.meta.env.DEV && data.type === 'message.part.updated') {
           console.log('[SSE] message.part.updated:', {
             partId: data.properties?.part?.id,
             textLength: data.properties?.part?.text?.length,
@@ -121,7 +124,9 @@ export function useSSE({
     eventSource.onerror = (error) => {
       if (!mountedRef.current) return;
       
-      console.warn('[SSE] Connection error, will attempt to reconnect');
+      if (import.meta.env.DEV) {
+        console.warn('[SSE] Connection error, will attempt to reconnect');
+      }
       onErrorRef.current?.(error);
       
       // 关闭当前连接
@@ -131,7 +136,9 @@ export function useSSE({
       // 尝试重连（使用更宽松的策略）
       if (reconnectEnabled && retryCountRef.current < maxRetries) {
         const delay = getReconnectDelay(retryCountRef.current);
-        console.log(`[SSE] Reconnecting in ${Math.round(delay)}ms (attempt ${retryCountRef.current + 1}/${maxRetries})`);
+        if (import.meta.env.DEV) {
+          console.log(`[SSE] Reconnecting in ${Math.round(delay)}ms (attempt ${retryCountRef.current + 1}/${maxRetries})`);
+        }
         setStatus('reconnecting');
         
         clearReconnectTimeout();
@@ -143,7 +150,9 @@ export function useSSE({
         }, delay);
       } else {
         // 即使达到最大重试次数，也不要完全放弃，而是使用较长的间隔继续尝试
-        console.log('[SSE] Max fast retries reached, switching to slow retry mode');
+        if (import.meta.env.DEV) {
+          console.log('[SSE] Max fast retries reached, switching to slow retry mode');
+        }
         setStatus('reconnecting');
         
         clearReconnectTimeout();
@@ -161,7 +170,9 @@ export function useSSE({
     mountedRef.current = true;
 
     if (!enabled) {
-      console.log('[SSE] Not enabled, skipping connection');
+      if (import.meta.env.DEV) {
+        console.log('[SSE] Not enabled, skipping connection');
+      }
       setStatus('disconnected');
       return;
     }

@@ -147,7 +147,7 @@ async def publish_event(event_type: str, properties: dict = None, directory: str
     if event_type == "message.part.updated":
         text_len = properties.get("part", {}).get("text", "") if properties else ""
         delta = properties.get("delta", "") if properties else ""
-        log.info("event.publish.part_updated", {
+        log.debug("event.publish.part_updated", {
             "clients": broadcaster.client_count,
             "text_length": len(text_len) if text_len else 0,
             "delta_length": len(delta) if delta else 0,

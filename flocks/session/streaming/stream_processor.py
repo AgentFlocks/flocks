@@ -287,7 +287,7 @@ class StreamProcessor:
                 
                 if should_publish:
                     self._last_reasoning_event_time[event.id] = current_time
-                    log.info("stream.reasoning.publishing_delta", {
+                    log.debug("stream.reasoning.publishing_delta", {
                         "delta_len": len(event.text),
                         "total_len": len(part.text),
                         "reasoning_id": event.id,
@@ -1055,7 +1055,7 @@ class StreamProcessor:
             visible_delta = self._compute_visible_delta(self._last_visible_text, visible_text)
             
             if len(self.current_text_part.text) <= 100 or len(self.current_text_part.text) % 100 < len(event.text):
-                log.info("stream.text.delta", {
+                log.debug("stream.text.delta", {
                     "delta_length": len(event.text),
                     "total_length": len(self.current_text_part.text),
                 })
@@ -1086,7 +1086,7 @@ class StreamProcessor:
                 if should_publish:
                     self._last_text_event_time = current_time
                     if len(self.current_text_part.text) <= 100 or len(self.current_text_part.text) % 100 < len(event.text):
-                        log.info("stream.text.publishing_delta", {
+                        log.debug("stream.text.publishing_delta", {
                             "delta_len": len(visible_delta),
                             "part_id": self.current_text_part.id,
                             "throttled": time_since_last < self._text_event_throttle_ms,

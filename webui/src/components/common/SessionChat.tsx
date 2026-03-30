@@ -16,13 +16,9 @@
  * - 消息复制、时间戳等可选功能
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
 import { Send, Loader2, ChevronDown, Square, Copy, User } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import rehypeHighlight from 'rehype-highlight';
-import rehypeRaw from 'rehype-raw';
-import remarkGfm from 'remark-gfm';
-import 'highlight.js/styles/github-dark.css';
+import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool } from './QuestionTool';
@@ -225,7 +221,7 @@ export default function SessionChat({
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
     requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     });
   }, []);
 
@@ -1002,7 +998,7 @@ export interface ChatMessageBubbleProps {
   compactedMessages?: MergedMessage[];
 }
 
-export function ChatMessageBubble({
+function ChatMessageBubbleInner({
   message,
   isActive = false,
   pendingQuestions,
@@ -1112,37 +1108,10 @@ export function ChatMessageBubble({
                       <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
                     </div>
                   )}
-                  <div className="prose prose-sm max-w-none">
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      rehypePlugins={[rehypeRaw, [rehypeHighlight, { detect: false, ignoreMissing: true }]]}
-                      components={{
-                        code({ className, children, ...props }) {
-                          // 检测是否为块级代码（fenced code block）:
-                          // 1. 有 language-* 类（有语言标记）
-                          // 2. 有 hljs 类（rehype-highlight 添加的）
-                          // 3. children 以 \n 结尾（react-markdown 对块级代码添加尾随换行）
-                          const isBlock =
-                            /language-/.test(className || '') ||
-                            /\bhljs\b/.test(className || '') ||
-                            String(children ?? '').endsWith('\n');
-                          if (!isBlock) {
-                            return (
-                              <code
-                                className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-[0.85em] font-mono"
-                                {...props}
-                              >
-                                {children}
-                              </code>
-                            );
-                          }
-                          return <code className={className} {...props}>{children}</code>;
-                        },
-                      }}
-                    >
-                      {displayText}
-                    </ReactMarkdown>
-                  </div>
+                  <StreamingMarkdown
+                    content={displayText}
+                    isStreaming={isActive && !isUser}
+                  />
                 </>
               );
             })()}
@@ -1364,3 +1333,31 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     </details>
   );
 }
+
+/**
+ * Memoized export of ChatMessageBubble.
+ *
+ * Fast path (O(1) field checks, aligned with Open WebUI's approach):
+ * - structural props: isActive, role, finish, parts.length
+ * - content probe: last part's text/thinking field
+ *
+ * Only triggers a re-render when something actually visible has changed,
+ * avoiding unnecessary reconciliation during high-frequency streaming.
+ */
+export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
+  if (prev.isActive !== next.isActive) return false;
+  if (prev.showActions !== next.showActions) return false;
+  if (prev.message.finish !== next.message.finish) return false;
+  const prevParts = prev.message.parts as any[] | undefined;
+  const nextParts = next.message.parts as any[] | undefined;
+  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
+  if (prev.pendingQuestions !== next.pendingQuestions) return false;
+  // O(1) content probe on the last part — covers the streaming delta case
+  const prevLast = prevParts?.[prevParts.length - 1];
+  const nextLast = nextParts?.[nextParts.length - 1];
+  return (
+    prevLast?.text === nextLast?.text &&
+    prevLast?.thinking === nextLast?.thinking &&
+    prevLast?.state?.status === nextLast?.state?.status
+  );
+});

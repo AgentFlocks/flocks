@@ -1,10 +1,82 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
-import { flushSync } from 'react-dom';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, startTransition } from 'react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message, MessagePart } from '@/types';
 
 const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
+
+/**
+ * Pure reducer for updating a message part in the messages list.
+ * Exported for unit testing.
+ */
+export function applyMessagePartUpdate(
+  prev: Message[],
+  partInfo: any,
+  delta?: string,
+): Message[] {
+  const messageIndex = prev.findIndex(m => m.id === partInfo.messageID);
+
+  if (messageIndex < 0) {
+    // Message not found — reuse the last in-progress assistant message if available
+    let lastAssistantIndex = -1;
+    for (let i = prev.length - 1; i >= 0; i--) {
+      if (prev[i].role === 'assistant' && !prev[i].finish) {
+        lastAssistantIndex = i;
+        break;
+      }
+    }
+
+    if (lastAssistantIndex >= 0) {
+      const updated = [...prev];
+      const message = { ...updated[lastAssistantIndex] };
+      const parts = [...(message.parts || [])];
+      parts.push(partInfo);
+      message.parts = parts;
+      updated[lastAssistantIndex] = message;
+      return updated;
+    }
+
+    // No in-progress assistant message — create a placeholder
+    return [...prev, {
+      id: partInfo.messageID,
+      sessionID: partInfo.sessionID,
+      role: 'assistant' as const,
+      parts: [partInfo],
+      timestamp: Date.now(),
+    }];
+  }
+
+  // Message exists — update its parts
+  const updated = [...prev];
+  const message = { ...updated[messageIndex] };
+  const parts = [...(message.parts || [])];
+
+  const partIndex = parts.findIndex((p: any) => p.id === partInfo.id);
+
+  if (partIndex < 0) {
+    for (let j = parts.length - 1; j >= 0; j--) {
+      if (String(parts[j].id).startsWith('temp-')) {
+        parts.splice(j, 1);
+      }
+    }
+    parts.push(partInfo);
+  } else {
+    if (delta && (partInfo.type === 'text' || partInfo.type === 'reasoning' || partInfo.type === 'thinking')) {
+      const existingPart = parts[partIndex];
+      parts[partIndex] = {
+        ...existingPart,
+        ...partInfo,
+        text: partInfo.text,
+      };
+    } else {
+      parts[partIndex] = partInfo;
+    }
+  }
+
+  message.parts = parts;
+  updated[messageIndex] = message;
+  return updated;
+}
 
 export function useSessions() {
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -86,6 +158,9 @@ export function useSessionMessages(sessionId?: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Tracks part IDs seen in this session to distinguish first-time creation
+  // (structural change → immediate update) from content deltas (low-priority).
+  const knownPartIdsRef = useRef<Set<string>>(new Set());
 
   const fetchMessages = useCallback(async () => {
     if (!sessionId) return;
@@ -122,6 +197,7 @@ export function useSessionMessages(sessionId?: string) {
   useLayoutEffect(() => {
     setMessages([]);
     setError(null);
+    knownPartIdsRef.current.clear();
     if (sessionId) {
       setLoading(true);
     } else {
@@ -157,6 +233,14 @@ export function useSessionMessages(sessionId?: string) {
             compacted: messageInfo.compacted ?? existing.compacted,
             finish: messageInfo.finish ?? existing.finish,
           };
+          // When a message finishes streaming, evict its part IDs from the
+          // known-parts registry to reclaim memory.
+          if (messageInfo.finish) {
+            const parts = updated[existingIndex].parts as any[] | undefined;
+            parts?.forEach((p: any) => {
+              if (p?.id) knownPartIdsRef.current.delete(p.id);
+            });
+          }
           return updated;
         }
 
@@ -199,83 +283,24 @@ export function useSessionMessages(sessionId?: string) {
      * 增量更新 message part（用于流式展示）
      * @param partInfo - part 对象，包含 id, messageID, sessionID, type, text 等
      * @param delta - 本次增量文本（如果有的话）
-     * 
-     * 使用 flushSync 强制同步更新，确保每个 chunk 立即渲染
+     *
+     * 首次出现的 part（结构性变化）立即同步更新，确保"思考中"等指示符
+     * 即时显示；已知 part 的内容增量则用 startTransition 降低优先级，
+     * 允许 React 合批调度以避免高频 SSE chunk 阻塞主线程。
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      flushSync(() => {
-        setMessages(prev => {
-          const messageIndex = prev.findIndex(m => m.id === partInfo.messageID);
-          
-          if (messageIndex < 0) {
-            // Message 不存在，检查是否有任何未完成的assistant message
-            // 如果有，使用那个message而不是创建新的（避免重复）
-            let lastAssistantIndex = -1;
-            for (let i = prev.length - 1; i >= 0; i--) {
-              if (prev[i].role === 'assistant' && !prev[i].finish) {
-                lastAssistantIndex = i;
-                break;
-              }
-            }
-            
-            if (lastAssistantIndex >= 0) {
-              // 更新最后一个未完成的assistant message
-              const updated = [...prev];
-              const message = { ...updated[lastAssistantIndex] };
-              const parts = [...(message.parts || [])];
-              parts.push(partInfo);
-              message.parts = parts;
-              updated[lastAssistantIndex] = message;
-              return updated;
-            }
-            
-            // 没有未完成的assistant message，创建新的占位 message
-            return [...prev, {
-              id: partInfo.messageID,
-              sessionID: partInfo.sessionID,
-              role: 'assistant' as const,
-              parts: [partInfo],
-              timestamp: Date.now(),
-            }];
-          }
-          
-          // Message 存在，更新其 parts
-          const updated = [...prev];
-          const message = { ...updated[messageIndex] };
-          const parts = [...(message.parts || [])];
-          
-          const partIndex = parts.findIndex((p: any) => p.id === partInfo.id);
-          
-          if (partIndex < 0) {
-            for (let j = parts.length - 1; j >= 0; j--) {
-              if (String(parts[j].id).startsWith('temp-')) {
-                parts.splice(j, 1);
-              }
-            }
-            parts.push(partInfo);
-          } else {
-            // Part 存在
-            if (delta && (partInfo.type === 'text' || partInfo.type === 'reasoning' || partInfo.type === 'thinking')) {
-              // 有 delta，追加到现有 text（实现逐字效果）
-              // text、reasoning 和 thinking 类型都支持流式更新
-              const existingPart = parts[partIndex];
-              parts[partIndex] = {
-                ...existingPart,
-                ...partInfo,
-                // 使用累积的 text（后端已经累积好了）
-                text: partInfo.text,
-              };
-            } else {
-              // 无 delta 或其他类型，直接替换整个 part
-              parts[partIndex] = partInfo;
-            }
-          }
-          
-          message.parts = parts;
-          updated[messageIndex] = message;
-          return updated;
+      const isNewPart = !knownPartIdsRef.current.has(partInfo.id);
+      if (isNewPart) {
+        // Structural change: first appearance of this part — must render immediately
+        // so that "thinking" / "streaming" indicators show without delay.
+        knownPartIdsRef.current.add(partInfo.id);
+        setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
+      } else {
+        // Content delta on an existing part — low priority, allow React to batch.
+        startTransition(() => {
+          setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
         });
-      });
+      }
     },
   };
 }
