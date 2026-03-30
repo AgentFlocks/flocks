@@ -4,6 +4,8 @@
 
 AI-Native SecOps Platform
 
+![Flocks WebUI animated preview](assets/flocks.webp)
+
 ## Project Overview
 
 Flocks is an AI-driven SecOps platform built with Python, featuring multi-agent collaboration, HTTP API server, and modern terminal user interface designed to help you with your SecOps tasks.
@@ -167,6 +169,12 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 url = "https://pypi.org/simple"
 default = true
 ```
+
+## Join our community
+
+Scan the QR code with **WeCom (Enterprise WeChat)** to join our official discussion group.  
+
+![WeCom official community QR code](assets/community-wecom-qr.png)
 
 ## License
 

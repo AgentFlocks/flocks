@@ -4,6 +4,8 @@
 
 AI 原生 SecOps 平台
 
+![Flocks Web 动效预览](assets/flocks.webp)
+
 ## 项目概览
 
 Flocks 是一个以 Python 构建的 AI 驱动型 SecOps 平台，具备多智能体协作、HTTP API 服务与现代化终端用户界面，用于辅助完成各类 SecOps 任务。
@@ -163,6 +165,12 @@ url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 url = "https://pypi.org/simple"
 default = true
 ```
+
+## 加入社区
+
+请使用**企业微信**扫描下方二维码，加入官方交流群。  
+
+![企业微信官方交流群二维码](assets/community-wecom-qr.png)
 
 ## 开源协议
 
