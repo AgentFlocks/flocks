@@ -232,6 +232,7 @@
       "thirdPartySubtitle": "选择一个其他模型厂商，填写其 key，并指定默认模型。",
       "thirdPartyKeyPlaceholder": "粘贴第三方模型 API Key",
       "thirdPartyBaseUrlPlaceholder": "填写模型服务 Base URL（如需要）",
+      "thirdPartyModelIdPlaceholder": "输入模型 ID（例如 gpt-4o、deepseek-chat）",
       "thirdPartyModelHint": "保存后会验证并设为默认模型：{{model}}",
       "thirdPartyAdvancedHint": "如需 OpenAI Compatible 等高级自定义接入，请前往 Models 页面配置。",
       "validateAndApply": "验证并应用",

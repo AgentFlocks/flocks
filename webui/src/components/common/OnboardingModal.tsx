@@ -313,9 +313,12 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
       }
       return;
     }
-    const firstModelId = selectedPrimaryProvider.models[0]?.id || '';
-    if (!selectedPrimaryProvider.models.some((model) => model.id === primaryModelId)) {
-      setPrimaryModelId(firstModelId);
+    const hasModels = selectedPrimaryProvider.models.length > 0;
+    if (hasModels) {
+      const firstModelId = selectedPrimaryProvider.models[0]?.id || '';
+      if (!selectedPrimaryProvider.models.some((model) => model.id === primaryModelId)) {
+        setPrimaryModelId(firstModelId);
+      }
     }
     if (primaryProviderIsThreatBook) {
       setPrimaryBaseUrl('');
@@ -829,7 +832,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                   </div>
                 )}
 
-                {!primaryProviderIsThreatBook && (
+                {!primaryProviderIsThreatBook && (selectedPrimaryProvider?.models?.length ? (
                   <select
                     value={primaryModelId}
                     onChange={(e) => {
@@ -838,13 +841,24 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                     }}
                     className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all"
                   >
-                    {(selectedPrimaryProvider?.models || []).map((model) => (
+                    {selectedPrimaryProvider.models.map((model) => (
                       <option key={model.id} value={model.id}>
                         {model.name}
                       </option>
                     ))}
                   </select>
-                )}
+                ) : (
+                  <input
+                    type="text"
+                    value={primaryModelId}
+                    onChange={(e) => {
+                      setPrimaryModelId(e.target.value);
+                      setPrimaryStatus(null);
+                    }}
+                    placeholder={t('onboarding.bootstrap.thirdPartyModelIdPlaceholder')}
+                    className="w-full text-xs px-3 py-2 rounded-lg border border-gray-200 bg-white focus:outline-none focus:ring-2 focus:ring-red-400/50 focus:border-red-400 transition-all placeholder-gray-300"
+                  />
+                ))}
 
                 {needsPrimaryBaseUrl && (
                   <input
@@ -897,9 +911,9 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
                       ? t('onboarding.bootstrap.primaryThreatBookCnHint')
                       : t('onboarding.bootstrap.primaryThreatBookGlobalHint')}
                   </p>
-                ) : selectedPrimaryModel ? (
+                ) : (selectedPrimaryModel || primaryModelId) ? (
                   <p className="text-[11px] text-gray-500">
-                    {t('onboarding.bootstrap.thirdPartyModelHint', { model: selectedPrimaryModel.name })}
+                    {t('onboarding.bootstrap.thirdPartyModelHint', { model: selectedPrimaryModel?.name || primaryModelId })}
                   </p>
                 ) : null}
 

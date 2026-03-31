@@ -59,17 +59,6 @@ curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh 
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh | bash -s -- --with-tui
 ```
 
-#### Windows PowerShell（管理员）
-
-```powershell
-# 一键安装后端 + WebUI
-iwr -useb https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1 | iex
-# 默认会在当前目录下创建 .\flocks
-
-# 可选：同时安装 TUI 依赖
-& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1))) -InstallTui
-```
-
 #### github源码安装
 
 克隆到本地后在工作区执行安装脚本：

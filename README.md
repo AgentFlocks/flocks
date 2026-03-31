@@ -61,17 +61,6 @@ curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh 
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh | bash -s -- --with-tui
 ```
 
-#### Windows PowerShell (Administrator)
-
-```powershell
-# One-click install backend + WebUI
-iwr -useb https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1 | iex
-# Creates .\flocks under the current directory
-
-# Optional: also install TUI dependencies
-& ([scriptblock]::Create((iwr -useb https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1))) -InstallTui
-```
-
 #### Install from source code
 
 If you prefer to inspect the repository before installation, clone it locally and run the installer from the workspace:

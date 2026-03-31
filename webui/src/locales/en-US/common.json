@@ -232,6 +232,7 @@
       "thirdPartySubtitle": "Choose another provider, enter its key, and select the default model.",
       "thirdPartyKeyPlaceholder": "Paste the third-party model API key",
       "thirdPartyBaseUrlPlaceholder": "Enter the model service base URL if needed",
+      "thirdPartyModelIdPlaceholder": "Enter the model ID (e.g. gpt-4o, deepseek-chat)",
       "thirdPartyModelHint": "Will verify and set this as the default model: {{model}}",
       "thirdPartyAdvancedHint": "For advanced custom setups such as OpenAI Compatible, use the Models page instead.",
       "validateAndApply": "Validate & Apply",

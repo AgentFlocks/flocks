@@ -344,10 +344,12 @@ const fakeApi: any = {
 };
 
 // ── 启动：先开代理，再注册插件 ───────────────────────────────────────────────
-await startProxy();
+(async () => {
+  await startProxy();
 
-// 更新 runtime 里的端口（startAccount 读 cfg.gateway.port，cfg 在 registerChannel 里构造，已用最新值）
-fakeRuntime.gateway.port = PROXY_PORT;
+  // 更新 runtime 里的端口（startAccount 读 cfg.gateway.port，cfg 在 registerChannel 里构造，已用最新值）
+  fakeRuntime.gateway.port = PROXY_PORT;
 
-console.log(`[runner] 启动 DingTalk connector → flocks :${FLOCKS_PORT}`);
-plugin.register(fakeApi);
+  console.log(`[runner] 启动 DingTalk connector → flocks :${FLOCKS_PORT}`);
+  plugin.register(fakeApi);
+})();
