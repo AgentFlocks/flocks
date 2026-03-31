@@ -100,8 +100,8 @@ flocks stop
 ```
 
 The default service URLs are:
-- Backend API: `http://127.0.0.1:8000`
-- WebUI: `http://127.0.0.1:5173`
+- Backend API: `http://127.0.0.1:8000` by default, configurable via `flocks start --server-port`
+- WebUI: `http://127.0.0.1:5173` by default, configurable via `flocks start --webui-port`
 
 Flocks cli useage:  `flocks --help`
 

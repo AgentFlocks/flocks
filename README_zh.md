@@ -94,8 +94,8 @@ flocks stop
 ```
 
 默认服务地址：
-- 后端 API：`http://127.0.0.1:8000`
-- WebUI：`http://127.0.0.1:5173`
+- 后端 API：默认 `http://127.0.0.1:8000`，可通过 `flocks start --server-port` 修改
+- WebUI：默认 `http://127.0.0.1:5173`，可通过 `flocks start --webui-port` 修改
 
 更多 CLI 命令使用 `flocks --help`
 
@@ -137,8 +137,8 @@ docker run -d `
 ```
 
 默认服务地址：
-- 后端 API：`http://127.0.0.1:8000`
-- WebUI：`http://127.0.0.1:5173`
+- 后端 API：默认 `http://127.0.0.1:8000`
+- WebUI：默认 `http://127.0.0.1:5173`
 
 ## 常见问题
 

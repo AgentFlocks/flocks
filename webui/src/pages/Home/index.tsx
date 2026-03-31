@@ -124,7 +124,7 @@ export default function Home() {
               <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
               <div>
                 <span className="text-sm font-medium text-red-900">{t('stats.abnormal')}</span>
-                <span className="text-sm text-red-600 ml-2">Please ensure the Flocks backend is running (port 8000)</span>
+                <span className="text-sm text-red-600 ml-2">Please ensure the Flocks backend is running</span>
               </div>
             </div>
           )}

@@ -1,7 +1,7 @@
 #!/bin/bash
 # 构建前端并以生产模式启动服务（后台守护）
-# 后端: 8000（uvicorn，无热重载）
-# 前端: 5173（vite preview 托管构建产物，代理 /api 到后端）
+# 后端默认: 8000（uvicorn，无热重载，可通过 BACKEND_PORT 覆盖）
+# 前端默认: 5173（vite preview 托管构建产物，代理 /api 到后端）
 
 set -e
 
@@ -10,7 +10,16 @@ BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
-BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-http://127.0.0.1:8000/api/health}"
+BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+BACKEND_ACCESS_HOST="${BACKEND_HOST}"
+if [ "${BACKEND_ACCESS_HOST}" = "0.0.0.0" ] || [ "${BACKEND_ACCESS_HOST}" = "::" ]; then
+    BACKEND_ACCESS_HOST="127.0.0.1"
+fi
+BACKEND_BASE_URL="http://${BACKEND_ACCESS_HOST}:${BACKEND_PORT}"
+BACKEND_WS_URL="ws://${BACKEND_ACCESS_HOST}:${BACKEND_PORT}"
+BACKEND_HEALTH_URL="${BACKEND_HEALTH_URL:-${BACKEND_BASE_URL}/api/health}"
 BACKEND_STARTUP_TIMEOUT="${BACKEND_STARTUP_TIMEOUT:-90}"
 BACKEND_HEALTH_CHECK_INTERVAL="${BACKEND_HEALTH_CHECK_INTERVAL:-2}"
 
@@ -19,8 +28,8 @@ echo -e "${BLUE}🚀 启动 Flocks 生产环境...${NC}"
 echo "🧹 清理现有进程..."
 pkill -9 -f "uvicorn flocks.server.app" 2>/dev/null || true
 pkill -9 -f "vite preview" 2>/dev/null || true
-lsof -ti:8000 | xargs kill -9 2>/dev/null || true
-lsof -ti:5173 | xargs kill -9 2>/dev/null || true
+lsof -ti:"${BACKEND_PORT}" | xargs kill -9 2>/dev/null || true
+lsof -ti:"${FRONTEND_PORT}" | xargs kill -9 2>/dev/null || true
 sleep 1
 
 cd "$(dirname "$0")/.."
@@ -30,6 +39,8 @@ mkdir -p "$LOGS_DIR"
 
 echo -e "${BLUE}📦 构建 WebUI 前端...${NC}"
 cd webui
+VITE_API_BASE_URL="${BACKEND_BASE_URL}" \
+VITE_WS_BASE_URL="${BACKEND_WS_URL}" \
 npm run build
 cd "$PROJECT_ROOT"
 
@@ -39,11 +50,11 @@ if [ ! -d "webui/dist" ]; then
 fi
 echo -e "${GREEN}✓ 前端构建完成${NC}"
 
-echo -e "${GREEN}🔧 启动后端服务（端口 8000）...${NC}"
+echo -e "${GREEN}🔧 启动后端服务（端口 ${BACKEND_PORT}）...${NC}"
 source "${PROJECT_ROOT}/.venv/bin/activate"
 nohup python -m uvicorn flocks.server.app:app \
-    --host 127.0.0.1 \
-    --port 8000 \
+    --host "${BACKEND_HOST}" \
+    --port "${BACKEND_PORT}" \
     > /tmp/flocks-backend.log 2>&1 &
 
 BACKEND_PID=$!
@@ -72,9 +83,13 @@ for i in $(seq 1 "$BACKEND_CHECK_ATTEMPTS"); do
 done
 
 # 前端也用 nohup 后台启动，终端断开不会收到 SIGHUP
-echo -e "${GREEN}🎨 启动 WebUI 前端（端口 5173）...${NC}"
+echo -e "${GREEN}🎨 启动 WebUI 前端（端口 ${FRONTEND_PORT}）...${NC}"
 cd webui
-nohup npm run preview > "${LOGS_DIR}/webui-preview.log" 2>&1 &
+nohup env \
+    VITE_API_BASE_URL="${BACKEND_BASE_URL}" \
+    VITE_WS_BASE_URL="${BACKEND_WS_URL}" \
+    npm run preview -- --host 127.0.0.1 --port "${FRONTEND_PORT}" \
+    > "${LOGS_DIR}/webui-preview.log" 2>&1 &
 FRONTEND_PID=$!
 
 sleep 2

@@ -286,6 +286,78 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     assert record.command[:3] == (service_manager.sys.executable, "-m", "uvicorn")
 
 
+def test_build_frontend_env_uses_backend_host_and_port() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="0.0.0.0",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
+    assert env["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+
+
+def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    build_calls: list[dict[str, object]] = []
+    preview_calls: list[dict[str, object]] = []
+
+    def fake_run(command, **kwargs):
+        build_calls.append({"command": command, "kwargs": kwargs})
+        return SimpleNamespace(returncode=0)
+
+    def fake_spawn(command, **kwargs):
+        preview_calls.append({"command": command, "kwargs": kwargs})
+        return SimpleNamespace(pid=2468)
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else None)
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
+
+    config = service_manager.ServiceConfig(
+        backend_host="0.0.0.0",
+        backend_port=9000,
+        frontend_port=5174,
+    )
+    service_manager.start_frontend(config, console)
+
+    assert build_calls[0]["command"] == ["/usr/bin/npm", "run", "build"]
+    assert build_calls[0]["kwargs"]["env"]["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
+    assert build_calls[0]["kwargs"]["env"]["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+
+    assert preview_calls[0]["command"] == [
+        "/usr/bin/npm",
+        "run",
+        "preview",
+        "--",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5174",
+    ]
+    assert preview_calls[0]["kwargs"]["env"]["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
+    assert preview_calls[0]["kwargs"]["env"]["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+
+
 def test_start_backend_raises_on_port_record_mismatch(monkeypatch, tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
@@ -366,6 +438,25 @@ def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Pa
     assert captured["kwargs"]["creationflags"] == 0
     assert captured["kwargs"]["start_new_session"] is True
     assert "startupinfo" not in captured["kwargs"]
+
+
+def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+    env = {"VITE_API_BASE_URL": "http://127.0.0.1:9000"}
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=1111)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path, env=env)
+
+    assert process.pid == 1111
+    assert captured["kwargs"]["env"] == env
 
 
 def test_stop_one_prefers_process_group_on_unix(monkeypatch, tmp_path: Path) -> None:

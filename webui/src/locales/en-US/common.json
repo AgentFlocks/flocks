@@ -46,7 +46,7 @@
   "error": {
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
-    "backendErrorHint": "Please ensure the Flocks backend is running (port 8000)",
+    "backendErrorHint": "Please ensure the Flocks backend is running",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"
@@ -85,7 +85,7 @@
     "error": "Backend error",
     "checking": "Checking...",
     "restarting": "Backend may be restarting, please wait...",
-    "runningHint": "Please ensure backend is running (port 8000)",
+    "runningHint": "Please ensure backend is running",
     "retry": "Retry"
   },
   "chat": {

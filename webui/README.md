@@ -70,18 +70,25 @@ src/
 
 ## API 代理配置
 
-开发环境下，API 请求会自动代理到 `http://localhost:8000`：
+开发环境下，API 请求默认代理到 `http://127.0.0.1:8000`，也可通过 `VITE_API_BASE_URL` 覆盖：
 
-- `/api/*` -> `http://localhost:8000/api/*`
-- `/event` -> `http://localhost:8000/event`
+- `/api/*` -> `${VITE_API_BASE_URL:-http://127.0.0.1:8000}/api/*`
+- `/event` -> `${VITE_API_BASE_URL:-http://127.0.0.1:8000}/event`
 
 ## 环境变量
 
 复制 `.env.example` 为 `.env` 并配置：
 
 ```bash
-VITE_API_BASE_URL=http://localhost:8000
-VITE_WS_BASE_URL=ws://localhost:8000
+VITE_API_BASE_URL=http://127.0.0.1:8000
+VITE_WS_BASE_URL=ws://127.0.0.1:8000
+```
+
+如果后端改为 `9000`，对应设置为：
+
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:9000
+VITE_WS_BASE_URL=ws://127.0.0.1:9000
 ```
 
 ## License

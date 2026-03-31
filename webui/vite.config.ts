@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
+import { createApiProxy, getApiProxyTarget } from './src/config/apiProxy'
+
+const apiProxyTarget = getApiProxyTarget(process.env)
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -70,16 +73,7 @@ export default defineConfig({
       'flocks.threatbook-inc.cn',
       'ops-flocks.threatbook-inc.cn'
     ],
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/event': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
+    proxy: createApiProxy(apiProxyTarget),
   },
   preview: {
     port: 5173,
@@ -88,15 +82,6 @@ export default defineConfig({
       'flocks.threatbook-inc.cn',
       'ops-flocks.threatbook-inc.cn'
     ],
-    proxy: {
-      '/api': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/event': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-    },
+    proxy: createApiProxy(apiProxyTarget),
   },
 })

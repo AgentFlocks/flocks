@@ -20,6 +20,30 @@ function Write-Fail {
     Write-Host $Message -ForegroundColor Red
 }
 
+function Get-EnvOrDefault {
+    param(
+        [string]$Name,
+        [string]$DefaultValue
+    )
+
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $DefaultValue
+    }
+
+    return $value
+}
+
+function Get-AccessHost {
+    param([string]$Host)
+
+    if ($Host -in @("0.0.0.0", "::")) {
+        return "127.0.0.1"
+    }
+
+    return $Host
+}
+
 function Stop-PortProcess {
     param([int]$Port)
 
@@ -80,6 +104,12 @@ $frontendStdout = Join-Path $logsDir "webui-preview.out.log"
 $frontendStderr = Join-Path $logsDir "webui-preview.err.log"
 $backendPidFile = Join-Path $logsDir "backend.pid"
 $frontendPidFile = Join-Path $logsDir "frontend.pid"
+$backendHost = Get-EnvOrDefault -Name "BACKEND_HOST" -DefaultValue "127.0.0.1"
+$backendAccessHost = Get-AccessHost -Host $backendHost
+$backendPort = [int](Get-EnvOrDefault -Name "BACKEND_PORT" -DefaultValue "8000")
+$frontendPort = [int](Get-EnvOrDefault -Name "FRONTEND_PORT" -DefaultValue "5173")
+$backendBaseUrl = "http://{0}:{1}" -f $backendAccessHost, $backendPort
+$backendWsUrl = "ws://{0}:{1}" -f $backendAccessHost, $backendPort
 
 if (-not (Test-Path $pythonExe)) {
     Write-Fail "Python venv not found: $pythonExe"
@@ -95,18 +125,32 @@ if (-not (Test-Path (Join-Path $webuiDir "package.json"))) {
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 
 Write-Info "Cleaning existing processes..."
-Stop-PortProcess -Port 8000
-Stop-PortProcess -Port 5173
+Stop-PortProcess -Port $backendPort
+Stop-PortProcess -Port $frontendPort
 Start-Sleep -Seconds 1
 
 Write-Info "Building WebUI frontend..."
 Push-Location $webuiDir
 try {
+    $originalApiBaseUrl = $env:VITE_API_BASE_URL
+    $originalWsBaseUrl = $env:VITE_WS_BASE_URL
+    $env:VITE_API_BASE_URL = $backendBaseUrl
+    $env:VITE_WS_BASE_URL = $backendWsUrl
     & npm.cmd run build
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
 } finally {
+    if ($null -eq $originalApiBaseUrl) {
+        Remove-Item Env:VITE_API_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_API_BASE_URL = $originalApiBaseUrl
+    }
+    if ($null -eq $originalWsBaseUrl) {
+        Remove-Item Env:VITE_WS_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_WS_BASE_URL = $originalWsBaseUrl
+    }
     Pop-Location
 }
 
@@ -117,12 +161,12 @@ if (-not (Test-Path $distDir)) {
 
 Write-Success "Frontend build completed."
 
-Write-Info "Starting backend service on port 8000..."
+Write-Info ("Starting backend service on port {0}..." -f $backendPort)
 $backendArgs = @(
     "-m", "uvicorn",
     "flocks.server.app:app",
-    "--host", "127.0.0.1",
-    "--port", "8000"
+    "--host", $backendHost,
+    "--port", $backendPort.ToString()
 )
 
 $backendProcess = Start-Process `
@@ -142,7 +186,7 @@ Write-Info "Waiting for backend startup..."
 for ($attempt = 1; $attempt -le 15; $attempt++) {
     Start-Sleep -Seconds 2
 
-    if (Test-HttpHealth -PythonExe $pythonExe -Urls @("http://localhost:8000/api/health", "http://localhost:8000/health")) {
+    if (Test-HttpHealth -PythonExe $pythonExe -Urls @("$backendBaseUrl/api/health", "$backendBaseUrl/health")) {
         $backendReady = $true
         break
     }
@@ -160,7 +204,7 @@ if (-not $backendReady) {
         Write-Host "Backend stderr tail:"
         Get-Content -Path $backendStderr -Tail 20
     }
-    Stop-PortProcess -Port 8000
+    Stop-PortProcess -Port $backendPort
     exit 1
 }
 
@@ -168,15 +212,15 @@ Write-Success "Backend started successfully."
 Write-Warn "Backend stdout log: $backendStdout"
 Write-Warn "Backend stderr log: $backendStderr"
 
-Write-Info "Starting WebUI preview on port 5173..."
+Write-Info ("Starting WebUI preview on port {0}..." -f $frontendPort)
+$previewCommand = ('set "VITE_API_BASE_URL={0}" && set "VITE_WS_BASE_URL={1}" && npm.cmd run preview -- --host 127.0.0.1 --port {2}' -f $backendBaseUrl, $backendWsUrl, $frontendPort)
 $frontendArgs = @(
-    "run", "preview", "--",
-    "--host", "127.0.0.1",
-    "--port", "5173"
+    "/c",
+    $previewCommand
 )
 
 $frontendProcess = Start-Process `
-    -FilePath "npm.cmd" `
+    -FilePath "cmd.exe" `
     -ArgumentList $frontendArgs `
     -WorkingDirectory $webuiDir `
     -WindowStyle Hidden `
@@ -192,7 +236,7 @@ Write-Info "Waiting for frontend startup..."
 for ($attempt = 1; $attempt -le 10; $attempt++) {
     Start-Sleep -Seconds 2
 
-    if (Test-HttpHealth -PythonExe $pythonExe -Urls @("http://localhost:5173/")) {
+    if (Test-HttpHealth -PythonExe $pythonExe -Urls @("http://127.0.0.1:$frontendPort/")) {
         $frontendReady = $true
         break
     }
@@ -210,8 +254,8 @@ if (-not $frontendReady) {
         Write-Host "Frontend stderr tail:"
         Get-Content -Path $frontendStderr -Tail 20
     }
-    Stop-PortProcess -Port 5173
-    Stop-PortProcess -Port 8000
+    Stop-PortProcess -Port $frontendPort
+    Stop-PortProcess -Port $backendPort
     exit 1
 }
 
@@ -220,6 +264,6 @@ Write-Warn "Frontend stdout log: $frontendStdout"
 Write-Warn "Frontend stderr log: $frontendStderr"
 
 Write-Success "Flocks production environment started."
-Write-Warn "Backend URL: http://localhost:8000"
-Write-Warn "Frontend URL: http://localhost:5173"
+Write-Warn ("Backend URL: {0}" -f $backendBaseUrl)
+Write-Warn ("Frontend URL: http://127.0.0.1:{0}" -f $frontendPort)
 Write-Warn ("Stop services: Stop-Process -Id {0},{1} -Force" -f $backendProcess.Id, $frontendProcess.Id)

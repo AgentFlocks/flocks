@@ -46,7 +46,7 @@
   "error": {
     "backendUnavailable": "无法连接到后端服务",
     "backendError": "后端服务异常",
-    "backendErrorHint": "请确保 Flocks 后端服务正在运行（端口 8000）",
+    "backendErrorHint": "请确保 Flocks 后端服务正在运行",
     "processingFailed": "处理失败",
     "deleteFailed": "删除失败",
     "saveFailed": "保存失败"
@@ -85,7 +85,7 @@
     "error": "后端服务异常",
     "checking": "检查中...",
     "restarting": "后端可能正在重启，请稍候...",
-    "runningHint": "请确保后端服务正在运行（端口 8000）",
+    "runningHint": "请确保后端服务正在运行",
     "retry": "重试"
   },
   "chat": {

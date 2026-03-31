@@ -20,6 +20,30 @@ function Write-Fail {
     Write-Host $Message -ForegroundColor Red
 }
 
+function Get-EnvOrDefault {
+    param(
+        [string]$Name,
+        [string]$DefaultValue
+    )
+
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $DefaultValue
+    }
+
+    return $value
+}
+
+function Get-AccessHost {
+    param([string]$Host)
+
+    if ($Host -in @("0.0.0.0", "::")) {
+        return "127.0.0.1"
+    }
+
+    return $Host
+}
+
 function Stop-PortProcess {
     param([int]$Port)
 
@@ -43,11 +67,14 @@ function Stop-PortProcess {
 }
 
 function Test-BackendHealth {
-    param([string]$PythonExe)
+    param(
+        [string]$PythonExe,
+        [string]$BackendBaseUrl
+    )
 
     $healthUrls = @(
-        "http://localhost:8000/api/health",
-        "http://localhost:8000/health"
+        "$BackendBaseUrl/api/health",
+        "$BackendBaseUrl/health"
     )
 
     foreach ($url in $healthUrls) {
@@ -77,6 +104,12 @@ $webuiDir = Join-Path $projectRoot "webui"
 $logsDir = Join-Path $projectRoot "logs"
 $backendStdout = Join-Path $logsDir "flocks-backend.out.log"
 $backendStderr = Join-Path $logsDir "flocks-backend.err.log"
+$backendHost = Get-EnvOrDefault -Name "BACKEND_HOST" -DefaultValue "127.0.0.1"
+$backendAccessHost = Get-AccessHost -Host $backendHost
+$backendPort = [int](Get-EnvOrDefault -Name "BACKEND_PORT" -DefaultValue "8000")
+$frontendPort = [int](Get-EnvOrDefault -Name "FRONTEND_PORT" -DefaultValue "5173")
+$backendBaseUrl = "http://{0}:{1}" -f $backendAccessHost, $backendPort
+$backendWsUrl = "ws://{0}:{1}" -f $backendAccessHost, $backendPort
 
 if (-not (Test-Path $pythonExe)) {
     Write-Fail "Python venv not found: $pythonExe"
@@ -92,16 +125,16 @@ if (-not (Test-Path (Join-Path $webuiDir "package.json"))) {
 New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
 
 Write-Info "Cleaning existing processes..."
-Stop-PortProcess -Port 8000
-Stop-PortProcess -Port 5173
+Stop-PortProcess -Port $backendPort
+Stop-PortProcess -Port $frontendPort
 Start-Sleep -Seconds 2
 
-Write-Info "Starting backend service on port 8000..."
+Write-Info ("Starting backend service on port {0}..." -f $backendPort)
 $backendArgs = @(
     "-m", "uvicorn",
     "flocks.server.app:app",
-    "--host", "127.0.0.1",
-    "--port", "8000",
+    "--host", $backendHost,
+    "--port", $backendPort.ToString(),
     "--reload",
     "--reload-dir", "flocks",
     "--timeout-graceful-shutdown", "3"
@@ -123,7 +156,7 @@ Write-Info "Waiting for backend health check..."
 for ($attempt = 1; $attempt -le 30; $attempt++) {
     Start-Sleep -Seconds 2
 
-    if (Test-BackendHealth -PythonExe $pythonExe) {
+    if (Test-BackendHealth -PythonExe $pythonExe -BackendBaseUrl $backendBaseUrl) {
         $backendReady = $true
         break
     }
@@ -141,7 +174,7 @@ if (-not $backendReady) {
         Write-Host "Backend stderr tail:"
         Get-Content -Path $backendStderr -Tail 20
     }
-    Stop-PortProcess -Port 8000
+    Stop-PortProcess -Port $backendPort
     exit 1
 }
 
@@ -149,13 +182,27 @@ Write-Success "Backend started successfully."
 Write-Warn "Backend stdout log: $backendStdout"
 Write-Warn "Backend stderr log: $backendStderr"
 
-Write-Info "Starting WebUI frontend on port 5173..."
+Write-Info ("Starting WebUI frontend on port {0}..." -f $frontendPort)
 
 Push-Location $webuiDir
 try {
-    & npm.cmd run dev
+    $originalApiBaseUrl = $env:VITE_API_BASE_URL
+    $originalWsBaseUrl = $env:VITE_WS_BASE_URL
+    $env:VITE_API_BASE_URL = $backendBaseUrl
+    $env:VITE_WS_BASE_URL = $backendWsUrl
+    & npm.cmd run dev -- --host 127.0.0.1 --port $frontendPort
 } finally {
+    if ($null -eq $originalApiBaseUrl) {
+        Remove-Item Env:VITE_API_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_API_BASE_URL = $originalApiBaseUrl
+    }
+    if ($null -eq $originalWsBaseUrl) {
+        Remove-Item Env:VITE_WS_BASE_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_WS_BASE_URL = $originalWsBaseUrl
+    }
     Pop-Location
     Write-Warn "Stopping backend service..."
-    Stop-PortProcess -Port 8000
+    Stop-PortProcess -Port $backendPort
 }

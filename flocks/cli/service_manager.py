@@ -442,12 +442,14 @@ def start_frontend(config: ServiceConfig, console) -> None:
         raise ServiceError(f"检测到的 Node.js 版本过低。启动 WebUI 至少需要 Node.js {MIN_NODE_MAJOR}+。")
 
     webui_dir = root / "webui"
+    frontend_env = build_frontend_env(config)
     if not config.skip_frontend_build:
         console.print("[flocks] 构建 WebUI...")
         completed = subprocess.run(
             [npm, "run", "build"],
             cwd=webui_dir,
             check=False,
+            env=frontend_env,
         )
         if completed.returncode != 0:
             raise ServiceError("WebUI 构建失败。")
@@ -468,6 +470,7 @@ def start_frontend(config: ServiceConfig, console) -> None:
         command,
         cwd=webui_dir,
         log_path=paths.frontend_log,
+        env=frontend_env,
     )
     write_runtime_record(
         paths.frontend_pid,
@@ -788,7 +791,25 @@ def open_default_browser(url: str, console) -> None:
     console.print(f"[flocks] 未检测到可用的浏览器打开命令，请手动访问: {url}")
 
 
-def _spawn_process(command: Sequence[str], *, cwd: Path, log_path: Path) -> subprocess.Popen:
+def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
+    """Build frontend environment variables from backend service settings."""
+    backend_host = _loopback_host(config.backend_host)
+    api_base_url = f"http://{backend_host}:{config.backend_port}"
+    ws_protocol = "wss" if api_base_url.startswith("https://") else "ws"
+
+    env = os.environ.copy()
+    env["VITE_API_BASE_URL"] = api_base_url
+    env["VITE_WS_BASE_URL"] = f"{ws_protocol}://{backend_host}:{config.backend_port}"
+    return env
+
+
+def _spawn_process(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     """Spawn a detached child process and redirect output to a log file."""
     creationflags = 0
     kwargs: dict[str, object] = {}
@@ -812,6 +833,7 @@ def _spawn_process(command: Sequence[str], *, cwd: Path, log_path: Path) -> subp
         return subprocess.Popen(
             list(command),
             cwd=cwd,
+            env=env,
             stdout=handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
