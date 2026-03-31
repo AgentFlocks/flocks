@@ -561,13 +561,43 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
     return _detect_archive_root(dest_dir)
 
 
+def _rmtree_onerror(func, path, exc_info):  # noqa: ANN001
+    """Handle rmtree errors on Windows (read-only / locked files)."""
+    import stat
+    import time
+
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+        time.sleep(0.05)
+        func(path)
+    except OSError:
+        log.warning("updater.rmtree.skip_locked", {"path": str(path)})
+
+
+def _safe_rmtree(target: Path) -> None:
+    """rmtree with Windows permission-error fallback."""
+    if sys.platform == "win32":
+        shutil.rmtree(target, onerror=_rmtree_onerror)
+    else:
+        shutil.rmtree(target)
+
+
+def _has_preserved_children(directory: Path) -> bool:
+    """Check if *directory* directly contains any ``_PRESERVE_NAMES`` entries."""
+    try:
+        return any(child.name in _PRESERVE_NAMES for child in directory.iterdir())
+    except OSError:
+        return False
+
+
 def _replace_install_dir(
     source_dir: Path,
     install_root: Path,
 ) -> None:
     """
     Overwrite *install_root* with the contents of *source_dir*, while
-    preserving user/runtime directories listed in ``_PRESERVE_NAMES``.
+    preserving user/runtime directories listed in ``_PRESERVE_NAMES``
+    at **any** directory depth (not only the top level).
     """
     for item in source_dir.iterdir():
         if item.name in _PRESERVE_NAMES:
@@ -575,7 +605,17 @@ def _replace_install_dir(
         target = install_root / item.name
         if target.exists() or target.is_symlink():
             if target.is_dir() and not target.is_symlink():
-                shutil.rmtree(target)
+                if item.is_dir() and _has_preserved_children(target):
+                    _replace_install_dir(item, target)
+                    source_names = {c.name for c in item.iterdir()}
+                    for child in target.iterdir():
+                        if child.name not in source_names and child.name not in _PRESERVE_NAMES:
+                            if child.is_dir() and not child.is_symlink():
+                                _safe_rmtree(child)
+                            else:
+                                child.unlink()
+                    continue
+                _safe_rmtree(target)
             else:
                 target.unlink()
         if item.is_dir():
