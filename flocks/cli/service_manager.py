@@ -399,7 +399,7 @@ def start_backend(config: ServiceConfig, console) -> None:
         paths.backend_pid,
         process_runtime_record(process, port=config.backend_port, command=command),
     )
- 
+
     try:
         wait_for_http(config.backend_urls, "后端服务")
     except ServiceError:
