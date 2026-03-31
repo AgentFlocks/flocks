@@ -610,7 +610,6 @@ main() {
   info "项目目录: $ROOT_DIR"
   install_uv
   ensure_npm_installed
-  install_agent_browser
 
   info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
   (
@@ -639,11 +638,13 @@ main() {
     info "跳过 TUI 依赖安装。如需安装，请重新执行 ./scripts/install.sh --with-tui"
   fi
 
+  install_agent_browser
+
   cat <<EOF
 
 [flocks] 安装完成。
 
-$(show_path_update_hint_inline)
+请启动新的终端会话，以加载环境变量并启用相关命令
 
 后续可用命令：
   1. 以 daemon 模式启动后端 + WebUI

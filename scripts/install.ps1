@@ -517,7 +517,6 @@ function Main {
     Write-Info "项目目录: $RootDir"
     Install-Uv
     Ensure-NpmInstalled
-    Install-AgentBrowser
 
     Write-Info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
     Push-Location $RootDir
@@ -565,8 +564,12 @@ function Main {
         Write-Info "跳过 TUI 依赖安装。如需安装，请重新执行 .\scripts\install.ps1 -InstallTui"
     }
 
+    Install-AgentBrowser
+
     Write-Host ""
     Write-Host "[flocks] 安装完成。"
+    Write-Host ""
+    Write-Host "请启动新的终端会话，以加载环境变量并启用相关命令"
     Write-Host ""
     Write-Host "后续可用命令："
     Write-Host "  1. 以 daemon 模式启动后端 + WebUI"

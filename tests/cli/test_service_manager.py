@@ -1,6 +1,19 @@
+import json
+import signal
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from flocks.cli import service_manager
+
+
+class DummyConsole:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def print(self, *args, **kwargs) -> None:
+        self.messages.append(" ".join(str(arg) for arg in args))
 
 
 def test_runtime_paths_follow_flocks_root_env(monkeypatch, tmp_path: Path) -> None:
@@ -21,6 +34,59 @@ def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
     service_manager.cleanup_stale_pid_file(pid_file)
 
     assert not pid_file.exists()
+
+
+def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("12345\n", encoding="utf-8")
+
+    record = service_manager.read_runtime_record(pid_file)
+
+    assert record == service_manager.RuntimeRecord(pid=12345)
+
+
+def test_runtime_record_round_trip_preserves_metadata(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    record = service_manager.RuntimeRecord(
+        pid=4321,
+        pgid=4321,
+        port=8000,
+        command=("python", "-m", "uvicorn"),
+        started_at=1234.5,
+    )
+
+    service_manager.write_runtime_record(pid_file, record)
+
+    assert json.loads(pid_file.read_text(encoding="utf-8")) == {
+        "command": ["python", "-m", "uvicorn"],
+        "pgid": 4321,
+        "pid": 4321,
+        "port": 8000,
+        "started_at": 1234.5,
+    }
+    assert service_manager.read_runtime_record(pid_file) == record
+
+
+def test_read_runtime_record_rejects_invalid_content(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("{not-json", encoding="utf-8")
+
+    assert service_manager.read_runtime_record(pid_file) is None
+
+
+def test_cleanup_stale_pid_file_keeps_live_process_group(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=1001, pgid=2002, port=8000),
+    )
+
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: pgid == 2002)
+
+    service_manager.cleanup_stale_pid_file(pid_file)
+
+    assert pid_file.exists()
 
 
 def test_selected_log_paths_support_specific_targets(tmp_path: Path) -> None:
@@ -166,3 +232,227 @@ def test_restart_all_reuses_start_all_flow(monkeypatch) -> None:
     service_manager.restart_all(config, console)
 
     assert captured == {"config": config, "console": console}
+
+
+def test_start_all_stops_on_failure_before_restart(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_manager,
+        "stop_all",
+        lambda *_args: (_ for _ in ()).throw(service_manager.ServiceError("stop failed")),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_start_all_without_stop",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("should not start")),
+    )
+
+    with pytest.raises(service_manager.ServiceError, match="stop failed"):
+        service_manager.start_all(service_manager.ServiceConfig(), console=None)
+
+
+def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=2468),
+    )
+
+    service_manager.start_backend(service_manager.ServiceConfig(), console)
+
+    record = service_manager.read_runtime_record(paths.backend_pid)
+    assert record is not None
+    assert record.pid == 2468
+    assert record.pgid == 2468
+    assert record.port == 8000
+    assert record.command[:3] == (service_manager.sys.executable, "-m", "uvicorn")
+
+
+def test_start_backend_raises_on_port_record_mismatch(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(paths.backend_pid, service_manager.RuntimeRecord(pid=1111, port=8000))
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [9999])
+
+    with pytest.raises(service_manager.ServiceError, match="运行时记录不一致"):
+        service_manager.start_backend(service_manager.ServiceConfig(), DummyConsole())
+
+
+def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+
+    class FakeStartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = 1
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=4321)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "STARTUPINFO", FakeStartupInfo, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "STARTF_USESHOWWINDOW", 0x1, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "SW_HIDE", 0, raising=False)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert process.pid == 4321
+    assert captured["args"] == (["python", "-m", "uvicorn"],)
+    assert captured["kwargs"]["cwd"] == tmp_path
+    assert captured["kwargs"]["creationflags"] == 0x200 | 0x08000000
+    assert captured["kwargs"]["creationflags"] & 0x8 == 0
+    assert "start_new_session" not in captured["kwargs"]
+    assert captured["kwargs"]["stdin"] == service_manager.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] == service_manager.subprocess.STDOUT
+    assert captured["kwargs"]["startupinfo"].dwFlags == 0x1
+    assert captured["kwargs"]["startupinfo"].wShowWindow == 0
+
+
+def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert process.pid == 9876
+    assert captured["args"] == (["python", "-m", "uvicorn"],)
+    assert captured["kwargs"]["cwd"] == tmp_path
+    assert captured["kwargs"]["creationflags"] == 0
+    assert captured["kwargs"]["start_new_session"] is True
+    assert "startupinfo" not in captured["kwargs"]
+
+
+def test_stop_one_prefers_process_group_on_unix(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=111, pgid=222, port=8000),
+    )
+    console = DummyConsole()
+    group_alive = {"value": True}
+    group_signals: list[tuple[signal.Signals, int | None]] = []
+    pid_signals: list[tuple[signal.Signals, list[int]]] = []
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111, 112])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: bool(pgid == 222 and group_alive["value"]))
+
+    def fake_signal_group(sig, pgid):
+        group_signals.append((sig, pgid))
+        if sig == signal.SIGTERM:
+            group_alive["value"] = False
+
+    monkeypatch.setattr(service_manager, "signal_process_group", fake_signal_group)
+    monkeypatch.setattr(
+        service_manager,
+        "signal_pid_list",
+        lambda sig, pids: pid_signals.append((sig, list(pids))),
+    )
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert group_signals == [(signal.SIGTERM, 222)]
+    assert pid_signals == []
+    assert not pid_file.exists()
+
+
+def test_stop_one_falls_back_to_pid_signals_without_process_group(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("111", encoding="utf-8")
+    console = DummyConsole()
+    pid_signals: list[tuple[signal.Signals, list[int]]] = []
+    alive = {"value": True}
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111, 112])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: alive["value"])
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: False)
+    monkeypatch.setattr(
+        service_manager,
+        "signal_pid_list",
+        lambda sig, pids: (
+            pid_signals.append((sig, list(pids))),
+            alive.__setitem__("value", False),
+        ),
+    )
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert pid_signals[0] == (signal.SIGTERM, [111, 112])
+    assert not pid_file.exists()
+
+
+def test_stop_one_uses_taskkill_on_windows(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("111", encoding="utf-8")
+    console = DummyConsole()
+    commands: list[list[str]] = []
+    alive = {"value": True}
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111, 222])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: alive["value"])
+
+    def fake_run(args, **kwargs):
+        commands.append(list(args))
+        alive["value"] = False
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert commands == [
+        ["taskkill", "/PID", "111", "/T", "/F"],
+        ["taskkill", "/PID", "222", "/T", "/F"],
+    ]

@@ -4,6 +4,7 @@ Service lifecycle helpers for local Flocks daemon commands.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -55,6 +56,15 @@ class RuntimePaths:
     frontend_pid: Path
     backend_log: Path
     frontend_log: Path
+
+
+@dataclass(frozen=True)
+class RuntimeRecord:
+    pid: int
+    pgid: int | None = None
+    port: int | None = None
+    command: tuple[str, ...] = ()
+    started_at: float | None = None
 
 
 def repo_root() -> Path:
@@ -136,17 +146,103 @@ def node_version_satisfies_requirement() -> bool:
     return major is not None and major >= MIN_NODE_MAJOR
 
 
-def read_pid(pid_file: Path) -> int | None:
-    """Read a pid file if it exists and contains a valid integer."""
+def _coerce_positive_int(value: object) -> int | None:
+    """Return a positive integer when the value can be safely coerced."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _parse_runtime_record(raw: str) -> RuntimeRecord | None:
+    """Parse either legacy pid-only files or JSON runtime metadata."""
+    text = raw.strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return RuntimeRecord(pid=int(text))
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    pid = _coerce_positive_int(payload.get("pid"))
+    if pid is None:
+        return None
+
+    command_payload = payload.get("command")
+    command: tuple[str, ...] = ()
+    if isinstance(command_payload, list) and all(isinstance(item, str) for item in command_payload):
+        command = tuple(command_payload)
+
+    started_at = payload.get("started_at")
+    started_value = float(started_at) if isinstance(started_at, (int, float)) and not isinstance(started_at, bool) else None
+
+    return RuntimeRecord(
+        pid=pid,
+        pgid=_coerce_positive_int(payload.get("pgid")),
+        port=_coerce_positive_int(payload.get("port")),
+        command=command,
+        started_at=started_value,
+    )
+
+
+def read_runtime_record(pid_file: Path) -> RuntimeRecord | None:
+    """Read runtime metadata from a pid file, supporting legacy formats."""
     if not pid_file.exists():
         return None
     raw = pid_file.read_text(encoding="utf-8").strip()
-    return int(raw) if raw.isdigit() else None
+    return _parse_runtime_record(raw)
+
+
+def write_runtime_record(pid_file: Path, record: RuntimeRecord) -> None:
+    """Persist runtime metadata in a backward-compatible JSON format."""
+    payload: dict[str, object] = {"pid": record.pid}
+    if record.pgid is not None:
+        payload["pgid"] = record.pgid
+    if record.port is not None:
+        payload["port"] = record.port
+    if record.command:
+        payload["command"] = list(record.command)
+    if record.started_at is not None:
+        payload["started_at"] = record.started_at
+    pid_file.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+
+
+def process_runtime_record(process: subprocess.Popen, *, port: int, command: Sequence[str]) -> RuntimeRecord:
+    """Build runtime metadata for a freshly started service process."""
+    pgid = None
+    if sys.platform != "win32":
+        try:
+            pgid = os.getpgid(process.pid)
+        except OSError:
+            pgid = None
+    return RuntimeRecord(
+        pid=process.pid,
+        pgid=pgid,
+        port=port,
+        command=tuple(command),
+        started_at=time.time(),
+    )
+
+
+def read_pid(pid_file: Path) -> int | None:
+    """Read a pid file if it exists and contains a valid integer."""
+    record = read_runtime_record(pid_file)
+    return record.pid if record else None
 
 
 def write_pid(pid_file: Path, pid: int) -> None:
     """Persist a process id."""
-    pid_file.write_text(str(pid), encoding="utf-8")
+    write_runtime_record(pid_file, RuntimeRecord(pid=pid))
 
 
 def pid_is_running(pid: int | None) -> bool:
@@ -161,10 +257,40 @@ def pid_is_running(pid: int | None) -> bool:
     return True
 
 
+def process_group_is_running(pgid: int | None) -> bool:
+    """Return True when a Unix process group is still alive."""
+    if sys.platform == "win32" or pgid is None or pgid <= 0:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def runtime_record_is_running(record: RuntimeRecord | None) -> bool:
+    """Return True if the tracked pid or process group is still alive."""
+    if record is None:
+        return False
+    return pid_is_running(record.pid) or process_group_is_running(record.pgid)
+
+
 def cleanup_stale_pid_file(pid_file: Path) -> None:
     """Remove pid files that no longer point to running processes."""
-    pid = read_pid(pid_file)
-    if pid is not None and not pid_is_running(pid):
+    if not pid_file.exists():
+        return
+
+    raw = pid_file.read_text(encoding="utf-8").strip()
+    if not raw:
+        pid_file.unlink(missing_ok=True)
+        return
+
+    record = _parse_runtime_record(raw)
+    if record is None or not runtime_record_is_running(record):
         pid_file.unlink(missing_ok=True)
 
 
@@ -172,14 +298,14 @@ def backend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None)
     """Return True if the tracked backend process is running."""
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.backend_pid)
-    return pid_is_running(read_pid(current.backend_pid)) or bool(port_owner_pids(config.backend_port))
+    return runtime_record_is_running(read_runtime_record(current.backend_pid)) or bool(port_owner_pids(config.backend_port))
 
 
 def frontend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None) -> bool:
     """Return True if the tracked frontend process is running."""
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.frontend_pid)
-    return pid_is_running(read_pid(current.frontend_pid)) or bool(port_owner_pids(config.frontend_port))
+    return runtime_record_is_running(read_runtime_record(current.frontend_pid)) or bool(port_owner_pids(config.frontend_port))
 
 
 def port_owner_pids(port: int) -> list[int]:
@@ -232,35 +358,48 @@ def start_backend(config: ServiceConfig, console) -> None:
     paths = ensure_runtime_dirs()
     cleanup_stale_pid_file(paths.backend_pid)
 
-    tracked_pid = read_pid(paths.backend_pid)
+    runtime_record = read_runtime_record(paths.backend_pid)
+    tracked_pid = runtime_record.pid if runtime_record else None
     listeners = port_owner_pids(config.backend_port)
     if listeners:
         if tracked_pid and tracked_pid in listeners:
             console.print(f"[flocks] 后端已在运行，PID={tracked_pid}")
-        else:
-            console.print(f"[flocks] 后端端口已被占用，视为已运行 (PID: {_join_pids(listeners)})")
-        return
+            return
+        raise ServiceError(
+            f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+            "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
+        )
 
-    if tracked_pid is not None:
+    if runtime_record is not None and runtime_record_is_running(runtime_record):
+        raise ServiceError(
+            "后端运行记录仍存活，但端口未监听；请先执行 `flocks stop` 清理异常状态后重试。"
+        )
+
+    if runtime_record is not None:
         paths.backend_pid.unlink(missing_ok=True)
+
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "flocks.server.app:app",
+        "--host",
+        config.backend_host,
+        "--port",
+        str(config.backend_port),
+    ]
 
     console.print("[flocks] 启动后端服务...")
     process = _spawn_process(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "flocks.server.app:app",
-            "--host",
-            config.backend_host,
-            "--port",
-            str(config.backend_port),
-        ],
+        command,
         cwd=root,
         log_path=paths.backend_log,
     )
-    write_pid(paths.backend_pid, process.pid)
-
+    write_runtime_record(
+        paths.backend_pid,
+        process_runtime_record(process, port=config.backend_port, command=command),
+    )
+ 
     try:
         wait_for_http(config.backend_urls, "后端服务")
     except ServiceError:
@@ -276,16 +415,24 @@ def start_frontend(config: ServiceConfig, console) -> None:
     paths = ensure_runtime_dirs()
     cleanup_stale_pid_file(paths.frontend_pid)
 
-    tracked_pid = read_pid(paths.frontend_pid)
+    runtime_record = read_runtime_record(paths.frontend_pid)
+    tracked_pid = runtime_record.pid if runtime_record else None
     listeners = port_owner_pids(config.frontend_port)
     if listeners:
         if tracked_pid and tracked_pid in listeners:
             console.print(f"[flocks] WebUI 已在运行，PID={tracked_pid}")
-        else:
-            console.print(f"[flocks] WebUI 端口已被占用，视为已运行 (PID: {_join_pids(listeners)})")
-        return
+            return
+        raise ServiceError(
+            f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
+            "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
+        )
 
-    if tracked_pid is not None:
+    if runtime_record is not None and runtime_record_is_running(runtime_record):
+        raise ServiceError(
+            "WebUI 运行记录仍存活，但端口未监听；请先执行 `flocks stop` 清理异常状态后重试。"
+        )
+
+    if runtime_record is not None:
         paths.frontend_pid.unlink(missing_ok=True)
 
     npm = which("npm") or which("npm.cmd")
@@ -305,22 +452,27 @@ def start_frontend(config: ServiceConfig, console) -> None:
         if completed.returncode != 0:
             raise ServiceError("WebUI 构建失败。")
 
+    command = [
+        npm,
+        "run",
+        "preview",
+        "--",
+        "--host",
+        config.frontend_host,
+        "--port",
+        str(config.frontend_port),
+    ]
+
     console.print("[flocks] 启动 WebUI...")
     process = _spawn_process(
-        [
-            npm,
-            "run",
-            "preview",
-            "--",
-            "--host",
-            config.frontend_host,
-            "--port",
-            str(config.frontend_port),
-        ],
+        command,
         cwd=webui_dir,
         log_path=paths.frontend_log,
     )
-    write_pid(paths.frontend_pid, process.pid)
+    write_runtime_record(
+        paths.frontend_pid,
+        process_runtime_record(process, port=config.frontend_port, command=command),
+    )
 
     try:
         wait_for_http([config.frontend_url], "WebUI")
@@ -331,10 +483,35 @@ def start_frontend(config: ServiceConfig, console) -> None:
     console.print(f"[flocks] WebUI 已启动，日志: {paths.frontend_log}")
 
 
+def _tracked_processes_stopped(
+    port: int,
+    record: RuntimeRecord | None,
+    tracked_pids: Iterable[int],
+) -> bool:
+    """Return True when the tracked service no longer has running processes."""
+    listeners = port_owner_pids(port)
+    if listeners:
+        return False
+    if runtime_record_is_running(record):
+        return False
+    return not any(pid_is_running(pid) for pid in tracked_pids)
+
+
+def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
+    """Signal an entire Unix process group when it exists."""
+    if sys.platform == "win32" or pgid is None or pgid <= 0:
+        return
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        pass
+
+
 def stop_one(port: int, pid_file: Path, name: str, console) -> None:
     """Stop a single service by tracked pid and/or listening port."""
     cleanup_stale_pid_file(pid_file)
-    tracked_pid = read_pid(pid_file)
+    runtime_record = read_runtime_record(pid_file)
+    tracked_pid = runtime_record.pid if runtime_record else None
     listeners = port_owner_pids(port)
 
     target_pids: list[int] = []
@@ -342,30 +519,39 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
         target_pids = append_unique_pids(target_pids, collect_process_tree_pids(tracked_pid))
     target_pids = append_unique_pids(target_pids, listeners)
 
-    if not target_pids:
+    group_running = process_group_is_running(runtime_record.pgid if runtime_record else None)
+    if not target_pids and not group_running:
         pid_file.unlink(missing_ok=True)
         console.print(f"[flocks] {name} 未运行。")
         return
 
-    console.print(f"[flocks] 停止 {name}（端口 {port}，PID: {_join_pids(target_pids)}）...")
+    details = _join_pids(target_pids) if target_pids else "none"
+    if runtime_record and runtime_record.pgid is not None and sys.platform != "win32":
+        details = f"{details}; PGID={runtime_record.pgid}"
+    console.print(f"[flocks] 停止 {name}（端口 {port}，PID: {details}）...")
 
     if sys.platform == "win32":
         for pid in target_pids:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
     else:
-        signal_pid_list(signal.SIGTERM, target_pids)
+        if runtime_record and runtime_record.pgid is not None:
+            signal_process_group(signal.SIGTERM, runtime_record.pgid)
+        else:
+            signal_pid_list(signal.SIGTERM, target_pids)
         for _ in range(10):
-            if not port_owner_pids(port) and not any(pid_is_running(pid) for pid in target_pids):
+            if _tracked_processes_stopped(port, runtime_record, target_pids):
                 pid_file.unlink(missing_ok=True)
                 console.print(f"[flocks] {name} 已停止。")
                 return
             time.sleep(1)
 
         console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
-        signal_pid_list(signal.SIGKILL, target_pids)
+        if runtime_record and runtime_record.pgid is not None:
+            signal_process_group(signal.SIGKILL, runtime_record.pgid)
+        signal_pid_list(signal.SIGKILL, append_unique_pids(target_pids, port_owner_pids(port)))
 
     for _ in range(10):
-        if not port_owner_pids(port):
+        if _tracked_processes_stopped(port, runtime_record, append_unique_pids(target_pids, port_owner_pids(port))):
             pid_file.unlink(missing_ok=True)
             console.print(f"[flocks] {name} 已停止。")
             return
@@ -409,8 +595,10 @@ def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None)
     cleanup_stale_pid_file(current.backend_pid)
     cleanup_stale_pid_file(current.frontend_pid)
 
-    backend_pid = read_pid(current.backend_pid)
-    frontend_pid = read_pid(current.frontend_pid)
+    backend_record = read_runtime_record(current.backend_pid)
+    frontend_record = read_runtime_record(current.frontend_pid)
+    backend_pid = backend_record.pid if backend_record else None
+    frontend_pid = frontend_record.pid if frontend_record else None
     backend_listeners = port_owner_pids(config.backend_port)
     frontend_listeners = port_owner_pids(config.frontend_port)
 
@@ -421,6 +609,8 @@ def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None)
         )
     elif pid_is_running(backend_pid):
         lines.append(f"[flocks] 后端主进程仍在运行，但端口 {config.backend_port} 未监听: PID={backend_pid}")
+    elif process_group_is_running(backend_record.pgid if backend_record else None):
+        lines.append(f"[flocks] 后端进程组仍在运行，但端口 {config.backend_port} 未监听: PGID={backend_record.pgid}")
     else:
         lines.append("[flocks] 后端未运行")
 
@@ -430,6 +620,8 @@ def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None)
         )
     elif pid_is_running(frontend_pid):
         lines.append(f"[flocks] WebUI 主进程仍在运行，但端口 {config.frontend_port} 未监听: PID={frontend_pid}")
+    elif process_group_is_running(frontend_record.pgid if frontend_record else None):
+        lines.append(f"[flocks] WebUI 进程组仍在运行，但端口 {config.frontend_port} 未监听: PGID={frontend_record.pgid}")
     else:
         lines.append("[flocks] WebUI 未运行")
 
@@ -603,9 +795,14 @@ def _spawn_process(command: Sequence[str], *, cwd: Path, log_path: Path) -> subp
     if sys.platform == "win32":
         creationflags = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         )
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            kwargs["startupinfo"] = startupinfo
     else:
         kwargs["start_new_session"] = True
 
