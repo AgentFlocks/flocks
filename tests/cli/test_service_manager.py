@@ -1,3 +1,4 @@
+import contextlib
 import json
 import signal
 from pathlib import Path
@@ -59,6 +60,30 @@ def test_runtime_record_round_trip_preserves_metadata(tmp_path: Path) -> None:
 
     assert json.loads(pid_file.read_text(encoding="utf-8")) == {
         "command": ["python", "-m", "uvicorn"],
+        "pgid": 4321,
+        "pid": 4321,
+        "port": 8000,
+        "started_at": 1234.5,
+    }
+    assert service_manager.read_runtime_record(pid_file) == record
+
+
+def test_runtime_record_round_trip_preserves_host(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    record = service_manager.RuntimeRecord(
+        pid=4321,
+        pgid=4321,
+        host="0.0.0.0",
+        port=8000,
+        command=("python", "-m", "uvicorn"),
+        started_at=1234.5,
+    )
+
+    service_manager.write_runtime_record(pid_file, record)
+
+    assert json.loads(pid_file.read_text(encoding="utf-8")) == {
+        "command": ["python", "-m", "uvicorn"],
+        "host": "0.0.0.0",
         "pgid": 4321,
         "pid": 4321,
         "port": 8000,
@@ -145,7 +170,7 @@ def test_build_status_lines_reports_running_and_idle_services(monkeypatch, tmp_p
     )
     monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 222)
 
-    lines = service_manager.build_status_lines(service_manager.ServiceConfig(), paths)
+    lines = service_manager.build_status_lines(paths)
 
     assert "后端运行中" in lines[0]
     assert "WebUI 主进程仍在运行" in lines[1]
@@ -163,6 +188,14 @@ def test_build_status_lines_uses_custom_server_and_webui_ports(monkeypatch, tmp_
     )
     paths.run_dir.mkdir(parents=True)
     paths.log_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, host="0.0.0.0", port=9000),
+    )
+    service_manager.write_runtime_record(
+        paths.frontend_pid,
+        service_manager.RuntimeRecord(pid=222, host="0.0.0.0", port=5174),
+    )
 
     monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _: None)
     monkeypatch.setattr(
@@ -172,13 +205,7 @@ def test_build_status_lines_uses_custom_server_and_webui_ports(monkeypatch, tmp_
     )
     monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
 
-    config = service_manager.ServiceConfig(
-        backend_host="0.0.0.0",
-        backend_port=9000,
-        frontend_host="0.0.0.0",
-        frontend_port=5174,
-    )
-    lines = service_manager.build_status_lines(config, paths)
+    lines = service_manager.build_status_lines(paths)
 
     assert "http://127.0.0.1:9000" in lines[0]
     assert "http://127.0.0.1:5174" in lines[1]
@@ -186,58 +213,75 @@ def test_build_status_lines_uses_custom_server_and_webui_ports(monkeypatch, tmp_
 
 def test_start_all_stops_services_before_starting(monkeypatch) -> None:
     call_order: list[str] = []
+    paths = service_manager.RuntimePaths(
+        root=Path("/tmp"),
+        run_dir=Path("/tmp/run"),
+        log_dir=Path("/tmp/logs"),
+        backend_pid=Path("/tmp/run/backend.pid"),
+        frontend_pid=Path("/tmp/run/webui.pid"),
+        backend_log=Path("/tmp/logs/backend.log"),
+        frontend_log=Path("/tmp/logs/webui.log"),
+    )
 
-    monkeypatch.setattr(service_manager, "stop_all", lambda _config, _console: call_order.append("stop_all"))
-    monkeypatch.setattr(
-        service_manager,
-        "ensure_runtime_dirs",
-        lambda: call_order.append("ensure_runtime_dirs"),
-    )
-    monkeypatch.setattr(service_manager, "start_backend", lambda _config, _console: call_order.append("start_backend"))
-    monkeypatch.setattr(service_manager, "start_frontend", lambda _config, _console: call_order.append("start_frontend"))
-    monkeypatch.setattr(
-        service_manager,
-        "show_start_summary",
-        lambda _config, _console: call_order.append("show_start_summary"),
-    )
-    monkeypatch.setattr(
-        service_manager,
-        "open_default_browser",
-        lambda _url, _console: call_order.append("open_default_browser"),
-    )
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
     service_manager.start_all(service_manager.ServiceConfig(), console=None)
 
     assert call_order == [
-        "stop_all",
         "ensure_runtime_dirs",
-        "start_backend",
-        "start_frontend",
-        "show_start_summary",
-        "open_default_browser",
+        "service_lock",
+        "stop_one:5173",
+        "stop_one:8000",
+        "_start_all_without_stop",
     ]
 
 
-def test_restart_all_reuses_start_all_flow(monkeypatch) -> None:
-    captured = {}
+def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
+    call_order: list[str] = []
+    paths = service_manager.RuntimePaths(
+        root=Path("/tmp"),
+        run_dir=Path("/tmp/run"),
+        log_dir=Path("/tmp/logs"),
+        backend_pid=Path("/tmp/run/backend.pid"),
+        frontend_pid=Path("/tmp/run/webui.pid"),
+        backend_log=Path("/tmp/logs/backend.log"),
+        frontend_log=Path("/tmp/logs/webui.log"),
+    )
 
-    def fake_start_all(config, console) -> None:
-        captured["config"] = config
-        captured["console"] = console
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
-    monkeypatch.setattr(service_manager, "start_all", fake_start_all)
+    service_manager.restart_all(service_manager.ServiceConfig(), console=None)
 
-    config = service_manager.ServiceConfig(no_browser=True, skip_frontend_build=True)
-    console = object()
-    service_manager.restart_all(config, console)
-
-    assert captured == {"config": config, "console": console}
+    assert call_order == [
+        "ensure_runtime_dirs",
+        "service_lock",
+        "stop_one:5173",
+        "stop_one:8000",
+        "_start_all_without_stop",
+    ]
 
 
 def test_start_all_stops_on_failure_before_restart(monkeypatch) -> None:
+    paths = service_manager.RuntimePaths(
+        root=Path("/tmp"),
+        run_dir=Path("/tmp/run"),
+        log_dir=Path("/tmp/logs"),
+        backend_pid=Path("/tmp/run/backend.pid"),
+        frontend_pid=Path("/tmp/run/webui.pid"),
+        backend_log=Path("/tmp/logs/backend.log"),
+        frontend_log=Path("/tmp/logs/webui.log"),
+    )
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
     monkeypatch.setattr(
         service_manager,
-        "stop_all",
+        "stop_one",
         lambda *_args: (_ for _ in ()).throw(service_manager.ServiceError("stop failed")),
     )
     monkeypatch.setattr(
@@ -282,11 +326,25 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     assert record is not None
     assert record.pid == 2468
     assert record.pgid == 2468
+    assert record.host == "127.0.0.1"
     assert record.port == 8000
     assert record.command[:3] == (service_manager.sys.executable, "-m", "uvicorn")
 
 
 def test_build_frontend_env_uses_backend_host_and_port() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert "VITE_API_BASE_URL" not in env
+    assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_uses_loopback_for_wildcard_backend_host() -> None:
     config = service_manager.ServiceConfig(
         backend_host="0.0.0.0",
         backend_port=9000,
@@ -294,8 +352,8 @@ def test_build_frontend_env_uses_backend_host_and_port() -> None:
 
     env = service_manager.build_frontend_env(config)
 
-    assert env["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
-    assert env["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+    assert env["FLOCKS_API_PROXY_TARGET"] == "http://127.0.0.1:9000"
+    assert "VITE_API_BASE_URL" not in env
 
 
 def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tmp_path: Path) -> None:
@@ -334,15 +392,16 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
 
     config = service_manager.ServiceConfig(
-        backend_host="0.0.0.0",
+        backend_host="10.0.0.8",
         backend_port=9000,
+        frontend_host="0.0.0.0",
         frontend_port=5174,
     )
     service_manager.start_frontend(config, console)
 
     assert build_calls[0]["command"] == ["/usr/bin/npm", "run", "build"]
-    assert build_calls[0]["kwargs"]["env"]["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
-    assert build_calls[0]["kwargs"]["env"]["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+    assert build_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert "VITE_API_BASE_URL" not in build_calls[0]["kwargs"]["env"]
 
     assert preview_calls[0]["command"] == [
         "/usr/bin/npm",
@@ -350,12 +409,16 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
         "preview",
         "--",
         "--host",
-        "127.0.0.1",
+        "0.0.0.0",
         "--port",
         "5174",
     ]
-    assert preview_calls[0]["kwargs"]["env"]["VITE_API_BASE_URL"] == "http://127.0.0.1:9000"
-    assert preview_calls[0]["kwargs"]["env"]["VITE_WS_BASE_URL"] == "ws://127.0.0.1:9000"
+    assert preview_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert "VITE_API_BASE_URL" not in preview_calls[0]["kwargs"]["env"]
+    record = service_manager.read_runtime_record(paths.frontend_pid)
+    assert record is not None
+    assert record.host == "0.0.0.0"
+    assert record.port == 5174
 
 
 def test_start_backend_raises_on_port_record_mismatch(monkeypatch, tmp_path: Path) -> None:
@@ -443,7 +506,7 @@ def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Pa
 def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:
     captured = {}
     log_path = tmp_path / "logs" / "backend.log"
-    env = {"VITE_API_BASE_URL": "http://127.0.0.1:9000"}
+    env = {"FLOCKS_API_PROXY_TARGET": "http://127.0.0.1:9000"}
 
     def fake_popen(*args, **kwargs):
         captured["args"] = args
@@ -547,3 +610,217 @@ def test_stop_one_uses_taskkill_on_windows(monkeypatch, tmp_path: Path) -> None:
         ["taskkill", "/PID", "111", "/T", "/F"],
         ["taskkill", "/PID", "222", "/T", "/F"],
     ]
+
+
+@contextlib.contextmanager
+def _record_call(call_order: list[str], name: str):
+    call_order.append(name)
+    yield
+
+
+def test_stop_all_reads_port_from_runtime_record(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(paths.backend_pid, service_manager.RuntimeRecord(pid=111, port=9995))
+    service_manager.write_runtime_record(paths.frontend_pid, service_manager.RuntimeRecord(pid=222, port=9996))
+    calls: list[tuple[int, Path, str]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, pid_file, name, _console: calls.append((port, pid_file, name)),
+    )
+
+    service_manager.stop_all(console=None)
+
+    assert calls == [
+        (9996, paths.frontend_pid, "WebUI"),
+        (9995, paths.backend_pid, "后端"),
+    ]
+
+
+def test_stop_all_falls_back_to_default_port_when_record_missing(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    calls: list[int] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_one", lambda port, *_args: calls.append(port))
+
+    service_manager.stop_all(console=None)
+
+    assert calls == [5173, 8000]
+
+
+def test_stop_all_falls_back_to_default_port_when_record_has_no_port(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.backend_pid.write_text("111", encoding="utf-8")
+    paths.frontend_pid.write_text("222", encoding="utf-8")
+    calls: list[int] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_one", lambda port, *_args: calls.append(port))
+
+    service_manager.stop_all(console=None)
+
+    assert calls == [5173, 8000]
+
+
+def test_build_status_lines_reads_port_from_runtime_record(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(paths.backend_pid, service_manager.RuntimeRecord(pid=111, port=9995))
+    service_manager.write_runtime_record(paths.frontend_pid, service_manager.RuntimeRecord(pid=222, port=9996))
+
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda port: [port] if port in {9995, 9996} else [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert "http://127.0.0.1:9995" in lines[0]
+    assert "http://127.0.0.1:9996" in lines[1]
+
+
+def test_build_status_lines_uses_recorded_host(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    service_manager.write_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, host="10.0.0.8", port=9000),
+    )
+    service_manager.write_runtime_record(
+        paths.frontend_pid,
+        service_manager.RuntimeRecord(pid=222, host="0.0.0.0", port=5174),
+    )
+
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda port: [111] if port == 9000 else [222])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert "http://10.0.0.8:9000" in lines[0]
+    assert "http://127.0.0.1:5174" in lines[1]
+
+
+def test_service_lock_prevents_concurrent_operations(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    state = {"locked": False}
+
+    class FakeFcntl:
+        LOCK_EX = 1
+        LOCK_NB = 2
+        LOCK_UN = 4
+
+        @staticmethod
+        def flock(_handle, operation):
+            if operation == FakeFcntl.LOCK_UN:
+                state["locked"] = False
+                return
+            if state["locked"]:
+                raise OSError("busy")
+            state["locked"] = True
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "fcntl", FakeFcntl)
+
+    with service_manager.service_lock(paths):
+        with pytest.raises(service_manager.ServiceError, match="另一个 flocks 命令正在执行"):
+            with service_manager.service_lock(paths):
+                raise AssertionError("should not acquire nested lock")
+
+
+def test_service_lock_releases_on_completion(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    operations: list[int] = []
+
+    class FakeFcntl:
+        LOCK_EX = 1
+        LOCK_NB = 2
+        LOCK_UN = 4
+
+        @staticmethod
+        def flock(_handle, operation):
+            operations.append(operation)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "fcntl", FakeFcntl)
+
+    with service_manager.service_lock(paths):
+        pass
+
+    assert operations == [FakeFcntl.LOCK_EX | FakeFcntl.LOCK_NB, FakeFcntl.LOCK_UN]
+
+
+def test_log_startup_config_appends_to_log_file(tmp_path: Path) -> None:
+    log_path = tmp_path / "backend.log"
+    record = service_manager.RuntimeRecord(pid=2468, pgid=2468, host="0.0.0.0", port=8000)
+
+    service_manager._log_startup_config(log_path, "backend", "0.0.0.0", 8000, record)
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "backend starting: host=0.0.0.0 port=8000 pid=2468 pgid=2468" in content
