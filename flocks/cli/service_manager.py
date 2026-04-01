@@ -355,14 +355,39 @@ def port_owner_pids(port: int) -> list[int]:
     raise ServiceError("未检测到 lsof 或 fuser，无法检查端口占用。")
 
 
-def wait_for_http(urls: Sequence[str], name: str, attempts: int = 30, delay: float = 1.0) -> None:
-    """Wait until any URL becomes reachable."""
+def _is_expected_health_response(response: httpx.Response) -> bool:
+    """Return True when the response matches a Flocks health payload."""
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("status") == "healthy" or payload.get("healthy") is True
+
+
+def _is_reachable_response(response: httpx.Response) -> bool:
+    """Return True when an HTTP endpoint is reachable enough for startup checks."""
+    return response.status_code < 500
+
+
+def wait_for_http(
+    urls: Sequence[str],
+    name: str,
+    attempts: int = 30,
+    delay: float = 1.0,
+    validator=None,
+) -> None:
+    """Wait until any URL passes the provided startup validator."""
+    response_validator = validator or _is_reachable_response
     with httpx.Client(timeout=2.0) as client:
         for _ in range(attempts):
             for url in urls:
                 try:
                     response = client.get(url)
-                    if response.status_code < 500:
+                    if response_validator(response):
                         return
                 except Exception:
                     pass
@@ -425,7 +450,7 @@ def start_backend(config: ServiceConfig, console) -> None:
     _log_startup_config(paths.backend_log, "backend", config.backend_host, config.backend_port, read_runtime_record(paths.backend_pid))
 
     try:
-        wait_for_http(config.backend_urls, "后端服务")
+        wait_for_http(config.backend_urls, "后端服务", validator=_is_expected_health_response)
     except ServiceError:
         stop_one(config.backend_port, paths.backend_pid, "后端", console)
         raise

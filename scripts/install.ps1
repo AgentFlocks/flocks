@@ -299,14 +299,224 @@ function Install-Uv {
     }
 }
 
+function Get-RuntimePidFilePaths {
+    $flocksRoot = [Environment]::GetEnvironmentVariable("FLOCKS_ROOT")
+    if ([string]::IsNullOrWhiteSpace($flocksRoot)) {
+        $flocksRoot = Join-Path $HOME ".flocks"
+    }
+
+    $runDir = Join-Path $flocksRoot "run"
+    return @(
+        Join-Path $runDir "backend.pid",
+        Join-Path $runDir "webui.pid",
+        Join-Path $runDir "upgrade_server.pid"
+    )
+}
+
+function Get-PidFromRuntimeFile {
+    param([string]$PidFile)
+
+    if ([string]::IsNullOrWhiteSpace($PidFile) -or -not (Test-Path $PidFile)) {
+        return $null
+    }
+
+    try {
+        $raw = (Get-Content -Path $PidFile -Raw -ErrorAction Stop).Trim()
+    }
+    catch {
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $null
+    }
+
+    if ($raw -match '^\d+$') {
+        return [int]$raw
+    }
+
+    try {
+        $json = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($null -ne $json.pid -and "$($json.pid)" -match '^\d+$') {
+            return [int]$json.pid
+        }
+    }
+    catch {
+    }
+
+    return $null
+}
+
+function Stop-TrackedProcess {
+    param(
+        [int]$ProcessId,
+        [string]$Reason = "tracked process"
+    )
+
+    if ($ProcessId -le 0) {
+        return
+    }
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+        Write-Info ("已停止 {0} (PID: {1})" -f $Reason, $ProcessId)
+    }
+    catch {
+        try {
+            & taskkill.exe /PID $ProcessId /T /F | Out-Null
+            Write-Info ("已停止 {0} (PID: {1})" -f $Reason, $ProcessId)
+        }
+        catch {
+            Write-Info ("无法停止 {0} (PID: {1})，继续安装" -f $Reason, $ProcessId)
+        }
+    }
+}
+
+function Get-FlocksProcessIds {
+    param([string]$ProjectRoot)
+
+    $matches = [System.Collections.Generic.List[int]]::new()
+    $toolDir = ""
+    if (Test-Command "uv") {
+        try {
+            $toolDir = (& uv tool dir 2>$null).Trim()
+        }
+        catch {
+            $toolDir = ""
+        }
+    }
+
+    $escapedToolDir = if ([string]::IsNullOrWhiteSpace($toolDir)) { "" } else { [Regex]::Escape($toolDir) }
+    $patterns = @(
+        "flocks\.server\.app",
+        "uv tool install .*flocks",
+        "uv tool .*flocks",
+        "uv sync",
+        "npm(\.cmd)? run preview",
+        "vite preview",
+        "agentflocks[/\\]flocks"
+    )
+    if ($escapedToolDir) {
+        $patterns += $escapedToolDir
+    }
+
+    try {
+        $processes = Get-CimInstance Win32_Process -ErrorAction Stop
+    }
+    catch {
+        return @()
+    }
+
+    foreach ($process in $processes) {
+        if ([int]$process.ProcessId -eq $PID) {
+            continue
+        }
+        $commandLine = $process.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            continue
+        }
+        foreach ($pattern in $patterns) {
+            if ($commandLine -match $pattern) {
+                $matches.Add([int]$process.ProcessId)
+                break
+            }
+        }
+    }
+
+    return $matches | Select-Object -Unique
+}
+
+function Stop-FlocksProcesses {
+    param([switch]$Aggressive)
+
+    Write-Info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
+
+    $flocksCommand = Get-Command flocks -ErrorAction SilentlyContinue
+    if ($flocksCommand) {
+        try {
+            & $flocksCommand.Source stop 2>$null | Out-Null
+        }
+        catch {
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    foreach ($pidFile in Get-RuntimePidFilePaths) {
+        $pid = Get-PidFromRuntimeFile -PidFile $pidFile
+        if ($null -ne $pid) {
+            Stop-TrackedProcess -ProcessId $pid -Reason ("runtime process from {0}" -f $pidFile)
+        }
+    }
+
+    foreach ($processId in Get-FlocksProcessIds -ProjectRoot $RootDir) {
+        Stop-TrackedProcess -ProcessId $processId -Reason "Flocks related process"
+    }
+
+    if ($Aggressive) {
+        foreach ($name in @("flocks", "uvicorn", "esbuild")) {
+            Get-Process -Name $name -ErrorAction SilentlyContinue | ForEach-Object {
+                Stop-TrackedProcess -ProcessId $_.Id -Reason ("process name {0}" -f $name)
+            }
+        }
+    }
+
+    Start-Sleep -Seconds 1
+}
+
+function Test-IsLockError {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return $Text -match '拒绝访问|Access is denied|os error 5|WinError 5|failed to remove directory|Failed to update Windows PE resources'
+}
+
+function Invoke-InstallerCommandWithLockRetry {
+    param(
+        [string]$Description,
+        [scriptblock]$ScriptBlock
+    )
+
+    $output = @(& $ScriptBlock 2>&1)
+    $exitCode = $LASTEXITCODE
+    foreach ($entry in $output) {
+        Write-Host ($entry.ToString())
+    }
+
+    if ($exitCode -eq 0) {
+        return
+    }
+
+    $combinedOutput = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    if (-not (Test-IsLockError -Text $combinedOutput)) {
+        Fail "$Description 失败。"
+    }
+
+    Write-Info "$Description 检测到文件锁定，尝试清理残留进程后重试..."
+    Stop-FlocksProcesses -Aggressive
+    Start-Sleep -Seconds 3
+
+    $retryOutput = @(& $ScriptBlock 2>&1)
+    $retryExitCode = $LASTEXITCODE
+    foreach ($entry in $retryOutput) {
+        Write-Host ($entry.ToString())
+    }
+
+    if ($retryExitCode -ne 0) {
+        Fail "$Description 失败。"
+    }
+}
+
 function Install-FlocksCli {
     Write-Info "安装 flocks 全局 CLI..."
 
     Push-Location $RootDir
     try {
-        & uv tool install --editable $RootDir --force
-        if ($LASTEXITCODE -ne 0) {
-            Fail "flocks 全局 CLI 安装失败。"
+        Stop-FlocksProcesses
+        Invoke-InstallerCommandWithLockRetry -Description "flocks 全局 CLI 安装" -ScriptBlock {
+            & uv tool install --editable $RootDir --force
         }
     }
     finally {
@@ -521,9 +731,9 @@ function Main {
     Write-Info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
     Push-Location $RootDir
     try {
-        & uv sync --group dev
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Python 后端依赖安装失败。"
+        Stop-FlocksProcesses
+        Invoke-InstallerCommandWithLockRetry -Description "Python 后端依赖安装" -ScriptBlock {
+            & uv sync --group dev
         }
     }
     finally {

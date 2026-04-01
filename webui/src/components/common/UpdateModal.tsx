@@ -19,8 +19,9 @@ import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress } from '@/api/upd
 
 // ------------------------------------------------------------------ //
 
+const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
 const HEALTH_POLL_INTERVAL = 2000;
-const HEALTH_POLL_TIMEOUT  = 60000;
+const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
@@ -96,18 +97,36 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
 
   const pollUntilReady = () => {
     const start = Date.now();
-    const poll = () => {
+    const poll = async () => {
       if (Date.now() - start > HEALTH_POLL_TIMEOUT) {
         setError(t('restartTimeout'));
         setRestartingSync(false);
         setUpgrading(false);
         return;
       }
-      fetch('/api/health')
-        .then((r) => { if (r.ok) window.location.reload(); else setTimeout(poll, HEALTH_POLL_INTERVAL); })
-        .catch(() => setTimeout(poll, HEALTH_POLL_INTERVAL));
+
+      try {
+        const rootResponse = await fetch('/', { cache: 'no-store' });
+        const rootHtml = await rootResponse.text();
+        const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
+
+        if (rootResponse.ok && !stillShowingUpgradePage) {
+          const healthResponse = await fetch('/api/health', { cache: 'no-store' });
+          if (healthResponse.ok) {
+            window.location.reload();
+            return;
+          }
+        }
+      } catch {
+      }
+
+      setTimeout(() => {
+        void poll();
+      }, HEALTH_POLL_INTERVAL);
     };
-    setTimeout(poll, 1500);
+    setTimeout(() => {
+      void poll();
+    }, 1500);
   };
 
   const renderStep = (step: UpdateProgress, index: number) => {

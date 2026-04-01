@@ -1040,3 +1040,34 @@ class TestGatewayManagerHelpers:
         assert plugin.status.connected is False
         assert plugin.status.last_error == "fail"
         assert plugin.status.error_count == 1
+
+    async def test_stop_all_drains_cancelled_tasks(self, monkeypatch):
+        from flocks.channel.gateway.manager import GatewayManager
+        from flocks.channel.registry import ChannelRegistry
+
+        registry = ChannelRegistry()
+        plugin = _StubChannel()
+        registry.register(plugin)
+        manager = GatewayManager(registry=registry)
+        cancelled = asyncio.Event()
+
+        async def _blocking() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        task = asyncio.create_task(_blocking())
+        await asyncio.sleep(0)
+        manager._running["stub"] = task
+        manager._abort_events["stub"] = asyncio.Event()
+
+        async def _fake_wait(tasks, timeout):
+            return set(), set(tasks)
+
+        monkeypatch.setattr("flocks.channel.gateway.manager.asyncio.wait", _fake_wait)
+
+        await manager.stop_all()
+
+        assert cancelled.is_set()
+        assert task.done()

@@ -41,6 +41,28 @@ log = Log.create(service="channel.feishu.monitor")
 _CHAT_LOCKS_MAX = 2000
 
 
+def _extract_ws_close_code(exc: BaseException | None) -> int | None:
+    """Return a websocket close code from common exception shapes."""
+    if exc is None:
+        return None
+    for attr in ("rcvd", "sent"):
+        frame = getattr(exc, attr, None)
+        code = getattr(frame, "code", None)
+        if isinstance(code, int):
+            return code
+    code = getattr(exc, "code", None)
+    return code if isinstance(code, int) else None
+
+
+def _is_normal_ws_close(exc: BaseException | None) -> bool:
+    """Return True when the websocket closed cleanly."""
+    if exc is None:
+        return False
+    if type(exc).__name__ == "ConnectionClosedOK":
+        return True
+    return _extract_ws_close_code(exc) in {1000, 1001}
+
+
 def _resolve_ws_domain(config: dict) -> str:
     """Return the domain root expected by the modern lark-oapi websocket client."""
     api_base = resolve_api_base(config)
@@ -96,6 +118,7 @@ def _build_ws_client(
                 self._thread: Optional[threading.Thread] = None
                 self._loop: Optional[asyncio.AbstractEventLoop] = None
                 self._start_error: Optional[BaseException] = None
+                self._stop_requested = False
                 self._finished = threading.Event()
 
             def start(self) -> None:
@@ -103,6 +126,31 @@ def _build_ws_client(
                     self._loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(self._loop)
                     ws_module.loop = self._loop
+
+                    async def _receive_message_loop() -> None:
+                        try:
+                            while True:
+                                if self._client._conn is None:
+                                    raise RuntimeError("connection is closed")
+                                msg = await self._client._conn.recv()
+                                asyncio.get_running_loop().create_task(
+                                    self._client._handle_message(msg)
+                                )
+                        except Exception as e:
+                            if self._stop_requested and _is_normal_ws_close(e):
+                                await self._client._disconnect()
+                                return
+                            log.error("feishu.ws.receive_loop_error", {
+                                "app_id": app_id,
+                                "error": str(e),
+                            })
+                            await self._client._disconnect()
+                            if self._client._auto_reconnect:
+                                await self._client._reconnect()
+                            else:
+                                raise
+
+                    self._client._receive_message_loop = _receive_message_loop
                     try:
                         self._client.start()
                     except RuntimeError as e:
@@ -126,6 +174,7 @@ def _build_ws_client(
             def stop(self) -> None:
                 if self._loop is None:
                     return
+                self._stop_requested = True
                 with contextlib.suppress(Exception):
                     future = asyncio.run_coroutine_threadsafe(
                         self._client._disconnect(),

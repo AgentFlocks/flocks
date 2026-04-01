@@ -436,13 +436,63 @@ install_uv() {
   has_cmd uv || fail "uv 安装完成后仍不可用，请检查 PATH。"
 }
 
+is_lock_error_output() {
+  local output="$1"
+  [[ "$output" =~ 拒绝访问|Access\ is\ denied|os\ error\ 5|WinError\ 5|failed\ to\ remove\ directory|Failed\ to\ update\ Windows\ PE\ resources ]]
+}
+
+stop_flocks_processes() {
+  info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
+
+  if has_cmd flocks; then
+    flocks stop >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
+  pkill -f "flocks.server.app" >/dev/null 2>&1 || true
+  pkill -f "uvicorn.*flocks.server.app" >/dev/null 2>&1 || true
+  pkill -f "uv tool install.*flocks" >/dev/null 2>&1 || true
+  pkill -f "uv sync" >/dev/null 2>&1 || true
+  pkill -f "npm run preview" >/dev/null 2>&1 || true
+  pkill -f "vite preview" >/dev/null 2>&1 || true
+
+  sleep 1
+}
+
+run_with_lock_retry() {
+  local description="$1"
+  shift
+
+  local output status
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  [[ -n "$output" ]] && printf '%s\n' "$output"
+
+  if [[ "$status" -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! is_lock_error_output "$output"; then
+    fail "${description}失败。"
+  fi
+
+  info "${description}检测到文件锁定，尝试清理残留进程后重试..."
+  stop_flocks_processes
+  sleep 3
+
+  "$@" || fail "${description}失败。"
+}
+
 install_flocks_cli() {
   local tool_bin
 
   info "安装 flocks 全局 CLI..."
   (
     cd "$ROOT_DIR"
-    uv tool install --editable "$ROOT_DIR" --force
+    stop_flocks_processes
+    run_with_lock_retry "flocks 全局 CLI 安装" uv tool install --editable "$ROOT_DIR" --force
   )
 
   tool_bin="$(uv tool dir --bin 2>/dev/null | tr -d '\r' || true)"
@@ -614,7 +664,8 @@ main() {
   info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
   (
     cd "$ROOT_DIR"
-    uv sync --group dev
+    stop_flocks_processes
+    run_with_lock_retry "Python 后端依赖安装" uv sync --group dev
   )
 
   install_flocks_cli

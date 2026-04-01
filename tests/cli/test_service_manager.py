@@ -4,6 +4,7 @@ import signal
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from flocks.cli import service_manager
@@ -145,6 +146,94 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
 """
 
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
+
+
+def test_is_expected_health_response_accepts_known_payload_shapes() -> None:
+    api_health = httpx.Response(200, json={"status": "healthy", "version": "v1"})
+    global_health = httpx.Response(200, json={"healthy": True, "version": "v1"})
+
+    assert service_manager._is_expected_health_response(api_health) is True
+    assert service_manager._is_expected_health_response(global_health) is True
+
+
+def test_wait_for_http_rejects_non_flocks_health_payload(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(404, json={"detail": "not found"}),
+        httpx.Response(200, json={"status": "starting"}),
+        httpx.Response(200, text="ok"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager.wait_for_http(
+            ["http://127.0.0.1:8000/api/health"],
+            "后端服务",
+            attempts=3,
+            delay=0.0,
+            validator=service_manager._is_expected_health_response,
+        )
+
+
+def test_wait_for_http_accepts_flocks_health_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(503, json={"detail": "warming"}),
+        httpx.Response(200, json={"status": "healthy", "version": "v1"}),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000/api/health"],
+        "后端服务",
+        attempts=2,
+        delay=0.0,
+        validator=service_manager._is_expected_health_response,
+    )
+
+
+def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(503, text="warming"),
+        httpx.Response(200, text="<html>ok</html>"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
 
 
 def test_build_status_lines_reports_running_and_idle_services(monkeypatch, tmp_path: Path) -> None:

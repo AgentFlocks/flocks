@@ -92,11 +92,13 @@ class GatewayManager:
             event.set()
 
         if self._running:
-            done, pending = await asyncio.wait(
+            _done, pending = await asyncio.wait(
                 self._running.values(), timeout=10.0,
             )
             for task in pending:
                 task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         for channel_id in list(self._running.keys()):
             plugin = self._registry.get(channel_id)

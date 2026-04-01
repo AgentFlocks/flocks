@@ -52,6 +52,14 @@ async def lifespan(app: FastAPI):
     # Startup
     log.info("server.startup", {"version": "0.2.0"})
     try:
+        from flocks.updater.updater import cleanup_replaced_files
+
+        await asyncio.to_thread(cleanup_replaced_files)
+        log.info("updater.leftovers.cleaned")
+    except Exception as e:
+        log.warning("updater.leftovers.cleanup_failed", {"error": str(e)})
+
+    try:
         init_observability()
         log.info("observability.initialized")
     except Exception as e:
@@ -167,6 +175,14 @@ async def lifespan(app: FastAPI):
         log.info("channel.gateway.started")
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
+
+    try:
+        from flocks.updater.updater import recover_upgrade_state
+
+        await asyncio.to_thread(recover_upgrade_state)
+        log.info("updater.recovery.checked")
+    except Exception as e:
+        log.warning("updater.recovery.failed", {"error": str(e)})
 
     yield
 
