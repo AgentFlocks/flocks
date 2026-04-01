@@ -21,6 +21,7 @@ def test_bash_installer_stops_processes_before_retrying_locked_operations() -> N
     assert 'pkill -f "npm run preview"' not in script
     assert 'pkill -f "vite preview"' not in script
     assert "stop_flocks_processes\n    run_with_lock_retry" not in script
+    assert "< <(" not in script
 
 
 def test_powershell_installer_stops_processes_before_retrying_locked_operations() -> None:
@@ -37,3 +38,11 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert 'Get-Process -Name $name' not in script
     assert '"uv sync"' not in script
     assert '"vite preview"' not in script
+
+
+def test_powershell_installers_use_utf8_bom_with_crlf() -> None:
+    for path in (REPO_ROOT / "install.ps1", SCRIPT_DIR / "install.ps1"):
+        data = path.read_bytes()
+        assert data.startswith(b"\xef\xbb\xbf")
+        assert b"\r\n" in data
+        assert b"\n" not in data.replace(b"\r\n", b"")

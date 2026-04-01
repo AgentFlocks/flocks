@@ -516,16 +516,16 @@ stop_flocks_processes() {
   fi
 
   local pid_file pid
-  while IFS= read -r pid_file; do
+  get_runtime_pid_file_paths | while IFS= read -r pid_file; do
     pid="$(get_pid_from_runtime_file "$pid_file" || true)"
     [[ -n "$pid" ]] || continue
     stop_tracked_process "$pid" "runtime process from $pid_file"
-  done < <(get_runtime_pid_file_paths)
+  done
 
-  while IFS= read -r pid; do
+  list_flocks_process_ids | awk '!seen[$0]++' | while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     stop_tracked_process "$pid" "Flocks related process"
-  done < <(list_flocks_process_ids | awk '!seen[$0]++')
+  done
 
   sleep 1
 }
