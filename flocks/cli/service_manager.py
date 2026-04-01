@@ -4,6 +4,8 @@ Service lifecycle helpers for local Flocks daemon commands.
 
 from __future__ import annotations
 
+import contextlib
+import datetime
 import json
 import os
 import signal
@@ -18,6 +20,11 @@ from shutil import which
 from typing import Iterable, Sequence
 
 import httpx
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - unavailable on Windows
+    fcntl = None
 
 MIN_NODE_MAJOR = 22
 BACKEND_HEALTH_PATHS = ("/api/health", "/health")
@@ -62,6 +69,7 @@ class RuntimePaths:
 class RuntimeRecord:
     pid: int
     pgid: int | None = None
+    host: str | None = None
     port: int | None = None
     command: tuple[str, ...] = ()
     started_at: float | None = None
@@ -189,6 +197,7 @@ def _parse_runtime_record(raw: str) -> RuntimeRecord | None:
     return RuntimeRecord(
         pid=pid,
         pgid=_coerce_positive_int(payload.get("pgid")),
+        host=payload.get("host") if isinstance(payload.get("host"), str) and payload.get("host") else None,
         port=_coerce_positive_int(payload.get("port")),
         command=command,
         started_at=started_value,
@@ -208,6 +217,8 @@ def write_runtime_record(pid_file: Path, record: RuntimeRecord) -> None:
     payload: dict[str, object] = {"pid": record.pid}
     if record.pgid is not None:
         payload["pgid"] = record.pgid
+    if record.host is not None:
+        payload["host"] = record.host
     if record.port is not None:
         payload["port"] = record.port
     if record.command:
@@ -217,7 +228,13 @@ def write_runtime_record(pid_file: Path, record: RuntimeRecord) -> None:
     pid_file.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
 
 
-def process_runtime_record(process: subprocess.Popen, *, port: int, command: Sequence[str]) -> RuntimeRecord:
+def process_runtime_record(
+    process: subprocess.Popen,
+    *,
+    host: str,
+    port: int,
+    command: Sequence[str],
+) -> RuntimeRecord:
     """Build runtime metadata for a freshly started service process."""
     pgid = None
     if sys.platform != "win32":
@@ -228,6 +245,7 @@ def process_runtime_record(process: subprocess.Popen, *, port: int, command: Seq
     return RuntimeRecord(
         pid=process.pid,
         pgid=pgid,
+        host=host,
         port=port,
         command=tuple(command),
         started_at=time.time(),
@@ -397,8 +415,14 @@ def start_backend(config: ServiceConfig, console) -> None:
     )
     write_runtime_record(
         paths.backend_pid,
-        process_runtime_record(process, port=config.backend_port, command=command),
+        process_runtime_record(
+            process,
+            host=config.backend_host,
+            port=config.backend_port,
+            command=command,
+        ),
     )
+    _log_startup_config(paths.backend_log, "backend", config.backend_host, config.backend_port, read_runtime_record(paths.backend_pid))
 
     try:
         wait_for_http(config.backend_urls, "后端服务")
@@ -474,8 +498,14 @@ def start_frontend(config: ServiceConfig, console) -> None:
     )
     write_runtime_record(
         paths.frontend_pid,
-        process_runtime_record(process, port=config.frontend_port, command=command),
+        process_runtime_record(
+            process,
+            host=config.frontend_host,
+            port=config.frontend_port,
+            command=command,
+        ),
     )
+    _log_startup_config(paths.frontend_log, "webui", config.frontend_host, config.frontend_port, read_runtime_record(paths.frontend_pid))
 
     try:
         wait_for_http([config.frontend_url], "WebUI")
@@ -564,11 +594,84 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
     raise ServiceError(f"{name} 未在预期时间内退出，请手动检查端口 {port}。")
 
 
-def stop_all(config: ServiceConfig, console) -> None:
-    """Stop frontend then backend."""
+def _recorded_port(pid_file: Path, default: int) -> int:
+    """Return the port from a runtime record, falling back to *default*."""
+    record = read_runtime_record(pid_file)
+    if record is not None and record.port is not None:
+        return record.port
+    return default
+
+
+def _recorded_host(pid_file: Path, default: str) -> str:
+    """Return the host from a runtime record, falling back to *default*."""
+    record = read_runtime_record(pid_file)
+    if record is not None and record.host:
+        return record.host
+    return default
+
+
+@contextlib.contextmanager
+def service_lock(paths: RuntimePaths):
+    """Serialize lifecycle commands with a cross-process lock file."""
+    lock_path = paths.run_dir / "service.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    unlock_windows = None
+    try:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                handle.seek(0)
+                handle.write("0")
+                handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                unlock_windows = msvcrt
+            else:
+                if fcntl is None:  # pragma: no cover - defensive
+                    raise OSError("fcntl unavailable")
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise ServiceError("另一个 flocks 命令正在执行，请稍后重试。") from error
+        yield
+    finally:
+        try:
+            if unlock_windows is not None:
+                handle.seek(0)
+                unlock_windows.locking(handle.fileno(), unlock_windows.LK_UNLCK, 1)
+            elif fcntl is not None and sys.platform != "win32":
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
+
+
+def _log_startup_config(
+    log_path: Path,
+    name: str,
+    host: str,
+    port: int,
+    record: RuntimeRecord | None,
+) -> None:
+    """Append a startup summary to the service log."""
+    timestamp = datetime.datetime.now().isoformat(timespec="seconds")
+    pid = record.pid if record is not None else "unknown"
+    pgid = record.pgid if record is not None else None
+    pgid_info = f" pgid={pgid}" if pgid is not None else ""
+    line = f"[{timestamp}] {name} starting: host={host} port={port} pid={pid}{pgid_info}\n"
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def stop_all(console) -> None:
+    """Stop frontend then backend using ports persisted in runtime records."""
     paths = ensure_runtime_dirs()
-    stop_one(config.frontend_port, paths.frontend_pid, "WebUI", console)
-    stop_one(config.backend_port, paths.backend_pid, "后端", console)
+    with service_lock(paths):
+        fe_port = _recorded_port(paths.frontend_pid, ServiceConfig.frontend_port)
+        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
+        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
+        stop_one(be_port, paths.backend_pid, "后端", console)
 
 
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
@@ -583,16 +686,27 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
 
 def start_all(config: ServiceConfig, console) -> None:
     """Ensure backend and frontend are restarted with a clean state."""
-    stop_all(config, console)
-    _start_all_without_stop(config, console)
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        fe_port = _recorded_port(paths.frontend_pid, ServiceConfig.frontend_port)
+        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
+        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
+        stop_one(be_port, paths.backend_pid, "后端", console)
+        _start_all_without_stop(config, console)
 
 
 def restart_all(config: ServiceConfig, console) -> None:
     """Restart backend and frontend."""
-    start_all(config, console)
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        fe_port = _recorded_port(paths.frontend_pid, ServiceConfig.frontend_port)
+        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
+        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
+        stop_one(be_port, paths.backend_pid, "后端", console)
+        _start_all_without_stop(config, console)
 
 
-def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None) -> list[str]:
+def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     """Return a human-readable status summary."""
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.backend_pid)
@@ -600,31 +714,35 @@ def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None)
 
     backend_record = read_runtime_record(current.backend_pid)
     frontend_record = read_runtime_record(current.frontend_pid)
+    backend_port = _recorded_port(current.backend_pid, ServiceConfig.backend_port)
+    frontend_port = _recorded_port(current.frontend_pid, ServiceConfig.frontend_port)
+    backend_host = _loopback_host(_recorded_host(current.backend_pid, ServiceConfig.backend_host))
+    frontend_host = _loopback_host(_recorded_host(current.frontend_pid, ServiceConfig.frontend_host))
     backend_pid = backend_record.pid if backend_record else None
     frontend_pid = frontend_record.pid if frontend_record else None
-    backend_listeners = port_owner_pids(config.backend_port)
-    frontend_listeners = port_owner_pids(config.frontend_port)
+    backend_listeners = port_owner_pids(backend_port)
+    frontend_listeners = port_owner_pids(frontend_port)
 
     lines: list[str] = []
     if backend_listeners:
         lines.append(
-            f"[flocks] 后端运行中: PID={_join_pids(backend_listeners)} URL=http://{_loopback_host(config.backend_host)}:{config.backend_port}"
+            f"[flocks] 后端运行中: PID={_join_pids(backend_listeners)} URL=http://{backend_host}:{backend_port}"
         )
     elif pid_is_running(backend_pid):
-        lines.append(f"[flocks] 后端主进程仍在运行，但端口 {config.backend_port} 未监听: PID={backend_pid}")
+        lines.append(f"[flocks] 后端主进程仍在运行，但端口 {backend_port} 未监听: PID={backend_pid}")
     elif process_group_is_running(backend_record.pgid if backend_record else None):
-        lines.append(f"[flocks] 后端进程组仍在运行，但端口 {config.backend_port} 未监听: PGID={backend_record.pgid}")
+        lines.append(f"[flocks] 后端进程组仍在运行，但端口 {backend_port} 未监听: PGID={backend_record.pgid}")
     else:
         lines.append("[flocks] 后端未运行")
 
     if frontend_listeners:
         lines.append(
-            f"[flocks] WebUI 运行中: PID={_join_pids(frontend_listeners)} URL=http://{_loopback_host(config.frontend_host)}:{config.frontend_port}"
+            f"[flocks] WebUI 运行中: PID={_join_pids(frontend_listeners)} URL=http://{frontend_host}:{frontend_port}"
         )
     elif pid_is_running(frontend_pid):
-        lines.append(f"[flocks] WebUI 主进程仍在运行，但端口 {config.frontend_port} 未监听: PID={frontend_pid}")
+        lines.append(f"[flocks] WebUI 主进程仍在运行，但端口 {frontend_port} 未监听: PID={frontend_pid}")
     elif process_group_is_running(frontend_record.pgid if frontend_record else None):
-        lines.append(f"[flocks] WebUI 进程组仍在运行，但端口 {config.frontend_port} 未监听: PGID={frontend_record.pgid}")
+        lines.append(f"[flocks] WebUI 进程组仍在运行，但端口 {frontend_port} 未监听: PGID={frontend_record.pgid}")
     else:
         lines.append("[flocks] WebUI 未运行")
 
@@ -633,9 +751,9 @@ def build_status_lines(config: ServiceConfig, paths: RuntimePaths | None = None)
     return lines
 
 
-def show_status(config: ServiceConfig, console) -> None:
+def show_status(console) -> None:
     """Print service status."""
-    for line in build_status_lines(config):
+    for line in build_status_lines():
         console.print(line)
 
 
