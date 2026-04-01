@@ -1,9 +1,10 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, render } from '@testing-library/react';
 
 // Extract the hook for isolated testing by re-implementing it here.
 // This mirrors the approach in useSessions.test.ts: test pure logic directly.
 import { useState, useEffect, useRef } from 'react';
+import { StreamingMarkdown } from './StreamingMarkdown';
 
 function useStreamingContent(content: string, isStreaming: boolean): string {
   const [displayContent, setDisplayContent] = useState(content);
@@ -171,5 +172,18 @@ describe('useStreamingContent', () => {
     // Only one frame scheduled; it should use the latest ref value (v4)
     act(() => { flushRaf(); });
     expect(result.current).toBe('v4');
+  });
+});
+
+describe('StreamingMarkdown', () => {
+  it('preserves single newlines as visible line breaks', () => {
+    const { container } = render(
+      <StreamingMarkdown content={'first line\nsecond line\nthird line'} isStreaming={false} />,
+    );
+
+    const paragraph = container.querySelector('p');
+    expect(paragraph).not.toBeNull();
+    expect(paragraph?.querySelectorAll('br')).toHaveLength(2);
+    expect(paragraph?.textContent).toBe('first line\nsecond line\nthird line');
   });
 });

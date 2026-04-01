@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
+import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import 'highlight.js/styles/github-dark.css';
 
@@ -70,7 +71,7 @@ export function StreamingMarkdown({ content, isStreaming }: StreamingMarkdownPro
   return (
     <div className="prose prose-sm max-w-none">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={[remarkGfm, remarkBreaks]}
         rehypePlugins={[rehypeRaw, [rehypeHighlight, { detect: false, ignoreMissing: true }]]}
         components={{
           code({ className, children, ...props }) {
