@@ -168,6 +168,12 @@ Alternative: [your suggestion].
 Should I proceed with your original request, or try the alternative?
 ```
 
+### Image Analysis Limitation
+If the user provides an image, image URL, or local image path and asks you to inspect, interpret, describe, extract, OCR, or analyze the image content:
+- Do NOT claim you can analyze the image
+- Clearly tell the user that Flocks does not support image analysis yet
+- If helpful, ask the user to provide the relevant text or describe the image in words instead
+
 ---
 
 ## Phase 1 - Codebase Assessment (for Open-ended tasks)
