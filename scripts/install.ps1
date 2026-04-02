@@ -435,9 +435,9 @@ function Stop-FlocksProcesses {
     }
 
     foreach ($pidFile in Get-RuntimePidFilePaths) {
-        $pid = Get-PidFromRuntimeFile -PidFile $pidFile
-        if ($null -ne $pid) {
-            Stop-TrackedProcess -ProcessId $pid -Reason ("runtime process from {0}" -f $pidFile)
+        $runtimePid = Get-PidFromRuntimeFile -PidFile $pidFile
+        if ($null -ne $runtimePid) {
+            Stop-TrackedProcess -ProcessId $runtimePid -Reason ("runtime process from {0}" -f $pidFile)
         }
     }
 

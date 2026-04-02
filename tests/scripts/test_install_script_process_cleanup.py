@@ -49,6 +49,8 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert 'Get-Process -Name $name' not in script
     assert '"uv sync"' not in script
     assert '"vite preview"' not in script
+    assert "$runtimePid = Get-PidFromRuntimeFile -PidFile $pidFile" in script
+    assert "$pid = Get-PidFromRuntimeFile -PidFile $pidFile" not in script
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is required to execute PowerShell helper functions")
