@@ -185,10 +185,16 @@ async def _load_model_overrides() -> Dict[str, Dict[str, Any]]:
 
 
 async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str]]:
-    """Load skills/tools list for a custom agent from storage."""
+    """Load skills/tools list for an agent from storage.
+
+    Works for both full Storage-based custom agents and YAML agents with
+    a skills/tools overlay (written by the YAML update path).
+    """
     from flocks.storage.storage import Storage
     try:
         data = await Storage.read(f"agent/custom/{name}")
+        if not isinstance(data, dict):
+            return [], []
         return data.get("skills", []), data.get("tools", [])
     except Exception:
         return [], []
@@ -398,7 +404,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         except Storage.NotFoundError:
             pass
 
-        if agent_data is not None:
+        # Storage-based custom agents always have a "name" key.
+        # YAML agents may also have an overlay entry (skills/tools only) which
+        # lacks the "name" key; those should fall through to the YAML path.
+        if agent_data is not None and agent_data.get("name"):
             if req.description is not None:
                 agent_data["description"] = req.description
             if req.descriptionCn is not None:
@@ -443,6 +452,17 @@ async def update_agent(name: str, req: AgentUpdateRequest):
 
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
+
+            # Persist skills/tools overlay for YAML agents in Storage.
+            # The entry intentionally omits "name" so it is not mistaken
+            # for a full Storage-based custom agent on subsequent updates.
+            if req.skills is not None or req.tools is not None:
+                extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
+                if req.skills is not None:
+                    extras["skills"] = req.skills
+                if req.tools is not None:
+                    extras["tools"] = req.tools
+                await Storage.write(agent_key, extras)
 
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
