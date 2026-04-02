@@ -375,7 +375,7 @@ function Stop-TrackedProcess {
 function Get-FlocksProcessIds {
     param([string]$ProjectRoot)
 
-    $matches = [System.Collections.Generic.List[int]]::new()
+    $processIds = [System.Collections.Generic.List[int]]::new()
     $toolDir = ""
     if (Test-Command "uv") {
         try {
@@ -405,20 +405,20 @@ function Get-FlocksProcessIds {
             continue
         }
 
-        $isMatch = $commandLine -match "flocks\.server\.app"
+        $isMatch = [Regex]::IsMatch($commandLine, "flocks\.server\.app")
         if (-not $isMatch -and $escapedProjectRoot) {
-            $isMatch = $commandLine -match $escapedProjectRoot -and $commandLine -match "(uv tool|uv sync|npm(\.cmd)? run preview|vite preview)"
+            $isMatch = [Regex]::IsMatch($commandLine, $escapedProjectRoot) -and [Regex]::IsMatch($commandLine, "(uv tool|uv sync|npm(\.cmd)? run preview|vite preview)")
         }
         if (-not $isMatch -and $escapedToolDir) {
-            $isMatch = $commandLine -match $escapedToolDir -and $commandLine -match "flocks"
+            $isMatch = [Regex]::IsMatch($commandLine, $escapedToolDir) -and [Regex]::IsMatch($commandLine, "flocks")
         }
 
         if ($isMatch) {
-            $matches.Add([int]$process.ProcessId)
+            $processIds.Add([int]$process.ProcessId)
         }
     }
 
-    return $matches | Select-Object -Unique
+    return $processIds | Select-Object -Unique
 }
 
 function Stop-FlocksProcesses {

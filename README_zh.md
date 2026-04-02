@@ -44,7 +44,7 @@ Flocks 支持两种部署方式：
 
 如果安装过程中自动安装 `npm` 失败，请手动安装 `npm`，并使用 `22.+` 或更高版本。
 
-### 一条命令安装
+### 快速安装
 
 > **中国大陆用户**：若 GitHub / `raw.githubusercontent.com` 访问不稳定，可从 Gitee 镜像克隆后安装，见下文「源码安装」。
 
@@ -52,21 +52,21 @@ Flocks 支持两种部署方式：
 
 ```bash
 # 一键安装后端 + WebUI
-curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
+curl -fsSL https://gitee.com/flocks/flocks/raw/main/install.sh | bash
 # 默认会在当前目录下创建 ./flocks
 
 # 可选：同时安装 TUI 依赖
-curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash -s -- --with-tui
+curl -fsSL https://gitee.com/flocks/flocks/raw/main/install.sh | bash -s -- --with-tui
 ```
 
 #### Windows PowerShell (Administrator)
 
 ```powershell
 # 一键安装后端 + WebUI
-powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1 | iex"
+powershell -c "irm https://gitee.com/flocks/flocks/raw/main/install.ps1 | iex"
 
 # 可选：同时安装 TUI 依赖
-powershell -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1))) -InstallTui"
+powershell -c "& ([scriptblock]::Create((irm https://gitee.com/flocks/flocks/raw/main/install.ps1))) -InstallTui"
 ```
 
 #### github源码安装
