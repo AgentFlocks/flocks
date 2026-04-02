@@ -128,6 +128,29 @@ def agent_to_response(
     )
 
 
+def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
+    """Build an in-memory AgentInfo from a custom agent's stored data dict.
+
+    Used after create/update to keep ``_custom_agents`` in sync with Storage.
+    """
+    model_data = agent_data.get("model")
+    return AgentInfoModel(
+        name=agent_data["name"],
+        description=agent_data.get("description") or "",
+        description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
+        prompt=agent_data.get("prompt") or "",
+        temperature=agent_data.get("temperature"),
+        color=agent_data.get("color"),
+        mode=agent_data.get("mode", "primary"),
+        model=AgentModelConfig(
+            model_id=model_data["modelID"],
+            provider_id=model_data["providerID"],
+        ) if model_data else None,
+        native=False,
+        hidden=False,
+    )
+
+
 def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
     """Build an AgentResponse from a custom agent's stored data dict."""
     model_data = agent_data.get("model")
@@ -162,10 +185,16 @@ async def _load_model_overrides() -> Dict[str, Dict[str, Any]]:
 
 
 async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str]]:
-    """Load skills/tools list for a custom agent from storage."""
+    """Load skills/tools list for an agent from storage.
+
+    Works for both full Storage-based custom agents and YAML agents with
+    a skills/tools overlay (written by the YAML update path).
+    """
     from flocks.storage.storage import Storage
     try:
         data = await Storage.read(f"agent/custom/{name}")
+        if not isinstance(data, dict):
+            return [], []
         return data.get("skills", []), data.get("tools", [])
     except Exception:
         return [], []
@@ -347,20 +376,9 @@ async def create_agent(req: AgentCreateRequest):
             "tools": req.tools,
         }
         await Storage.write(f"agent/custom/{req.name}", agent_data)
-        # Sync in-memory cache so the new agent is immediately visible via Agent.get/list
-        from flocks.agent.registry import Agent as AgentRegistry, AgentInfo
-        agent_info = AgentInfo(
-            name=req.name,
-            description=req.description or "",
-            description_cn=req.descriptionCn,
-            prompt=req.prompt or "",
-            mode=req.mode or "primary",
-            native=False,
-            hidden=False,
-        )
-        AgentRegistry.register(req.name, agent_info)
-        # Invalidate the state cache so the next list/get picks up the new agent
-        await AgentRegistry.refresh()
+        from flocks.agent.registry import Agent as AgentRegistry
+        AgentRegistry.register(req.name, _agent_data_to_info(agent_data))
+        AgentRegistry.invalidate_cache()
         log.info("agent.created", {"name": req.name})
         return _custom_agent_data_to_response(agent_data)
     except HTTPException:
@@ -386,7 +404,10 @@ async def update_agent(name: str, req: AgentUpdateRequest):
         except Storage.NotFoundError:
             pass
 
-        if agent_data is not None:
+        # Storage-based custom agents always have a "name" key.
+        # YAML agents may also have an overlay entry (skills/tools only) which
+        # lacks the "name" key; those should fall through to the YAML path.
+        if agent_data is not None and agent_data.get("name"):
             if req.description is not None:
                 agent_data["description"] = req.description
             if req.descriptionCn is not None:
@@ -405,6 +426,11 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 agent_data["tools"] = req.tools
 
             await Storage.write(agent_key, agent_data)
+
+            from flocks.agent.registry import Agent as AgentRegistry
+            AgentRegistry.register(name, _agent_data_to_info(agent_data))
+            AgentRegistry.invalidate_cache()
+
             log.info("agent.updated", {"name": name, "source": "storage"})
             return _custom_agent_data_to_response(agent_data)
 
@@ -426,6 +452,17 @@ async def update_agent(name: str, req: AgentUpdateRequest):
 
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
+
+            # Persist skills/tools overlay for YAML agents in Storage.
+            # The entry intentionally omits "name" so it is not mistaken
+            # for a full Storage-based custom agent on subsequent updates.
+            if req.skills is not None or req.tools is not None:
+                extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
+                if req.skills is not None:
+                    extras["skills"] = req.skills
+                if req.tools is not None:
+                    extras["tools"] = req.tools
+                await Storage.write(agent_key, extras)
 
             # Sync: apply updates to the in-memory AgentInfo cache
             agent = await Agent.get(name)
@@ -496,8 +533,9 @@ async def delete_agent(name: str):
             )
 
         # Sync: remove from in-memory agent cache
-        agents = await Agent.state()
-        agents.pop(name, None)
+        from flocks.agent.registry import Agent as AgentRegistry
+        AgentRegistry.unregister(name)
+        AgentRegistry.invalidate_cache()
 
         return {"status": "success", "message": f"Agent {name} deleted"}
     except HTTPException:
@@ -553,9 +591,14 @@ async def update_agent_model(name: str, req: AgentModelUpdateRequest):
             except Storage.NotFoundError:
                 pass
 
-            if agent_data is not None:
+            if agent_data is not None and agent_data.get("name"):
                 agent_data["model"] = req.model.model_dump() if req.model else None
                 await Storage.write(agent_key, agent_data)
+
+                from flocks.agent.registry import Agent as AgentRegistry
+                AgentRegistry.register(name, _agent_data_to_info(agent_data))
+                AgentRegistry.invalidate_cache()
+
                 log.info("agent.model.updated", {"name": name, "source": "storage"})
                 return _custom_agent_data_to_response(agent_data)
 
