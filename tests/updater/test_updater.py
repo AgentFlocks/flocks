@@ -1,3 +1,4 @@
+import signal
 import shutil
 import subprocess
 import tarfile
@@ -433,7 +434,11 @@ def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails(
         calls.append(("start_frontend", config.skip_frontend_build))
 
     monkeypatch.setattr(service_manager, "start_frontend", fake_start_frontend)
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: calls.append(("stop_page", True)))
+    monkeypatch.setattr(
+        updater,
+        "_stop_upgrade_page_server",
+        lambda config: calls.append((f"stop_page:{config.frontend_port}", True)),
+    )
     monkeypatch.setattr(
         updater,
         "_start_upgrade_page_server",
@@ -445,10 +450,89 @@ def test_prepare_upgrade_handover_restores_frontend_when_upgrade_page_fails(
 
     assert calls == [
         ("stop:WebUI:5173", True),
-        ("stop_page", True),
+        ("stop_page:5173", True),
         ("start_frontend", False),
     ]
     assert updater._read_upgrade_state() is None
+
+
+def test_stop_upgrade_page_server_waits_for_port_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    pid_path = tmp_path / ".flocks" / "run" / "upgrade_server.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("321", encoding="utf-8")
+
+    kill_signals: list[tuple[int, signal.Signals]] = []
+    listener_states = iter([[321], [321], []])
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.os, "kill", lambda pid, sig: kill_signals.append((pid, sig)))
+    monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: len(kill_signals) == 0)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(listener_states))
+
+    updater._stop_upgrade_page_server(service_manager.ServiceConfig(frontend_port=5173))
+
+    assert kill_signals == [(321, signal.SIGTERM)]
+    assert not pid_path.exists()
+
+
+def test_stop_upgrade_page_server_escalates_when_page_process_does_not_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    pid_path = tmp_path / ".flocks" / "run" / "upgrade_server.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("321", encoding="utf-8")
+
+    kill_signals: list[tuple[int, signal.Signals]] = []
+    sleep_calls = {"count": 0}
+
+    def fake_sleep(_seconds: float) -> None:
+        sleep_calls["count"] += 1
+
+    def fake_pid_is_running(_pid: int) -> bool:
+        return len(kill_signals) < 2
+
+    def fake_port_owner_pids(_port: int) -> list[int]:
+        return [321] if len(kill_signals) < 2 else []
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.os, "kill", lambda pid, sig: kill_signals.append((pid, sig)))
+    monkeypatch.setattr(updater.time, "sleep", fake_sleep)
+    monkeypatch.setattr(service_manager, "pid_is_running", fake_pid_is_running)
+    monkeypatch.setattr(service_manager, "port_owner_pids", fake_port_owner_pids)
+
+    updater._stop_upgrade_page_server(service_manager.ServiceConfig(frontend_port=5173))
+
+    assert kill_signals == [(321, signal.SIGTERM), (321, signal.SIGKILL)]
+    assert sleep_calls["count"] == 20
+    assert not pid_path.exists()
+
+
+def test_stop_upgrade_page_server_raises_when_another_process_keeps_port(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    pid_path = tmp_path / ".flocks" / "run" / "upgrade_server.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("321", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.os, "kill", lambda *_args: None)
+    monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [999])
+
+    with pytest.raises(RuntimeError, match="Frontend port 5173 is still occupied"):
+        updater._stop_upgrade_page_server(service_manager.ServiceConfig(frontend_port=5173))
+
+    assert not pid_path.exists()
 
 
 def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
@@ -459,7 +543,7 @@ def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
     started: list[tuple[int, bool]] = []
     stopped: list[str] = []
 
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: stopped.append("stop"))
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda config: stopped.append(f"stop:{config.frontend_port}"))
     monkeypatch.setattr(
         service_manager,
         "start_frontend",
@@ -478,7 +562,7 @@ def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
 
     updater.recover_upgrade_state()
 
-    assert stopped == ["stop"]
+    assert stopped == ["stop:5173"]
     assert started == [(5173, True)]
     assert updater._read_upgrade_state() is None
 
@@ -490,7 +574,7 @@ def test_recover_upgrade_state_retries_frontend_with_build_when_dist_is_missing(
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
     starts: list[bool] = []
 
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: None)
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda _config: None)
 
     def fake_start_frontend(config, _console) -> None:
         starts.append(config.skip_frontend_build)
@@ -523,7 +607,7 @@ def test_recover_upgrade_state_restart_failure_restarts_upgrade_page_and_keeps_s
     starts: list[bool] = []
     page_restarts: list[str] = []
 
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: None)
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda _config: None)
 
     def fake_start_frontend(config, _console) -> None:
         starts.append(config.skip_frontend_build)
@@ -662,7 +746,7 @@ def test_rollback_failed_update_restores_backup_and_rebuilds_frontend_if_needed(
 
     monkeypatch.setattr(updater, "_restore_backup_archive", lambda backup, root: events.append(f"restore:{backup.name}:{root.name}"))
     monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: events.append("stop_page"))
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda _config: events.append("stop_page"))
     monkeypatch.setattr(updater.shutil, "rmtree", lambda path, ignore_errors=True: events.append(f"rmtree:{Path(path).name}"))
 
     def fake_start_frontend(config, _console) -> None:
@@ -710,7 +794,7 @@ def test_rollback_failed_update_keeps_state_and_upgrade_page_when_restore_fails(
         lambda *_args: (_ for _ in ()).throw(RuntimeError("backup broken")),
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
-    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda: events.append("stop_page"))
+    monkeypatch.setattr(updater, "_stop_upgrade_page_server", lambda _config: events.append("stop_page"))
     monkeypatch.setattr(
         updater,
         "_start_upgrade_page_server",

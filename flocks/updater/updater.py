@@ -908,14 +908,42 @@ def _start_upgrade_page_server(config, version: str) -> dict[str, Any]:
     }
 
 
-def _stop_upgrade_page_server() -> None:
+def _read_upgrade_server_pid() -> int | None:
     pid_path = _upgrade_server_pid_path()
     if not pid_path.exists():
-        return
+        return None
     try:
-        pid = int(pid_path.read_text(encoding="utf-8").strip())
+        return int(pid_path.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):
         pid_path.unlink(missing_ok=True)
+        return None
+
+
+def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
+    from flocks.cli import service_manager
+
+    for _ in range(20):
+        pid_running = service_manager.pid_is_running(pid)
+        listeners = service_manager.port_owner_pids(config.frontend_port)
+        if not pid_running and pid not in listeners:
+            if listeners:
+                raise RuntimeError(
+                    f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
+                )
+            return
+        time.sleep(0.25)
+
+    listeners = service_manager.port_owner_pids(config.frontend_port)
+    if listeners and pid not in listeners:
+        raise RuntimeError(
+            f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
+        )
+    raise RuntimeError(f"Upgrade page server on port {config.frontend_port} did not stop in time")
+
+
+def _stop_upgrade_page_server(config) -> None:
+    pid = _read_upgrade_server_pid()
+    if pid is None:
         return
 
     try:
@@ -926,7 +954,19 @@ def _stop_upgrade_page_server() -> None:
     except OSError:
         pass
 
-    pid_path.unlink(missing_ok=True)
+    try:
+        _wait_for_upgrade_page_server_shutdown(config, pid)
+    except RuntimeError:
+        if sys.platform != "win32":
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            _wait_for_upgrade_page_server_shutdown(config, pid)
+        else:
+            raise
+    finally:
+        _upgrade_server_pid_path().unlink(missing_ok=True)
 
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
@@ -957,7 +997,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
             last_error=None,
         )
     except Exception:
-        _stop_upgrade_page_server()
+        _stop_upgrade_page_server(config)
         _clear_upgrade_state()
         try:
             service_manager.start_frontend(config, console)
@@ -1047,7 +1087,7 @@ def _rollback_failed_update(
 
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(config)
     try:
         _start_frontend_with_fallback(
             config,
@@ -1102,7 +1142,7 @@ def recover_upgrade_state() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload)
 
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(config)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=True)
     except Exception as exc:
@@ -1131,7 +1171,7 @@ def rollback_upgrade_handover() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
 
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(config)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=False)
     except Exception as exc:
