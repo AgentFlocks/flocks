@@ -17,7 +17,6 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
@@ -36,9 +35,7 @@ from flocks.utils.log import Log
 
 _DEFAULT_REPO = "AgentFlocks/Flocks"
 _BACKUP_DIR = Path.home() / ".flocks" / "version"
-_UPGRADE_PAGE_MARKER = "flocks-upgrade-in-progress"
 _UPGRADE_PHASE_HANDOVER_PREPARING = "handover_preparing"
-_UPGRADE_PHASE_TEMP_PAGE_ACTIVE = "temporary_page_active"
 _UPGRADE_PHASE_CUTOVER_APPLIED = "cutover_applied"
 _UPGRADE_PHASE_ROLLBACK_IN_PROGRESS = "rollback_in_progress"
 _UPGRADE_PHASE_ROLLBACK_FAILED = "rollback_failed"
@@ -182,24 +179,8 @@ def _upgrade_run_dir() -> Path:
     return _flocks_root() / "run"
 
 
-def _upgrade_log_dir() -> Path:
-    return _flocks_root() / "logs"
-
-
 def _upgrade_state_path() -> Path:
     return _upgrade_run_dir() / "upgrade-state.json"
-
-
-def _upgrade_server_pid_path() -> Path:
-    return _upgrade_run_dir() / "upgrade_server.pid"
-
-
-def _upgrade_page_dir() -> Path:
-    return _upgrade_run_dir() / "upgrade-page"
-
-
-def _upgrade_page_log_path() -> Path:
-    return _upgrade_log_dir() / "upgrade-page.log"
 
 
 def _read_upgrade_state() -> dict[str, Any] | None:
@@ -238,136 +219,6 @@ def _persist_upgrade_state(
             payload.pop("last_error", None)
     _write_upgrade_state(payload)
     return payload
-
-
-def _upgrade_page_html(version: str) -> str:
-    return f"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flocks 升级中</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      --bg: #fff7ed;
-      --panel: rgba(255, 255, 255, 0.92);
-      --text: #7c2d12;
-      --muted: #9a3412;
-      --accent: #f59e0b;
-      --border: rgba(251, 191, 36, 0.32);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at top left, rgba(251, 191, 36, 0.22), transparent 32%),
-        radial-gradient(circle at bottom right, rgba(249, 115, 22, 0.18), transparent 28%),
-        var(--bg);
-      color: var(--text);
-    }}
-    .panel {{
-      width: min(100%, 520px);
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 24px;
-      padding: 28px;
-      box-shadow: 0 24px 60px rgba(124, 45, 18, 0.12);
-    }}
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(251, 191, 36, 0.14);
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 600;
-    }}
-    h1 {{
-      margin: 18px 0 12px;
-      font-size: 32px;
-      line-height: 1.2;
-    }}
-    p {{
-      margin: 0;
-      line-height: 1.7;
-      color: var(--muted);
-      font-size: 15px;
-    }}
-    .version {{
-      margin-top: 18px;
-      font-size: 28px;
-      font-weight: 800;
-    }}
-    .status {{
-      margin-top: 20px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 14px;
-      color: var(--text);
-    }}
-    .spinner {{
-      width: 18px;
-      height: 18px;
-      border-radius: 999px;
-      border: 2px solid rgba(245, 158, 11, 0.24);
-      border-top-color: var(--accent);
-      animation: spin 0.9s linear infinite;
-      flex: 0 0 auto;
-    }}
-    .tips {{
-      margin-top: 22px;
-      padding: 14px 16px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.82);
-      border: 1px solid rgba(251, 191, 36, 0.24);
-      font-size: 13px;
-      color: var(--muted);
-    }}
-    @keyframes spin {{
-      to {{ transform: rotate(360deg); }}
-    }}
-  </style>
-</head>
-<body data-upgrade-marker="{_UPGRADE_PAGE_MARKER}">
-  <main class="panel">
-    <div class="badge">Flocks 正在升级</div>
-    <h1>系统升级中，请稍候</h1>
-    <p>升级期间服务会短暂重启。当前页面会在新版本恢复后自动刷新。</p>
-    <div class="version">v{version}</div>
-    <div class="status">
-      <div class="spinner" aria-hidden="true"></div>
-      <span>正在切换到新版本并恢复服务...</span>
-    </div>
-    <div class="tips">如果页面长时间没有恢复，请稍后手动刷新一次。</div>
-  </main>
-  <script>
-    const marker = "{_UPGRADE_PAGE_MARKER}";
-    const reloadWhenReady = async () => {{
-      try {{
-        const rootResp = await fetch("/", {{ cache: "no-store" }});
-        const rootText = await rootResp.text();
-        if (!rootText.includes(marker)) {{
-          window.location.reload();
-          return;
-        }}
-      }} catch (error) {{
-      }}
-      window.setTimeout(reloadWhenReady, 3000);
-    }};
-    window.setTimeout(reloadWhenReady, 2500);
-  </script>
-</body>
-</html>
-"""
 
 
 # ------------------------------------------------------------------ #
@@ -811,196 +662,6 @@ def _current_service_config():
     )
 
 
-def _spawn_detached_process(
-    command: list[str],
-    *,
-    cwd: Path,
-    log_path: Path,
-) -> subprocess.Popen:
-    creationflags = 0
-    kwargs: dict[str, object] = {}
-    if sys.platform == "win32":
-        creationflags = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
-        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
-        if startupinfo_cls is not None:
-            startupinfo = startupinfo_cls()
-            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
-            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
-            kwargs["startupinfo"] = startupinfo
-    else:
-        kwargs["start_new_session"] = True
-
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    handle = log_path.open("a", encoding="utf-8")
-    try:
-        return subprocess.Popen(
-            command,
-            cwd=cwd,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            creationflags=creationflags,
-            **kwargs,
-        )
-    finally:
-        handle.close()
-
-
-def _write_upgrade_page(version: str) -> Path:
-    page_dir = _upgrade_page_dir()
-    page_dir.mkdir(parents=True, exist_ok=True)
-    (page_dir / "index.html").write_text(_upgrade_page_html(version), encoding="utf-8")
-    return page_dir
-
-
-def _upgrade_page_probe_urls(frontend_host: str, frontend_port: int) -> list[str]:
-    from flocks.cli import service_manager
-
-    if frontend_host == "::":
-        return [
-            f"http://[::1]:{frontend_port}",
-            f"http://127.0.0.1:{frontend_port}",
-        ]
-    return [f"http://{service_manager.access_host(frontend_host)}:{frontend_port}"]
-
-
-def _wait_for_upgrade_page(config) -> None:
-    page_urls = _upgrade_page_probe_urls(config.frontend_host, config.frontend_port)
-    with httpx.Client(timeout=1.5) as client:
-        for _ in range(40):
-            for page_url in page_urls:
-                try:
-                    response = client.get(page_url)
-                    if response.status_code < 500:
-                        return
-                except Exception:
-                    pass
-            time.sleep(0.25)
-    raise RuntimeError("Upgrade page server failed to start in time")
-
-
-def _start_upgrade_page_server(config, version: str) -> dict[str, Any]:
-    page_dir = _write_upgrade_page(version)
-    page_dir_resolved = page_dir.resolve()
-    process = _spawn_detached_process(
-        [
-            sys.executable,
-            "-m",
-            "http.server",
-            str(config.frontend_port),
-            "--bind",
-            config.frontend_host,
-            "--directory",
-            str(page_dir_resolved),
-        ],
-        cwd=page_dir_resolved,
-        log_path=_upgrade_page_log_path(),
-    )
-    _upgrade_server_pid_path().write_text(str(process.pid), encoding="utf-8")
-    _wait_for_upgrade_page(config)
-    return {
-        "page_dir": str(page_dir_resolved),
-        "page_log": str(_upgrade_page_log_path().resolve()),
-        "upgrade_server_pid": process.pid,
-    }
-
-
-def _read_upgrade_server_pid() -> int | None:
-    pid_path = _upgrade_server_pid_path()
-    if not pid_path.exists():
-        return None
-    try:
-        return int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        pid_path.unlink(missing_ok=True)
-        return None
-
-
-def _wait_for_upgrade_page_server_shutdown(
-    config,
-    pid: int,
-    *,
-    allow_port_handover: bool = False,
-) -> None:
-    from flocks.cli import service_manager
-
-    for _ in range(20):
-        pid_running = _upgrade_page_server_is_running(pid)
-        listeners = service_manager.port_owner_pids(config.frontend_port)
-        if not pid_running and pid not in listeners:
-            if listeners:
-                if allow_port_handover:
-                    return
-                raise RuntimeError(
-                    f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
-                )
-            return
-        time.sleep(0.25)
-
-    listeners = service_manager.port_owner_pids(config.frontend_port)
-    if listeners and pid not in listeners:
-        if allow_port_handover:
-            return
-        raise RuntimeError(
-            f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
-        )
-    raise RuntimeError(f"Upgrade page server on port {config.frontend_port} did not stop in time")
-
-
-def _upgrade_page_server_is_running(pid: int) -> bool:
-    from flocks.cli import service_manager
-
-    if sys.platform != "win32":
-        try:
-            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
-        except ChildProcessError:
-            waited_pid = 0
-        except OSError:
-            waited_pid = 0
-        if waited_pid == pid:
-            return False
-    return service_manager.pid_is_running(pid)
-
-
-def _stop_upgrade_page_server(config, *, allow_port_handover: bool = False) -> None:
-    pid = _read_upgrade_server_pid()
-    if pid is None:
-        return
-
-    try:
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
-
-    try:
-        _wait_for_upgrade_page_server_shutdown(
-            config,
-            pid,
-            allow_port_handover=allow_port_handover,
-        )
-    except RuntimeError:
-        if sys.platform != "win32":
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-            _wait_for_upgrade_page_server_shutdown(
-                config,
-                pid,
-                allow_port_handover=allow_port_handover,
-            )
-        else:
-            raise
-    finally:
-        _upgrade_server_pid_path().unlink(missing_ok=True)
-
-
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     from flocks.cli import service_manager
 
@@ -1019,22 +680,10 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
     console = _NullConsole()
     paths = service_manager.ensure_runtime_dirs()
     frontend_port = service_manager._recorded_port(paths.frontend_pid, config.frontend_port)
-    service_manager.stop_one(frontend_port, paths.frontend_pid, "WebUI", console)
-
     try:
-        payload.update(_start_upgrade_page_server(config, version))
-        _persist_upgrade_state(
-            payload,
-            phase=_UPGRADE_PHASE_TEMP_PAGE_ACTIVE,
-            last_error=None,
-        )
+        service_manager.stop_one(frontend_port, paths.frontend_pid, "WebUI", console)
     except Exception:
-        _stop_upgrade_page_server(config)
         _clear_upgrade_state()
-        try:
-            service_manager.start_frontend(config, console)
-        except Exception as restart_error:
-            log.error("updater.frontend.restore_failed", {"error": str(restart_error)})
         raise
 
     return payload
@@ -1119,7 +768,6 @@ def _rollback_failed_update(
 
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
-    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(
             config,
@@ -1137,21 +785,6 @@ def _rollback_failed_update(
             phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
             last_error=rollback_error,
         )
-        try:
-            payload.update(_start_upgrade_page_server(config, previous_version))
-            _persist_upgrade_state(
-                payload,
-                phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-                last_error=rollback_error,
-            )
-        except Exception as page_error:
-            combined_error = f"{rollback_error}; failed to restart upgrade page: {page_error}"
-            log.error("updater.rollback.page_restart_failed", {"error": str(page_error)})
-            _persist_upgrade_state(
-                payload,
-                phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-                last_error=combined_error,
-            )
         return
 
     if restore_error:
@@ -1163,7 +796,6 @@ def _rollback_failed_update(
         return
 
     _clear_upgrade_state()
-    shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
 def recover_upgrade_state() -> None:
@@ -1174,25 +806,15 @@ def recover_upgrade_state() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload)
 
-    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=True)
     except Exception as exc:
         error_message = f"Failed to recover upgraded frontend: {exc}"
         log.error("updater.frontend.resume_failed", {"error": str(exc)})
-        try:
-            payload.update(_start_upgrade_page_server(config, str(payload.get("version") or get_current_version())))
-            _persist_upgrade_state(payload, last_error=error_message)
-        except Exception as page_error:
-            log.error("updater.frontend.resume_page_failed", {"error": str(page_error)})
-            _persist_upgrade_state(
-                payload,
-                last_error=f"{error_message}; failed to restart upgrade page: {page_error}",
-            )
+        _persist_upgrade_state(payload, last_error=error_message)
         raise
     else:
         _clear_upgrade_state()
-        shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
 def rollback_upgrade_handover() -> None:
@@ -1203,14 +825,12 @@ def rollback_upgrade_handover() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
 
-    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=False)
     except Exception as exc:
         log.error("updater.frontend.rollback_failed", {"error": str(exc)})
     finally:
         _clear_upgrade_state()
-        shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
 def cleanup_replaced_files(root: Path | None = None) -> None:
@@ -1621,12 +1241,12 @@ async def perform_update(
             return
 
     # ------------------------------------------------------------------ #
-    # Step 4 – switch frontend to temporary page
+    # Step 4 – stop frontend before cutover
     # ------------------------------------------------------------------ #
     if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
         yield UpdateProgress(
             stage="restarting",
-            message="Switching to the temporary upgrade page...",
+            message="Stopping WebUI for upgrade cutover...",
         )
         try:
             await asyncio.to_thread(_prepare_upgrade_handover, latest_tag)
@@ -1635,7 +1255,7 @@ async def perform_update(
             shutil.rmtree(tmp_dir, ignore_errors=True)
             yield UpdateProgress(
                 stage="error",
-                message=f"Failed to prepare the temporary upgrade page: {exc}",
+                message=f"Failed to stop WebUI before upgrade: {exc}",
                 success=False,
             )
             return
