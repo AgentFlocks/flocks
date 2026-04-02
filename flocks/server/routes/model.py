@@ -447,7 +447,24 @@ async def list_model_definitions(
 
 
 @router.get(
-    "/v2/definitions/{provider_id}/{model_id}",
+    "/v2/definitions/{provider_id}/{model_id:path}/parameter-rules",
+    summary="Get model parameter rules",
+    description="Get the parameter rules (constraints) for a model",
+)
+async def get_parameter_rules(provider_id: str, model_id: str):
+    """Get parameter rules for a model."""
+    manager = get_model_manager()
+    definition = manager.get_model(provider_id, model_id)
+    if not definition:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+        )
+    return {"parameter_rules": definition.parameter_rules}
+
+
+@router.get(
+    "/v2/definitions/{provider_id}/{model_id:path}",
     response_model=ModelDefinition,
     summary="Get model definition (V2)",
     description="Get full model definition with capabilities, limits, pricing, and parameter rules",
@@ -467,24 +484,7 @@ async def get_model_definition(
 
 
 @router.get(
-    "/v2/definitions/{provider_id}/{model_id}/parameter-rules",
-    summary="Get model parameter rules",
-    description="Get the parameter rules (constraints) for a model",
-)
-async def get_parameter_rules(provider_id: str, model_id: str):
-    """Get parameter rules for a model."""
-    manager = get_model_manager()
-    definition = manager.get_model(provider_id, model_id)
-    if not definition:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
-        )
-    return {"parameter_rules": definition.parameter_rules}
-
-
-@router.get(
-    "/v2/settings/{provider_id}/{model_id}",
+    "/v2/settings/{provider_id}/{model_id:path}",
     summary="Get model settings",
 )
 async def get_model_settings(provider_id: str, model_id: str):
@@ -498,7 +498,7 @@ async def get_model_settings(provider_id: str, model_id: str):
 
 
 @router.put(
-    "/v2/settings/{provider_id}/{model_id}",
+    "/v2/settings/{provider_id}/{model_id:path}",
     response_model=ModelSetting,
     summary="Update model settings",
     description="Enable/disable a model or set default parameters",
@@ -517,7 +517,7 @@ async def update_model_settings(
     return setting
 
 @router.delete(
-    "/v2/definitions/{provider_id}/{model_id}",
+    "/v2/definitions/{provider_id}/{model_id:path}",
     status_code=204,
     summary="Delete model definition",
     description="Delete a model from a provider (removes from flocks.json and runtime)",

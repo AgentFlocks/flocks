@@ -260,7 +260,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
     )
 
 
-@router.delete("/models/{provider_id}/{model_id}", status_code=204)
+@router.delete("/models/{provider_id}/{model_id:path}", status_code=204)
 async def delete_model(provider_id: str, model_id: str):
     """Remove a model from a provider in flocks.json."""
     removed = ConfigWriter.remove_model(provider_id, model_id)
