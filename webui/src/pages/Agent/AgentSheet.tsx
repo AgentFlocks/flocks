@@ -240,6 +240,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       submitDisabled={submitDisabled}
       submitLoading={loading}
       submitLabel={isEdit ? undefined : t('sheet.done')}
+      hideForm={!isEdit}
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={isEdit ? handleExtractFromRex : undefined}
