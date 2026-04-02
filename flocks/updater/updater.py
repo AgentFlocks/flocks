@@ -919,7 +919,12 @@ def _read_upgrade_server_pid() -> int | None:
         return None
 
 
-def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
+def _wait_for_upgrade_page_server_shutdown(
+    config,
+    pid: int,
+    *,
+    allow_port_handover: bool = False,
+) -> None:
     from flocks.cli import service_manager
 
     for _ in range(20):
@@ -927,6 +932,8 @@ def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
         listeners = service_manager.port_owner_pids(config.frontend_port)
         if not pid_running and pid not in listeners:
             if listeners:
+                if allow_port_handover:
+                    return
                 raise RuntimeError(
                     f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
                 )
@@ -935,6 +942,8 @@ def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
 
     listeners = service_manager.port_owner_pids(config.frontend_port)
     if listeners and pid not in listeners:
+        if allow_port_handover:
+            return
         raise RuntimeError(
             f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
         )
@@ -956,7 +965,7 @@ def _upgrade_page_server_is_running(pid: int) -> bool:
     return service_manager.pid_is_running(pid)
 
 
-def _stop_upgrade_page_server(config) -> None:
+def _stop_upgrade_page_server(config, *, allow_port_handover: bool = False) -> None:
     pid = _read_upgrade_server_pid()
     if pid is None:
         return
@@ -970,14 +979,22 @@ def _stop_upgrade_page_server(config) -> None:
         pass
 
     try:
-        _wait_for_upgrade_page_server_shutdown(config, pid)
+        _wait_for_upgrade_page_server_shutdown(
+            config,
+            pid,
+            allow_port_handover=allow_port_handover,
+        )
     except RuntimeError:
         if sys.platform != "win32":
             try:
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
-            _wait_for_upgrade_page_server_shutdown(config, pid)
+            _wait_for_upgrade_page_server_shutdown(
+                config,
+                pid,
+                allow_port_handover=allow_port_handover,
+            )
         else:
             raise
     finally:
@@ -1102,7 +1119,7 @@ def _rollback_failed_update(
 
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
-    _stop_upgrade_page_server(config)
+    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(
             config,
@@ -1157,7 +1174,7 @@ def recover_upgrade_state() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload)
 
-    _stop_upgrade_page_server(config)
+    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=True)
     except Exception as exc:
@@ -1186,7 +1203,7 @@ def rollback_upgrade_handover() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
 
-    _stop_upgrade_page_server(config)
+    _stop_upgrade_page_server(config, allow_port_handover=True)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=False)
     except Exception as exc:

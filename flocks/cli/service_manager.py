@@ -565,6 +565,24 @@ def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
         pass
 
 
+def _force_kill_tracked_processes(
+    port: int,
+    runtime_record: RuntimeRecord | None,
+    tracked_pids: Iterable[int],
+) -> list[int]:
+    """Force kill tracked pids plus the latest listeners on the port."""
+    current_targets = append_unique_pids(tracked_pids, port_owner_pids(port))
+    if sys.platform == "win32":
+        for pid in current_targets:
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+        return current_targets
+
+    if runtime_record and runtime_record.pgid is not None:
+        signal_process_group(signal.SIGKILL, runtime_record.pgid)
+    signal_pid_list(signal.SIGKILL, current_targets)
+    return current_targets
+
+
 def stop_one(port: int, pid_file: Path, name: str, console) -> None:
     """Stop a single service by tracked pid and/or listening port."""
     cleanup_stale_pid_file(pid_file)
@@ -604,16 +622,15 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
             time.sleep(1)
 
         console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
-        if runtime_record and runtime_record.pgid is not None:
-            signal_process_group(signal.SIGKILL, runtime_record.pgid)
-        signal_pid_list(signal.SIGKILL, append_unique_pids(target_pids, port_owner_pids(port)))
+        target_pids = _force_kill_tracked_processes(port, runtime_record, target_pids)
 
     for _ in range(10):
-        if _tracked_processes_stopped(port, runtime_record, append_unique_pids(target_pids, port_owner_pids(port))):
+        if _tracked_processes_stopped(port, runtime_record, target_pids):
             pid_file.unlink(missing_ok=True)
             console.print(f"[flocks] {name} 已停止。")
             return
         time.sleep(1)
+        target_pids = _force_kill_tracked_processes(port, runtime_record, target_pids)
 
     pid_file.unlink(missing_ok=True)
     raise ServiceError(f"{name} 未在预期时间内退出，请手动检查端口 {port}。")
