@@ -535,6 +535,36 @@ def test_stop_upgrade_page_server_raises_when_another_process_keeps_port(
     assert not pid_path.exists()
 
 
+def test_stop_upgrade_page_server_accepts_reaped_unix_child_without_waiting_for_pid_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / ".flocks"))
+    pid_path = tmp_path / ".flocks" / "run" / "upgrade_server.pid"
+    pid_path.parent.mkdir(parents=True)
+    pid_path.write_text("321", encoding="utf-8")
+
+    kill_signals: list[tuple[int, signal.Signals]] = []
+    waitpid_calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.os, "kill", lambda pid, sig: kill_signals.append((pid, sig)))
+    monkeypatch.setattr(
+        updater.os,
+        "waitpid",
+        lambda pid, options: waitpid_calls.append((pid, options)) or (321, 0),
+    )
+    monkeypatch.setattr(updater.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+
+    updater._stop_upgrade_page_server(service_manager.ServiceConfig(frontend_port=5173))
+
+    assert kill_signals == [(321, signal.SIGTERM)]
+    assert waitpid_calls == [(321, updater.os.WNOHANG)]
+    assert not pid_path.exists()
+
+
 def test_recover_upgrade_state_restarts_frontend_and_clears_marker(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

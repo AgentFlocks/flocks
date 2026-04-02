@@ -923,7 +923,7 @@ def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
     from flocks.cli import service_manager
 
     for _ in range(20):
-        pid_running = service_manager.pid_is_running(pid)
+        pid_running = _upgrade_page_server_is_running(pid)
         listeners = service_manager.port_owner_pids(config.frontend_port)
         if not pid_running and pid not in listeners:
             if listeners:
@@ -939,6 +939,21 @@ def _wait_for_upgrade_page_server_shutdown(config, pid: int) -> None:
             f"Frontend port {config.frontend_port} is still occupied by PID(s): {listeners}"
         )
     raise RuntimeError(f"Upgrade page server on port {config.frontend_port} did not stop in time")
+
+
+def _upgrade_page_server_is_running(pid: int) -> bool:
+    from flocks.cli import service_manager
+
+    if sys.platform != "win32":
+        try:
+            waited_pid, _status = os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            waited_pid = 0
+        except OSError:
+            waited_pid = 0
+        if waited_pid == pid:
+            return False
+    return service_manager.pid_is_running(pid)
 
 
 def _stop_upgrade_page_server(config) -> None:
