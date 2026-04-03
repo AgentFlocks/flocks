@@ -111,6 +111,15 @@ class File:
         try:
             abs_path = os.path.abspath(file_path)
             
+            # Security: restrict file access to project workspace only
+            from flocks.utils.paths import find_project_root
+            from flocks.sandbox.paths import resolve_sandbox_path
+            project_root = find_project_root()
+            try:
+                resolve_sandbox_path(abs_path, str(project_root), str(project_root))
+            except ValueError as e:
+                raise PermissionError(f"Access denied: {e}")
+            
             if not os.path.exists(abs_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
             
