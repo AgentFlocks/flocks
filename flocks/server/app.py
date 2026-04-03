@@ -102,6 +102,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("credential.env_migration.failed", {"error": str(e)})
 
+    # Sync new catalog models into flocks.json for existing providers (idempotent)
+    try:
+        from flocks.provider.model_catalog import sync_catalog_models_to_config
+        synced = sync_catalog_models_to_config()
+        if synced > 0:
+            log.info("catalog.model_sync.done", {"models_added": synced})
+    except Exception as e:
+        log.warning("catalog.model_sync.failed", {"error": str(e)})
+
     # Load custom providers from flocks.json into runtime
     try:
         from flocks.server.routes.custom_provider import load_custom_providers_on_startup
