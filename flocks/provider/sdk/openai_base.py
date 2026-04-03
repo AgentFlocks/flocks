@@ -375,12 +375,15 @@ class OpenAIBaseProvider(BaseProvider):
             "messages": openai_messages,
         }
 
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 params["temperature"] = temperature
+        if extra_body:
+            params["extra_body"] = extra_body
 
         if kwargs.get("max_tokens"):
             params["max_tokens"] = kwargs["max_tokens"]
@@ -433,12 +436,15 @@ class OpenAIBaseProvider(BaseProvider):
             "stream": True,
         }
 
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 params["temperature"] = temperature
+        if extra_body:
+            params["extra_body"] = extra_body
 
         if kwargs.get("max_tokens"):
             params["max_tokens"] = kwargs["max_tokens"]

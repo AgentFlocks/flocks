@@ -88,6 +88,11 @@ def build_provider_options(
     elif provider_id == "groq":
         options["thinkingLevel"] = "high"
 
+    # -- Qwen reasoning (ThreatBook-hosted or Alibaba DashScope) -------------
+    elif provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba"):
+        if "qwen3-max" in model_lower or "qwen3.6-plus" in model_lower:
+            options["extra_body"] = {"enable_thinking": True}
+
     # -- Amazon Bedrock reasoning -------------------------------------------
     elif provider_id == "amazon-bedrock":
         if "anthropic" in model_lower:
