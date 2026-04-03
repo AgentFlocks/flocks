@@ -908,25 +908,60 @@ def _start_upgrade_page_server(config, version: str) -> dict[str, Any]:
     }
 
 
-def _stop_upgrade_page_server() -> None:
+def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
     pid_path = _upgrade_server_pid_path()
-    if not pid_path.exists():
-        return
-    try:
-        pid = int(pid_path.read_text(encoding="utf-8").strip())
-    except (OSError, ValueError):
-        pid_path.unlink(missing_ok=True)
+    if pid_path.exists():
+        try:
+            pid = int(pid_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pid = None
+            pid_path.unlink(missing_ok=True)
+
+        if pid is not None:
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+                else:
+                    os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+            for _ in range(40):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    break
+                time.sleep(0.1)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                time.sleep(0.1)
+
+            pid_path.unlink(missing_ok=True)
+
+    if frontend_port is None:
         return
 
-    try:
-        if sys.platform == "win32":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
-        else:
-            os.kill(pid, signal.SIGTERM)
-    except OSError:
-        pass
+    from flocks.cli import service_manager
 
-    pid_path.unlink(missing_ok=True)
+    remaining = service_manager.port_owner_pids(frontend_port)
+    if not remaining:
+        return
+    log.info("updater.upgrade_page.port_fallback_kill", {
+        "port": frontend_port,
+        "pids": remaining,
+    })
+    for rpid in remaining:
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(rpid), "/T", "/F"], check=False, capture_output=True)
+            else:
+                os.kill(rpid, signal.SIGKILL)
+        except OSError:
+            pass
+    time.sleep(0.3)
 
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
@@ -957,7 +992,7 @@ def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
             last_error=None,
         )
     except Exception:
-        _stop_upgrade_page_server()
+        _stop_upgrade_page_server(frontend_port=config.frontend_port)
         _clear_upgrade_state()
         try:
             service_manager.start_frontend(config, console)
@@ -1011,6 +1046,20 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
     service_manager.start_frontend(rebuilt_config, console)
 
 
+def _restore_backup_if_possible(
+    backup_path: Path, install_root: Path, previous_version: str,
+) -> None:
+    """Restore install tree from backup without touching upgrade-page state."""
+    try:
+        _restore_backup_archive(backup_path, install_root)
+        _write_version_marker(previous_version)
+        log.info("updater.backup.restored", {"backup": str(backup_path)})
+    except Exception as exc:
+        log.error("updater.backup.restore_failed", {
+            "backup": str(backup_path), "error": str(exc),
+        })
+
+
 def _restore_backup_archive(backup_path: Path, install_root: Path) -> None:
     restore_dir = Path(tempfile.mkdtemp(prefix="flocks-rollback-"))
     try:
@@ -1047,7 +1096,7 @@ def _rollback_failed_update(
 
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(frontend_port=config.frontend_port)
     try:
         _start_frontend_with_fallback(
             config,
@@ -1055,43 +1104,13 @@ def _rollback_failed_update(
             allow_build_fallback=restored_backup,
         )
     except Exception as exc:
-        rollback_error = restore_error or f"Failed to restore frontend after rollback: {exc}"
         log.error(
             "updater.frontend.rollback_failed",
             {"error": str(exc), "restored_backup": restored_backup, "restore_error": restore_error},
         )
-        payload = _persist_upgrade_state(
-            payload,
-            phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-            last_error=rollback_error,
-        )
-        try:
-            payload.update(_start_upgrade_page_server(config, previous_version))
-            _persist_upgrade_state(
-                payload,
-                phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-                last_error=rollback_error,
-            )
-        except Exception as page_error:
-            combined_error = f"{rollback_error}; failed to restart upgrade page: {page_error}"
-            log.error("updater.rollback.page_restart_failed", {"error": str(page_error)})
-            _persist_upgrade_state(
-                payload,
-                phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-                last_error=combined_error,
-            )
-        return
-
-    if restore_error:
-        _persist_upgrade_state(
-            payload,
-            phase=_UPGRADE_PHASE_ROLLBACK_FAILED,
-            last_error=restore_error,
-        )
-        return
-
-    _clear_upgrade_state()
-    shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
+    finally:
+        _clear_upgrade_state()
+        shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
 
 def recover_upgrade_state() -> None:
@@ -1102,23 +1121,13 @@ def recover_upgrade_state() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload)
 
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(frontend_port=config.frontend_port)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=True)
     except Exception as exc:
-        error_message = f"Failed to recover upgraded frontend: {exc}"
         log.error("updater.frontend.resume_failed", {"error": str(exc)})
-        try:
-            payload.update(_start_upgrade_page_server(config, str(payload.get("version") or get_current_version())))
-            _persist_upgrade_state(payload, last_error=error_message)
-        except Exception as page_error:
-            log.error("updater.frontend.resume_page_failed", {"error": str(page_error)})
-            _persist_upgrade_state(
-                payload,
-                last_error=f"{error_message}; failed to restart upgrade page: {page_error}",
-            )
         raise
-    else:
+    finally:
         _clear_upgrade_state()
         shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
 
@@ -1549,27 +1558,13 @@ async def perform_update(
             return
 
     # ------------------------------------------------------------------ #
-    # Step 4 – switch frontend to temporary page
+    # Step 4 – determine whether frontend handover is needed
     # ------------------------------------------------------------------ #
-    if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
-        yield UpdateProgress(
-            stage="restarting",
-            message="Switching to the temporary upgrade page...",
-        )
-        try:
-            await asyncio.to_thread(_prepare_upgrade_handover, latest_tag)
-            handover_prepared = True
-        except Exception as exc:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            yield UpdateProgress(
-                stage="error",
-                message=f"Failed to prepare the temporary upgrade page: {exc}",
-                success=False,
-            )
-            return
+    needs_handover = staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists()
 
     # ------------------------------------------------------------------ #
     # Step 5 – replace install tree
+    # (Frontend proxy is still alive so the SSE stream keeps flowing.)
     # ------------------------------------------------------------------ #
     yield UpdateProgress(
         stage="applying",
@@ -1581,24 +1576,15 @@ async def perform_update(
         )
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if handover_prepared:
-            await asyncio.to_thread(_rollback_failed_update, backup_path, install_root, current_version)
-        elif backup_path is not None:
-            await asyncio.to_thread(_rollback_failed_update, backup_path, install_root, current_version)
+        if backup_path is not None:
+            await asyncio.to_thread(
+                _restore_backup_if_possible, backup_path, install_root, current_version,
+            )
         msg = f"Failed to replace files: {exc}"
         if backup_path:
             msg += f"\nRestore from backup: {backup_path}"
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
-    if handover_prepared:
-        payload = await asyncio.to_thread(_read_upgrade_state)
-        if payload:
-            await asyncio.to_thread(
-                _persist_upgrade_state,
-                payload,
-                phase=_UPGRADE_PHASE_CUTOVER_APPLIED,
-                last_error=None,
-            )
 
     # ------------------------------------------------------------------ #
     # Step 6 – sync dependencies
@@ -1618,7 +1604,10 @@ async def perform_update(
         )
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        await asyncio.to_thread(_rollback_failed_update, backup_path, install_root, current_version)
+        if backup_path is not None:
+            await asyncio.to_thread(
+                _restore_backup_if_possible, backup_path, install_root, current_version,
+            )
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
 
@@ -1627,9 +1616,15 @@ async def perform_update(
 
     # ------------------------------------------------------------------ #
     # Step 7 – restart in-place
+    # Send the "restarting" event while the proxy is still alive, then
+    # perform the handover (kill frontend + start temp page) right
+    # before os.execv so the SSE stream is not broken prematurely.
+    #
+    # CRITICAL: handover + execv run SYNCHRONOUSLY (no await) so that
+    # CancelledError from client disconnect cannot interrupt between
+    # killing the Vite proxy and calling os.execv.
     # ------------------------------------------------------------------ #
-    if not handover_prepared:
-        yield UpdateProgress(stage="restarting", message="Restarting service...")
+    yield UpdateProgress(stage="restarting", message="Restarting service...")
 
     log.info("updater.restart", {
         "tag": latest_tag,
@@ -1643,17 +1638,24 @@ async def perform_update(
         sys.exit(3)
 
     restart_argv = _build_restart_argv()
+
+    if needs_handover:
+        try:
+            _prepare_upgrade_handover(latest_tag)
+        except Exception as exc:
+            log.error("updater.handover.failed", {"error": str(exc)})
+
     log.info("updater.restart.execv", {"argv": restart_argv})
     try:
         os.execv(restart_argv[0], restart_argv)
     except OSError as exc:
-        await asyncio.to_thread(_rollback_failed_update, backup_path, install_root, current_version)
-        yield UpdateProgress(
-            stage="error",
-            message=f"Failed to restart service: {exc}",
-            success=False,
-        )
-        return
+        log.error("updater.restart.execv_failed", {"error": str(exc)})
+        if needs_handover:
+            try:
+                rollback_upgrade_handover()
+            except Exception:
+                pass
+        raise
 
 
 def _build_restart_argv() -> list[str]:

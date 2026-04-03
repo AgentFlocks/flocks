@@ -80,17 +80,24 @@ async def apply_update(
     log.info("update.apply.start", {"target": version_to_apply})
 
     async def _stream():
+        gen = perform_update(
+            version_to_apply,
+            zipball_url=zipball_url,
+            tarball_url=tarball_url,
+        )
         try:
-            async for progress in perform_update(
-                version_to_apply,
-                zipball_url=zipball_url,
-                tarball_url=tarball_url,
-            ):
+            async for progress in gen:
                 yield f"data: {progress.model_dump_json()}\n\n"
                 await asyncio.sleep(0)
+        except (asyncio.CancelledError, GeneratorExit):
+            log.warning("update.apply.stream_disconnected", {
+                "target": version_to_apply,
+            })
         except Exception as exc:
             log.error("update.apply.failed", {"error": str(exc)})
             yield f"data: {json.dumps({'stage': 'error', 'message': 'An unexpected error occurred during the upgrade. Please check the server logs for details.', 'success': False})}\n\n"
+        finally:
+            await gen.aclose()
 
     return StreamingResponse(
         _stream(),
