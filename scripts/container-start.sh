@@ -10,6 +10,7 @@ BACKEND_PORT="${FLOCKS_BACKEND_PORT:-8000}"
 FRONTEND_HOST="${FLOCKS_FRONTEND_HOST:-0.0.0.0}"
 FRONTEND_PORT="${FLOCKS_FRONTEND_PORT:-5173}"
 FRONTEND_DIST_DIR="${FLOCKS_FRONTEND_DIST_DIR:-$ROOT_DIR/webui/dist}"
+FRONTEND_PROXY_TARGET="${FLOCKS_FRONTEND_PROXY_TARGET:-http://127.0.0.1:${BACKEND_PORT}}"
 
 backend_pid=""
 frontend_pid=""
@@ -51,11 +52,13 @@ python -m uvicorn flocks.server.app:app \
   --port "$BACKEND_PORT" &
 backend_pid=$!
 
-printf '[flocks] starting frontend on %s:%s\n' "$FRONTEND_HOST" "$FRONTEND_PORT"
+printf '[flocks] starting frontend on %s:%s (proxy -> %s)\n' \
+  "$FRONTEND_HOST" "$FRONTEND_PORT" "$FRONTEND_PROXY_TARGET"
 ( exec python "$ROOT_DIR/scripts/serve_webui.py" \
     --directory "$FRONTEND_DIST_DIR" \
     --host "$FRONTEND_HOST" \
-    --port "$FRONTEND_PORT" ) &
+    --port "$FRONTEND_PORT" \
+    --proxy-target "$FRONTEND_PROXY_TARGET" ) &
 frontend_pid=$!
 
 (
