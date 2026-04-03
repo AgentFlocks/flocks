@@ -257,7 +257,8 @@ async def _login(session: aiohttp.ClientSession) -> tuple[bool, dict[str, Any], 
 
 
 async def _request_json(endpoint: str, params: dict[str, Any], api_name: str) -> ToolResult:
-    async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as session:
+    jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT, cookie_jar=jar) as session:
         ok, auth_info, error = await _login(session)
         if not ok:
             return ToolResult(success=False, error=error)
@@ -328,7 +329,8 @@ def _normalize_binary_payload(content: bytes, content_type: str | None, content_
 
 
 async def _request_bytes(endpoint: str, params: dict[str, Any], api_name: str) -> ToolResult:
-    async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT) as session:
+    jar = aiohttp.CookieJar(unsafe=True)
+    async with aiohttp.ClientSession(timeout=_DEFAULT_TIMEOUT, cookie_jar=jar) as session:
         ok, auth_info, error = await _login(session)
         if not ok:
             return ToolResult(success=False, error=error)
