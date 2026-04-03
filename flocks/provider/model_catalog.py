@@ -294,3 +294,60 @@ def list_catalog_provider_ids() -> List[str]:
     _ensure_loaded()
     assert _raw_catalog is not None
     return list(_raw_catalog.keys())
+
+
+def sync_catalog_models_to_config() -> int:
+    """Sync new models from catalog.json into flocks.json for existing providers.
+
+    When catalog.json gains new models (e.g. after a code update), providers
+    already configured in flocks.json won't see them because flocks.json only
+    gets a snapshot at first-add time.  This function adds any missing catalog
+    models to existing provider entries so they appear automatically.
+
+    Only *new* model IDs are added; existing model entries are never modified
+    or removed, preserving user customizations.
+
+    NOTE: If a user manually removes a catalog model from flocks.json, it will
+    be re-added on next startup.  This is intentional — there is currently no
+    UI for per-model deletion, and catalog models should always be visible.
+
+    Returns:
+        Number of models added across all providers.
+    """
+    from flocks.config.config_writer import ConfigWriter
+
+    data = ConfigWriter._read_raw()
+    providers = data.get("provider", {})
+    if not providers:
+        return 0
+
+    catalog_provider_ids = set(list_catalog_provider_ids())
+    dirty = False
+    total_added = 0
+
+    for provider_id, pconfig in providers.items():
+        if provider_id not in catalog_provider_ids:
+            continue
+
+        existing_models = pconfig.get("models")
+        if not isinstance(existing_models, dict):
+            continue
+
+        catalog_defs = get_provider_model_definitions(provider_id)
+        if not catalog_defs:
+            continue
+
+        added = 0
+        for m in catalog_defs:
+            if m.id not in existing_models:
+                existing_models[m.id] = {"name": m.name}
+                added += 1
+
+        if added:
+            dirty = True
+            total_added += added
+
+    if dirty:
+        ConfigWriter._write_raw(data)
+
+    return total_added
