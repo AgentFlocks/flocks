@@ -236,6 +236,55 @@ def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
     service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
 
 
+def test_resolve_python_subprocess_command_prefers_module_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    tool_env = tmp_path / "tool-env"
+    python_exe = tool_env / "bin" / "python"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service_manager,
+        "_python_env_root_from_module",
+        lambda module_name: tool_env if module_name == "uvicorn" else None,
+    )
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(python_exe)]
+
+
+def test_resolve_python_subprocess_command_falls_back_to_repo_venv(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(service_manager, "_python_env_root_from_module", lambda _module_name: None)
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
+
+
+def test_resolve_flocks_cli_command_prefers_launcher(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
+
+    assert service_manager.resolve_flocks_cli_command() == ["/usr/local/bin/flocks"]
+
+
+def test_resolve_flocks_cli_command_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager.sys, "argv", ["python"])
+    monkeypatch.setattr(service_manager, "resolve_python_subprocess_command", lambda root=None: ["/env/bin/python"])
+
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == [
+        "/env/bin/python",
+        "-m",
+        "flocks.cli.main",
+    ]
+
+
 def test_build_status_lines_reports_running_and_idle_services(monkeypatch, tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
@@ -405,6 +454,11 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(
         service_manager,
+        "resolve_flocks_cli_command",
+        lambda root=None: ["python", "-m", "flocks.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
         "_spawn_process",
         lambda *_args, **_kwargs: SimpleNamespace(pid=2468),
     )
@@ -417,7 +471,16 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     assert record.pgid == 2468
     assert record.host == "127.0.0.1"
     assert record.port == 8000
-    assert record.command[:3] == (service_manager.sys.executable, "-m", "uvicorn")
+    assert record.command == (
+        "python",
+        "-m",
+        "flocks.cli.main",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+    )
 
 
 def test_build_frontend_env_uses_backend_host_and_port() -> None:

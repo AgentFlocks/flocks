@@ -61,6 +61,7 @@ log = Log.create(service="updater")
 # Install root
 # ------------------------------------------------------------------ #
 
+
 def _clean_process_output(value: str | bytes | None) -> str:
     """Normalize subprocess stdout/stderr so Windows commands can't crash upgrade flow."""
     if value is None:
@@ -132,9 +133,33 @@ def _get_repo_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
+def _windows_upgrade_python_path(install_root: Path) -> Path:
+    """Return the Windows project virtualenv interpreter for upgrade restarts."""
+    return install_root / ".venv" / "Scripts" / "python.exe"
+
+
+async def _validate_windows_restart_runtime(install_root: Path) -> str | None:
+    """Validate the Windows project runtime that will be used for restart."""
+    python_exe = _windows_upgrade_python_path(install_root)
+    if not python_exe.exists():
+        return f"Windows restart runtime is missing: {python_exe}"
+
+    code, _, err = await _run_async(
+        [str(python_exe), "-c", "import flocks; import uvicorn"],
+        cwd=install_root,
+        timeout=30,
+    )
+    if code == 0:
+        return None
+
+    detail = err or "unknown error"
+    return f"Windows restart runtime validation failed: {detail}"
+
+
 # ------------------------------------------------------------------ #
 # Async subprocess helpers
 # ------------------------------------------------------------------ #
+
 
 async def _run_async(
     cmd: list[str],
@@ -374,20 +399,24 @@ def _upgrade_page_html(version: str) -> str:
 # Config helper
 # ------------------------------------------------------------------ #
 
+
 async def _get_updater_config():
     """Return UpdaterConfig from flocks.json, or defaults."""
     try:
         from flocks.config.config import Config, UpdaterConfig
+
         cfg = await Config.get()
         return cfg.updater or UpdaterConfig()
     except Exception:
         from flocks.config.config import UpdaterConfig
+
         return UpdaterConfig()
 
 
 # ------------------------------------------------------------------ #
 # Release API — GitHub
 # ------------------------------------------------------------------ #
+
 
 def _github_api_url(base_url: str | None, repo: str) -> str:
     base = (base_url or "https://api.github.com").rstrip("/")
@@ -431,6 +460,7 @@ def _github_archive_url(repo: str, tag: str, fmt: str, base_url: str | None = No
 # Release API — Gitee
 # ------------------------------------------------------------------ #
 
+
 async def _fetch_gitee_release(
     repo: str,
     token: str | None,
@@ -473,6 +503,7 @@ def _gitee_archive_url(repo: str, tag: str, fmt: str, gitee_token: str | None = 
 # Release API — GitLab
 # ------------------------------------------------------------------ #
 
+
 async def _fetch_gitlab_release(
     repo: str,
     token: str | None,
@@ -496,19 +527,13 @@ async def _fetch_gitlab_release(
                 tag: str = latest.get("tag_name", "").lstrip("v")
                 raw_tag: str = latest.get("tag_name", "")
                 notes: str | None = latest.get("description") or None
-                link: str | None = (
-                    latest.get("_links", {}).get("self")
-                    or f"{base}/{repo}/-/releases/{raw_tag}"
-                )
+                link: str | None = latest.get("_links", {}).get("self") or f"{base}/{repo}/-/releases/{raw_tag}"
                 proj = repo.split("/")[-1]
                 zip_url = f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.zip"
                 tar_url = f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.tar.gz"
                 return tag, notes, link, zip_url, tar_url
 
-        tags_url = (
-            f"{base}/api/v4/projects/{encoded}/repository/tags"
-            "?order_by=version&sort=desc&per_page=1"
-        )
+        tags_url = f"{base}/api/v4/projects/{encoded}/repository/tags?order_by=version&sort=desc&per_page=1"
         tags_resp = await client.get(tags_url, headers=headers, follow_redirects=True)
 
         if tags_resp.status_code == 200:
@@ -517,11 +542,7 @@ async def _fetch_gitlab_release(
                 latest_tag_obj = tags[0]
                 tag = latest_tag_obj.get("name", "").lstrip("v")
                 raw_tag = latest_tag_obj.get("name", "")
-                notes = (
-                    latest_tag_obj.get("release", {}).get("description")
-                    or latest_tag_obj.get("message")
-                    or None
-                )
+                notes = latest_tag_obj.get("release", {}).get("description") or latest_tag_obj.get("message") or None
                 link = f"{base}/{repo}/-/tags/{raw_tag}"
                 proj = repo.split("/")[-1]
                 zip_url = f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.zip"
@@ -538,6 +559,7 @@ async def _fetch_gitlab_release(
 # ------------------------------------------------------------------ #
 # Multi-source dispatcher
 # ------------------------------------------------------------------ #
+
 
 async def _fetch_release_from_source(
     source: str,
@@ -589,6 +611,7 @@ def _token_for_source(source: str, token: str | None, gitee_token: str | None) -
 # Version helpers
 # ------------------------------------------------------------------ #
 
+
 def _parse_version(v: str) -> tuple[int, ...]:
     parts: list[int] = []
     for seg in v.lstrip("v").split("."):
@@ -621,11 +644,7 @@ async def _latest_tag_from_git_remote_async(
         timeout=15,
     )
     if code == 0:
-        names = [
-            line.split("\t")[1].removeprefix("refs/tags/")
-            for line in out.splitlines()
-            if "\t" in line
-        ]
+        names = [line.split("\t")[1].removeprefix("refs/tags/") for line in out.splitlines() if "\t" in line]
         tag = _pick_best_tag(names)
         if tag:
             return tag, None, None
@@ -642,6 +661,7 @@ async def _latest_tag_from_git_remote_async(
 # ------------------------------------------------------------------ #
 # Archive helpers — download / backup / extract
 # ------------------------------------------------------------------ #
+
 
 def _choose_archive_format(configured: str) -> str:
     """Return 'zip' or 'tar.gz' based on config and platform."""
@@ -716,11 +736,14 @@ async def _download_with_fallback(
         except Exception as exc:
             err_msg = f"[{source_name}] {exc}"
             errors.append(err_msg)
-            log.warning("updater.download.source_failed", {
-                "source": source_name,
-                "url": url,
-                "error": str(exc),
-            })
+            log.warning(
+                "updater.download.source_failed",
+                {
+                    "source": source_name,
+                    "url": url,
+                    "error": str(exc),
+                },
+            )
 
     summary = "; ".join(errors) if errors else "No download sources configured"
     raise RuntimeError(summary)
@@ -820,10 +843,7 @@ def _spawn_detached_process(
     creationflags = 0
     kwargs: dict[str, object] = {}
     if sys.platform == "win32":
-        creationflags = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        )
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
         startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
         if startupinfo_cls is not None:
             startupinfo = startupinfo_cls()
@@ -883,11 +903,13 @@ def _wait_for_upgrade_page(config) -> None:
 
 
 def _start_upgrade_page_server(config, version: str) -> dict[str, Any]:
+    from flocks.cli import service_manager
+
     page_dir = _write_upgrade_page(version)
     page_dir_resolved = page_dir.resolve()
     process = _spawn_detached_process(
-        [
-            sys.executable,
+        service_manager.resolve_python_subprocess_command(_get_repo_root())
+        + [
             "-m",
             "http.server",
             str(config.frontend_port),
@@ -933,11 +955,12 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
                     break
                 time.sleep(0.1)
             else:
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                time.sleep(0.1)
+                if sys.platform != "win32":
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    time.sleep(0.1)
 
             pid_path.unlink(missing_ok=True)
 
@@ -947,21 +970,34 @@ def _stop_upgrade_page_server(*, frontend_port: int | None = None) -> None:
     from flocks.cli import service_manager
 
     remaining = service_manager.port_owner_pids(frontend_port)
-    if not remaining:
+    if remaining:
+        log.info(
+            "updater.upgrade_page.port_fallback_kill",
+            {
+                "port": frontend_port,
+                "pids": remaining,
+            },
+        )
+        for rpid in remaining:
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["taskkill", "/PID", str(rpid), "/T", "/F"], check=False, capture_output=True)
+                else:
+                    os.kill(rpid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    if sys.platform == "win32":
+        wait_attempts = 40
+        wait_interval = 0.25
+        for _ in range(wait_attempts):
+            if not service_manager.port_owner_pids(frontend_port):
+                return
+            time.sleep(wait_interval)
         return
-    log.info("updater.upgrade_page.port_fallback_kill", {
-        "port": frontend_port,
-        "pids": remaining,
-    })
-    for rpid in remaining:
-        try:
-            if sys.platform == "win32":
-                subprocess.run(["taskkill", "/PID", str(rpid), "/T", "/F"], check=False, capture_output=True)
-            else:
-                os.kill(rpid, signal.SIGKILL)
-        except OSError:
-            pass
-    time.sleep(0.3)
+
+    if remaining:
+        time.sleep(0.3)
 
 
 def _prepare_upgrade_handover(version: str) -> dict[str, Any]:
@@ -1011,9 +1047,7 @@ def _service_config_from_payload(
     from flocks.cli import service_manager
 
     resolved_skip_frontend_build = (
-        bool(payload.get("skip_frontend_build", True))
-        if skip_frontend_build is None
-        else skip_frontend_build
+        bool(payload.get("skip_frontend_build", True)) if skip_frontend_build is None else skip_frontend_build
     )
     return service_manager.ServiceConfig(
         backend_host=str(payload.get("backend_host") or service_manager.ServiceConfig.backend_host),
@@ -1023,6 +1057,61 @@ def _service_config_from_payload(
         no_browser=True,
         skip_frontend_build=resolved_skip_frontend_build,
     )
+
+
+def _read_upgrade_server_pid() -> tuple[int | None, bool]:
+    pid_path = _upgrade_server_pid_path()
+    if not pid_path.exists():
+        return None, False
+    try:
+        return int(pid_path.read_text(encoding="utf-8").strip()), True
+    except (OSError, ValueError):
+        pid_path.unlink(missing_ok=True)
+        return None, True
+
+
+def _payload_frontend_port(payload: dict[str, Any] | None) -> int | None:
+    if not payload:
+        return None
+    value = payload.get("frontend_port")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def read_upgrade_runtime_state(frontend_port: int | None = None) -> dict[str, Any]:
+    payload = _read_upgrade_state()
+    upgrade_pid, pid_file_present = _read_upgrade_server_pid()
+    resolved_port = _payload_frontend_port(payload) or frontend_port
+    frontend_host = str(payload.get("frontend_host")) if payload and payload.get("frontend_host") else None
+
+    listener_pids: list[int] = []
+    if resolved_port is not None:
+        try:
+            from flocks.cli import service_manager
+
+            listener_pids = service_manager.port_owner_pids(resolved_port)
+        except Exception:
+            listener_pids = []
+
+    listener_matches_pid = upgrade_pid is not None and upgrade_pid in listener_pids
+    return {
+        "payload": payload,
+        "payload_present": payload is not None,
+        "pid_file_present": pid_file_present,
+        "upgrade_pid": upgrade_pid,
+        "frontend_host": frontend_host,
+        "frontend_port": resolved_port,
+        "listener_pids": listener_pids,
+        "listener_matches_pid": listener_matches_pid,
+        "page_active": listener_matches_pid,
+        "has_artifacts": payload is not None or pid_file_present,
+    }
 
 
 def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool) -> None:
@@ -1046,8 +1135,65 @@ def _start_frontend_with_fallback(config, console, *, allow_build_fallback: bool
     service_manager.start_frontend(rebuilt_config, console)
 
 
+def cleanup_orphan_upgrade_state(*, frontend_port: int | None = None) -> bool:
+    state = read_upgrade_runtime_state(frontend_port=frontend_port)
+    if not state["has_artifacts"]:
+        return False
+
+    resolved_port = state["frontend_port"]
+    if resolved_port is None:
+        _stop_upgrade_page_server()
+    else:
+        _stop_upgrade_page_server(frontend_port=resolved_port)
+
+    _clear_upgrade_state()
+    _upgrade_server_pid_path().unlink(missing_ok=True)
+    shutil.rmtree(_upgrade_page_dir(), ignore_errors=True)
+    return True
+
+
+def resolve_upgrade_runtime_state(
+    *,
+    attempt_recover: bool = True,
+    frontend_port: int | None = None,
+) -> dict[str, Any]:
+    state = read_upgrade_runtime_state(frontend_port=frontend_port)
+    if not state["has_artifacts"]:
+        return {
+            **state,
+            "action": "noop",
+            "error": None,
+        }
+
+    resolved_port = state["frontend_port"]
+    if attempt_recover and state["payload_present"]:
+        try:
+            recover_upgrade_state()
+            return {
+                **state,
+                "action": "recovered",
+                "error": None,
+            }
+        except Exception as exc:
+            cleanup_orphan_upgrade_state(frontend_port=resolved_port)
+            return {
+                **state,
+                "action": "cleanup_after_failed_recover",
+                "error": str(exc),
+            }
+
+    cleanup_orphan_upgrade_state(frontend_port=resolved_port)
+    return {
+        **state,
+        "action": "cleaned",
+        "error": None,
+    }
+
+
 def _restore_backup_if_possible(
-    backup_path: Path, install_root: Path, previous_version: str,
+    backup_path: Path,
+    install_root: Path,
+    previous_version: str,
 ) -> None:
     """Restore install tree from backup without touching upgrade-page state."""
     try:
@@ -1055,9 +1201,13 @@ def _restore_backup_if_possible(
         _write_version_marker(previous_version)
         log.info("updater.backup.restored", {"backup": str(backup_path)})
     except Exception as exc:
-        log.error("updater.backup.restore_failed", {
-            "backup": str(backup_path), "error": str(exc),
-        })
+        log.error(
+            "updater.backup.restore_failed",
+            {
+                "backup": str(backup_path),
+                "error": str(exc),
+            },
+        )
 
 
 def _restore_backup_archive(backup_path: Path, install_root: Path) -> None:
@@ -1140,7 +1290,7 @@ def rollback_upgrade_handover() -> None:
     console = _NullConsole()
     config = _service_config_from_payload(payload, skip_frontend_build=True)
 
-    _stop_upgrade_page_server()
+    _stop_upgrade_page_server(frontend_port=config.frontend_port)
     try:
         _start_frontend_with_fallback(config, console, allow_build_fallback=False)
     except Exception as exc:
@@ -1192,7 +1342,7 @@ def _rmtree_onerror(func, path, exc_info):  # noqa: ANN001
     for attempt in range(5):
         try:
             os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
-            time.sleep(0.1 * (2 ** attempt))
+            time.sleep(0.1 * (2**attempt))
             func(path)
             return
         except OSError:
@@ -1310,6 +1460,7 @@ def get_current_version() -> str:
         pass
 
     from flocks import __version__
+
     return __version__
 
 
@@ -1343,17 +1494,24 @@ async def get_latest_release(
     for source in sources:
         try:
             result = await _fetch_release_from_source(
-                source, repo, token, ucfg.gitee_token, base_url,
+                source,
+                repo,
+                token,
+                ucfg.gitee_token,
+                base_url,
                 gitee_repo=ucfg.gitee_repo,
             )
             log.info("updater.release.fetched", {"source": source, "tag": result[0]})
             return result
         except Exception as exc:
             last_error = exc
-            log.warning("updater.release.source_failed", {
-                "source": source,
-                "error": str(exc),
-            })
+            log.warning(
+                "updater.release.source_failed",
+                {
+                    "source": source,
+                    "error": str(exc),
+                },
+            )
 
     log.warning("updater.api_failed_fallback_git", {"error": str(last_error)})
     tag, _, _ = await _latest_tag_from_git_remote_async(ucfg.remote)
@@ -1410,6 +1568,7 @@ async def check_update() -> VersionInfo:
 # ------------------------------------------------------------------ #
 # Perform upgrade
 # ------------------------------------------------------------------ #
+
 
 async def perform_update(
     latest_tag: str,
@@ -1493,7 +1652,9 @@ async def perform_update(
     extract_dir.mkdir()
     try:
         content_root = await asyncio.to_thread(
-            _extract_archive, archive_path, extract_dir,
+            _extract_archive,
+            archive_path,
+            extract_dir,
         )
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1543,9 +1704,7 @@ async def perform_update(
             log.warning(
                 "updater.frontend.npm_not_found",
                 {
-                    "hint": (
-                        "Cannot prebuild frontend during upgrade because npm was not found"
-                    ),
+                    "hint": ("Cannot prebuild frontend during upgrade because npm was not found"),
                 },
             )
         dist_index = staged_webui_dir / "dist" / "index.html"
@@ -1573,13 +1732,18 @@ async def perform_update(
     )
     try:
         await asyncio.to_thread(
-            _replace_install_dir, content_root, install_root,
+            _replace_install_dir,
+            content_root,
+            install_root,
         )
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if backup_path is not None:
             await asyncio.to_thread(
-                _restore_backup_if_possible, backup_path, install_root, current_version,
+                _restore_backup_if_possible,
+                backup_path,
+                install_root,
+                current_version,
             )
         msg = f"Failed to replace files: {exc}"
         if backup_path:
@@ -1593,8 +1757,24 @@ async def perform_update(
     yield UpdateProgress(stage="syncing", message="Syncing dependencies...")
 
     uv_path = _find_executable("uv")
+    if sys.platform == "win32" and not uv_path:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if backup_path is not None:
+            await asyncio.to_thread(
+                _restore_backup_if_possible,
+                backup_path,
+                install_root,
+                current_version,
+            )
+        yield UpdateProgress(
+            stage="error",
+            message="Dependency sync failed: uv is required to refresh the Windows project runtime.",
+            success=False,
+        )
+        return
+
     if uv_path:
-        log.info("updater.dependencies.sync", {"tool": "uv", "path": uv_path})
+        log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
         code, _, err = await _run_async([uv_path, "sync"], cwd=install_root, timeout=120)
     else:
         log.warning("updater.dependencies.sync_fallback", {"tool": "pip"})
@@ -1607,10 +1787,27 @@ async def perform_update(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if backup_path is not None:
             await asyncio.to_thread(
-                _restore_backup_if_possible, backup_path, install_root, current_version,
+                _restore_backup_if_possible,
+                backup_path,
+                install_root,
+                current_version,
             )
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
+
+    if sys.platform == "win32":
+        validation_error = await _validate_windows_restart_runtime(install_root)
+        if validation_error:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            if backup_path is not None:
+                await asyncio.to_thread(
+                    _restore_backup_if_possible,
+                    backup_path,
+                    install_root,
+                    current_version,
+                )
+            yield UpdateProgress(stage="error", message=validation_error, success=False)
+            return
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _write_version_marker(latest_tag.lstrip("v"))
@@ -1635,24 +1832,45 @@ async def perform_update(
 
     yield UpdateProgress(stage="restarting", message="Restarting service...")
 
-    log.info("updater.restart", {
-        "tag": latest_tag,
-        "sources": ucfg.sources,
-        "repo": ucfg.repo,
-    })
+    log.info(
+        "updater.restart",
+        {
+            "tag": latest_tag,
+            "sources": ucfg.sources,
+            "repo": ucfg.repo,
+        },
+    )
     await asyncio.sleep(0.8)
 
     if "--reload" in sys.argv:
         log.info("updater.restart.reload_exit3")
         sys.exit(3)
 
-    restart_argv = _build_restart_argv()
+    restart_argv = _build_restart_argv(install_root)
 
     if needs_handover:
         try:
             _prepare_upgrade_handover(latest_tag)
         except Exception as exc:
             log.error("updater.handover.failed", {"error": str(exc)})
+
+    if sys.platform == "win32":
+        log.info("updater.restart.spawn", {"argv": restart_argv})
+        try:
+            subprocess.Popen(
+                restart_argv,
+                cwd=install_root,
+                close_fds=True,
+            )
+            os._exit(0)
+        except OSError as exc:
+            log.error("updater.restart.spawn_failed", {"error": str(exc)})
+            if needs_handover:
+                try:
+                    rollback_upgrade_handover()
+                except Exception:
+                    pass
+            raise
 
     log.info("updater.restart.execv", {"argv": restart_argv})
     try:
@@ -1667,7 +1885,7 @@ async def perform_update(
         raise
 
 
-def _build_restart_argv() -> list[str]:
+def _build_restart_argv(install_root: Path | None = None) -> list[str]:
     """
     Reconstruct the argv for os.execv so the process restarts correctly.
 
@@ -1693,16 +1911,12 @@ def _build_restart_argv() -> list[str]:
         clean_rest.append(arg)
 
     if sys.platform == "win32":
-        resolved = _resolve_windows_restart_command(
-            argv0,
-            getattr(sys, "orig_argv", []),
-        )
-        if resolved:
-            return resolved + clean_rest
-
-        resolved = _resolve_windows_launcher_entry(argv0)
-        if resolved:
-            return resolved + clean_rest
+        repo_root = install_root or _get_repo_root()
+        venv_python = _windows_upgrade_python_path(repo_root)
+        if not venv_python.exists():
+            raise FileNotFoundError(f"Windows restart runtime is missing: {venv_python}")
+        log.info("updater.restart.force_venv", {"python": str(venv_python)})
+        return [str(venv_python), "-m", "flocks.cli.main"] + clean_rest
 
     if argv0.endswith("__main__.py"):
         pkg_dir = Path(argv0).parent
@@ -1714,10 +1928,13 @@ def _build_restart_argv() -> list[str]:
 
         if parts:
             module = ".".join(parts)
-            log.info("updater.restart.module_mode", {
-                "module": module,
-                "reload_stripped": len(rest) - len(clean_rest),
-            })
+            log.info(
+                "updater.restart.module_mode",
+                {
+                    "module": module,
+                    "reload_stripped": len(rest) - len(clean_rest),
+                },
+            )
             return [sys.executable, "-m", module] + clean_rest
 
     return [sys.executable, argv0] + clean_rest
@@ -1741,11 +1958,11 @@ def _resolve_windows_restart_command(argv0: str, orig_argv: list[str]) -> list[s
 
     for index, value in enumerate(tail):
         if _windows_paths_match(value, argv0):
-            return launcher + tail[:index + 1]
+            return launcher + tail[: index + 1]
 
     for index, value in enumerate(tail[:-1]):
         if value == "-m":
-            return launcher + tail[:index + 2]
+            return launcher + tail[: index + 2]
 
     return None
 
@@ -1790,8 +2007,7 @@ def _find_executable(name: str) -> str | None:
     venv_candidates = [repo_root / ".venv" / "bin" / name]
     if sys.platform == "win32":
         venv_candidates.extend(
-            repo_root / ".venv" / "Scripts" / candidate
-            for candidate in _windows_command_candidates(name)
+            repo_root / ".venv" / "Scripts" / candidate for candidate in _windows_command_candidates(name)
         )
     else:
         venv_candidates.append(repo_root / ".venv" / "Scripts" / name)

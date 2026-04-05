@@ -166,141 +166,77 @@ def test_upgrade_page_probe_urls_support_ipv6_loopback_fallback() -> None:
     ]
 
 
-def test_build_restart_argv_uses_windows_executable_shim(
+def test_build_restart_argv_uses_windows_venv_python(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
     monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.sys, "executable", r"C:\Python312\python.exe")
     monkeypatch.setattr(
         updater.sys,
         "argv",
         [r"C:\Users\worker\.local\bin\flocks", "start", "--reload", "--port", "8000"],
     )
-    monkeypatch.setattr(
-        updater.shutil,
-        "which",
-        lambda name: r"C:\Users\worker\.local\bin\flocks.exe" if name in {
-            r"C:\Users\worker\.local\bin\flocks",
-            r"C:\Users\worker\.local\bin\flocks.exe",
-        } else None,
-    )
 
-    assert updater._build_restart_argv() == [
-        r"C:\Users\worker\.local\bin\flocks.exe",
+    assert updater._build_restart_argv(tmp_path) == [
+        str(tmp_path / ".venv" / "Scripts" / "python.exe"),
+        "-m",
+        "flocks.cli.main",
         "start",
         "--port",
         "8000",
     ]
 
 
-def test_build_restart_argv_preserves_python_script_path_from_orig_argv(
+def test_build_restart_argv_restores_module_mode_on_non_windows(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.sys, "executable", r"C:\Python312\python.exe")
-    monkeypatch.setattr(
-        updater.sys,
-        "argv",
-        [r"C:\Users\worker\.local\bin\flocks", "start"],
-    )
-    monkeypatch.setattr(
-        updater.sys,
-        "orig_argv",
-        [r"C:\Python312\python.exe", r"C:\Users\worker\.local\bin\flocks", "start"],
-    )
-    monkeypatch.setattr(
-        updater.shutil,
-        "which",
-        lambda name: r"C:\Python312\python.exe" if name == r"C:\Python312\python.exe" else None,
-    )
+    package_dir = tmp_path / "flocks"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    main_path = package_dir / "__main__.py"
+    main_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.sys, "executable", "/usr/bin/python3")
+    monkeypatch.setattr(updater.sys, "argv", [str(main_path), "start", "--reload"])
 
     assert updater._build_restart_argv() == [
-        r"C:\Python312\python.exe",
-        r"C:\Users\worker\.local\bin\flocks",
-        "start",
-    ]
-
-
-def test_build_restart_argv_prefers_windows_orig_argv_launcher(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.sys, "executable", r"C:\Python312\python.exe")
-    monkeypatch.setattr(
-        updater.sys,
-        "argv",
-        [r"C:\Users\worker\.local\bin\flocks", "start"],
-    )
-    monkeypatch.setattr(
-        updater.sys,
-        "orig_argv",
-        [r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe", "start"],
-    )
-    monkeypatch.setattr(
-        updater.shutil,
-        "which",
-        lambda name: r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe" if name == r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe" else None,
-    )
-
-    assert updater._build_restart_argv() == [
-        r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe",
-        "start",
-    ]
-
-
-def test_build_restart_argv_preserves_windows_module_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.sys, "executable", r"C:\Python312\python.exe")
-    monkeypatch.setattr(
-        updater.sys,
-        "argv",
-        [r"C:\repo\flocks\__main__.py", "start", "--reload"],
-    )
-    monkeypatch.setattr(
-        updater.sys,
-        "orig_argv",
-        [r"C:\Windows\py.exe", "-m", "flocks", "start", "--reload"],
-    )
-    monkeypatch.setattr(
-        updater.shutil,
-        "which",
-        lambda name: r"C:\Windows\py.exe" if name == r"C:\Windows\py.exe" else None,
-    )
-
-    assert updater._build_restart_argv() == [
-        r"C:\Windows\py.exe",
+        "/usr/bin/python3",
         "-m",
         "flocks",
         "start",
     ]
 
 
-def test_build_restart_argv_falls_back_to_path_launcher_name_when_orig_argv_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.sys, "executable", r"C:\Python312\python.exe")
-    monkeypatch.setattr(
-        updater.sys,
-        "argv",
-        [r"C:\Users\worker\.local\bin\flocks", "start"],
-    )
-    monkeypatch.delattr(updater.sys, "orig_argv", raising=False)
-    monkeypatch.setattr(
-        updater.shutil,
-        "which",
-        lambda name: r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe" if name in {
-            "flocks.exe",
-            "flocks",
-        } else None,
+@pytest.mark.asyncio
+async def test_validate_windows_restart_runtime_requires_venv_python(tmp_path: Path) -> None:
+    assert await updater._validate_windows_restart_runtime(tmp_path) == (
+        f"Windows restart runtime is missing: {tmp_path / '.venv' / 'Scripts' / 'python.exe'}"
     )
 
-    assert updater._build_restart_argv() == [
-        r"C:\Users\worker\AppData\Roaming\uv\bin\flocks.exe",
-        "start",
-    ]
+
+@pytest.mark.asyncio
+async def test_validate_windows_restart_runtime_reports_import_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    async def fake_run_async(cmd, cwd=None, timeout=None):
+        return 1, "", "No module named uvicorn"
+
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+
+    assert await updater._validate_windows_restart_runtime(tmp_path) == (
+        "Windows restart runtime validation failed: No module named uvicorn"
+    )
 
 
 def test_rmtree_onerror_retries_before_logging_skip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -562,6 +498,11 @@ def test_start_upgrade_page_server_binds_configured_frontend_host(
     monkeypatch.setattr(updater, "_write_upgrade_page", lambda _version: page_dir)
     monkeypatch.setattr(updater, "_wait_for_upgrade_page", lambda config: captured.setdefault("wait_host", config.frontend_host))
     monkeypatch.setattr(
+        service_manager,
+        "resolve_python_subprocess_command",
+        lambda _root=None: ["/env/bin/python"],
+    )
+    monkeypatch.setattr(
         updater,
         "_spawn_detached_process",
         lambda command, *, cwd, log_path: captured.update({
@@ -576,7 +517,7 @@ def test_start_upgrade_page_server_binds_configured_frontend_host(
 
     assert payload["upgrade_server_pid"] == 4321
     assert captured["command"] == [
-        updater.sys.executable,
+        "/env/bin/python",
         "-m",
         "http.server",
         "5173",
@@ -1081,3 +1022,138 @@ async def test_perform_update_no_orphan_state_when_generator_abandoned_before_ha
 
     assert "handover" not in events
     assert updater._read_upgrade_state() is None
+
+
+@pytest.mark.asyncio
+async def test_perform_update_spawns_restart_process_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    popen_calls: list[tuple[list[str], Path, bool]] = []
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None):
+        return 0, "", ""
+
+    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
+        return None
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, cwd=None, close_fds=False: popen_calls.append((list(argv), cwd, close_fds)) or SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
+    monkeypatch.setattr(updater.os, "execv", lambda *_args: events.append("execv"))
+
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1"):
+            pass
+
+    assert popen_calls == [
+        ([r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"], tmp_path / "install-root", True),
+    ]
+    assert events == ["handover"]
+    assert "execv" not in events
+
+
+@pytest.mark.asyncio
+async def test_perform_update_stops_when_windows_restart_runtime_validation_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None):
+        return 0, "", ""
+
+    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
+        return "No module named uvicorn"
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: events.append("marker"))
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: events.append("popen"))
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert progresses[-1].message == "No module named uvicorn"
+    assert events == ["restore"]
