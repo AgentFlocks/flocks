@@ -94,6 +94,7 @@ export default function ModelPage() {
   const sseRefetchTimer = useRef<number | null>(null);
   const selectedProviderRef = useRef(selectedProvider);
   selectedProviderRef.current = selectedProvider;
+  const providerLoadSeqRef = useRef(0);
   const handleSelectProviderRef = useRef<(p: EnrichedProvider) => Promise<void>>(null!);
 
   useSSE({
@@ -173,23 +174,37 @@ export default function ModelPage() {
   // ==================== Handlers ====================
 
   const handleSelectProvider = useCallback(async (provider: EnrichedProvider) => {
+    const requestSeq = ++providerLoadSeqRef.current;
     setSelectedProvider(provider);
     sessionStorage.setItem('model_page_selected_provider', provider.id);
+    setCredentials(null);
+    setProviderModels([]);
+    setLoadingModels(true);
 
     try {
-      setLoadingModels(true);
+      const modelsRes = await modelV2API
+        .listDefinitions({ provider: provider.id })
+        .catch(() => ({ data: { models: [], total: 0 } }));
 
-      const [modelsRes, credentialsRes] = await Promise.all([
-        modelV2API.listDefinitions({ provider: provider.id }).catch(() => ({ data: { models: [], total: 0 } })),
-        providerAPI.getCredentials(provider.id).catch(() => ({ data: null })),
-      ]);
+      if (providerLoadSeqRef.current !== requestSeq) return;
 
       const models = modelsRes.data.models || [];
       setProviderModels(models);
-      setCredentials(credentialsRes.data);
+      setLoadingModels(false);
+
+      void providerAPI
+        .getCredentials(provider.id)
+        .then((credentialsRes) => {
+          if (providerLoadSeqRef.current !== requestSeq) return;
+          setCredentials(credentialsRes.data);
+        })
+        .catch(() => {
+          if (providerLoadSeqRef.current !== requestSeq) return;
+          setCredentials(null);
+        });
 
       const enabledMap: Record<string, boolean> = {};
-      await Promise.all(
+      await Promise.allSettled(
         models.map(async (m) => {
           try {
             const res = await modelSettingsAPI.get(provider.id, m.id);
@@ -199,11 +214,13 @@ export default function ModelPage() {
           }
         })
       );
+
+      if (providerLoadSeqRef.current !== requestSeq) return;
       setModelEnabledMap(prev => ({ ...prev, ...enabledMap }));
     } catch {
+      if (providerLoadSeqRef.current !== requestSeq) return;
       setProviderModels([]);
       setCredentials(null);
-    } finally {
       setLoadingModels(false);
     }
   }, []);
