@@ -41,6 +41,17 @@ router = APIRouter()
 log = Log.create(service="skill-routes")
 
 
+async def _refresh_agents_for_skill_change() -> None:
+    """Invalidate agent cache so the next agent load sees latest skills."""
+    try:
+        from flocks.agent.registry import Agent
+
+        Agent.invalidate_cache()
+        log.info("skills.agents_cache_invalidated")
+    except Exception as e:
+        log.warning("skills.agents_refresh_failed", {"error": str(e)})
+
+
 # =============================================================================
 # Request/Response Models
 # =============================================================================
@@ -246,6 +257,7 @@ async def refresh_skills():
     """
     try:
         skills = await Skill.refresh()
+        await _refresh_agents_for_skill_change()
         log.info("skills.refreshed", {"count": len(skills)})
         return {
             "status": "success",
@@ -276,6 +288,7 @@ async def install_skill(req: SkillInstallRequest):
                 status_code=422,
                 detail=result.error or "Install failed",
             )
+        await _refresh_agents_for_skill_change()
         log.info("skill.install.api.ok", {"source": req.source, "name": result.skill_name})
         return SkillInstallResponse(
             success=result.success,
@@ -364,6 +377,7 @@ async def create_skill(req: SkillCreateRequest):
         skill_path.write_text(full_content, encoding="utf-8")
 
         Skill.clear_cache()
+        await _refresh_agents_for_skill_change()
 
         log.info("skill.created", {"name": req.name, "path": str(skill_path)})
 
@@ -431,6 +445,7 @@ async def update_skill(name: str, req: SkillCreateRequest):
             log.info("skill.updated", {"name": name, "path": location})
 
         Skill.clear_cache()
+        await _refresh_agents_for_skill_change()
         return SkillResponse(
             name=req.name,
             description=req.description,
@@ -469,6 +484,7 @@ async def delete_skill(name: str):
             shutil.rmtree(skill_dir)
 
         Skill.clear_cache()
+        await _refresh_agents_for_skill_change()
 
         log.info("skill.deleted", {"name": name})
         return None

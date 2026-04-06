@@ -23,24 +23,36 @@ export default function SkillPage() {
   const [showCreateSheet, setShowCreateSheet] = useState(false);
   const [showInstallDialog, setShowInstallDialog] = useState(false);
 
-  const fetchSkills = async () => {
+  const fetchSkills = async ({ silent = false }: { silent?: boolean } = {}) => {
     try {
-      setLoading(true);
-      setError(null);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
       // Use /status endpoint to get eligibility info
       const response = await skillAPI.status();
       setSkills(Array.isArray(response.data) ? response.data : []);
+      if (!silent) {
+        setError(null);
+      }
     } catch {
       // Fallback to plain list if status endpoint isn't available yet
       try {
         const fallback = await skillAPI.list();
         setSkills(Array.isArray(fallback.data) ? fallback.data : []);
+        if (!silent) {
+          setError(null);
+        }
       } catch (listErr: unknown) {
-        setError(listErr instanceof Error ? listErr.message : t('fetchListFailed'));
-        setSkills([]);
+        if (!silent) {
+          setError(listErr instanceof Error ? listErr.message : t('fetchListFailed'));
+          setSkills([]);
+        }
       }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -70,7 +82,7 @@ export default function SkillPage() {
       setRefreshing(true);
       // Ensure a minimum spin duration so the animation is clearly visible
       await Promise.all([
-        skillAPI.refresh().then(() => fetchSkills()),
+        skillAPI.refresh().then(() => fetchSkills({ silent: true })),
         new Promise((r) => setTimeout(r, 600)),
       ]);
       setRefreshDone(true);
@@ -80,6 +92,15 @@ export default function SkillPage() {
     } finally {
       setRefreshing(false);
     }
+  };
+
+  const refreshSkillsAndFetch = async () => {
+    try {
+      await skillAPI.refresh();
+    } catch {
+      // Fall back to a plain fetch if refresh is temporarily unavailable.
+    }
+    await fetchSkills({ silent: true });
   };
 
   const handleSelectSkill = async (skill: Skill) => {
@@ -99,7 +120,7 @@ export default function SkillPage() {
       const allOk = res.data.results.every(r => r.success);
       if (allOk) {
         toast.success(t('eligibility.installSuccess'));
-        fetchSkills();
+        fetchSkills({ silent: true });
       } else {
         const errors = res.data.results
           .filter(r => !r.success)
@@ -115,7 +136,7 @@ export default function SkillPage() {
   };
 
   const handleInstalled = () => {
-    fetchSkills();
+    refreshSkillsAndFetch();
   };
 
   const handleDeleteFromCard = async (skill: Skill, e: React.MouseEvent) => {
@@ -124,7 +145,7 @@ export default function SkillPage() {
     if (!confirm(t('sheet.deleteConfirm', { name: skill.name }))) return;
     try {
       await skillAPI.delete(skill.name);
-      fetchSkills();
+      fetchSkills({ silent: true });
     } catch (err: unknown) {
       toast.error(t('sheet.deleteFailed'), err instanceof Error ? err.message : String(err));
     }
@@ -143,7 +164,7 @@ export default function SkillPage() {
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
-          <button onClick={fetchSkills} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
+          <button onClick={() => fetchSkills()} className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700">
             {t('common:button.retry')}
           </button>
         </div>
@@ -288,8 +309,8 @@ export default function SkillPage() {
         <SkillSheet
           skill={sheetSkill}
           onClose={() => setSheetSkill(null)}
-          onSaved={() => { fetchSkills(); setSheetSkill(null); }}
-          onDeleted={() => { fetchSkills(); setSheetSkill(null); }}
+          onSaved={() => { fetchSkills({ silent: true }); setSheetSkill(null); }}
+          onDeleted={() => { fetchSkills({ silent: true }); setSheetSkill(null); }}
         />
       )}
 
@@ -297,7 +318,10 @@ export default function SkillPage() {
       {showCreateSheet && (
         <SkillSheet
           onClose={() => setShowCreateSheet(false)}
-          onSaved={() => { fetchSkills(); setShowCreateSheet(false); }}
+          onSaved={async () => {
+            setShowCreateSheet(false);
+            await refreshSkillsAndFetch();
+          }}
         />
       )}
 
