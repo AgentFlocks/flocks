@@ -9,8 +9,8 @@ import EmptyState from '@/components/common/EmptyState';
 import SessionChat from '@/components/common/SessionChat';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
-import { useQueueItems } from '@/hooks/useTasks';
-import { taskAPI, Task, TaskListParams } from '@/api/task';
+import { useTaskExecutions } from '@/hooks/useTasks';
+import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 
@@ -20,7 +20,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   const [page, setPage] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
-  const [detailTask, setDetailTask] = useState<Task | null>(null);
+  const [detailTask, setDetailTask] = useState<TaskExecution | null>(null);
   const toast = useToast();
   const confirm = useConfirm();
 
@@ -33,8 +33,9 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   const currentFilter = QUEUED_FILTERS.find(f => f.key === filterKey)?.filter ?? {};
   const listParams = { ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
 
-  const { tasks, total, loading, error, refetch } = useQueueItems(listParams, { pollInterval: 5000 });
+  const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const refresh = useCallback(() => { refetch(); onRefreshGlobal(); }, [refetch, onRefreshGlobal]);
 
   // Keep detailTask in sync: update from list data when available,
   // but never clear it just because the task left the current page.
@@ -44,20 +45,28 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     if (found) setDetailTask(found);
   }, [tasks, selectedId]);
 
-  // When the user selects a task, also fetch it directly to be sure
-  // we have the latest data even if it's not on the current page.
-  const fetchDetailTask = useCallback(async (task: Task) => {
-    if (task.taskID) {
-      setDetailTask(task);
-      return;
+  const markViewedIfNeeded = useCallback(async (task: TaskExecution) => {
+    if (task.status !== 'completed' || task.deliveryStatus !== 'unread') {
+      return task;
     }
     try {
-      const res = await taskAPI.get(task.id);
-      setDetailTask(res.data);
-    } catch { /* ignore — list sync will cover it */ }
-  }, []);
+      const res = await taskAPI.markExecutionViewed(task.id);
+      refresh();
+      return res.data;
+    } catch {
+      return task;
+    }
+  }, [refresh]);
 
-  const refresh = useCallback(() => { refetch(); onRefreshGlobal(); }, [refetch, onRefreshGlobal]);
+  // When the user selects a task, also fetch it directly to be sure
+  // we have the latest data even if it's not on the current page.
+  const fetchDetailTask = useCallback(async (task: TaskExecution) => {
+    try {
+      const res = await taskAPI.getExecution(task.id);
+      const detail = await markViewedIfNeeded(res.data);
+      setDetailTask(detail);
+    } catch { /* ignore — list sync will cover it */ }
+  }, [markViewedIfNeeded]);
 
   const refreshWithDetail = useCallback(() => {
     refresh();
@@ -72,7 +81,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setDetailTask(null);
   }, []);
 
-  const openDetail = useCallback((task: Task) => {
+  const openDetail = useCallback((task: TaskExecution) => {
     if (selectedId === task.id) {
       closeDetail();
       return;
@@ -82,27 +91,17 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     fetchDetailTask(task);
   }, [selectedId, closeDetail, fetchDetailTask]);
 
-  const isScheduledExecutionItem = useCallback(
-    (task?: Task | null) => task?.source?.sourceType === 'scheduled_trigger' && !!task?.taskID,
-    [],
-  );
-
   const handleAction = async (action: string, taskId: string) => {
     try {
-      const item = tasks.find(t => t.id === taskId);
-      const isScheduledExecution = isScheduledExecutionItem(item);
-      const targetId = item?.taskID ?? taskId;
       switch (action) {
         case 'cancel':
-          if (isScheduledExecution) await taskAPI.cancelQueueItem(taskId);
-          else await taskAPI.cancel(targetId);
+          await taskAPI.cancelExecution(taskId);
           break;
-        case 'pause':  await taskAPI.pause(targetId);  break;
-        case 'resume': await taskAPI.resume(targetId); break;
-        case 'retry':  await taskAPI.retry(targetId);  break;
+        case 'pause':  await taskAPI.pauseExecution(taskId);  break;
+        case 'resume': await taskAPI.resumeExecution(taskId); break;
+        case 'retry':  await taskAPI.retryExecution(taskId);  break;
         case 'rerun':
-          if (isScheduledExecution) await taskAPI.rerunQueueItem(taskId);
-          else await taskAPI.rerun(targetId);
+          await taskAPI.rerunExecution(taskId);
           break;
         case 'delete': {
           const ok = await confirm({
@@ -111,8 +110,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
             confirmText: t('common:button.delete'),
           });
           if (!ok) return;
-          if (isScheduledExecution) await taskAPI.deleteQueueItem(taskId);
-          else await taskAPI.delete(targetId);
+          await taskAPI.deleteExecution(taskId);
           if (selectedId === taskId) closeDetail();
           break;
         }
@@ -140,18 +138,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     if (!ok) return;
     const selectedItems = [...selectedTasks]
       .map(id => tasks.find(t => t.id === id))
-      .filter((task): task is Task => !!task);
-    const scheduledItemIDs = selectedItems
-      .filter(task => isScheduledExecutionItem(task))
-      .map(task => task.id);
-    const manualTaskIDs = selectedItems
-      .filter(task => !isScheduledExecutionItem(task))
-      .map(task => task.id);
-
-    await Promise.all([
-      ...(manualTaskIDs.length > 0 ? [taskAPI.batchCancel([...new Set(manualTaskIDs)])] : []),
-      ...scheduledItemIDs.map(itemId => taskAPI.cancelQueueItem(itemId)),
-    ]);
+      .filter((task): task is TaskExecution => !!task);
+    await taskAPI.batchCancelExecutions([...new Set(selectedItems.map(task => task.id))]);
     setSelectedTasks(new Set());
     refresh();
   };
@@ -166,18 +154,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     if (!ok) return;
     const selectedItems = [...selectedTasks]
       .map(id => tasks.find(t => t.id === id))
-      .filter((task): task is Task => !!task);
-    const scheduledItemIDs = selectedItems
-      .filter(task => isScheduledExecutionItem(task))
-      .map(task => task.id);
-    const manualTaskIDs = selectedItems
-      .filter(task => !isScheduledExecutionItem(task))
-      .map(task => task.id);
-
-    await Promise.all([
-      ...(manualTaskIDs.length > 0 ? [taskAPI.batchDelete([...new Set(manualTaskIDs)])] : []),
-      ...scheduledItemIDs.map(itemId => taskAPI.deleteQueueItem(itemId)),
-    ]);
+      .filter((task): task is TaskExecution => !!task);
+    await taskAPI.batchDeleteExecutions([...new Set(selectedItems.map(task => task.id))]);
     setSelectedTasks(new Set());
     if (selectedId && selectedTasks.has(selectedId)) closeDetail();
     refresh();
@@ -260,8 +238,10 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                     <td className="px-3 py-3"><ModeBadge mode={task.executionMode} agent={task.agentName} /></td>
                     <td className="px-3 py-3"><PriorityBadge priority={task.priority} /></td>
                     <td className="px-3 py-3 text-gray-400 text-xs whitespace-nowrap">
-                      {task.execution?.startedAt
-                        ? formatTime(task.execution.startedAt)
+                      {task.startedAt
+                        ? formatTime(task.startedAt)
+                        : task.queuedAt
+                        ? formatTime(task.queuedAt)
                         : formatTime(task.createdAt)}
                     </td>
                   </tr>
@@ -293,7 +273,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 }
 
 function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
-  task: Task;
+  task: TaskExecution;
   onClose: () => void;
   onAction: (action: string, taskId: string) => void;
   onRefresh?: () => void;
@@ -302,9 +282,8 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   const DRAWER_MIN_WIDTH = 480;
   const DRAWER_MAX_WIDTH = 960;
   const { t } = useTranslation('task');
-  const sessionId = task.execution?.sessionID;
+  const sessionId = task.sessionID;
   const isActive = ['queued', 'running'].includes(task.status);
-  const isScheduledExecution = task.source?.sourceType === 'scheduled_trigger' && !!task.taskID;
   const emptyText = ['pending', 'queued'].includes(task.status)
     ? t('queued.detailWaiting')
     : t('queued.detailNoRecord');
@@ -370,8 +349,8 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             <StatusBadge status={task.status} />
             <PriorityBadge priority={task.priority} />
             <ModeBadge mode={task.executionMode} agent={task.agentName} />
-            {task.execution?.durationMs != null && (
-              <span className="text-xs text-gray-400">{formatDuration(task.execution.durationMs)}</span>
+            {task.durationMs != null && (
+              <span className="text-xs text-gray-400">{formatDuration(task.durationMs)}</span>
             )}
           </div>
 
@@ -379,23 +358,23 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
             <p className="text-xs text-gray-500 break-words">{task.description}</p>
           )}
 
-          {task.tags.length > 0 && (
+          {(task.executionInputSnapshot?.tags?.length ?? 0) > 0 && (
             <div className="flex flex-wrap gap-1">
-              {task.tags.map(tag => <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>)}
+              {task.executionInputSnapshot.tags.map((tag: string) => <span key={tag} className="px-1.5 py-0.5 bg-gray-100 text-gray-500 rounded text-xs">{tag}</span>)}
             </div>
           )}
 
           <div className="flex flex-wrap gap-1.5">
-            {!isScheduledExecution && (task.status === 'running' || task.status === 'queued') && (
+            {(task.status === 'running' || task.status === 'queued') && (
               <ActionButton icon={<Pause className="w-3 h-3" />} label={t('queued.actionPause')} onClick={() => onAction('pause', task.id)} color="yellow" />
             )}
-            {!isScheduledExecution && task.status === 'paused' && (
+            {task.status === 'paused' && (
               <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionResume')} onClick={() => onAction('resume', task.id)} color="green" />
             )}
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
               <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
             )}
-            {!isScheduledExecution && task.status === 'failed' && (
+            {task.status === 'failed' && (
               <ActionButton icon={<RotateCcw className="w-3 h-3" />} label={t('queued.actionRetry')} onClick={() => onAction('retry', task.id)} color="blue" />
             )}
             {['completed', 'cancelled', 'failed'].includes(task.status) && (
@@ -412,10 +391,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
           emptyText={emptyText}
           className="flex-1 min-h-0"
           onSSEEvent={(event) => {
-            // task.updated fires when session_id is linked (backend emits it immediately).
-            // Trigger a task-list refresh so the new sessionId propagates to this panel
-            // without waiting for the next polling cycle.
-            if (event.type === 'task.updated' && event.properties?.taskID === (task.taskID ?? task.id)) {
+            if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
               onRefresh?.();
             }
           }}

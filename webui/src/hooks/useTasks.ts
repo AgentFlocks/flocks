@@ -1,27 +1,33 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   taskAPI,
-  Task,
+  TaskExecution,
   TaskListParams,
-  TaskExecutionRecord,
+  TaskScheduler,
+  SchedulerListParams,
   DashboardCounts,
   QueueStatus,
+  TaskSystemNotice,
 } from '@/api/task';
 
-const ACTIVE_STATUSES = new Set(['pending', 'queued', 'running']);
+const ACTIVE_EXECUTION_STATUSES = new Set(['pending', 'queued', 'running']);
+const ACTIVE_SCHEDULER_STATUSES = new Set(['active']);
 
-export function useTasks(filters?: TaskListParams, options?: { pollInterval?: number }) {
-  const [tasks, setTasks] = useState<Task[]>([]);
+export function useTaskSchedulers(
+  filters?: SchedulerListParams,
+  options?: { pollInterval?: number },
+) {
+  const [tasks, setTasks] = useState<TaskScheduler[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const tasksRef = useRef<Task[]>([]);
+  const tasksRef = useRef<TaskScheduler[]>([]);
 
   const fetchTasks = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await taskAPI.list(filters);
+      const response = await taskAPI.listSchedulers(filters);
       const data = response.data;
       const items = data.items ?? [];
       setTasks(items);
@@ -36,9 +42,8 @@ export function useTasks(filters?: TaskListParams, options?: { pollInterval?: nu
     }
   }, [
     filters?.status,
-    filters?.type,
     filters?.priority,
-    filters?.deliveryStatus,
+    filters?.scheduledOnly,
     filters?.sortBy,
     filters?.sortOrder,
     filters?.offset,
@@ -55,7 +60,7 @@ export function useTasks(filters?: TaskListParams, options?: { pollInterval?: nu
     if (!baseInterval) return;
 
     const schedule = () => {
-      const hasActive = tasksRef.current.some(t => ACTIVE_STATUSES.has(t.status));
+      const hasActive = tasksRef.current.some(t => ACTIVE_SCHEDULER_STATUSES.has(t.status));
       return hasActive ? Math.min(baseInterval, 4000) : baseInterval;
     };
 
@@ -73,25 +78,28 @@ export function useTasks(filters?: TaskListParams, options?: { pollInterval?: nu
   return { tasks, total, loading, error, refetch: fetchTasks };
 }
 
-export function useQueueItems(filters?: Omit<TaskListParams, 'type'>, options?: { pollInterval?: number }) {
-  const [tasks, setTasks] = useState<Task[]>([]);
+export function useTaskExecutions(
+  filters?: TaskListParams & { schedulerID?: string },
+  options?: { pollInterval?: number },
+) {
+  const [tasks, setTasks] = useState<TaskExecution[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const tasksRef = useRef<Task[]>([]);
+  const tasksRef = useRef<TaskExecution[]>([]);
 
   const fetchTasks = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await taskAPI.listQueueItems(filters);
+      const response = await taskAPI.listExecutions(filters);
       const data = response.data;
       const items = data.items ?? [];
       setTasks(items);
       setTotal(data.total ?? 0);
       tasksRef.current = items;
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch queue items');
+      setError(err.message || 'Failed to fetch task executions');
       setTasks([]);
       setTotal(0);
     } finally {
@@ -101,6 +109,7 @@ export function useQueueItems(filters?: Omit<TaskListParams, 'type'>, options?: 
     filters?.status,
     filters?.priority,
     filters?.deliveryStatus,
+    filters?.schedulerID,
     filters?.sortBy,
     filters?.sortOrder,
     filters?.offset,
@@ -116,7 +125,7 @@ export function useQueueItems(filters?: Omit<TaskListParams, 'type'>, options?: 
     if (!baseInterval) return;
 
     const schedule = () => {
-      const hasActive = tasksRef.current.some(t => ACTIVE_STATUSES.has(t.status));
+      const hasActive = tasksRef.current.some(t => ACTIVE_EXECUTION_STATUSES.has(t.status));
       return hasActive ? Math.min(baseInterval, 4000) : baseInterval;
     };
 
@@ -134,24 +143,24 @@ export function useQueueItems(filters?: Omit<TaskListParams, 'type'>, options?: 
   return { tasks, total, loading, error, refetch: fetchTasks };
 }
 
-export function useTask(taskId?: string) {
-  const [task, setTask] = useState<Task | null>(null);
+export function useTaskScheduler(schedulerId?: string) {
+  const [task, setTask] = useState<TaskScheduler | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchTask = useCallback(async () => {
-    if (!taskId) return;
+    if (!schedulerId) return;
     try {
       setLoading(true);
       setError(null);
-      const response = await taskAPI.get(taskId);
+      const response = await taskAPI.getScheduler(schedulerId);
       setTask(response.data);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch task');
+      setError(err.message || 'Failed to fetch task scheduler');
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [schedulerId]);
 
   useEffect(() => {
     fetchTask();
@@ -191,26 +200,26 @@ export function useTaskDashboard(options?: { pollInterval?: number }) {
   return { counts, loading, error, refetch: fetchDashboard };
 }
 
-export function useTaskRecords(taskId?: string, params?: { offset?: number; limit?: number }) {
-  const [records, setRecords] = useState<TaskExecutionRecord[]>([]);
+export function useTaskExecutionsByScheduler(schedulerId?: string, params?: { offset?: number; limit?: number }) {
+  const [records, setRecords] = useState<TaskExecution[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchRecords = useCallback(async () => {
-    if (!taskId) return;
+    if (!schedulerId) return;
     try {
       setLoading(true);
       setError(null);
-      const response = await taskAPI.listRecords(taskId, params);
+      const response = await taskAPI.listSchedulerExecutions(schedulerId, params);
       setRecords(response.data.items ?? []);
       setTotal(response.data.total ?? 0);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch records');
+      setError(err.message || 'Failed to fetch executions');
     } finally {
       setLoading(false);
     }
-  }, [taskId, params?.offset, params?.limit]);
+  }, [schedulerId, params?.offset, params?.limit]);
 
   useEffect(() => {
     fetchRecords();
@@ -249,3 +258,29 @@ export function useQueueStatus(options?: { pollInterval?: number }) {
 
   return { queueStatus, loading, error, refetch: fetchQueueStatus };
 }
+
+export function useTaskSystemNotice() {
+  const [notice, setNotice] = useState<TaskSystemNotice | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchNotice = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await taskAPI.getSystemNotice();
+      setNotice(response.data ?? null);
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch system notice');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchNotice();
+  }, [fetchNotice]);
+
+  return { notice, loading, error, refetch: fetchNotice };
+}
+

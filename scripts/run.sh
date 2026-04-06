@@ -21,6 +21,7 @@ refresh_path() {
 
 main() {
   refresh_path
+  "$ROOT_DIR/scripts/run_legacy_task_migration.sh" "${1:-}" || true
 
   if command -v flocks >/dev/null 2>&1; then
     exec flocks "$@"

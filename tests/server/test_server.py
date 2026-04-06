@@ -7,6 +7,8 @@ from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 from flocks.server.app import app
+from flocks.task.manager import TaskManager
+from flocks.task.models import DeliveryStatus, SchedulerMode, TaskStatus, TaskTrigger
 
 
 @pytest.fixture
@@ -58,11 +60,73 @@ async def test_ping(client):
 
 @pytest.mark.asyncio
 async def test_queue_items_endpoint(client):
-    response = await client.get("/api/tasks/queue/items")
+    response = await client.get("/api/task-executions")
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert "items" in data
     assert "total" in data
+
+
+@pytest.mark.asyncio
+async def test_task_schedulers_scheduled_only_excludes_immediate_queue_templates(client):
+    await TaskManager.create_scheduler(
+        title="立即任务",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=True),
+    )
+    scheduled = await TaskManager.create_scheduler(
+        title="单次计划",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+
+    response = await client.get("/api/task-schedulers", params={"scheduledOnly": "true"})
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    ids = {item["id"] for item in data["items"]}
+
+    assert scheduled.id in ids
+    assert len(ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_task_schedulers_list_excludes_archived_builtin_after_delete(client):
+    scheduler = await TaskManager.create_scheduler(
+        title="内置计划任务",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
+        dedup_key="builtin:test-scheduled-task",
+    )
+
+    response = await client.delete(f"/api/task-schedulers/{scheduler.id}")
+    assert response.status_code == status.HTTP_200_OK
+
+    response = await client.get("/api/task-schedulers", params={"scheduledOnly": "true"})
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    ids = {item["id"] for item in data["items"]}
+
+    assert scheduler.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_mark_execution_viewed_endpoint_updates_delivery_status(client):
+    from flocks.task.store import TaskStore
+
+    scheduler = await TaskManager.create_scheduler(
+        title="标记已读",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=True),
+    )
+    execution = (await TaskManager.list_scheduler_executions(scheduler.id, limit=1))[0][0]
+    execution.status = TaskStatus.COMPLETED
+    execution.delivery_status = DeliveryStatus.UNREAD
+    await TaskStore.update_execution(execution)
+
+    response = await client.post(f"/api/task-executions/{execution.id}/viewed")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["deliveryStatus"] == "viewed"
 
 
 @pytest.mark.asyncio

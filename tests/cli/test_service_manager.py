@@ -420,6 +420,43 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     assert record.command[:3] == (service_manager.sys.executable, "-m", "uvicorn")
 
 
+def test_start_backend_runs_legacy_migration_before_launch(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    call_order: list[str] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "_run_legacy_task_migration",
+        lambda root, _console: call_order.append(f"migrate:{root}"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *_args, **_kwargs: (call_order.append("spawn"), SimpleNamespace(pid=2468))[1],
+    )
+
+    service_manager.start_backend(service_manager.ServiceConfig(), console)
+
+    assert call_order == [f"migrate:{tmp_path}", "spawn"]
+
+
 def test_build_frontend_env_uses_backend_host_and_port() -> None:
     config = service_manager.ServiceConfig(
         backend_host="10.0.0.8",

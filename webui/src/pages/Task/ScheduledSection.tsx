@@ -5,25 +5,28 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
-import { useTasks } from '@/hooks/useTasks';
-import { taskAPI, Task } from '@/api/task';
+import { useTaskSchedulers } from '@/hooks/useTasks';
+import { taskAPI, TaskScheduler } from '@/api/task';
 import { PriorityBadge, ModeBadge } from './components';
 import { describeCron, formatTime } from './helpers';
 import TaskSheet from './TaskSheet';
 
 export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
-  const [editingTask, setEditingTask] = useState<Task | null>(null);
-  const { tasks, loading, error, refetch } = useTasks({ type: 'scheduled', limit: 100 }, { pollInterval: 10000 });
+  const [editingTask, setEditingTask] = useState<TaskScheduler | null>(null);
+  const { tasks, loading, error, refetch } = useTaskSchedulers(
+    { limit: 100, scheduledOnly: true },
+    { pollInterval: 10000 },
+  );
   const toast = useToast();
   const confirm = useConfirm();
 
   const refresh = () => { refetch(); onRefreshGlobal(); };
 
-  const handleToggle = async (task: Task) => {
+  const handleToggle = async (task: TaskScheduler) => {
     try {
-      if (task.schedule?.enabled) await taskAPI.disableScheduled(task.id);
-      else await taskAPI.enableScheduled(task.id);
+      if (task.status === 'active') await taskAPI.disableScheduler(task.id);
+      else await taskAPI.enableScheduler(task.id);
       refresh();
     } catch (err: unknown) {
       toast.error(t('scheduled.actionFailed'), err instanceof Error ? err.message : String(err));
@@ -38,7 +41,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
     });
     if (!ok) return;
     try {
-      await taskAPI.delete(taskId);
+      await taskAPI.deleteScheduler(taskId);
       refresh();
     } catch (err: unknown) {
       toast.error(t('scheduled.deleteFailed'), err instanceof Error ? err.message : String(err));
@@ -75,17 +78,17 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {[...tasks].sort((a, b) => {
-                  const ae = a.schedule?.enabled ? 1 : 0;
-                  const be = b.schedule?.enabled ? 1 : 0;
+                  const ae = a.status === 'active' ? 1 : 0;
+                  const be = b.status === 'active' ? 1 : 0;
                   return be - ae;
                 }).map(task => {
-                  const enabled = task.schedule?.enabled ?? false;
-                  const runOnce = task.schedule?.runOnce ?? false;
-                  const cron = task.schedule?.cron ?? '';
+                  const enabled = task.status === 'active';
+                  const runOnce = task.mode === 'once';
+                  const cron = task.trigger?.cron ?? '';
                   const cronDesc = runOnce
                     ? t('scheduled.runOnce')
-                    : (task.schedule?.cronDescription || describeCron(cron));
-                  const nextRun = task.schedule?.nextRun ?? (runOnce ? task.schedule?.runAt : undefined);
+                    : (task.trigger?.cronDescription || describeCron(cron));
+                  const nextRun = task.trigger?.nextRun ?? (runOnce ? task.trigger?.runAt : undefined);
 
                   return (
                     <tr key={task.id} onClick={() => setEditingTask(task)} className="hover:bg-gray-50 transition-colors cursor-pointer">
