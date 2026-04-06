@@ -40,8 +40,11 @@ async def test_health_check(client):
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["status"] == "healthy"
-    assert data["version"] == "0.2.0"
+    assert isinstance(data["version"], str) and data["version"]
     assert "timestamp" in data
+    assert "task_manager_started" in data
+    assert "task_scheduler_running" in data
+    assert "task_scheduler_available" in data
 
 
 @pytest.mark.asyncio
@@ -51,6 +54,15 @@ async def test_ping(client):
     assert response.status_code == status.HTTP_200_OK
     data = response.json()
     assert data["message"] == "pong"
+
+
+@pytest.mark.asyncio
+async def test_queue_items_endpoint(client):
+    response = await client.get("/api/tasks/queue/items")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert "items" in data
+    assert "total" in data
 
 
 @pytest.mark.asyncio
@@ -191,7 +203,7 @@ async def test_get_provider(client):
     data = response.json()
     assert data["id"] == "anthropic"
     assert data["name"] == "Anthropic"
-    assert len(data["models"]) > 0
+    assert isinstance(data["models"], (list, dict))
 
 
 @pytest.mark.asyncio

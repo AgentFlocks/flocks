@@ -10,8 +10,10 @@ so the UI can start streaming immediately without any polling delay.
 """
 
 import asyncio
+from datetime import date
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Dict, Optional
 
 from flocks.utils.log import Log
 
@@ -19,6 +21,7 @@ from .models import (
     DeliveryStatus,
     ExecutionMode,
     Task,
+    TaskExecutionRecord,
     TaskExecution,
     TaskStatus,
 )
@@ -59,6 +62,7 @@ class TaskExecutor:
             session_id=session_id,
         )
         task = await TaskStore.update_task(task)
+        await cls._sync_running_record(task)
         log.info("task.dispatch", {
             "id": task.id,
             "mode": task.execution_mode.value,
@@ -141,23 +145,12 @@ class TaskExecutor:
         from flocks.session.session import Session
         from flocks.session.message import Message, MessageRole
 
-        directory, project_id = cls._resolve_project_context()
-        parent_session_id = task.source.session_id if task.source else None
-
-        if parent_session_id:
-            parent = await Session.get_by_id(parent_session_id)
-            if parent:
-                directory = parent.directory or directory
-                project_id = parent.project_id or project_id
-
-        if not project_id or not directory:
-            raise RuntimeError("Failed to resolve project context for task session")
+        directory, project_id = await cls._resolve_task_session_context(task)
 
         session = await Session.create(
             project_id=project_id,
             directory=directory,
             title=task.title,
-            parent_id=parent_session_id,
             agent=task.agent_name,
             category="task",
         )
@@ -176,6 +169,9 @@ class TaskExecutor:
     async def _run_agent_session(cls, task: Task, session_id: str) -> Optional[str]:
         """Run the agent loop on an already-created session."""
         from flocks.task.background import get_background_manager
+
+        if not session_id:
+            raise RuntimeError("Agent task session was not created")
 
         manager = get_background_manager()
         bg_task = await manager.run_existing_session(
@@ -224,46 +220,57 @@ class TaskExecutor:
 
         return str(result.outputs) if result.outputs else None
 
-    @staticmethod
-    def _resolve_project_context() -> tuple[Optional[str], Optional[str]]:
-        """Resolve directory and project_id from Instance context or cache."""
-        from flocks.project.instance import Instance
+    @classmethod
+    async def _resolve_task_session_context(cls, task: Task) -> tuple[str, str]:
+        """Resolve a standalone workspace directory and internal project_id."""
+        from flocks.project.project import Project
+        from flocks.workspace.manager import WorkspaceManager
 
-        directory = Instance.get_directory()
-        project = Instance.get_project()
-        project_id = project.id if project else None
+        if task.workspace_directory:
+            directory = Path(task.workspace_directory)
+        else:
+            workspace_root = WorkspaceManager.get_instance().get_workspace_dir()
+            today = date.today().isoformat()
+            directory = workspace_root / "tasks" / today / task.id
 
-        if directory and project_id:
-            return directory, project_id
-
-        cached = Instance.get_any_cached_context()
-        if cached:
-            log.warn("executor.project_context_fallback", {
-                "reason": "using cached context from another instance",
-                "directory": cached.directory,
-            })
-            return cached.directory, cached.project.id
-
-        return directory, project_id
+        directory.mkdir(parents=True, exist_ok=True)
+        project_ctx = await Project.from_directory(str(directory))
+        project = project_ctx.get("project")
+        project_id = getattr(project, "id", None)
+        if not project_id:
+            raise RuntimeError("Failed to resolve internal project context for task session")
+        return str(directory), project_id
 
     @staticmethod
     def _build_prompt(task: Task) -> str:
-        body = (
+        base_body = (
             task.source.user_prompt
             if task.source and task.source.user_prompt
             else task.description or task.title
         )
-        if task.context:
-            ctx_str = "\n".join(f"- {k}: {v}" for k, v in task.context.items())
-            body += f"\n\nAdditional context:\n{ctx_str}"
+        visible_context = {
+            k: v for k, v in (task.context or {}).items()
+            if not k.startswith("_")
+        }
 
-        # Scheduled-trigger tasks: prefer description over user_prompt (which
-        # may contain scheduling instructions like "每天9点…"), then prepend a
-        # directive so the agent knows NOT to create any new tasks.
-        if task.source and task.source.source_type == "scheduled_trigger":
+        # Scheduled tasks should execute as standalone work, without reusing
+        # the scheduling instructions that created the task definition.
+        if task.schedule is not None or (
+            task.source and task.source.source_type == "scheduled_trigger"
+        ):
             clean_body = task.description or task.title
-            if task.context:
-                ctx_str = "\n".join(f"- {k}: {v}" for k, v in task.context.items())
+            user_prompt = (
+                task.source.user_prompt.strip()
+                if task.source and task.source.user_prompt
+                else ""
+            )
+            if user_prompt:
+                if clean_body and user_prompt != clean_body:
+                    clean_body += f"\n\nAdditional instructions:\n{user_prompt}"
+                else:
+                    clean_body = user_prompt
+            if visible_context:
+                ctx_str = "\n".join(f"- {k}: {v}" for k, v in visible_context.items())
                 clean_body += f"\n\nAdditional context:\n{ctx_str}"
             header = (
                 "[Scheduled task automated execution — "
@@ -272,4 +279,27 @@ class TaskExecutor:
             )
             return header + clean_body
 
+        body = base_body
+        if visible_context:
+            ctx_str = "\n".join(f"- {k}: {v}" for k, v in visible_context.items())
+            body += f"\n\nAdditional context:\n{ctx_str}"
         return body
+
+    @staticmethod
+    async def _sync_running_record(task: Task) -> None:
+        record_id = (task.context or {}).get("_execution_record_id")
+        if not record_id or not task.execution:
+            return
+        record = TaskExecutionRecord(
+            id=record_id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+            started_at=task.execution.started_at,
+            completed_at=None,
+            duration_ms=None,
+            result_summary=None,
+            error=None,
+            session_id=task.execution.session_id,
+            delivery_status=task.delivery_status,
+        )
+        await TaskStore.update_record(record)

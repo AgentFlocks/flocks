@@ -185,7 +185,11 @@
     "entityType": "任务",
     "saveFailed": "保存失败",
     "createFailed": "创建失败",
-    "extractTimeout": "提取超时。请在对话中让 Rex 输出 JSON 格式的配置，然后再试。"
+    "extractTimeout": "提取超时。请在对话中让 Rex 输出 JSON 格式的配置，然后再试。",
+    "selfContainedHint": "定时任务执行时会创建全新的 Rex 会话，不再继承父 session；请把执行上下文直接写在描述或任务补充信息里。",
+    "recentRuns": "最近运行",
+    "recentRunsEmpty": "暂无运行记录",
+    "recentRunsLoading": "正在加载运行记录..."
   },
   "dashboard": {
     "completedWeek": "7日内完成",

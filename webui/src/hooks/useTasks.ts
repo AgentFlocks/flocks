@@ -73,6 +73,67 @@ export function useTasks(filters?: TaskListParams, options?: { pollInterval?: nu
   return { tasks, total, loading, error, refetch: fetchTasks };
 }
 
+export function useQueueItems(filters?: Omit<TaskListParams, 'type'>, options?: { pollInterval?: number }) {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const tasksRef = useRef<Task[]>([]);
+
+  const fetchTasks = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await taskAPI.listQueueItems(filters);
+      const data = response.data;
+      const items = data.items ?? [];
+      setTasks(items);
+      setTotal(data.total ?? 0);
+      tasksRef.current = items;
+    } catch (err: any) {
+      setError(err.message || 'Failed to fetch queue items');
+      setTasks([]);
+      setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    filters?.status,
+    filters?.priority,
+    filters?.deliveryStatus,
+    filters?.sortBy,
+    filters?.sortOrder,
+    filters?.offset,
+    filters?.limit,
+  ]);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
+  useEffect(() => {
+    const baseInterval = options?.pollInterval;
+    if (!baseInterval) return;
+
+    const schedule = () => {
+      const hasActive = tasksRef.current.some(t => ACTIVE_STATUSES.has(t.status));
+      return hasActive ? Math.min(baseInterval, 4000) : baseInterval;
+    };
+
+    let timerId: ReturnType<typeof setTimeout>;
+
+    const tick = async () => {
+      await fetchTasks();
+      timerId = setTimeout(tick, schedule());
+    };
+
+    timerId = setTimeout(tick, schedule());
+    return () => clearTimeout(timerId);
+  }, [fetchTasks, options?.pollInterval]);
+
+  return { tasks, total, loading, error, refetch: fetchTasks };
+}
+
 export function useTask(taskId?: string) {
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState(false);

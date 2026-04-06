@@ -258,9 +258,11 @@ class TestSchedulerDedup:
                 await TaskStore.update_task(tmpl)
             await sched._tick()
 
-        queued, total = await TaskStore.list_tasks(task_type=TaskType.QUEUED, limit=50)
-        assert total == 1, f"Expected 1 queued instance, got {total}"
-        assert queued[0].dedup_key == f"scheduled:{template.id}"
+        queued_ref = await TaskStore.get_active_queue_ref(template.id)
+        assert queued_ref is not None
+
+        records, total = await TaskStore.list_records(template.id, limit=50)
+        assert total == 1, f"Expected 1 execution record, got {total}"
 
     @pytest.mark.asyncio
     async def test_new_instance_after_previous_completes(self):
@@ -281,27 +283,27 @@ class TestSchedulerDedup:
         )
         await TaskStore.create_task(template)
 
-        # First tick — creates instance
+        # First tick — creates a queue ref
         await sched._tick()
-        queued, _ = await TaskStore.list_tasks(task_type=TaskType.QUEUED, limit=10)
-        assert len(queued) == 1
-        first_instance = queued[0]
+        first_ref = await TaskStore.get_active_queue_ref(template.id)
+        assert first_ref is not None
 
-        # Mark instance as COMPLETED (simulates executor finishing)
-        first_instance.status = TaskStatus.COMPLETED
-        await TaskStore.update_task(first_instance)
+        # Mark task as COMPLETED and release the queue ref (simulates executor finishing)
+        template_after_first_tick = await TaskStore.get_task(template.id)
+        template_after_first_tick.status = TaskStatus.COMPLETED
+        await TaskStore.update_task(template_after_first_tick)
+        await TaskStore.finish_queue_ref(template.id)
 
-        # Second tick — should create a new instance now
+        # Second tick — should create a new queue ref now
         tmpl = await TaskStore.get_task(template.id)
         if tmpl.schedule:
             tmpl.schedule.next_run = datetime(2020, 1, 1, tzinfo=timezone.utc)
             await TaskStore.update_task(tmpl)
         await sched._tick()
 
-        # Filter by status=QUEUED (not type, which would include the completed one too)
-        active_queued, total = await TaskStore.list_tasks(status=TaskStatus.QUEUED, limit=10)
-        assert total == 1
-        assert active_queued[0].id != first_instance.id
+        second_ref = await TaskStore.get_active_queue_ref(template.id)
+        assert second_ref is not None
+        assert second_ref.id != first_ref.id
 
 
 # ---------------------------------------------------------------------------

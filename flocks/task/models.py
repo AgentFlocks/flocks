@@ -70,7 +70,7 @@ class TaskSource(BaseModel):
     )
     session_id: Optional[str] = Field(
         None, alias="sessionID",
-        description="Session ID where this task was created",
+        description="Legacy session reference kept only for compatibility",
     )
     user_prompt: Optional[str] = Field(
         None, alias="userPrompt",
@@ -153,6 +153,11 @@ class Task(BaseModel):
     category: Optional[str] = None
 
     context: Dict[str, Any] = Field(default_factory=dict)
+    workspace_directory: Optional[str] = Field(
+        None,
+        alias="workspaceDirectory",
+        description="Task workspace directory. If absent, the executor derives one under workspace/tasks/<today>/.",
+    )
     retry: Optional[RetryConfig] = Field(default_factory=RetryConfig)
     tags: List[str] = Field(default_factory=list)
     dedup_key: Optional[str] = Field(
@@ -243,3 +248,28 @@ class TaskExecutionRecord(BaseModel):
     delivery_status: DeliveryStatus = Field(
         DeliveryStatus.UNREAD, alias="deliveryStatus",
     )
+
+
+class TaskQueueRef(BaseModel):
+    """Persistent queue reference to a task definition."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(default_factory=lambda: Identifier.descending("tqref"))
+    task_id: str = Field(..., alias="taskID")
+    status: TaskStatus = Field(TaskStatus.QUEUED)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc), alias="createdAt",
+    )
+    started_at: Optional[datetime] = Field(None, alias="startedAt")
+    execution_record_id: Optional[str] = Field(
+        None, alias="executionRecordID",
+    )
+
+
+class QueueTaskItem(Task):
+    """Queue-facing view item for manual tasks and scheduled executions."""
+
+    task_id: Optional[str] = Field(None, alias="taskID")
+    source_task_type: Optional[TaskType] = Field(None, alias="sourceTaskType")
+    record_id: Optional[str] = Field(None, alias="recordID")

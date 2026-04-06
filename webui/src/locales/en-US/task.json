@@ -185,7 +185,11 @@
     "entityType": "Task",
     "saveFailed": "Save failed",
     "createFailed": "Create failed",
-    "extractTimeout": "Extraction timed out. Please have Rex output JSON-formatted configuration in the conversation and try again."
+    "extractTimeout": "Extraction timed out. Please have Rex output JSON-formatted configuration in the conversation and try again.",
+    "selfContainedHint": "Scheduled tasks run in a fresh Rex session and no longer inherit a parent session. Put all required context directly into the description or additional info.",
+    "recentRuns": "Recent Runs",
+    "recentRunsEmpty": "No execution records yet",
+    "recentRunsLoading": "Loading execution records..."
   },
   "dashboard": {
     "completedWeek": "Completed (7d)",

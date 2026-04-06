@@ -13,11 +13,10 @@ from flocks.utils.log import Log
 
 from .models import (
     Task,
+    TaskExecution,
     TaskExecutionRecord,
     TaskSchedule,
-    TaskSource,
     TaskStatus,
-    TaskType,
 )
 from .store import TaskStore
 
@@ -38,6 +37,14 @@ class TaskScheduler:
         self._check_interval = check_interval
         self._running = False
         self._task: Optional[asyncio.Task] = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def is_available(self) -> bool:
+        return croniter is not None
 
     async def start(self) -> None:
         if croniter is None:
@@ -77,28 +84,37 @@ class TaskScheduler:
                 continue
             next_run = self._parse_next_run(task.schedule)
             if next_run and next_run <= now:
-                # Advance next_run (or disable) BEFORE triggering so that a
-                # concurrent tick will not fire the same task again.
-                if task.schedule.run_once:
-                    task.schedule.enabled = False
-                    task.schedule.next_run = None
-                else:
+                if not task.schedule.run_once:
+                    # Advance next_run BEFORE triggering so concurrent ticks do
+                    # not enqueue the same recurring task twice.
                     self._advance_next_run(task.schedule, now)
                     task.schedule.next_run = self._parse_next_run(task.schedule)
-                await TaskStore.update_task(task)
+                    await TaskStore.update_task(task)
 
                 try:
-                    await self._trigger(task, now)
+                    triggered = await self._trigger(task, now)
                 except Exception as e:
                     log.error("scheduler.trigger_error", {
                         "task_id": task.id, "error": str(e),
                     })
+                    triggered = False
 
-                if task.schedule.run_once:
+                if task.schedule.run_once and triggered:
+                    task.schedule.enabled = False
+                    task.schedule.next_run = None
+                    await TaskStore.update_task(task)
                     log.info("scheduler.one_shot_completed", {"task_id": task.id})
 
-    async def _trigger(self, template: Task, now: datetime) -> Task:
-        """Create a queued instance from a scheduled template."""
+    async def _trigger(self, template: Task, now: datetime) -> bool:
+        """Queue a scheduled task definition for execution."""
+        active_ref = await TaskStore.get_active_queue_ref(template.id)
+        if active_ref is not None:
+            log.info("scheduler.enqueue_skipped", {
+                "task_id": template.id,
+                "queue_ref_id": active_ref.id,
+            })
+            return False
+
         record = TaskExecutionRecord(
             task_id=template.id,
             status=TaskStatus.QUEUED,
@@ -106,47 +122,29 @@ class TaskScheduler:
             session_id=None,
         )
         await TaskStore.create_record(record)
-
-        ctx = dict(template.context) if template.context else {}
+        ctx = dict(template.context or {})
         ctx["_execution_record_id"] = record.id
-
-        instance = Task(
-            title=template.title,
-            description=template.description,
-            type=TaskType.QUEUED,
-            status=TaskStatus.QUEUED,
-            priority=template.priority,
-            source=TaskSource(
-                source_type="scheduled_trigger",
-                user_prompt=template.source.user_prompt if template.source else None,
-            ),
-            execution_mode=template.execution_mode,
-            agent_name=template.agent_name,
-            workflow_id=template.workflow_id,
-            skills=template.skills,
-            context=ctx,
-            retry=template.retry,
-            tags=template.tags,
-            created_by="system",
-            dedup_key=f"scheduled:{template.id}",
+        template.context = ctx
+        template.status = TaskStatus.QUEUED
+        template.execution = TaskExecution(agent=template.agent_name)
+        await TaskStore.update_task(template)
+        ref = await TaskStore.enqueue_task_ref(
+            template.id,
+            execution_record_id=record.id,
         )
-        created = await TaskStore.create_task(instance)
-
-        if created is None:
-            existing = await TaskStore.get_active_by_dedup_key(instance.dedup_key)
-            log.info("scheduler.dedup_skipped", {
-                "template_id": template.id,
-                "dedup_key": instance.dedup_key,
-                "existing_id": existing.id if existing else None,
+        if ref is None:
+            log.info("scheduler.enqueue_race_skipped", {
+                "task_id": template.id,
+                "record_id": record.id,
             })
-            return existing or instance
+            return False
 
         log.info("scheduler.triggered", {
-            "template_id": template.id,
-            "instance_id": created.id,
+            "task_id": template.id,
+            "queue_ref_id": ref.id,
             "record_id": record.id,
         })
-        return created
+        return True
 
     # ------------------------------------------------------------------
     # Cron helpers

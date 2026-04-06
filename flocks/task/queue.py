@@ -1,9 +1,8 @@
 """
-Priority Task Queue
+Priority Task Queue.
 
 Database-backed priority queue with concurrency control.
-Queue state is derived from tasks with status='queued' in SQLite,
-so no extra in-memory state is needed.
+Queue state is derived from persistent task_queue_refs in SQLite.
 """
 
 import asyncio
@@ -31,6 +30,13 @@ class TaskQueue:
         return self._paused
 
     async def enqueue(self, task: Task) -> Task:
+        ref = await TaskStore.enqueue_task_ref(
+            task.id,
+            execution_record_id=(task.context or {}).get("_execution_record_id"),
+        )
+        if ref is None:
+            log.info("queue.enqueue_skipped", {"id": task.id})
+            return task
         task.status = TaskStatus.QUEUED
         task.touch()
         task = await TaskStore.update_task(task)
@@ -45,11 +51,17 @@ class TaskQueue:
             running = await TaskStore.count_running()
             if running >= self.max_concurrent:
                 return None
-            task = await TaskStore.dequeue_next(
+            claimed = await TaskStore.claim_next_queue_task(
                 exclude_ids=list(self._running_ids)
             )
-            if task:
-                self._running_ids.add(task.id)
+            if not claimed:
+                return None
+            task, queue_ref = claimed
+            if queue_ref.execution_record_id:
+                ctx = dict(task.context or {})
+                ctx["_execution_record_id"] = queue_ref.execution_record_id
+                task.context = ctx
+            self._running_ids.add(task.id)
             return task
 
     def mark_started(self, task_id: str) -> None:
@@ -59,10 +71,7 @@ class TaskQueue:
         self._running_ids.discard(task_id)
 
     async def pending_count(self) -> int:
-        _, total = await TaskStore.list_tasks(
-            status=TaskStatus.QUEUED, limit=0, offset=0
-        )
-        return total
+        return await TaskStore.count_queued_refs()
 
     def pause(self) -> None:
         self._paused = True

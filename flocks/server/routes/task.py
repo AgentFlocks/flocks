@@ -32,6 +32,7 @@ class TaskCreateRequest(BaseModel):
     cron_description: Optional[str] = Field(None, alias="cronDescription")
     timezone: str = "Asia/Shanghai"
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
+    workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
     tags: List[str] = Field(default_factory=list)
     context: dict = Field(default_factory=dict)
 
@@ -61,6 +62,7 @@ class TaskUpdateRequest(BaseModel):
     cron_description: Optional[str] = Field(None, alias="cronDescription")
     timezone: Optional[str] = None
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
+    workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
 
 
 class BatchRequest(BaseModel):
@@ -91,6 +93,66 @@ async def dashboard():
 async def queue_status():
     from flocks.task.manager import TaskManager
     return await TaskManager.queue_status()
+
+
+@router.get("/queue/items", summary="Queue items")
+async def list_queue_items(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    priority: Optional[str] = Query(None),
+    delivery_status: Optional[str] = Query(None, alias="deliveryStatus"),
+    sort_by: str = Query("created_at", alias="sortBy"),
+    sort_order: str = Query("desc", alias="sortOrder"),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+):
+    from flocks.task.manager import TaskManager
+    from flocks.task.models import DeliveryStatus, TaskPriority, TaskStatus
+
+    items, total = await TaskManager.list_queue_items(
+        status=TaskStatus(status_filter) if status_filter else None,
+        priority=TaskPriority(priority) if priority else None,
+        delivery_status=DeliveryStatus(delivery_status) if delivery_status else None,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        offset=offset,
+        limit=limit,
+    )
+    return PaginatedResponse(
+        items=[item.model_dump(mode="json", by_alias=True) for item in items],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.post("/queue/items/{item_id}/cancel", summary="Cancel queue item")
+async def cancel_queue_item(item_id: str):
+    from flocks.task.manager import TaskManager
+
+    ok = await TaskManager.cancel_queue_item(item_id)
+    if not ok:
+        raise HTTPException(404, "Queue item not found")
+    return {"ok": True}
+
+
+@router.post("/queue/items/{item_id}/rerun", summary="Rerun queue item")
+async def rerun_queue_item(item_id: str):
+    from flocks.task.manager import TaskManager
+
+    ok = await TaskManager.rerun_queue_item(item_id)
+    if not ok:
+        raise HTTPException(404, "Queue item not found")
+    return {"ok": True}
+
+
+@router.delete("/queue/items/{item_id}", summary="Delete queue item")
+async def delete_queue_item(item_id: str):
+    from flocks.task.manager import TaskManager
+
+    ok = await TaskManager.delete_queue_item(item_id)
+    if not ok:
+        raise HTTPException(404, "Queue item not found")
+    return {"ok": True}
 
 
 @router.post("/queue/pause", summary="Pause queue")
@@ -270,6 +332,7 @@ async def create_task(req: TaskCreateRequest):
         source=TaskSource(user_prompt=req.user_prompt) if req.user_prompt else None,
         schedule=schedule,
         context=req.context,
+        workspace_directory=req.workspace_directory,
         tags=req.tags,
         execution_mode=ExecutionMode(req.execution_mode),
         agent_name=req.agent_name,

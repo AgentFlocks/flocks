@@ -142,6 +142,8 @@ async def lifespan(app: FastAPI):
         await TaskManager.start()
         log.info("task_manager.started")
     except Exception as e:
+        from flocks.task.manager import TaskManager
+        TaskManager.mark_start_failed(e)
         log.warning("task_manager.start.failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)

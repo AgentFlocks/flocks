@@ -1,9 +1,10 @@
 """
-Task Store — SQLite persistence for Task Center
+Task Store — SQLite persistence for Task Center.
 
-Manages two tables:
-  - tasks: task definitions and state
+Manages three tables:
+  - tasks: stable task definitions and latest state
   - task_execution_records: per-execution history for scheduled tasks
+  - task_queue_refs: queued/running references to task definitions
 """
 
 import json
@@ -18,9 +19,12 @@ from flocks.utils.log import Log
 
 from .models import (
     DeliveryStatus,
+    QueueTaskItem,
     Task,
+    TaskExecution,
     TaskExecutionRecord,
     TaskPriority,
+    TaskQueueRef,
     TaskStatus,
     TaskType,
 )
@@ -45,6 +49,7 @@ class TaskStore:
         await Storage._ensure_init()
         db_path = Storage._db_path
         cls._conn = await aiosqlite.connect(db_path)
+        await cls._conn.execute("PRAGMA foreign_keys = ON")
         await cls._conn.executescript(_TASKS_DDL)
         for stmt in _INDEX_STMTS:
             try:
@@ -102,12 +107,17 @@ class TaskStore:
                (id, title, description, type, status, priority,
                 source, schedule, execution, delivery_status,
                 execution_mode, agent_name, workflow_id, skills, category,
-                context, retry, tags, created_at, updated_at, created_by,
-                dedup_key)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                context, workspace_directory, retry, tags, created_at,
+                updated_at, created_by, dedup_key)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             cls._task_to_row(task),
         )
         await db.commit()
+        if task.status == TaskStatus.QUEUED:
+            await cls.enqueue_task_ref(
+                task.id,
+                execution_record_id=(task.context or {}).get("_execution_record_id"),
+            )
         log.info("task.created", {"id": task.id, "type": task.type.value})
         return task
 
@@ -159,6 +169,69 @@ class TaskStore:
         return [cls._row_to_task(r) for r in rows], total
 
     @classmethod
+    async def list_queue_items(
+        cls,
+        *,
+        status: Optional[TaskStatus] = None,
+        priority: Optional[TaskPriority] = None,
+        delivery_status: Optional[DeliveryStatus] = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        offset: int = 0,
+        limit: int = 20,
+    ) -> tuple[List[QueueTaskItem], int]:
+        _, manual_total = await cls.list_tasks(
+            status=status,
+            task_type=TaskType.QUEUED,
+            priority=priority,
+            delivery_status=delivery_status,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            offset=0,
+            limit=1,
+        )
+        manual_tasks: List[Task] = []
+        if manual_total:
+            manual_tasks, _ = await cls.list_tasks(
+                status=status,
+                task_type=TaskType.QUEUED,
+                priority=priority,
+                delivery_status=delivery_status,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                offset=0,
+                limit=manual_total,
+            )
+        scheduled_items = await cls._list_scheduled_queue_items(
+            status=status,
+            priority=priority,
+            delivery_status=delivery_status,
+        )
+
+        items: List[QueueTaskItem] = [
+            QueueTaskItem(
+                **task.model_dump(mode="python"),
+                task_id=task.id,
+                source_task_type=task.type,
+                record_id=None,
+            )
+            for task in manual_tasks
+        ]
+        items.extend(scheduled_items)
+
+        reverse = sort_order.lower() != "asc"
+        if sort_by == "priority":
+            items.sort(key=lambda item: item.priority.weight, reverse=reverse)
+        elif sort_by == "updated_at":
+            items.sort(key=lambda item: item.updated_at, reverse=reverse)
+        else:
+            items.sort(key=lambda item: item.created_at, reverse=reverse)
+
+        total = len(items)
+        paged = items[offset: offset + limit]
+        return paged, total
+
+    @classmethod
     async def update_task(cls, task: Task) -> Task:
         task.touch()
         db = await cls._db()
@@ -168,7 +241,7 @@ class TaskStore:
                  source=?, schedule=?, execution=?, delivery_status=?,
                  execution_mode=?, agent_name=?, workflow_id=?,
                  skills=?, category=?,
-                 context=?, retry=?, tags=?, updated_at=?, created_by=?,
+                 context=?, workspace_directory=?, retry=?, tags=?, updated_at=?, created_by=?,
                  dedup_key=?
                WHERE id=?""",
             (
@@ -186,6 +259,7 @@ class TaskStore:
                 json.dumps(task.skills),
                 task.category,
                 _json(task.context),
+                task.workspace_directory,
                 _json(task.retry),
                 json.dumps(task.tags),
                 task.updated_at.isoformat(),
@@ -302,6 +376,27 @@ class TaskStore:
             rows = await cur.fetchall()
         return [cls._row_to_record(r) for r in rows], total
 
+    @classmethod
+    async def get_record(cls, record_id: str) -> Optional[TaskExecutionRecord]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM task_execution_records WHERE id = ?",
+            (record_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return cls._row_to_record(row) if row else None
+
+    @classmethod
+    async def delete_record(cls, record_id: str) -> bool:
+        db = await cls._db()
+        cur = await db.execute(
+            "DELETE FROM task_execution_records WHERE id = ?",
+            (record_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
     # ------------------------------------------------------------------
     # Dashboard helpers
     # ------------------------------------------------------------------
@@ -315,65 +410,212 @@ class TaskStore:
         db = await cls._db()
         db.row_factory = aiosqlite.Row
         counts: Dict[str, Any] = {}
-        for key, sql, params in (
-            ("running", "SELECT COUNT(*) as c FROM tasks WHERE status='running'", ()),
-            ("queued", "SELECT COUNT(*) as c FROM tasks WHERE status='queued'", ()),
-            (
-                "completed_week",
-                "SELECT COUNT(*) as c FROM tasks WHERE status='completed' AND updated_at>=?",
-                (week_start,),
-            ),
-            (
-                "completed_unviewed",
-                "SELECT COUNT(*) as c FROM tasks WHERE status='completed' AND delivery_status!='viewed'",
-                (),
-            ),
-            (
-                "failed_week",
-                "SELECT COUNT(*) as c FROM tasks WHERE status='failed' AND updated_at>=?",
-                (week_start,),
-            ),
-            (
-                "scheduled_active",
-                "SELECT COUNT(*) as c FROM tasks WHERE type='scheduled' AND status!='cancelled' AND json_extract(schedule, '$.enabled') = 1",
-                (),
-            ),
-        ):
+
+        async def _count(sql: str, params: tuple = ()) -> int:
             async with db.execute(sql, params) as cur:
-                counts[key] = (await cur.fetchone())["c"]
+                return (await cur.fetchone())["c"]
+
+        counts["running"] = await _count(
+            "SELECT COUNT(*) as c FROM tasks WHERE status='running'"
+        )
+        counts["queued"] = await _count(
+            "SELECT COUNT(*) as c FROM task_queue_refs WHERE status='queued'"
+        )
+        counts["scheduled_active"] = await _count(
+            "SELECT COUNT(*) as c FROM tasks WHERE type='scheduled' AND status!='cancelled' AND json_extract(schedule, '$.enabled') = 1"
+        )
+
+        manual_completed_week = await _count(
+            "SELECT COUNT(*) as c FROM tasks WHERE type!='scheduled' AND status='completed' AND updated_at>=?",
+            (week_start,),
+        )
+        scheduled_completed_week = await _count(
+            """SELECT COUNT(*) as c
+               FROM task_execution_records r
+               JOIN tasks t ON t.id = r.task_id
+               WHERE t.type='scheduled'
+                 AND r.status='completed'
+                 AND COALESCE(r.completed_at, r.started_at) >= ?""",
+            (week_start,),
+        )
+        counts["completed_week"] = manual_completed_week + scheduled_completed_week
+
+        manual_completed_unviewed = await _count(
+            "SELECT COUNT(*) as c FROM tasks WHERE type!='scheduled' AND status='completed' AND delivery_status!='viewed'"
+        )
+        scheduled_completed_unviewed = await _count(
+            """SELECT COUNT(*) as c
+               FROM task_execution_records r
+               JOIN tasks t ON t.id = r.task_id
+               WHERE t.type='scheduled'
+                 AND r.status='completed'
+                 AND r.delivery_status!='viewed'"""
+        )
+        counts["completed_unviewed"] = (
+            manual_completed_unviewed + scheduled_completed_unviewed
+        )
+
+        manual_failed_week = await _count(
+            "SELECT COUNT(*) as c FROM tasks WHERE type!='scheduled' AND status='failed' AND updated_at>=?",
+            (week_start,),
+        )
+        scheduled_failed_week = await _count(
+            """SELECT COUNT(*) as c
+               FROM task_execution_records r
+               JOIN tasks t ON t.id = r.task_id
+               WHERE t.type='scheduled'
+                 AND r.status='failed'
+                 AND COALESCE(r.completed_at, r.started_at) >= ?""",
+            (week_start,),
+        )
+        counts["failed_week"] = manual_failed_week + scheduled_failed_week
         return counts
 
     # ------------------------------------------------------------------
-    # Queued task helpers (used by TaskQueue)
+    # Queue reference helpers (used by TaskQueue)
     # ------------------------------------------------------------------
 
     @classmethod
-    async def dequeue_next(cls, *, exclude_ids: Optional[List[str]] = None) -> Optional[Task]:
-        """Pick the highest-priority queued task (FIFO within same priority)."""
+    async def enqueue_task_ref(
+        cls,
+        task_id: str,
+        *,
+        execution_record_id: Optional[str] = None,
+    ) -> Optional[TaskQueueRef]:
+        active = await cls.get_active_queue_ref(task_id)
+        if active is not None:
+            return None
+        ref = TaskQueueRef(
+            task_id=task_id,
+            status=TaskStatus.QUEUED,
+            execution_record_id=execution_record_id,
+        )
+        db = await cls._db()
+        await db.execute(
+            """INSERT INTO task_queue_refs
+               (id, task_id, status, created_at, started_at, execution_record_id)
+               VALUES (?,?,?,?,?,?)""",
+            (
+                ref.id,
+                ref.task_id,
+                ref.status.value,
+                ref.created_at.isoformat(),
+                ref.started_at.isoformat() if ref.started_at else None,
+                ref.execution_record_id,
+            ),
+        )
+        await db.commit()
+        return ref
+
+    @classmethod
+    async def get_active_queue_ref(cls, task_id: str) -> Optional[TaskQueueRef]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM task_queue_refs
+               WHERE task_id = ?
+                 AND status IN ('queued', 'running')
+               ORDER BY created_at ASC
+               LIMIT 1""",
+            (task_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return cls._row_to_queue_ref(row) if row else None
+
+    @classmethod
+    async def claim_next_queue_task(
+        cls, *, exclude_ids: Optional[List[str]] = None
+    ) -> Optional[Tuple[Task, TaskQueueRef]]:
+        """Pick and claim the next queued task reference."""
         excl = ""
         params: list = []
         if exclude_ids:
             placeholders = ",".join("?" for _ in exclude_ids)
-            excl = f"AND id NOT IN ({placeholders})"
+            excl = f"AND t.id NOT IN ({placeholders})"
             params.extend(exclude_ids)
         sql = f"""
-            SELECT * FROM tasks
-            WHERE status='queued' {excl}
+            SELECT
+                q.id AS queue_ref_id,
+                q.task_id AS queue_ref_task_id,
+                q.status AS queue_ref_status,
+                q.created_at AS queue_ref_created_at,
+                q.started_at AS queue_ref_started_at,
+                q.execution_record_id AS queue_ref_execution_record_id,
+                t.*
+            FROM task_queue_refs q
+            JOIN tasks t ON t.id = q.task_id
+            WHERE q.status='queued' {excl}
             ORDER BY
-              CASE priority
+              CASE t.priority
                 WHEN 'urgent' THEN 1
                 WHEN 'high'   THEN 2
                 WHEN 'normal' THEN 3
                 WHEN 'low'    THEN 4
               END,
-              created_at ASC
+              q.created_at ASC
             LIMIT 1
         """
         db = await cls._db()
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
             row = await cur.fetchone()
-        return cls._row_to_task(row) if row else None
+        if not row:
+            return None
+
+        queue_ref = TaskQueueRef(
+            id=row["queue_ref_id"],
+            task_id=row["queue_ref_task_id"],
+            status=TaskStatus(row["queue_ref_status"]),
+            created_at=datetime.fromisoformat(row["queue_ref_created_at"]),
+            started_at=(
+                datetime.fromisoformat(row["queue_ref_started_at"])
+                if row["queue_ref_started_at"] else None
+            ),
+            execution_record_id=row["queue_ref_execution_record_id"],
+        )
+
+        claimed_at = datetime.now(timezone.utc)
+        await db.execute(
+            """UPDATE task_queue_refs
+               SET status = ?, started_at = ?
+               WHERE id = ? AND status = 'queued'""",
+            (TaskStatus.RUNNING.value, claimed_at.isoformat(), queue_ref.id),
+        )
+        await db.commit()
+
+        queue_ref.status = TaskStatus.RUNNING
+        queue_ref.started_at = claimed_at
+        task_data = dict(row)
+        for key in (
+            "queue_ref_id", "queue_ref_task_id", "queue_ref_status",
+            "queue_ref_created_at", "queue_ref_started_at",
+            "queue_ref_execution_record_id",
+        ):
+            task_data.pop(key, None)
+        return cls._row_to_task(task_data), queue_ref
+
+    @classmethod
+    async def dequeue_next(
+        cls, *, exclude_ids: Optional[List[str]] = None
+    ) -> Optional[Task]:
+        claimed = await cls.claim_next_queue_task(exclude_ids=exclude_ids)
+        if not claimed:
+            return None
+        task, queue_ref = claimed
+        if queue_ref.execution_record_id:
+            ctx = dict(task.context or {})
+            ctx["_execution_record_id"] = queue_ref.execution_record_id
+            task.context = ctx
+        return task
+
+    @classmethod
+    async def finish_queue_ref(cls, task_id: str) -> None:
+        db = await cls._db()
+        await db.execute(
+            "DELETE FROM task_queue_refs WHERE task_id = ? AND status IN ('queued', 'running')",
+            (task_id,),
+        )
+        await db.commit()
 
     @classmethod
     async def count_running(cls) -> int:
@@ -383,6 +625,26 @@ class TaskStore:
             "SELECT COUNT(*) as c FROM tasks WHERE status='running'"
         ) as cur:
             return (await cur.fetchone())["c"]
+
+    @classmethod
+    async def count_queued_refs(cls) -> int:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT COUNT(*) as c FROM task_queue_refs WHERE status='queued'"
+        ) as cur:
+            return (await cur.fetchone())["c"]
+
+    @classmethod
+    async def requeue_running_refs(cls) -> int:
+        db = await cls._db()
+        cur = await db.execute(
+            """UPDATE task_queue_refs
+               SET status = 'queued', started_at = NULL
+               WHERE status = 'running'"""
+        )
+        await db.commit()
+        return cur.rowcount
 
     @classmethod
     async def get_unviewed_results(cls) -> List[Task]:
@@ -448,7 +710,7 @@ class TaskStore:
         db = await cls._db()
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM tasks WHERE status = ? AND type != 'scheduled'",
+            "SELECT * FROM tasks WHERE status = ?",
             (status.value,),
         ) as cur:
             rows = await cur.fetchall()
@@ -482,6 +744,7 @@ class TaskStore:
         async with db.execute(
             """SELECT * FROM tasks
                WHERE status IN ('pending', 'queued')
+                 AND type != 'scheduled'
                  AND updated_at < ?""",
             (before.isoformat(),),
         ) as cur:
@@ -511,6 +774,7 @@ class TaskStore:
             json.dumps(t.skills),
             t.category,
             _json(t.context),
+            t.workspace_directory,
             _json(t.retry),
             json.dumps(t.tags),
             t.created_at.isoformat(),
@@ -541,6 +805,128 @@ class TaskStore:
     @classmethod
     def _row_to_record(cls, row: aiosqlite.Row) -> TaskExecutionRecord:
         return TaskExecutionRecord(**dict(row))
+
+    @classmethod
+    def _row_to_queue_ref(cls, row: aiosqlite.Row) -> TaskQueueRef:
+        return TaskQueueRef(**dict(row))
+
+    @classmethod
+    async def _list_scheduled_queue_items(
+        cls,
+        *,
+        status: Optional[TaskStatus] = None,
+        priority: Optional[TaskPriority] = None,
+        delivery_status: Optional[DeliveryStatus] = None,
+    ) -> List[QueueTaskItem]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+
+        clauses = ["t.type = 'scheduled'"]
+        params: list[Any] = []
+        if status:
+            clauses.append("r.status = ?")
+            params.append(status.value)
+        if priority:
+            clauses.append("t.priority = ?")
+            params.append(priority.value)
+        if delivery_status:
+            clauses.append("r.delivery_status = ?")
+            params.append(delivery_status.value)
+
+        where = " AND ".join(clauses)
+        async with db.execute(
+            f"""
+            SELECT
+                r.id AS record_id,
+                r.task_id AS task_id,
+                r.status AS record_status,
+                r.started_at AS record_started_at,
+                r.completed_at AS record_completed_at,
+                r.duration_ms AS record_duration_ms,
+                r.result_summary AS record_result_summary,
+                r.error AS record_error,
+                r.session_id AS record_session_id,
+                r.delivery_status AS record_delivery_status,
+                t.*
+            FROM task_execution_records r
+            JOIN tasks t ON t.id = r.task_id
+            WHERE {where}
+            """,
+            tuple(params),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        items: List[QueueTaskItem] = []
+        for row in rows:
+            task_data = dict(row)
+            record_id = task_data.pop("record_id")
+            task_id = task_data.pop("task_id")
+            record_status = TaskStatus(task_data.pop("record_status"))
+            record_started_at = task_data.pop("record_started_at")
+            record_completed_at = task_data.pop("record_completed_at")
+            record_duration_ms = task_data.pop("record_duration_ms")
+            record_result_summary = task_data.pop("record_result_summary")
+            record_error = task_data.pop("record_error")
+            record_session_id = task_data.pop("record_session_id")
+            record_delivery_status = DeliveryStatus(task_data.pop("record_delivery_status"))
+
+            base_task = cls._row_to_task(task_data)
+            created_at = (
+                datetime.fromisoformat(record_started_at)
+                if record_started_at else base_task.updated_at
+            )
+            updated_at = (
+                datetime.fromisoformat(record_completed_at)
+                if record_completed_at else created_at
+            )
+
+            items.append(
+                QueueTaskItem(
+                    id=record_id,
+                    task_id=task_id,
+                    title=base_task.title,
+                    description=base_task.description,
+                    type=TaskType.QUEUED,
+                    status=record_status,
+                    priority=base_task.priority,
+                    source=base_task.source.model_copy(
+                        update={"source_type": "scheduled_trigger"}
+                    ),
+                    schedule=None,
+                    execution=TaskExecution(
+                        session_id=record_session_id,
+                        agent=base_task.agent_name,
+                        started_at=(
+                            datetime.fromisoformat(record_started_at)
+                            if record_started_at else None
+                        ),
+                        completed_at=(
+                            datetime.fromisoformat(record_completed_at)
+                            if record_completed_at else None
+                        ),
+                        duration_ms=record_duration_ms,
+                        result_summary=record_result_summary,
+                        error=record_error,
+                    ),
+                    delivery_status=record_delivery_status,
+                    execution_mode=base_task.execution_mode,
+                    agent_name=base_task.agent_name,
+                    workflow_id=base_task.workflow_id,
+                    skills=base_task.skills,
+                    category=base_task.category,
+                    context=base_task.context,
+                    workspace_directory=base_task.workspace_directory,
+                    retry=base_task.retry,
+                    tags=base_task.tags,
+                    dedup_key=None,
+                    created_at=created_at,
+                    updated_at=updated_at,
+                    created_by=base_task.created_by,
+                    source_task_type=base_task.type,
+                    record_id=record_id,
+                )
+            )
+        return items
 
     @classmethod
     def _build_where(
@@ -596,6 +982,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     skills          TEXT DEFAULT '[]', -- JSON array
     category        TEXT,
     context         TEXT DEFAULT '{}', -- JSON
+    workspace_directory TEXT,
     retry           TEXT,            -- JSON
     tags            TEXT DEFAULT '[]', -- JSON array
     created_at      TEXT NOT NULL,
@@ -617,6 +1004,17 @@ CREATE TABLE IF NOT EXISTS task_execution_records (
     delivery_status TEXT NOT NULL DEFAULT 'unread',
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS task_queue_refs (
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'queued',
+    created_at          TEXT NOT NULL,
+    started_at          TEXT,
+    execution_record_id TEXT,
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (execution_record_id) REFERENCES task_execution_records(id) ON DELETE SET NULL
+);
 """
 
 _INDEX_STMTS = [
@@ -628,6 +1026,8 @@ _INDEX_STMTS = [
     "CREATE INDEX IF NOT EXISTS idx_tasks_dedup ON tasks(dedup_key)",
     "CREATE INDEX IF NOT EXISTS idx_texec_task ON task_execution_records(task_id)",
     "CREATE INDEX IF NOT EXISTS idx_texec_started ON task_execution_records(started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_tqref_task ON task_queue_refs(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_tqref_status_created ON task_queue_refs(status, created_at)",
 ]
 
 # Migrations for tables created before these columns existed.
@@ -637,6 +1037,7 @@ _MIGRATION_STMTS = [
     "ALTER TABLE tasks ADD COLUMN workflow_id TEXT",
     "ALTER TABLE tasks ADD COLUMN skills TEXT DEFAULT '[]'",
     "ALTER TABLE tasks ADD COLUMN category TEXT",
+    "ALTER TABLE tasks ADD COLUMN workspace_directory TEXT",
     "ALTER TABLE tasks ADD COLUMN dedup_key TEXT",
 ]
 

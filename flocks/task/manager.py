@@ -6,7 +6,7 @@ Owns the background execution loop that polls the queue.
 """
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel as _BaseModel
@@ -17,6 +17,7 @@ from .executor import TaskExecutor
 from .models import (
     DeliveryStatus,
     ExecutionMode,
+    QueueTaskItem,
     RetryConfig,
     Task,
     TaskExecution,
@@ -57,6 +58,7 @@ class TaskManager:
     """
 
     _instance: Optional["TaskManager"] = None
+    _startup_error: Optional[str] = None
 
     def __init__(
         self,
@@ -90,6 +92,7 @@ class TaskManager:
         if cls._instance and cls._instance._running:
             return cls._instance
         await TaskStore.init()
+        cls._startup_error = None
         mgr = cls(
             max_concurrent=max_concurrent,
             poll_interval=poll_interval,
@@ -132,6 +135,27 @@ class TaskManager:
     def get(cls) -> Optional["TaskManager"]:
         return cls._instance
 
+    @classmethod
+    def mark_start_failed(cls, error: Exception) -> None:
+        cls._startup_error = str(error)
+
+    @classmethod
+    def runtime_status(cls) -> Dict[str, Any]:
+        mgr = cls._instance
+        if not mgr:
+            return {
+                "task_manager_started": False,
+                "task_scheduler_running": False,
+                "task_scheduler_available": False,
+                "task_manager_error": cls._startup_error,
+            }
+        return {
+            "task_manager_started": mgr._running,
+            "task_scheduler_running": mgr.scheduler.is_running,
+            "task_scheduler_available": mgr.scheduler.is_available,
+            "task_manager_error": cls._startup_error,
+        }
+
     # ------------------------------------------------------------------
     # Task CRUD
     # ------------------------------------------------------------------
@@ -152,6 +176,7 @@ class TaskManager:
         skills: Optional[List[str]] = None,
         category: Optional[str] = None,
         context: Optional[Dict[str, Any]] = None,
+        workspace_directory: Optional[str] = None,
         tags: Optional[List[str]] = None,
         created_by: str = "rex",
     ) -> Task:
@@ -179,10 +204,13 @@ class TaskManager:
             skills=skills or [],
             category=category,
             context=context or {},
+            workspace_directory=workspace_directory,
             retry=retry,
             tags=tags or [],
             created_by=created_by,
         )
+        if not task.workspace_directory:
+            task.workspace_directory = cls._default_workspace_directory(task.id)
         created = await TaskStore.create_task(task)
         if created is None:
             # dedup_key collision — return the existing active task instead
@@ -217,6 +245,28 @@ class TaskManager:
         return await TaskStore.list_tasks(
             status=status,
             task_type=task_type,
+            priority=priority,
+            delivery_status=delivery_status,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            offset=offset,
+            limit=limit,
+        )
+
+    @classmethod
+    async def list_queue_items(
+        cls,
+        *,
+        status: Optional[TaskStatus] = None,
+        priority: Optional[TaskPriority] = None,
+        delivery_status: Optional[DeliveryStatus] = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
+        offset: int = 0,
+        limit: int = 20,
+    ) -> tuple[List[QueueTaskItem], int]:
+        return await TaskStore.list_queue_items(
+            status=status,
             priority=priority,
             delivery_status=delivery_status,
             sort_by=sort_by,
@@ -322,7 +372,6 @@ class TaskManager:
             src = existing.source or TaskSource()
             fields["source"] = TaskSource(
                 source_type=src.source_type,
-                session_id=src.session_id,
                 user_prompt=user_prompt,
             )
 
@@ -346,6 +395,58 @@ class TaskManager:
             return True
         return await TaskStore.delete_task(task_id)
 
+    @classmethod
+    async def cancel_queue_item(cls, item_id: str) -> bool:
+        task = await TaskStore.get_task(item_id)
+        if task is not None:
+            return (await cls.cancel_task(item_id)) is not None
+
+        record = await TaskStore.get_record(item_id)
+        if record is None:
+            return False
+
+        task = await TaskStore.get_task(record.task_id)
+        if task is None:
+            return False
+
+        await cls._cancel_scheduled_execution(task, record)
+        return True
+
+    @classmethod
+    async def rerun_queue_item(cls, item_id: str) -> bool:
+        task = await TaskStore.get_task(item_id)
+        if task is not None:
+            return (await cls.rerun_task(item_id)) is not None
+
+        record = await TaskStore.get_record(item_id)
+        if record is None:
+            return False
+
+        task = await TaskStore.get_task(record.task_id)
+        if task is None:
+            return False
+
+        if record.status in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.PAUSED):
+            await cls._cancel_scheduled_execution(task, record)
+
+        await cls._enqueue_scheduled_execution(task)
+        return True
+
+    @classmethod
+    async def delete_queue_item(cls, item_id: str) -> bool:
+        task = await TaskStore.get_task(item_id)
+        if task is not None:
+            return await cls.delete_task(item_id)
+
+        record = await TaskStore.get_record(item_id)
+        if record is None:
+            return False
+
+        task = await TaskStore.get_task(record.task_id)
+        if task and record.status in (TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.PAUSED):
+            await cls._cancel_scheduled_execution(task, record)
+        return await TaskStore.delete_record(item_id)
+
     # ------------------------------------------------------------------
     # Task operations
     # ------------------------------------------------------------------
@@ -357,6 +458,7 @@ class TaskManager:
             return task
         task.status = TaskStatus.CANCELLED
         task = await TaskStore.update_task(task)
+        await TaskStore.finish_queue_ref(task_id)
         mgr = cls._instance
         if mgr:
             mgr.queue.mark_finished(task_id)
@@ -379,7 +481,8 @@ class TaskManager:
         if not task or task.status != TaskStatus.PAUSED:
             return task
         task.status = TaskStatus.QUEUED
-        task = await TaskStore.update_task(task)
+        task.execution = TaskExecution(agent=task.agent_name)
+        task = await cls._enqueue(task)
         await cls._publish_event("task.status", task)
         return task
 
@@ -392,7 +495,7 @@ class TaskManager:
             task.retry.retry_count += 1
         task.status = TaskStatus.QUEUED
         task.execution = TaskExecution(agent=task.agent_name)
-        task = await TaskStore.update_task(task)
+        task = await cls._enqueue(task)
         await cls._publish_event("task.status", task)
         return task
 
@@ -407,6 +510,7 @@ class TaskManager:
             mgr = cls._instance
             if mgr:
                 mgr.queue.mark_finished(task_id)
+            await TaskStore.finish_queue_ref(task_id)
             # Also cancel the running agent so it stops consuming resources
             # and so the executor's final status write is pre-empted correctly.
             session_id = task.execution.session_id if task.execution else None
@@ -418,13 +522,15 @@ class TaskManager:
                     pass  # best-effort; executor.py's overwrite guard handles the rest
         task.status = TaskStatus.QUEUED
         task.execution = TaskExecution(agent=task.agent_name)
-        task = await TaskStore.update_task(task)
+        task = await cls._enqueue(task)
         await cls._publish_event("task.status", task)
         return task
 
     @classmethod
     async def batch_cancel(cls, task_ids: List[str]) -> int:
         count = await TaskStore.batch_update_status(task_ids, TaskStatus.CANCELLED)
+        for task_id in task_ids:
+            await TaskStore.finish_queue_ref(task_id)
         return count
 
     @classmethod
@@ -575,6 +681,7 @@ class TaskManager:
             await TaskStore.update_task(task)
         finally:
             self.queue.mark_finished(task.id)
+            await TaskStore.finish_queue_ref(task.id)
 
         await self._sync_execution_record(task)
 
@@ -643,7 +750,7 @@ class TaskManager:
                 task.retry.retry_after = None
                 task.status = TaskStatus.QUEUED
                 task.execution = TaskExecution(agent=task.agent_name)
-                await TaskStore.update_task(task)
+                await self._enqueue(task)
                 log.info("manager.retry_requeued", {"id": task.id, "retry_count": task.retry.retry_count})
         except Exception as e:
             log.error("manager.retry_queue_error", {"error": str(e)})
@@ -655,10 +762,15 @@ class TaskManager:
         the running-slot count to an accurate value.
         """
         orphans = await TaskStore.list_by_status(TaskStatus.RUNNING)
+        await TaskStore.requeue_running_refs()
         for task in orphans:
             task.status = TaskStatus.QUEUED
             task.execution = TaskExecution(agent=task.agent_name)
             await TaskStore.update_task(task)
+            await TaskStore.enqueue_task_ref(
+                task.id,
+                execution_record_id=(task.context or {}).get("_execution_record_id"),
+            )
             log.warn("manager.orphan_recovered", {"id": task.id, "title": task.title})
         return len(orphans)
 
@@ -689,6 +801,67 @@ class TaskManager:
             log.info("manager.task_expired", {"id": task.id, "title": task.title})
         return len(stale)
 
+    @classmethod
+    async def _enqueue_scheduled_execution(cls, task: Task) -> TaskExecutionRecord:
+        record = TaskExecutionRecord(
+            task_id=task.id,
+            status=TaskStatus.QUEUED,
+            started_at=datetime.now(timezone.utc),
+        )
+        await TaskStore.create_record(record)
+
+        ctx = dict(task.context or {})
+        ctx["_execution_record_id"] = record.id
+        task.context = ctx
+        task.status = TaskStatus.QUEUED
+        task.execution = TaskExecution(agent=task.agent_name)
+        await cls._enqueue(task)
+        return record
+
+    @classmethod
+    async def _cancel_scheduled_execution(
+        cls,
+        task: Task,
+        record: TaskExecutionRecord,
+    ) -> TaskExecutionRecord:
+        now = datetime.now(timezone.utc)
+        session_id = (
+            record.session_id
+            or (task.execution.session_id if task.execution else None)
+        )
+        if session_id:
+            try:
+                from flocks.task.background import get_background_manager
+                get_background_manager().cancel_by_session_id(session_id)
+            except Exception:
+                pass
+
+        task = cls._restore_scheduled_template(task)
+        await TaskStore.update_task(task)
+        await TaskStore.finish_queue_ref(task.id)
+
+        mgr = cls._instance
+        if mgr:
+            mgr.queue.mark_finished(task.id)
+
+        record.status = TaskStatus.CANCELLED
+        record.completed_at = now
+        if record.started_at:
+            record.duration_ms = int((now - record.started_at).total_seconds() * 1000)
+        record.error = record.error or "Cancelled from task queue."
+        record.session_id = session_id
+        await TaskStore.update_record(record)
+        return record
+
+    @staticmethod
+    def _restore_scheduled_template(task: Task) -> Task:
+        ctx = dict(task.context or {})
+        ctx.pop("_execution_record_id", None)
+        task.context = ctx
+        task.status = TaskStatus.PENDING
+        task.execution = TaskExecution(agent=task.agent_name)
+        return task
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -699,7 +872,20 @@ class TaskManager:
         if mgr:
             return await mgr.queue.enqueue(task)
         task.status = TaskStatus.QUEUED
-        return await TaskStore.update_task(task)
+        task = await TaskStore.update_task(task)
+        await TaskStore.enqueue_task_ref(
+            task.id,
+            execution_record_id=(task.context or {}).get("_execution_record_id"),
+        )
+        return task
+
+    @staticmethod
+    def _default_workspace_directory(task_id: str) -> str:
+        from flocks.workspace.manager import WorkspaceManager
+
+        workspace_root = WorkspaceManager.get_instance().get_workspace_dir()
+        today = date.today().isoformat()
+        return str(workspace_root / "tasks" / today / task_id)
 
     @classmethod
     async def _publish_event(cls, event_type: str, task: Task) -> None:

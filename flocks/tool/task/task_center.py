@@ -195,7 +195,6 @@ async def task_create(
 
     source = TaskSource(
         source_type="user_conversation",
-        session_id=ctx.session_id,
         user_prompt=user_prompt,
     )
 

@@ -86,6 +86,23 @@ class TestModels:
         assert r.status == TaskStatus.RUNNING
         assert r.delivery_status == DeliveryStatus.UNREAD
 
+    def test_scheduled_prompt_preserves_user_prompt(self):
+        from flocks.task.executor import TaskExecutor
+
+        task = Task(
+            title="Daily task",
+            description="Description fallback",
+            type=TaskType.SCHEDULED,
+            schedule=TaskSchedule(cron="0 8 * * *", timezone="UTC"),
+            source=TaskSource(user_prompt="Execute with this exact prompt"),
+            context={"scope": "prod"},
+        )
+
+        prompt = TaskExecutor._build_prompt(task)
+        assert "Scheduled task automated execution" in prompt
+        assert "Execute with this exact prompt" in prompt
+        assert "scope: prod" in prompt
+
 
 # ------------------------------------------------------------------
 # Store tests
@@ -205,6 +222,63 @@ class TestStore:
 
         items, _ = await TaskStore.list_tasks(sort_by="priority", sort_order="asc")
         assert len(items) == 2
+
+    @pytest.mark.asyncio
+    async def test_list_queue_items_includes_scheduled_execution_records(self):
+        scheduled = Task(title="Daily hello", type=TaskType.SCHEDULED)
+        await TaskStore.create_task(scheduled)
+        record = TaskExecutionRecord(
+            task_id=scheduled.id,
+            status=TaskStatus.COMPLETED,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            completed_at=datetime.now(timezone.utc),
+            result_summary="done",
+            session_id="ses_demo",
+        )
+        await TaskStore.create_record(record)
+
+        items, total = await TaskStore.list_queue_items(limit=20)
+        assert total >= 1
+        matched = next(item for item in items if item.id == record.id)
+        assert matched.task_id == scheduled.id
+        assert matched.source.source_type == "scheduled_trigger"
+        assert matched.status == TaskStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_dashboard_counts_include_scheduled_execution_records(self):
+        manual = Task(title="Manual done", status=TaskStatus.COMPLETED)
+        await TaskStore.create_task(manual)
+
+        scheduled = Task(
+            title="Daily hello",
+            type=TaskType.SCHEDULED,
+            schedule=TaskSchedule(cron="0 8 * * *", timezone="UTC"),
+        )
+        await TaskStore.create_task(scheduled)
+        await TaskStore.create_record(
+            TaskExecutionRecord(
+                task_id=scheduled.id,
+                status=TaskStatus.COMPLETED,
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+                completed_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                result_summary="done",
+            )
+        )
+        await TaskStore.create_record(
+            TaskExecutionRecord(
+                task_id=scheduled.id,
+                status=TaskStatus.FAILED,
+                started_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                completed_at=datetime.now(timezone.utc),
+                error="boom",
+            )
+        )
+
+        counts = await TaskStore.dashboard_counts()
+        assert counts["completed_week"] == 2
+        assert counts["completed_unviewed"] == 2
+        assert counts["failed_week"] == 1
+        assert counts["scheduled_active"] == 1
 
 
 # ------------------------------------------------------------------
@@ -367,6 +441,73 @@ class TestManager:
         assert await TaskManager.get_task(task.id) is None
 
     @pytest.mark.asyncio
+    async def test_cancel_queue_item_for_scheduled_execution(self):
+        from flocks.task.manager import TaskManager
+
+        await TaskManager.start(poll_interval=999)
+        task = await TaskManager.create_task(
+            title="Scheduled",
+            task_type=TaskType.SCHEDULED,
+            schedule=TaskSchedule(cron="0 8 * * *", timezone="UTC"),
+        )
+        record = await TaskManager._enqueue_scheduled_execution(task)
+
+        ok = await TaskManager.cancel_queue_item(record.id)
+        assert ok is True
+
+        updated_record = await TaskStore.get_record(record.id)
+        assert updated_record is not None
+        assert updated_record.status == TaskStatus.CANCELLED
+        updated_task = await TaskStore.get_task(task.id)
+        assert updated_task is not None
+        assert updated_task.status == TaskStatus.PENDING
+        scheduled_tasks = await TaskStore.get_scheduled_tasks(enabled_only=True)
+        assert task.id in [item.id for item in scheduled_tasks]
+
+    @pytest.mark.asyncio
+    async def test_rerun_queue_item_for_scheduled_execution(self):
+        from flocks.task.manager import TaskManager
+
+        await TaskManager.start(poll_interval=999)
+        task = await TaskManager.create_task(
+            title="Scheduled",
+            task_type=TaskType.SCHEDULED,
+            schedule=TaskSchedule(cron="0 8 * * *", timezone="UTC"),
+        )
+        record = await TaskManager._enqueue_scheduled_execution(task)
+        record.status = TaskStatus.COMPLETED
+        record.completed_at = datetime.now(timezone.utc)
+        await TaskStore.update_record(record)
+        await TaskStore.finish_queue_ref(task.id)
+
+        ok = await TaskManager.rerun_queue_item(record.id)
+        assert ok is True
+
+        records, total = await TaskStore.list_records(task.id, limit=10)
+        assert total == 2
+        assert records[0].id != record.id
+
+    @pytest.mark.asyncio
+    async def test_delete_queue_item_for_scheduled_execution(self):
+        from flocks.task.manager import TaskManager
+
+        await TaskManager.start(poll_interval=999)
+        task = await TaskManager.create_task(
+            title="Scheduled",
+            task_type=TaskType.SCHEDULED,
+            schedule=TaskSchedule(cron="0 8 * * *", timezone="UTC"),
+        )
+        record = await TaskManager._enqueue_scheduled_execution(task)
+        record.status = TaskStatus.COMPLETED
+        record.completed_at = datetime.now(timezone.utc)
+        await TaskStore.update_record(record)
+        await TaskStore.finish_queue_ref(task.id)
+
+        ok = await TaskManager.delete_queue_item(record.id)
+        assert ok is True
+        assert await TaskStore.get_record(record.id) is None
+
+    @pytest.mark.asyncio
     async def test_batch_cancel(self):
         from flocks.task.manager import TaskManager
         await TaskManager.start(poll_interval=999)
@@ -485,7 +626,7 @@ class TestSchedulerTrigger:
 
     @pytest.mark.asyncio
     async def test_trigger_creates_execution_record(self):
-        """Verify _trigger creates an execution record linked to child task."""
+        """Verify _trigger creates an execution record and queue ref on the same task."""
         try:
             from flocks.task.scheduler import TaskScheduler
         except ImportError:
@@ -510,14 +651,13 @@ class TestSchedulerTrigger:
         assert total == 1
         assert records[0].status == TaskStatus.QUEUED
 
-        # The child queued task should have _execution_record_id in context
-        queued_tasks, _ = await TaskStore.list_tasks(
-            task_type=TaskType.QUEUED, limit=10
-        )
-        assert len(queued_tasks) >= 1
-        child = queued_tasks[0]
-        assert "_execution_record_id" in child.context
-        assert child.context["_execution_record_id"] == records[0].id
+        queued_ref = await TaskStore.get_active_queue_ref(task.id)
+        assert queued_ref is not None
+        assert queued_ref.execution_record_id == records[0].id
+
+        updated = await TaskStore.get_task(task.id)
+        assert "_execution_record_id" in updated.context
+        assert updated.context["_execution_record_id"] == records[0].id
 
 
 # ------------------------------------------------------------------
@@ -796,8 +936,8 @@ class TestStartupRecovery:
         assert queued.id not in ids
 
     @pytest.mark.asyncio
-    async def test_list_by_status_excludes_scheduled_type(self):
-        """Scheduled template tasks should not be returned — only QUEUED-type tasks."""
+    async def test_list_by_status_includes_scheduled_runtime_tasks(self):
+        """Scheduled tasks now reuse the same task definition and must be recoverable."""
         orphan = Task(title="Orphan", status=TaskStatus.RUNNING, type=TaskType.QUEUED)
         scheduled = Task(
             title="Template", status=TaskStatus.RUNNING, type=TaskType.SCHEDULED,
@@ -808,7 +948,7 @@ class TestStartupRecovery:
         result = await TaskStore.list_by_status(TaskStatus.RUNNING)
         ids = [t.id for t in result]
         assert orphan.id in ids
-        assert scheduled.id not in ids
+        assert scheduled.id in ids
 
     @pytest.mark.asyncio
     async def test_recover_orphaned_tasks_resets_to_queued(self):
@@ -966,7 +1106,7 @@ class TestDedupKey:
 
     @pytest.mark.asyncio
     async def test_scheduler_sets_dedup_key(self):
-        """TaskScheduler._trigger sets dedup_key on created instances."""
+        """TaskScheduler keeps only one active queue ref per scheduled task."""
         from flocks.task.scheduler import TaskScheduler
 
         sched = TaskScheduler(check_interval=999)
@@ -984,13 +1124,13 @@ class TestDedupKey:
         await TaskStore.create_task(template)
         await sched._tick()
 
-        queued, _ = await TaskStore.list_tasks(task_type=TaskType.QUEUED, limit=10)
-        assert len(queued) == 1
-        assert queued[0].dedup_key == f"scheduled:{template.id}"
+        queued_ref = await TaskStore.get_active_queue_ref(template.id)
+        assert queued_ref is not None
+        assert queued_ref.task_id == template.id
 
     @pytest.mark.asyncio
     async def test_scheduler_dedup_skip_on_second_tick(self):
-        """Second scheduler tick does NOT create a duplicate instance."""
+        """Second scheduler tick does NOT create a duplicate active queue ref."""
         from flocks.task.scheduler import TaskScheduler
 
         sched = TaskScheduler(check_interval=999)
@@ -1018,8 +1158,10 @@ class TestDedupKey:
         # Second tick — should be deduplicated
         await sched._tick()
 
-        queued, total = await TaskStore.list_tasks(task_type=TaskType.QUEUED, limit=10)
-        assert total == 1  # only one instance, not two
+        queued_ref = await TaskStore.get_active_queue_ref(template.id)
+        assert queued_ref is not None
+        records, total = await TaskStore.list_records(template.id, limit=10)
+        assert total == 1
 
 
 # ------------------------------------------------------------------

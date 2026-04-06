@@ -59,11 +59,15 @@ export interface Task {
   skills: string[];
   category?: string;
   context: Record<string, any>;
+  workspaceDirectory?: string;
   retry?: RetryConfig;
   tags: string[];
   createdAt: string;
   updatedAt: string;
   createdBy: string;
+  taskID?: string;
+  sourceTaskType?: TaskType;
+  recordID?: string;
 }
 
 export interface TaskExecutionRecord {
@@ -108,6 +112,7 @@ export interface TaskCreateParams {
   cronDescription?: string;
   timezone?: string;
   userPrompt?: string;
+  workspaceDirectory?: string;
   tags?: string[];
   context?: Record<string, any>;
   executionMode?: ExecutionMode;
@@ -133,6 +138,7 @@ export interface TaskUpdateParams {
   cronDescription?: string;
   timezone?: string;
   userPrompt?: string;
+  workspaceDirectory?: string;
 }
 
 export interface DashboardCounts {
@@ -192,6 +198,18 @@ export const taskAPI = {
 
   queueStatus: () =>
     client.get<QueueStatus>('/api/tasks/queue/status'),
+
+  listQueueItems: (params?: Omit<TaskListParams, 'type'>) =>
+    client.get<PaginatedResponse<Task>>('/api/tasks/queue/items', { params }),
+
+  cancelQueueItem: (itemId: string) =>
+    client.post(`/api/tasks/queue/items/${itemId}/cancel`),
+
+  rerunQueueItem: (itemId: string) =>
+    client.post(`/api/tasks/queue/items/${itemId}/rerun`),
+
+  deleteQueueItem: (itemId: string) =>
+    client.delete(`/api/tasks/queue/items/${itemId}`),
 
   pauseQueue: () =>
     client.post('/api/tasks/queue/pause'),
