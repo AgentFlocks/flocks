@@ -73,7 +73,16 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
 
     try {
       await applyUpdate(info.latest_version!, (progress) => {
-        setSteps((prev) => [...prev, progress]);
+        setSteps((prev) => {
+          const existingIndex = prev.findIndex((item) => item.stage === progress.stage);
+          if (existingIndex === -1) {
+            return [...prev, progress];
+          }
+
+          const next = [...prev];
+          next[existingIndex] = progress;
+          return next;
+        });
         if (progress.stage === 'restarting') {
           setRestartingSync(true);
           pollUntilReady();
