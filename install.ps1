@@ -83,7 +83,7 @@ function Invoke-WorkspaceInstaller {
     )
 
     if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
-        Fail "安装脚本路径为空。"
+        Fail "Installer path is empty."
     }
 
     & powershell -NoProfile -ExecutionPolicy Bypass -File $InstallerPath @InstallerArgs
@@ -111,7 +111,7 @@ function Download-Archive {
     $lastErrorMessage = $null
 
     foreach ($url in Get-ArchiveCandidateUrls) {
-        Write-Info "尝试下载源码包: $url"
+        Write-Info "Trying source archive URL: $url"
         try {
             Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $ArchivePath
             return $url
@@ -121,7 +121,7 @@ function Download-Archive {
         }
     }
 
-    Fail "无法从 GitHub 下载版本 '$Version' 的源码包。最后一次错误: $lastErrorMessage"
+    Fail "Failed to download source archive for version '$Version' from GitHub. Last error: $lastErrorMessage"
 }
 
 function Resolve-ProjectRoot {
@@ -148,18 +148,18 @@ function Main {
     $archivePath = Join-Path $tempDir "flocks.zip"
 
     try {
-        Write-Info "仓库: $RepoSlug"
-        Write-Info "版本: $Version"
-        Write-Info "临时目录: $tempDir"
+        Write-Info "Repository: $RepoSlug"
+        Write-Info "Version: $Version"
+        Write-Info "Temporary directory: $tempDir"
 
         $downloadUrl = Download-Archive -ArchivePath $archivePath
 
-        Write-Info "解压源码包..."
+        Write-Info "Extracting source archive..."
         Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force
 
         $projectRoot = Resolve-ProjectRoot -TempDir $tempDir
         if ([string]::IsNullOrWhiteSpace($projectRoot)) {
-            Fail "解压完成，但未找到 scripts\install.ps1。"
+            Fail "Archive extracted, but scripts\install.ps1 was not found."
         }
 
         $installParent = Split-Path -Parent $InstallDir
@@ -173,9 +173,9 @@ function Main {
         Unblock-InstallFiles -TargetDir $InstallDir
 
         $installerPath = Join-Path $InstallDir "scripts\install.ps1"
-        Write-Info "下载来源: $downloadUrl"
-        Write-Info "安装目录: $InstallDir"
-        Write-Info "转调安装脚本: $installerPath"
+        Write-Info "Downloaded from: $downloadUrl"
+        Write-Info "Install directory: $InstallDir"
+        Write-Info "Delegating to installer: $installerPath"
 
         $installerArgs = @()
         if ($InstallTui) {
