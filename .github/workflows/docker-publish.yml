@@ -54,8 +54,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VITE_API_BASE_URL=http://localhost:8000
-            VITE_WS_BASE_URL=ws://localhost:8000
             VITE_APP_ENV=production
             VITE_APP_NAME=Flocks
             VITE_APP_VERSION=${{ steps.vars.outputs.release_tag }}
