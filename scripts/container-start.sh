@@ -43,6 +43,8 @@ cd "$ROOT_DIR"
   exit 1
 }
 
+"$ROOT_DIR/scripts/run_legacy_task_migration.sh" start || true
+
 printf '[flocks] publish ports to access from host: -p %s:%s -p %s:%s\n' \
   "$BACKEND_PORT" "$BACKEND_PORT" "$FRONTEND_PORT" "$FRONTEND_PORT"
 

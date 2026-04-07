@@ -19,6 +19,10 @@ class HealthResponse(BaseModel):
     timestamp: str
     config_dir: str
     data_dir: str
+    task_manager_started: bool
+    task_scheduler_running: bool
+    task_scheduler_available: bool
+    task_manager_error: str | None = None
 
 
 @router.get(
@@ -36,6 +40,8 @@ async def health_check() -> HealthResponse:
     """
     from datetime import UTC
     config = Config.get_global()
+    from flocks.task.manager import TaskManager
+    task_status = TaskManager.runtime_status()
     
     from flocks.updater import get_current_version
     return HealthResponse(
@@ -44,6 +50,7 @@ async def health_check() -> HealthResponse:
         timestamp=datetime.now(UTC).isoformat(),
         config_dir=str(config.config_dir),
         data_dir=str(config.data_dir),
+        **task_status,
     )
 
 

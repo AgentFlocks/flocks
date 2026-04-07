@@ -41,7 +41,7 @@ export default function CreateTaskDialog({ onClose, onCreated }: { onClose: () =
         params.runAt = runAt ? new Date(runAt).toISOString() : undefined;
         params.cron = undefined;
       }
-      await taskAPI.create(params);
+      await taskAPI.createScheduler(params);
       onCreated();
     } catch (err: unknown) {
       toast.error(t('taskSheet.createFailed'), err instanceof Error ? err.message : String(err));

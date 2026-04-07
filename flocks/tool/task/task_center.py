@@ -175,15 +175,22 @@ async def task_create(
     user_prompt: Optional[str] = None,
 ) -> ToolResult:
     from flocks.task.manager import TaskManager
-    from flocks.task.models import TaskPriority, TaskSource, TaskType, build_schedule
+    from flocks.task.models import (
+        SchedulerMode,
+        TaskPriority,
+        TaskSource,
+        TaskTrigger,
+        build_schedule,
+    )
 
-    task_type = TaskType(type)
     task_priority = TaskPriority(priority)
 
-    schedule = None
-    if task_type == TaskType.SCHEDULED:
+    if type == "queued":
+        mode = SchedulerMode.ONCE
+        trigger = TaskTrigger(run_immediately=True)
+    else:
         try:
-            schedule = build_schedule(
+            trigger = build_schedule(
                 run_once=run_once,
                 run_at=run_at,
                 cron=cron,
@@ -192,26 +199,49 @@ async def task_create(
             )
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc))
+        mode = SchedulerMode.ONCE if run_once else SchedulerMode.CRON
 
     source = TaskSource(
         source_type="user_conversation",
-        session_id=ctx.session_id,
         user_prompt=user_prompt,
     )
 
-    task = await TaskManager.create_task(
+    scheduler = await TaskManager.create_scheduler(
         title=title,
         description=description,
-        task_type=task_type,
+        mode=mode,
         priority=task_priority,
         source=source,
-        schedule=schedule,
+        trigger=trigger,
     )
+
+    output_lines = [
+        f"ID: {scheduler.id}",
+        f"Title: {scheduler.title}",
+        f"Mode: {scheduler.mode.value}",
+        f"Status: {scheduler.status.value}",
+        f"Priority: {scheduler.priority.value}",
+    ]
+    if scheduler.trigger.run_immediately:
+        executions, _ = await TaskManager.list_scheduler_executions(
+            scheduler.id,
+            limit=1,
+        )
+        if executions:
+            execution = executions[0]
+            output_lines.append(f"Execution ID: {execution.id}")
+            output_lines.append(f"Execution Status: {execution.status.value}")
+    elif scheduler.trigger.run_at:
+        output_lines.append(f"Run at: {scheduler.trigger.run_at.isoformat()}")
+    elif scheduler.trigger.cron:
+        output_lines.append(f"Cron: {scheduler.trigger.cron}")
+        if scheduler.trigger.next_run:
+            output_lines.append(f"Next run: {scheduler.trigger.next_run.isoformat()}")
 
     return ToolResult(
         success=True,
-        output=_format_task(task),
-        title=f"Task created: {task.title}",
+        output="\n".join(output_lines),
+        title=f"Task created: {scheduler.title}",
     )
 
 
@@ -254,13 +284,23 @@ async def task_list(
     limit: int = 10,
 ) -> ToolResult:
     from flocks.task.manager import TaskManager
-    from flocks.task.models import TaskStatus, TaskType
+    from flocks.task.models import SchedulerStatus, TaskStatus
 
-    tasks, total = await TaskManager.list_tasks(
-        status=TaskStatus(status) if status else None,
-        task_type=TaskType(type) if type else None,
-        limit=limit,
-    )
+    if type == "scheduled":
+        scheduler_status = None
+        if status == "running":
+            scheduler_status = SchedulerStatus.ACTIVE
+        elif status == "paused":
+            scheduler_status = SchedulerStatus.DISABLED
+        tasks, total = await TaskManager.list_schedulers(
+            status=scheduler_status,
+            limit=limit,
+        )
+    else:
+        tasks, total = await TaskManager.list_executions(
+            status=TaskStatus(status) if status else None,
+            limit=limit,
+        )
 
     lines = [f"Tasks ({total} total, showing {len(tasks)}):"]
     for t in tasks:
@@ -289,12 +329,13 @@ async def task_list(
 async def task_status(ctx: ToolContext, task_id: str) -> ToolResult:
     from flocks.task.manager import TaskManager
 
-    task = await TaskManager.get_task(task_id)
-    if not task:
-        return ToolResult(success=False, error=f"Task {task_id} not found")
-
-    if task.delivery_status.value == "unread":
+    task = await TaskManager.get_execution(task_id)
+    if task and task.delivery_status.value == "unread":
         await TaskManager.mark_notified(task_id)
+    if task is None:
+        task = await TaskManager.get_scheduler(task_id)
+    if task is None:
+        return ToolResult(success=False, error=f"Task {task_id} not found")
 
     return ToolResult(
         success=True,
@@ -351,20 +392,20 @@ async def task_update(
     from flocks.task.models import TaskPriority
 
     if action == "cancel":
-        task = await TaskManager.cancel_task(task_id)
+        task = await TaskManager.cancel_execution(task_id)
     elif action == "pause":
-        task = await TaskManager.pause_task(task_id)
+        task = await TaskManager.pause_execution(task_id)
     elif action == "resume":
-        task = await TaskManager.resume_task(task_id)
+        task = await TaskManager.resume_execution(task_id)
     elif action == "retry":
-        task = await TaskManager.retry_task(task_id)
+        task = await TaskManager.retry_execution(task_id)
     elif action == "update":
         fields = {}
         if priority:
             fields["priority"] = TaskPriority(priority)
         if title:
             fields["title"] = title
-        task = await TaskManager.update_task(task_id, **fields)
+        task = await TaskManager.update_scheduler(task_id, **fields)
     else:
         return ToolResult(success=False, error=f"Unknown action: {action}")
 
@@ -398,7 +439,11 @@ async def task_update(
 async def task_delete(ctx: ToolContext, task_id: str) -> ToolResult:
     from flocks.task.manager import TaskManager
 
-    ok = await TaskManager.delete_task(task_id)
+    execution = await TaskManager.get_execution(task_id)
+    if execution is not None:
+        ok = await TaskManager.delete_execution(task_id)
+    else:
+        ok = await TaskManager.delete_scheduler(task_id)
     if not ok:
         return ToolResult(success=False, error=f"Task {task_id} not found")
     return ToolResult(success=True, output=f"Task {task_id} deleted.")
@@ -424,7 +469,9 @@ async def task_delete(ctx: ToolContext, task_id: str) -> ToolResult:
 async def task_rerun(ctx: ToolContext, task_id: str) -> ToolResult:
     from flocks.task.manager import TaskManager
 
-    task = await TaskManager.rerun_task(task_id)
+    task = await TaskManager.rerun_execution(task_id)
+    if task is None:
+        task = await TaskManager.rerun_scheduler(task_id)
     if not task:
         return ToolResult(success=False, error=f"Task {task_id} not found")
 
@@ -451,42 +498,51 @@ _STATUS_ICON = {
 
 
 def _format_task_line(t) -> str:
-    icon = _STATUS_ICON.get(t.status.value, "·")
+    status = getattr(getattr(t, "status", None), "value", str(getattr(t, "status", "")))
+    icon = _STATUS_ICON.get(status, "·")
     pri = f"[{t.priority.value}]" if t.priority.value != "normal" else ""
-    return f"  {icon} {t.id}  {pri} {t.title}  ({t.status.value})"
+    return f"  {icon} {t.id}  {pri} {t.title}  ({status})"
 
 
 def _format_task(t) -> str:
+    mode_value = getattr(getattr(t, "mode", None), "value", getattr(t, "mode", None))
+    trigger = getattr(t, "trigger", None)
+    if mode_value == "cron":
+        type_value = "scheduled"
+    elif getattr(trigger, "run_immediately", False):
+        type_value = "immediate"
+    elif trigger is not None:
+        type_value = "once"
+    else:
+        type_value = "execution"
+    status_value = getattr(getattr(t, "status", None), "value", str(getattr(t, "status", "")))
     lines = [
         f"ID: {t.id}",
         f"Title: {t.title}",
-        f"Type: {t.type.value}",
-        f"Status: {_STATUS_ICON.get(t.status.value, '')} {t.status.value}",
+        f"Type: {type_value}",
+        f"Status: {_STATUS_ICON.get(status_value, '')} {status_value}",
         f"Priority: {t.priority.value}",
     ]
-    if t.schedule:
-        if t.schedule.run_once:
-            run_time = t.schedule.run_at or t.schedule.next_run
-            lines.append(f"Schedule: 一次性定时任务")
-            if run_time:
-                lines.append(f"Run at: {run_time.isoformat()}")
-        else:
-            lines.append(f"Cron: {t.schedule.cron} ({t.schedule.timezone})")
-            if t.schedule.next_run:
-                lines.append(f"Next run: {t.schedule.next_run.isoformat()}")
-        if t.schedule.cron_description:
-            lines.append(f"Schedule desc: {t.schedule.cron_description}")
-        lines.append(f"Enabled: {t.schedule.enabled}")
-    if t.execution:
-        if t.execution.started_at:
-            lines.append(f"Started: {t.execution.started_at.isoformat()}")
-        if t.execution.completed_at:
-            lines.append(f"Completed: {t.execution.completed_at.isoformat()}")
-        if t.execution.duration_ms is not None:
-            lines.append(f"Duration: {t.execution.duration_ms}ms")
-        if t.execution.result_summary:
-            lines.append(f"Result:\n{t.execution.result_summary}")
-        if t.execution.error:
-            lines.append(f"Error: {t.execution.error}")
+    if trigger is not None:
+        if trigger.run_at:
+            lines.append(f"Run at: {trigger.run_at.isoformat()}")
+        if trigger.cron:
+            lines.append(f"Cron: {trigger.cron} ({trigger.timezone})")
+        if trigger.next_run:
+            lines.append(f"Next run: {trigger.next_run.isoformat()}")
+        if trigger.cron_description:
+            lines.append(f"Schedule desc: {trigger.cron_description}")
+    if getattr(t, "queued_at", None):
+        lines.append(f"Queued: {t.queued_at.isoformat()}")
+    if getattr(t, "started_at", None):
+        lines.append(f"Started: {t.started_at.isoformat()}")
+    if getattr(t, "completed_at", None):
+        lines.append(f"Completed: {t.completed_at.isoformat()}")
+    if getattr(t, "duration_ms", None) is not None:
+        lines.append(f"Duration: {t.duration_ms}ms")
+    if getattr(t, "result_summary", None):
+        lines.append(f"Result:\n{t.result_summary}")
+    if getattr(t, "error", None):
+        lines.append(f"Error: {t.error}")
     lines.append(f"Created: {t.created_at.isoformat()}")
     return "\n".join(lines)

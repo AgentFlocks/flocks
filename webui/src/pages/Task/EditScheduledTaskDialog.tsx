@@ -2,34 +2,34 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, Calendar, Clock, Loader2 } from 'lucide-react';
 import { useToast } from '@/components/common/Toast';
-import { taskAPI, Task, TaskPriority, ExecutionMode } from '@/api/task';
+import { taskAPI, TaskScheduler, TaskPriority, ExecutionMode } from '@/api/task';
 import { describeCron, CRON_PRESETS } from './helpers';
 
 export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
-  task: Task;
+  task: TaskScheduler;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const isRunOnce = task.schedule?.runOnce ?? false;
+  const isRunOnce = task.mode === 'once';
   const { t } = useTranslation('task');
   const toast = useToast();
 
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
   const [cronPreset, setCronPreset] = useState<string>(() => {
-    const preset = CRON_PRESETS.find(p => p.value === task.schedule?.cron);
+    const preset = CRON_PRESETS.find(p => p.value === task.trigger?.cron);
     return preset ? preset.value : '__custom__';
   });
-  const [cronCustom, setCronCustom] = useState(task.schedule?.cron ?? '');
-  const [cronDescription, setCronDescription] = useState(task.schedule?.cronDescription ?? '');
+  const [cronCustom, setCronCustom] = useState(task.trigger?.cron ?? '');
+  const [cronDescription, setCronDescription] = useState(task.trigger?.cronDescription ?? '');
   const [runAt, setRunAt] = useState<string>(() => {
-    const src = task.schedule?.runAt ?? task.schedule?.nextRun;
+    const src = task.trigger?.runAt ?? task.trigger?.nextRun;
     if (!src) return '';
     const d = new Date(src);
     const pad = (n: number) => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
   });
-  const [timezone, setTimezone] = useState(task.schedule?.timezone ?? 'Asia/Shanghai');
+  const [timezone, setTimezone] = useState(task.trigger?.timezone ?? 'Asia/Shanghai');
   const [priority, setPriority] = useState<TaskPriority>(task.priority);
   const [executionMode, setExecutionMode] = useState<ExecutionMode>(task.executionMode);
   const [agentName, setAgentName] = useState(task.agentName);
@@ -47,7 +47,7 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
     setSubmitting(true);
     try {
       if (isRunOnce) {
-        await taskAPI.update(task.id, {
+        await taskAPI.updateScheduler(task.id, {
           title: title.trim(),
           description: description.trim(),
           priority,
@@ -59,7 +59,7 @@ export default function EditScheduledTaskDialog({ task, onClose, onSaved }: {
           userPrompt: userPrompt || undefined,
         });
       } else {
-        await taskAPI.update(task.id, {
+        await taskAPI.updateScheduler(task.id, {
           title: title.trim(),
           description: description.trim(),
           priority,

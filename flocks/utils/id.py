@@ -27,6 +27,7 @@ IdPrefix = Literal[
     "agent",      # agt
     "subtask",    # stk
     "event",      # evt
+    "tqref",      # tqr
     "chbind",     # chb  (channel session binding)
 ]
 
@@ -55,6 +56,7 @@ class Identifier:
         "agent": "agt",
         "subtask": "stk",
         "event": "evt",
+        "tqref": "tqr",
         "task": "tsk",
         "texec": "txe",
         "chbind": "chb",

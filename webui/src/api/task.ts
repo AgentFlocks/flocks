@@ -9,6 +9,9 @@ export type TaskStatus = 'pending' | 'queued' | 'running' | 'completed' | 'faile
 export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
 export type DeliveryStatus = 'unread' | 'notified' | 'viewed';
 export type ExecutionMode = 'agent' | 'workflow';
+export type SchedulerMode = 'once' | 'cron';
+export type TaskSchedulerStatus = 'active' | 'disabled' | 'archived';
+export type ExecutionTriggerType = 'run_once' | 'scheduled' | 'rerun';
 
 export interface TaskSource {
   sourceType: string;
@@ -16,67 +19,71 @@ export interface TaskSource {
   userPrompt?: string;
 }
 
-export interface TaskSchedule {
+export interface TaskTrigger {
+  runImmediately: boolean;
+  runAt?: string;
   cron?: string;
   timezone: string;
   nextRun?: string;
-  enabled: boolean;
   cronDescription?: string;
-  runOnce?: boolean;
-  runAt?: string;
-}
-
-export interface TaskExecution {
-  sessionID?: string;
-  agent: string;
-  startedAt?: string;
-  completedAt?: string;
-  durationMs?: number;
-  resultSummary?: string;
-  error?: string;
 }
 
 export interface RetryConfig {
   maxRetries: number;
   retryCount: number;
   retryDelaySeconds: number;
+  retryAfter?: string;
 }
 
-export interface Task {
+export interface TaskScheduler {
   id: string;
   title: string;
   description: string;
-  type: TaskType;
-  status: TaskStatus;
+  mode: SchedulerMode;
+  status: TaskSchedulerStatus;
   priority: TaskPriority;
   source: TaskSource;
-  schedule?: TaskSchedule;
-  execution?: TaskExecution;
-  deliveryStatus: DeliveryStatus;
+  trigger: TaskTrigger;
   executionMode: ExecutionMode;
   agentName: string;
   workflowID?: string;
   skills: string[];
   category?: string;
   context: Record<string, any>;
-  retry?: RetryConfig;
+  workspaceDirectory?: string;
+  retry: RetryConfig;
   tags: string[];
   createdAt: string;
   updatedAt: string;
   createdBy: string;
+  dedupKey?: string;
 }
 
-export interface TaskExecutionRecord {
+export interface TaskExecution {
   id: string;
-  taskID: string;
+  schedulerID: string;
+  title: string;
+  description: string;
+  priority: TaskPriority;
+  source: TaskSource;
+  triggerType: ExecutionTriggerType;
   status: TaskStatus;
+  deliveryStatus: DeliveryStatus;
+  queuedAt?: string;
   startedAt?: string;
   completedAt?: string;
   durationMs?: number;
+  sessionID?: string;
   resultSummary?: string;
   error?: string;
-  sessionID?: string;
-  deliveryStatus: DeliveryStatus;
+  executionInputSnapshot: Record<string, any>;
+  workspaceDirectory?: string;
+  retry: RetryConfig;
+  executionMode: ExecutionMode;
+  agentName: string;
+  workflowID?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface PaginatedResponse<T> {
@@ -88,13 +95,17 @@ export interface PaginatedResponse<T> {
 
 export interface TaskListParams {
   status?: TaskStatus;
-  type?: TaskType;
   priority?: TaskPriority;
   deliveryStatus?: DeliveryStatus;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
   offset?: number;
   limit?: number;
+}
+
+export interface SchedulerListParams extends Omit<TaskListParams, 'deliveryStatus' | 'status'> {
+  status?: TaskSchedulerStatus;
+  scheduledOnly?: boolean;
 }
 
 export interface TaskCreateParams {
@@ -108,6 +119,7 @@ export interface TaskCreateParams {
   cronDescription?: string;
   timezone?: string;
   userPrompt?: string;
+  workspaceDirectory?: string;
   tags?: string[];
   context?: Record<string, any>;
   executionMode?: ExecutionMode;
@@ -133,6 +145,7 @@ export interface TaskUpdateParams {
   cronDescription?: string;
   timezone?: string;
   userPrompt?: string;
+  workspaceDirectory?: string;
 }
 
 export interface DashboardCounts {
@@ -152,68 +165,88 @@ export interface QueueStatus {
   queued: number;
 }
 
+export interface TaskSystemNotice {
+  message: string;
+  displayCount: number;
+}
+
 // ======================================================================
 // API
 // ======================================================================
 
 export const taskAPI = {
-  list: (params?: TaskListParams) =>
-    client.get<PaginatedResponse<Task>>('/api/tasks', { params }),
+  listSchedulers: (params?: SchedulerListParams) =>
+    client.get<PaginatedResponse<TaskScheduler>>('/api/task-schedulers', { params }),
 
-  get: (taskId: string) =>
-    client.get<Task>(`/api/tasks/${taskId}`),
+  getScheduler: (schedulerId: string) =>
+    client.get<TaskScheduler>(`/api/task-schedulers/${schedulerId}`),
 
-  create: (data: TaskCreateParams) =>
-    client.post<Task>('/api/tasks', data),
+  createScheduler: (data: TaskCreateParams) =>
+    client.post<TaskScheduler>('/api/task-schedulers', data),
 
-  update: (taskId: string, data: TaskUpdateParams) =>
-    client.put<Task>(`/api/tasks/${taskId}`, data),
+  updateScheduler: (schedulerId: string, data: TaskUpdateParams) =>
+    client.put<TaskScheduler>(`/api/task-schedulers/${schedulerId}`, data),
 
-  delete: (taskId: string) =>
-    client.delete(`/api/tasks/${taskId}`),
+  deleteScheduler: (schedulerId: string) =>
+    client.delete(`/api/task-schedulers/${schedulerId}`),
 
-  cancel: (taskId: string) =>
-    client.post<Task>(`/api/tasks/${taskId}/cancel`),
+  enableScheduler: (schedulerId: string) =>
+    client.post<TaskScheduler>(`/api/task-schedulers/${schedulerId}/enable`),
 
-  pause: (taskId: string) =>
-    client.post<Task>(`/api/tasks/${taskId}/pause`),
+  disableScheduler: (schedulerId: string) =>
+    client.post<TaskScheduler>(`/api/task-schedulers/${schedulerId}/disable`),
 
-  resume: (taskId: string) =>
-    client.post<Task>(`/api/tasks/${taskId}/resume`),
+  listSchedulerExecutions: (schedulerId: string, params?: { offset?: number; limit?: number }) =>
+    client.get<PaginatedResponse<TaskExecution>>(`/api/task-schedulers/${schedulerId}/executions`, { params }),
 
-  retry: (taskId: string) =>
-    client.post<Task>(`/api/tasks/${taskId}/retry`),
+  runScheduler: (schedulerId: string) =>
+    client.post<TaskExecution>(`/api/task-schedulers/${schedulerId}/run`),
 
-  rerun: (taskId: string) =>
-    client.post<Task>(`/api/tasks/${taskId}/rerun`),
+  listExecutions: (params?: TaskListParams & { schedulerID?: string }) =>
+    client.get<PaginatedResponse<TaskExecution>>('/api/task-executions', { params }),
+
+  getExecution: (executionId: string) =>
+    client.get<TaskExecution>(`/api/task-executions/${executionId}`),
+
+  markExecutionViewed: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/viewed`),
+
+  cancelExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/cancel`),
+
+  pauseExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/pause`),
+
+  resumeExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/resume`),
+
+  retryExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/retry`),
+
+  rerunExecution: (executionId: string) =>
+    client.post<TaskExecution>(`/api/task-executions/${executionId}/rerun`),
+
+  deleteExecution: (executionId: string) =>
+    client.delete(`/api/task-executions/${executionId}`),
 
   dashboard: () =>
-    client.get<DashboardCounts>('/api/tasks/dashboard'),
+    client.get<DashboardCounts>('/api/task-system/dashboard'),
 
   queueStatus: () =>
-    client.get<QueueStatus>('/api/tasks/queue/status'),
+    client.get<QueueStatus>('/api/task-system/queue/status'),
 
   pauseQueue: () =>
-    client.post('/api/tasks/queue/pause'),
+    client.post('/api/task-system/queue/pause'),
 
   resumeQueue: () =>
-    client.post('/api/tasks/queue/resume'),
+    client.post('/api/task-system/queue/resume'),
 
-  batchCancel: (taskIds: string[]) =>
-    client.post<{ cancelled: number }>('/api/tasks/batch/cancel', { taskIds }),
+  batchCancelExecutions: (executionIds: string[]) =>
+    client.post<{ cancelled: number }>('/api/task-executions/batch/cancel', { executionIds }),
 
-  batchDelete: (taskIds: string[]) =>
-    client.post<{ deleted: number }>('/api/tasks/batch/delete', { taskIds }),
+  batchDeleteExecutions: (executionIds: string[]) =>
+    client.post<{ deleted: number }>('/api/task-executions/batch/delete', { executionIds }),
 
-  listScheduled: () =>
-    client.get<Task[]>('/api/tasks/scheduled'),
-
-  enableScheduled: (taskId: string) =>
-    client.post<Task>(`/api/tasks/scheduled/${taskId}/enable`),
-
-  disableScheduled: (taskId: string) =>
-    client.post<Task>(`/api/tasks/scheduled/${taskId}/disable`),
-
-  listRecords: (taskId: string, params?: { offset?: number; limit?: number }) =>
-    client.get<PaginatedResponse<TaskExecutionRecord>>(`/api/tasks/${taskId}/records`, { params }),
+  getSystemNotice: () =>
+    client.get<TaskSystemNotice | null>('/api/task-system/notice'),
 };

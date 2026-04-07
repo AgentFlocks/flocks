@@ -6,15 +6,18 @@ Provides scheduled and queued task management for Flocks.
 
 from .models import (
     DeliveryStatus,
+    ExecutionMode,
+    ExecutionTriggerType,
     RetryConfig,
-    Task,
     TaskExecution,
-    TaskExecutionRecord,
+    TaskExecutionQueueRef,
     TaskPriority,
-    TaskSchedule,
-    TaskSource,
+    TaskScheduler,
     TaskStatus,
-    TaskType,
+    TaskTrigger,
+    TaskSource,
+    SchedulerMode,
+    SchedulerStatus,
     build_schedule,
 )
 from .manager import TaskManager
@@ -22,16 +25,19 @@ from .store import TaskStore
 
 __all__ = [
     "DeliveryStatus",
+    "ExecutionMode",
+    "ExecutionTriggerType",
     "RetryConfig",
-    "Task",
     "TaskExecution",
-    "TaskExecutionRecord",
+    "TaskExecutionQueueRef",
     "TaskManager",
     "TaskPriority",
-    "TaskSchedule",
+    "TaskScheduler",
+    "TaskTrigger",
     "TaskSource",
+    "SchedulerMode",
+    "SchedulerStatus",
     "TaskStatus",
     "TaskStore",
-    "TaskType",
     "build_schedule",
 ]

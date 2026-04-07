@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ListTodo, Plus, Clock, Calendar, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
-import { useTaskDashboard, useQueueStatus } from '@/hooks/useTasks';
+import { useTaskDashboard, useQueueStatus, useTaskSystemNotice } from '@/hooks/useTasks';
 import { DashboardCounts } from '@/api/task';
 import { DashboardCards } from './components';
 import QueuedSection from './QueuedSection';
@@ -25,7 +25,7 @@ export default function TaskPage() {
 
   const { counts, refetch: refetchDashboard } = useTaskDashboard({ pollInterval: 15000 });
   const { refetch: refetchQueue } = useQueueStatus({ pollInterval: 10000 });
-
+  const { notice } = useTaskSystemNotice();
   const refreshGlobal = () => {
     refetchDashboard();
     refetchQueue();
@@ -54,6 +54,11 @@ export default function TaskPage() {
       />
 
       <div className="flex-1 overflow-auto px-6 pb-6 space-y-4">
+        {notice?.message && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            {notice.message}
+          </div>
+        )}
         {activeTab !== 'services' && <DashboardCards counts={counts} />}
 
         <div className="flex gap-1 bg-gray-100 rounded-lg p-1 w-fit">
@@ -93,7 +98,7 @@ export default function TaskPage() {
 
       {showCreateDialog && activeTab !== 'services' && (
         <TaskSheet
-          defaultType={activeTab === 'scheduled' ? 'scheduled' : 'queued'}
+          defaultScheduleKind="recurring"
           onClose={() => setShowCreateDialog(false)}
           onSaved={() => { setShowCreateDialog(false); refreshGlobal(); forceRemountSections(); }}
         />

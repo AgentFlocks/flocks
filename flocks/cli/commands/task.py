@@ -88,15 +88,22 @@ def task_list(
 async def _list_tasks(status_val, type_val, limit, fmt):
     await Storage.init()
     from flocks.task.manager import TaskManager
-    from flocks.task.models import TaskStatus, TaskType
+    from flocks.task.models import SchedulerStatus, TaskStatus
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    tasks, total = await TaskManager.list_tasks(
-        status=TaskStatus(status_val) if status_val else None,
-        task_type=TaskType(type_val) if type_val else None,
-        limit=limit,
-    )
+    if type_val == "scheduled":
+        scheduler_status = None
+        if status_val == "running":
+            scheduler_status = SchedulerStatus.ACTIVE
+        elif status_val == "paused":
+            scheduler_status = SchedulerStatus.DISABLED
+        tasks, total = await TaskManager.list_schedulers(status=scheduler_status, limit=limit)
+    else:
+        tasks, total = await TaskManager.list_executions(
+            status=TaskStatus(status_val) if status_val else None,
+            limit=limit,
+        )
 
     if fmt == "json":
         console.print(json.dumps([t.model_dump(mode="json") for t in tasks], indent=2, default=str))
@@ -120,7 +127,15 @@ async def _list_tasks(status_val, type_val, limit, fmt):
         icon = status_icon.get(t.status.value, "·")
         created = _relative_time(t.created_at)
         mode = t.execution_mode.value if t.execution_mode else "-"
-        table.add_row(icon, t.id[:16], t.title, t.type.value, mode, t.priority.value, created)
+        if getattr(getattr(t, "mode", None), "value", getattr(t, "mode", None)) == "cron":
+            type_value = "scheduled"
+        elif getattr(getattr(t, "trigger", None), "run_immediately", False):
+            type_value = "immediate"
+        elif getattr(t, "trigger", None) is not None:
+            type_value = "once"
+        else:
+            type_value = "execution"
+        table.add_row(icon, t.id[:16], t.title, type_value, mode, t.priority.value, created)
 
     console.print(table)
 
@@ -141,15 +156,25 @@ async def _show_task(task_id: str):
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.get_task(task_id)
+    task = await TaskManager.get_execution(task_id)
+    if task is None:
+        task = await TaskManager.get_scheduler(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)
 
+    if getattr(getattr(task, "mode", None), "value", getattr(task, "mode", None)) == "cron":
+        type_value = "scheduled"
+    elif getattr(getattr(task, "trigger", None), "run_immediately", False):
+        type_value = "immediate"
+    elif getattr(task, "trigger", None) is not None:
+        type_value = "once"
+    else:
+        type_value = "execution"
     lines = [
         f"[bold]{task.title}[/bold]",
         f"ID:       {task.id}",
-        f"Type:     {task.type.value}",
+        f"Type:     {type_value}",
         f"Status:   {task.status.value}",
         f"Priority: {task.priority.value}",
         f"Mode:     {task.execution_mode.value}",
@@ -165,21 +190,21 @@ async def _show_task(task_id: str):
     lines.append(f"Created:  {task.created_at.isoformat()}")
     if task.description:
         lines.append(f"Desc:     {task.description}")
-    if task.schedule:
-        lines.append(f"Cron:     {task.schedule.cron} ({task.schedule.timezone})")
-        if task.schedule.next_run:
-            lines.append(f"Next run: {task.schedule.next_run.isoformat()}")
-    if task.execution:
-        if task.execution.started_at:
-            lines.append(f"Started:  {task.execution.started_at.isoformat()}")
-        if task.execution.completed_at:
-            lines.append(f"Finished: {task.execution.completed_at.isoformat()}")
-        if task.execution.duration_ms is not None:
-            lines.append(f"Duration: {_fmt_duration(task.execution.duration_ms)}")
-        if task.execution.result_summary:
-            lines.append(f"\n[bold]Result:[/bold]\n{task.execution.result_summary}")
-        if task.execution.error:
-            lines.append(f"\n[red]Error:[/red] {task.execution.error}")
+    if getattr(task, "trigger", None):
+        if task.trigger.cron:
+            lines.append(f"Cron:     {task.trigger.cron} ({task.trigger.timezone})")
+        if task.trigger.next_run:
+            lines.append(f"Next run: {task.trigger.next_run.isoformat()}")
+    if getattr(task, "started_at", None):
+        lines.append(f"Started:  {task.started_at.isoformat()}")
+    if getattr(task, "completed_at", None):
+        lines.append(f"Finished: {task.completed_at.isoformat()}")
+    if getattr(task, "duration_ms", None) is not None:
+        lines.append(f"Duration: {_fmt_duration(task.duration_ms)}")
+    if getattr(task, "result_summary", None):
+        lines.append(f"\n[bold]Result:[/bold]\n{task.result_summary}")
+    if getattr(task, "error", None):
+        lines.append(f"\n[red]Error:[/red] {task.error}")
 
     console.print(Panel("\n".join(lines), border_style="cyan"))
 
@@ -208,32 +233,46 @@ def task_create(
 async def _create_task(title, description, task_type, priority, mode, agent, workflow, skills, cron, prompt):
     await Storage.init()
     from flocks.task.manager import TaskManager
-    from flocks.task.models import ExecutionMode, TaskPriority, TaskSchedule, TaskSource, TaskType
+    from flocks.task.models import (
+        ExecutionMode,
+        SchedulerMode,
+        TaskPriority,
+        TaskSource,
+        TaskTrigger,
+    )
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    schedule = None
+    scheduler_mode = SchedulerMode.ONCE
+    trigger = TaskTrigger(run_immediately=True)
     if task_type == "scheduled":
         if not cron:
             console.print("[red]--cron is required for scheduled tasks[/red]")
             raise typer.Exit(1)
-        schedule = TaskSchedule(cron=cron)
+        scheduler_mode = SchedulerMode.CRON
+        trigger = TaskTrigger(cron=cron)
 
     source = TaskSource(user_prompt=prompt) if prompt else None
 
-    task = await TaskManager.create_task(
+    scheduler = await TaskManager.create_scheduler(
         title=title,
         description=description,
-        task_type=TaskType(task_type),
+        mode=scheduler_mode,
         priority=TaskPriority(priority),
         source=source,
-        schedule=schedule,
+        trigger=trigger,
         execution_mode=ExecutionMode(mode),
         agent_name=agent,
         workflow_id=workflow,
         skills=skills,
     )
-    console.print(f"[green]✅ Created:[/green] {task.id}  {task.title}")
+    console.print(f"[green]✅ Created scheduler:[/green] {scheduler.id}  {scheduler.title}")
+    if trigger.run_immediately:
+        executions, _ = await TaskManager.list_scheduler_executions(scheduler.id, limit=1)
+        if executions:
+            console.print(
+                f"[green]↳ execution:[/green] {executions[0].id}  ({executions[0].status.value})"
+            )
 
 
 # ------------------------------------------------------------------
@@ -281,7 +320,7 @@ async def _queue(pause: bool, resume: bool):
 
 @task_app.command("scheduled")
 def task_scheduled():
-    """List all scheduled (cron) tasks."""
+    """List all scheduled tasks."""
     asyncio.run(_scheduled())
 
 
@@ -291,7 +330,7 @@ async def _scheduled():
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    tasks = await TaskManager.list_scheduled()
+    tasks, _ = await TaskManager.list_schedulers(scheduled_only=True, limit=100)
     if not tasks:
         console.print("[dim]No scheduled tasks[/dim]")
         return
@@ -304,10 +343,10 @@ async def _scheduled():
     table.add_column("Next Run")
 
     for t in tasks:
-        enabled = "✅" if (t.schedule and t.schedule.enabled) else "⏸️"
-        cron = t.schedule.cron if t.schedule else "-"
-        next_run = t.schedule.next_run.isoformat() if (t.schedule and t.schedule.next_run) else "-"
-        table.add_row(enabled, t.id[:16], t.title, cron, next_run)
+        status_icon = "✅" if t.status.value == "active" else "⏸️"
+        cron = t.trigger.cron or "-"
+        next_run = t.trigger.next_run.isoformat() if t.trigger.next_run else "-"
+        table.add_row(status_icon, t.id[:16], t.title, cron, next_run)
 
     console.print(table)
 
@@ -328,7 +367,7 @@ async def _cancel(task_id: str):
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.cancel_task(task_id)
+    task = await TaskManager.cancel_execution(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)
@@ -347,7 +386,7 @@ async def _retry(task_id: str):
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.retry_task(task_id)
+    task = await TaskManager.retry_execution(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found or not failed[/red]")
         raise typer.Exit(1)
@@ -366,7 +405,9 @@ async def _rerun(task_id: str):
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.rerun_task(task_id)
+    task = await TaskManager.rerun_execution(task_id)
+    if task is None:
+        task = await TaskManager.rerun_scheduler(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)
