@@ -112,7 +112,7 @@ def _resolve_username(raw_service: dict[str, Any]) -> str:
 def _verify_ssl(raw_service: dict[str, Any]) -> bool:
     raw_value = raw_service.get("verify_ssl")
     if raw_value is None:
-        raw_value = _get_custom_setting(raw_service, "verify_ssl", False)
+        raw_value = _get_custom_setting(raw_service, "verify_ssl", True)
     if isinstance(raw_value, bool):
         return raw_value
     if isinstance(raw_value, str):
