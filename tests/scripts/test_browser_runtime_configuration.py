@@ -14,6 +14,7 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
     assert 'chrome@*\' \'*|chromium@*\' \'*' in script
     assert 'candidate="${line#* }"' in script
     assert '"$HOME/.flocks/browser"' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
     assert "agent-browser install" not in script
     assert 'require("@puppeteer/browsers")' not in script
     assert "npx --yes --package @puppeteer/browsers node -e" not in script
@@ -32,5 +33,7 @@ def test_powershell_installer_prefers_explicit_browser_configuration() -> None:
     assert '$line -like "chrome@* *"' in script
     assert '$candidate = $line.Substring($firstSpaceIndex + 1).Trim()' in script
     assert 'Join-Path $HOME ".flocks\\browser"' in script
+    assert '-Description "Chrome for Testing installation"' in script
+    assert '-Environment @{ npm_config_registry = $script:NpmRegistry }' in script
     assert "agent-browser install" not in script
     assert 'require("@puppeteer/browsers")' not in script

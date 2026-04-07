@@ -184,6 +184,13 @@ Permission issues for `/home/flocks/.flocks` after startup:
 ``` bash
 -v "$HOME/.flocks:/home/flocks/.flocks:Z" \
 ```
+OR
+```bash
+docker run --rm --entrypoint id ghcr.io/agentflocks/flocks
+# example result: uid=1001(flocks) gid=1001(flocks) 组=1001(flocks)
+sudo chown -R <uid>:<gid> ~/.flocks
+# example: sudo chown -R 1001:1001 ~/.flocks
+```
 
 ### Remote Access to Flocks Service
 ```bash

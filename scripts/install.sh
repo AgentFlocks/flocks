@@ -14,6 +14,8 @@ PATH_UPDATE_REQUIRED=0
 PATH_UPDATE_FILES=""
 PATH_UPDATE_DIRS=""
 PATH_REFRESH_HINT_REQUIRED=0
+UV_DEFAULT_INDEX="https://pypi.org/simple"
+NPM_REGISTRY="https://registry.npmjs.org/"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -28,6 +30,60 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+probe_url_time() {
+  local url="$1"
+
+  has_cmd curl || return 1
+  curl -fsS -o /dev/null --connect-timeout 2 --max-time 4 -w '%{time_total}' "$url" 2>/dev/null
+}
+
+pick_fastest_url() {
+  local default_url="$1"
+  shift
+
+  local best_url="" best_time="" source_url probe_url probe_time
+  while [[ "$#" -ge 2 ]]; do
+    source_url="$1"
+    probe_url="$2"
+    shift 2
+
+    probe_time="$(probe_url_time "$probe_url" || true)"
+    [[ -n "$probe_time" ]] || continue
+
+    if [[ -z "$best_time" ]] || awk -v lhs="$probe_time" -v rhs="$best_time" 'BEGIN { exit !(lhs < rhs) }'; then
+      best_url="$source_url"
+      best_time="$probe_time"
+    fi
+  done
+
+  if [[ -n "$best_url" ]]; then
+    printf '%s' "$best_url"
+    return 0
+  fi
+
+  printf '%s' "$default_url"
+}
+
+select_install_sources() {
+  if ! has_cmd curl; then
+    info "curl was not found; skipping automatic mirror selection and using the default registries."
+    return 0
+  fi
+
+  info "Probing PyPI and npm registries to choose the faster source..."
+  UV_DEFAULT_INDEX="$(pick_fastest_url \
+    "https://pypi.org/simple" \
+    "https://pypi.org/simple" "https://pypi.org/simple/pip/" \
+    "https://pypi.tuna.tsinghua.edu.cn/simple" "https://pypi.tuna.tsinghua.edu.cn/simple/pip/")"
+  NPM_REGISTRY="$(pick_fastest_url \
+    "https://registry.npmjs.org/" \
+    "https://registry.npmjs.org/" "https://registry.npmjs.org/npm" \
+    "https://registry.npmmirror.com/" "https://registry.npmmirror.com/npm")"
+
+  info "Selected PyPI index: $UV_DEFAULT_INDEX"
+  info "Selected npm registry: $NPM_REGISTRY"
+}
+
 run_with_privilege() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     "$@"
@@ -39,7 +95,7 @@ run_with_privilege() {
     return
   fi
 
-  fail "当前操作需要管理员权限，请使用 root 运行，或先安装并配置 sudo。"
+  fail "This operation requires administrator privileges. Run as root or install and configure sudo first."
 }
 
 append_path() {
@@ -112,7 +168,7 @@ ensure_path_persisted() {
     PATH_UPDATE_REQUIRED=1
     record_path_update_file "$rc_file"
     record_path_update_dir "$path_entry"
-    info "已将 PATH 写入: $rc_file"
+    info "Added PATH entry to: $rc_file"
   fi
 }
 
@@ -123,13 +179,13 @@ show_path_update_hint() {
   first_rc_file=""
 
   if [[ "$PATH_UPDATE_REQUIRED" -eq 1 ]]; then
-    printf '\n[flocks] 已写入 shell 配置，请刷新当前终端环境：\n'
+    printf '\n[flocks] Shell configuration was updated. Refresh the current terminal environment:\n'
   else
-    printf '\n[flocks] 检测到 shell 配置变更，请确认已在当前终端生效：\n'
+    printf '\n[flocks] Existing shell configuration was detected. Make sure it is active in the current terminal:\n'
   fi
 
   if [[ -n "$PATH_UPDATE_DIRS" ]]; then
-    printf '\n[flocks] 已追加到 PATH 的目录：\n'
+    printf '\n[flocks] Added these directories to PATH:\n'
     while IFS= read -r path_entry; do
       [[ -z "$path_entry" ]] && continue
       printf '  - %s\n' "$path_entry"
@@ -137,7 +193,7 @@ show_path_update_hint() {
   fi
 
   if [[ -n "$PATH_UPDATE_FILES" ]]; then
-    printf '\n[flocks] 请执行以下命令刷新当前终端，或直接重新打开一个新终端：\n'
+    printf '\n[flocks] Run the following command to refresh the current terminal, or open a new terminal session:\n'
     while IFS= read -r rc_file; do
       [[ -z "$rc_file" ]] && continue
       printf '  source "%s"\n' "$rc_file"
@@ -148,7 +204,7 @@ show_path_update_hint() {
   fi
 
   if [[ -n "$first_rc_file" ]]; then
-    printf '\n[flocks] 如果 `source "%s"` 后仍未生效，请直接打开新终端再继续。\n' "$first_rc_file"
+    printf '\n[flocks] If `source "%s"` still does not refresh the environment, open a new terminal and continue there.\n' "$first_rc_file"
   fi
 }
 
@@ -157,7 +213,7 @@ show_path_update_hint_inline() {
 
   local rc_file
   if [[ -n "$PATH_UPDATE_FILES" ]]; then
-    printf '请执行以下命令刷新当前终端，或直接重新打开一个新终端：\n'
+    printf 'Run the following command to refresh the current terminal, or open a new terminal session:\n'
     while IFS= read -r rc_file; do
       [[ -z "$rc_file" ]] && continue
       printf '  source "%s"\n' "$rc_file"
@@ -193,15 +249,15 @@ resolve_root_dir() {
 
 print_clone_hint_and_exit() {
   cat <<EOF
-[flocks] 当前未检测到 Flocks 仓库代码。
+[flocks] Flocks repository source was not found in the current location.
 
-如需源码安装，请先拉取代码，再执行安装：
+To install from source, clone the repository first and then run:
 
   git clone $REPO_URL
   cd Flocks
   ./scripts/install.sh
 
-或直接使用 GitHub 一键安装入口：
+Or use the one-line GitHub bootstrap installer:
 
   curl -fsSL $RAW_INSTALL_SH_URL | bash
   iwr -useb $RAW_INSTALL_PS1_URL | iex
@@ -263,8 +319,8 @@ print_usage() {
 Usage: ./scripts/install.sh [--with-tui]
 
 Options:
-  --with-tui, -t  安装 TUI 依赖（此时会自动安装 bun）
-  --help, -h      查看帮助
+  --with-tui, -t  Install TUI dependencies as well (bun will be installed automatically)
+  --help, -h      Show this help message
 EOF
 }
 
@@ -280,7 +336,7 @@ parse_args() {
         ;;
       *)
         print_usage
-        fail "不支持的参数: $1"
+        fail "Unsupported argument: $1"
         ;;
     esac
     shift
@@ -307,18 +363,18 @@ node_version_satisfies_requirement() {
 }
 
 install_nodejs_macos() {
-  has_cmd brew || fail "未检测到满足要求的 npm，macOS 自动安装或升级 Node.js 22+ 需要 Homebrew。请先安装 Homebrew 后重试。安装命令：/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
 
-  info "尝试使用 Homebrew 安装或升级 Node.js..."
+  info "Trying to install or upgrade Node.js with Homebrew..."
   brew install node
 }
 
 install_nodejs_linux() {
-  info "未检测到满足要求的 npm，尝试自动安装或升级 Node.js..."
+  info "A compatible npm installation was not found. Trying to install or upgrade Node.js automatically..."
 
   if has_cmd apt-get; then
-    has_cmd curl || fail "Debian/Ubuntu 自动安装 Node.js 22 需要 curl。请先安装 curl 后重试。"
-    info "检测到 Debian/Ubuntu，优先使用 NodeSource 安装 Node.js 22..."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically on Debian/Ubuntu."
+    info "Detected Debian/Ubuntu. Installing Node.js 22 from NodeSource..."
     run_with_privilege apt-get update
     curl -fsSL https://deb.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege apt-get install -y nodejs
@@ -326,44 +382,44 @@ install_nodejs_linux() {
   fi
 
   if has_cmd dnf; then
-    has_cmd curl || fail "dnf 自动安装 Node.js 22 需要 curl。请先安装 curl 后重试。"
-    info "检测到 dnf，优先使用 NodeSource 安装 Node.js 22..."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with dnf."
+    info "Detected dnf. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege dnf install -y nodejs
     return
   fi
 
   if has_cmd yum; then
-    has_cmd curl || fail "yum 自动安装 Node.js 22 需要 curl。请先安装 curl 后重试。"
-    info "检测到 yum，优先使用 NodeSource 安装 Node.js 22..."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with yum."
+    info "Detected yum. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege yum install -y nodejs
     return
   fi
 
   if has_cmd pacman; then
-    info "检测到 pacman，使用仓库安装 Node.js，并在安装后校验版本是否满足 Node.js ${MIN_NODE_MAJOR}+..."
+    info "Detected pacman. Installing Node.js from the distribution repository and verifying that the version satisfies Node.js ${MIN_NODE_MAJOR}+..."
     run_with_privilege pacman -Sy --noconfirm nodejs npm
     return
   fi
 
   if has_cmd zypper; then
-    info "检测到 zypper，优先尝试安装 nodejs22..."
+    info "Detected zypper. Trying nodejs22 first..."
     if run_with_privilege zypper --non-interactive install nodejs22; then
       return
     fi
-    info "未能直接安装 nodejs22，回退到仓库默认 nodejs/npm，并在安装后校验版本..."
+    info "nodejs22 was not available directly. Falling back to the default nodejs/npm packages and validating the version afterwards..."
     run_with_privilege zypper --non-interactive install nodejs npm
     return
   fi
 
   if has_cmd apk; then
-    info "检测到 apk，使用仓库安装 Node.js，并在安装后校验版本是否满足 Node.js ${MIN_NODE_MAJOR}+..."
+    info "Detected apk. Installing Node.js from the distribution repository and verifying that the version satisfies Node.js ${MIN_NODE_MAJOR}+..."
     run_with_privilege apk add --no-cache nodejs npm
     return
   fi
 
-  fail "未检测到可用的 Linux 包管理器，无法自动安装 Node.js（包含 npm）。"
+  fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically."
 }
 
 ensure_npm_installed() {
@@ -375,10 +431,10 @@ ensure_npm_installed() {
     local current_major
     current_major="$(get_node_major_version || true)"
     if [[ -n "$current_major" ]]; then
-      info "检测到当前 Node.js 版本为 v${current_major}，尝试升级到 Node.js ${MIN_NODE_MAJOR}+..."
+      info "Detected current Node.js version v${current_major}. Trying to upgrade to Node.js ${MIN_NODE_MAJOR}+..."
     fi
   else
-    info "未检测到满足要求的 npm，尝试自动安装 Node.js..."
+    info "A compatible npm installation was not found. Trying to install Node.js automatically..."
   fi
 
   case "$(uname -s)" in
@@ -389,17 +445,17 @@ ensure_npm_installed() {
       install_nodejs_linux
       ;;
     *)
-      fail "当前系统不支持自动安装 Node.js（包含 npm），请手动安装后重试。"
+      fail "Automatic installation of Node.js (including npm) is not supported on this system. Install it manually and retry."
       ;;
   esac
 
   refresh_path
-  has_cmd npm || fail "Node.js（包含 npm）安装完成后仍不可用，请检查 PATH。"
-  node_version_satisfies_requirement || fail "检测到的 Node.js 版本过低。当前项目至少需要 Node.js ${MIN_NODE_MAJOR}+，请安装或升级后重试。"
+  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry."
+  node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+."
 }
 
 ensure_npm_global_prefix_writable() {
-  has_cmd npm || fail "未检测到 npm，请先安装 Node.js 22+（包含 npm）后重试。"
+  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry."
 
   local npm_prefix target_dir user_prefix
   npm_prefix="$(get_npm_prefix || true)"
@@ -417,7 +473,7 @@ ensure_npm_global_prefix_writable() {
   fi
 
   user_prefix="$HOME/.npm-global"
-  info "检测到 npm 全局目录无写权限，切换到用户目录: $user_prefix"
+  info "Global npm directory is not writable. Switching to user prefix: $user_prefix"
   mkdir -p "$user_prefix"
   npm config set prefix "$user_prefix"
   refresh_path
@@ -428,12 +484,12 @@ install_uv() {
     return
   fi
 
-  has_cmd curl || fail "curl 未安装，无法自动安装 uv。"
-  info "未检测到 uv，开始自动安装..."
+  has_cmd curl || fail "curl is required to install uv automatically."
+  info "uv was not found. Installing it automatically..."
   curl -LsSf https://astral.sh/uv/install.sh | sh
   refresh_path
   ensure_path_persisted "$HOME/.local/bin"
-  has_cmd uv || fail "uv 安装完成后仍不可用，请检查 PATH。"
+  has_cmd uv || fail "uv finished installing, but it is still not available. Check PATH and retry."
 }
 
 is_lock_error_output() {
@@ -474,7 +530,7 @@ stop_tracked_process() {
   [[ -n "$process_id" && "$process_id" =~ ^[0-9]+$ && "$process_id" -gt 0 ]] || return 0
 
   kill "$process_id" >/dev/null 2>&1 || kill -9 "$process_id" >/dev/null 2>&1 || true
-  info "已停止 ${reason} (PID: ${process_id})"
+  info "Stopped ${reason} (PID: ${process_id})"
 }
 
 list_flocks_process_ids() {
@@ -508,7 +564,7 @@ list_flocks_process_ids() {
 }
 
 stop_flocks_processes() {
-  info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
+  info "Checking for Flocks-related processes that may be locking the install directory..."
 
   if has_cmd flocks; then
     flocks stop >/dev/null 2>&1 || true
@@ -546,23 +602,23 @@ run_with_lock_retry() {
   fi
 
   if ! is_lock_error_output "$output"; then
-    fail "${description}失败。"
+    fail "${description} failed."
   fi
 
-  info "${description}检测到文件锁定，尝试清理残留进程后重试..."
+  info "${description} detected a file lock. Cleaning up leftover processes before retrying..."
   stop_flocks_processes
   sleep 3
 
-  "$@" || fail "${description}失败。"
+  "$@" || fail "${description} failed."
 }
 
 install_flocks_cli() {
   local tool_bin
 
-  info "安装 flocks 全局 CLI..."
+  info "Installing the global flocks CLI..."
   (
     cd "$ROOT_DIR"
-    run_with_lock_retry "flocks 全局 CLI 安装" uv tool install --editable "$ROOT_DIR" --force
+    run_with_lock_retry "Global flocks CLI installation" uv tool install --editable "$ROOT_DIR" --force --default-index "$UV_DEFAULT_INDEX"
   )
 
   tool_bin="$(uv tool dir --bin 2>/dev/null | tr -d '\r' || true)"
@@ -571,7 +627,7 @@ install_flocks_cli() {
     ensure_path_persisted "$tool_bin"
   fi
 
-  has_cmd flocks || fail "flocks CLI 安装完成后仍不可用，请检查 PATH。"
+  has_cmd flocks || fail "The flocks CLI finished installing, but it is still not available. Check PATH and retry."
 }
 
 install_bun() {
@@ -579,12 +635,12 @@ install_bun() {
     return
   fi
 
-  has_cmd curl || fail "curl 未安装，无法自动安装 bun。"
-  info "未检测到 bun，开始自动安装..."
+  has_cmd curl || fail "curl is required to install bun automatically."
+  info "bun was not found. Installing it automatically..."
   curl -fsSL https://bun.sh/install | bash
   refresh_path
   ensure_path_persisted "$HOME/.bun/bin"
-  has_cmd bun || fail "bun 安装完成后仍不可用，请检查 PATH。"
+  has_cmd bun || fail "bun finished installing, but it is still not available. Check PATH and retry."
 }
 
 install_dingtalk_channel_deps() {
@@ -593,16 +649,16 @@ install_dingtalk_channel_deps() {
 
   local node_modules_dir="$connector_dir/node_modules"
   if [[ -d "$node_modules_dir" ]]; then
-    info "钉钉 channel 依赖已存在，跳过安装。"
+    info "DingTalk channel dependencies already exist. Skipping installation."
     return 0
   fi
 
-  info "检测到钉钉 channel 插件，安装 npm 依赖..."
+  info "Detected DingTalk channel plugin. Installing npm dependencies..."
   (
     cd "$connector_dir"
     npm install
   )
-  info "钉钉 channel 依赖安装完成。"
+  info "DingTalk channel dependencies installed."
 }
 
 ensure_env_var_persisted() {
@@ -625,7 +681,7 @@ ensure_env_var_persisted() {
     } >> "$rc_file"
     PATH_UPDATE_REQUIRED=1
     record_path_update_file "$rc_file"
-    info "已将 ${var_name} 写入: $rc_file"
+    info "Added ${var_name} to: $rc_file"
   fi
 }
 
@@ -663,14 +719,14 @@ get_chrome_for_testing_dir() {
 
 install_chrome_for_testing() {
   local browser_dir install_output browser_path="" line candidate
-  has_cmd npx || fail "未检测到 npx，请先安装 Node.js（包含 npm）后重试。"
+  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry."
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 
-  info "未检测到系统 Chrome/Chromium，开始安装 Chrome for Testing 到: $browser_dir" >&2
-  if ! install_output="$(npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1)"; then
+  info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browser_dir" >&2
+  if ! install_output="$(npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1)"; then
     printf '%s\n' "$install_output" >&2
-    fail "Chrome for Testing 安装失败。"
+    fail "Chrome for Testing installation failed."
   fi
 
   while IFS= read -r line; do
@@ -685,7 +741,7 @@ install_chrome_for_testing() {
     esac
   done <<< "$install_output"
 
-  [[ -n "$browser_path" ]] || fail "Chrome for Testing 安装成功，但未能从安装输出解析浏览器路径。"
+  [[ -n "$browser_path" ]] || fail "Chrome for Testing finished installing, but the browser path could not be parsed from the installer output."
   printf '%s' "$browser_path"
 }
 
@@ -694,10 +750,10 @@ configure_agent_browser_browser() {
 
   browser_path="$(detect_system_browser_path || true)"
   if [[ -n "$browser_path" ]]; then
-    info "检测到系统 Chrome/Chromium，agent-browser 将默认使用: $browser_path"
+    info "Detected system Chrome/Chromium. agent-browser will use: $browser_path"
   else
     browser_path="$(install_chrome_for_testing)"
-    info "已安装 Chrome for Testing，agent-browser 将默认使用: $browser_path"
+    info "Installed Chrome for Testing. agent-browser will use: $browser_path"
   fi
 
   export AGENT_BROWSER_EXECUTABLE_PATH="$browser_path"
@@ -709,13 +765,13 @@ install_agent_browser() {
 
   if ! has_cmd agent-browser; then
     ensure_npm_global_prefix_writable
-    info "安装 agent-browser CLI..."
+    info "Installing the agent-browser CLI..."
     npm install --global agent-browser
     refresh_path
     ensure_agent_browser_user_path_if_needed
-    has_cmd agent-browser || fail "agent-browser 安装完成后仍不可用，请检查 PATH。"
+    has_cmd agent-browser || fail "agent-browser finished installing, but it is still not available. Check PATH and retry."
   else
-    info "检测到 agent-browser，跳过 CLI 安装。"
+    info "agent-browser is already installed. Skipping CLI installation."
   fi
 
   configure_agent_browser_browser
@@ -727,19 +783,20 @@ main() {
 
   resolve_root_dir || print_clone_hint_and_exit
 
-  info "项目目录: $ROOT_DIR"
+  info "Project directory: $ROOT_DIR"
   install_uv
   ensure_npm_installed
+  select_install_sources
 
-  info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
+  info "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..."
   (
     cd "$ROOT_DIR"
-    run_with_lock_retry "Python 后端依赖安装" uv sync --group dev
+    run_with_lock_retry "Python backend dependency installation" uv sync --group dev --default-index "$UV_DEFAULT_INDEX"
   )
 
   install_flocks_cli
 
-  info "安装 WebUI 依赖..."
+  info "Installing WebUI dependencies..."
   (
     cd "$ROOT_DIR/webui"
     npm install
@@ -749,34 +806,34 @@ main() {
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun
-    info "安装 TUI 依赖..."
+    info "Installing TUI dependencies..."
     (
       cd "$ROOT_DIR/tui"
       bun install
     )
   else
-    info "跳过 TUI 依赖安装。如需安装，请重新执行 ./scripts/install.sh --with-tui"
+    info "Skipping TUI dependency installation. Re-run ./scripts/install.sh --with-tui to install them."
   fi
 
   install_agent_browser
 
   cat <<EOF
 
-[flocks] 安装完成。
+[flocks] Installation complete.
 
-请启动新的终端会话，以加载环境变量并启用相关命令
+Start a new terminal session to load the updated environment and enable the installed commands.
 
-后续可用命令：
-  1. 以 daemon 模式启动后端 + WebUI
+Next commands:
+  1. Start the backend and WebUI in daemon mode
      flocks start
 
-  2. 查看更多命令帮助
+  2. Show command help
      flocks --help
 EOF
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     cat <<EOF
-  3. 启动 TUI
+  3. Launch the TUI
      flocks tui
 EOF
   fi

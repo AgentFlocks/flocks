@@ -61,7 +61,7 @@ parse_args() {
         INSTALL_TUI=1
         ;;
       --version)
-        [[ $# -ge 2 ]] || fail "--version 需要一个值。"
+        [[ $# -ge 2 ]] || fail "--version requires a value."
         VERSION="$2"
         shift
         ;;
@@ -71,7 +71,7 @@ parse_args() {
         ;;
       *)
         print_usage
-        fail "不支持的参数: $1"
+        fail "Unsupported argument: $1"
         ;;
     esac
     shift
@@ -79,9 +79,9 @@ parse_args() {
 }
 
 ensure_dependencies() {
-  has_cmd curl || fail "未检测到 curl，无法下载 GitHub 源码包。"
-  has_cmd tar || fail "未检测到 tar，无法解压 GitHub 源码包。"
-  has_cmd bash || fail "未检测到 bash，无法运行仓库内安装脚本。"
+  has_cmd curl || fail "curl is required to download the GitHub source archive."
+  has_cmd tar || fail "tar is required to extract the GitHub source archive."
+  has_cmd bash || fail "bash is required to run the repository installer."
 }
 
 build_candidate_urls() {
@@ -103,7 +103,7 @@ download_archive() {
 
   while IFS= read -r url; do
     [[ -n "$url" ]] || continue
-    info "尝试下载源码包: $url"
+    info "Trying source archive URL: $url"
     if curl -fsSL "$url" -o "$archive_path"; then
       printf '%s' "$url"
       return 0
@@ -111,7 +111,7 @@ download_archive() {
     last_error="$url"
   done < <(build_candidate_urls)
 
-  fail "无法从 GitHub 下载版本 \"$VERSION\" 的源码包。最后一次尝试: ${last_error:-<none>}"
+  fail "Failed to download source archive for version \"$VERSION\" from GitHub. Last attempted URL: ${last_error:-<none>}"
 }
 
 resolve_project_dir() {
@@ -137,24 +137,24 @@ main() {
   TMP_DIR="$(mktemp -d)"
   archive_path="$TMP_DIR/flocks.tar.gz"
 
-  info "仓库: $REPO_SLUG"
-  info "版本: $VERSION"
-  info "临时目录: $TMP_DIR"
+  info "Repository: $REPO_SLUG"
+  info "Version: $VERSION"
+  info "Temporary directory: $TMP_DIR"
   download_url="$(download_archive "$archive_path")"
 
-  info "解压源码包..."
+  info "Extracting source archive..."
   tar -xzf "$archive_path" -C "$TMP_DIR"
 
-  project_dir="$(resolve_project_dir)" || fail "解压完成，但未找到 scripts/install.sh。"
+  project_dir="$(resolve_project_dir)" || fail "Archive extracted, but scripts/install.sh was not found."
 
   install_parent="$(dirname "$INSTALL_DIR")"
   mkdir -p "$install_parent"
   rm -rf "$INSTALL_DIR"
   cp -R "$project_dir" "$INSTALL_DIR"
 
-  info "下载来源: $download_url"
-  info "安装目录: $INSTALL_DIR"
-  info "转调安装脚本: $INSTALL_DIR/scripts/install.sh"
+  info "Downloaded from: $download_url"
+  info "Install directory: $INSTALL_DIR"
+  info "Delegating to installer: $INSTALL_DIR/scripts/install.sh"
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     bash "$INSTALL_DIR/scripts/install.sh" --with-tui
