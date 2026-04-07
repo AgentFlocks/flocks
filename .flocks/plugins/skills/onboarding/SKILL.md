@@ -73,7 +73,6 @@ Use this exact markdown format (bullet lists ensure correct line breaks in the c
 **📡 IM 渠道**
 - ✅/❌ 飞书 (Feishu) — 已启用 / 未配置
 - ✅/❌ 企业微信 (WeCom) — 已启用 / 未配置
-- ✅/❌ 钉钉 (DingTalk) — 已启用 / 未配置
 - ✅/❌ Telegram — 已启用 / 未配置
 
 **Rendering rules:**
@@ -380,7 +379,6 @@ Ask which IM channels the user wants to configure. Supported channels:
 
 - 飞书 / Lark (Feishu)
 - 企业微信 (WeCom)
-- 钉钉 (DingTalk)
 - Telegram
 
 Configure each channel by writing to `flocks.json` via `ConfigWriter`.
@@ -453,32 +451,6 @@ ConfigWriter.update_config_section('channels.wecom', {
     'defaultAgent': 'rex',
     'botId': '<BOT_ID>',
     'secret': '{secret:channel_wecom_secret}'
-})
-```
-
-### 钉钉 (DingTalk)
-
-必填：**Client ID**、**Client Secret**。
-
-请用户前往 [钉钉开放平台](https://open.dingtalk.com/) → 应用开发 → 企业内部应用，创建应用后在「基础信息」页面获取 Client ID 和 Client Secret。
-
-```python
-import json
-from flocks.config.config import Config
-from flocks.config.config_writer import ConfigWriter
-
-CLIENT_SECRET = '<CLIENT_SECRET>'  # substitute actual value
-
-secret_file = Config.get_secret_file()
-secrets = json.loads(secret_file.read_text()) if secret_file.exists() else {}
-secrets['channel_dingtalk_clientSecret'] = CLIENT_SECRET
-secret_file.write_text(json.dumps(secrets, indent=2))
-
-ConfigWriter.update_config_section('channels.dingtalk', {
-    'enabled': True,
-    'defaultAgent': 'rex',
-    'clientId': '<CLIENT_ID>',
-    'clientSecret': '{secret:channel_dingtalk_clientSecret}'
 })
 ```
 
@@ -646,7 +618,7 @@ Template:
    - ThreatBook MCP 工具: 当前实现会把 key 保存为 `threatbook_mcp_key`（兼容旧项目中的 `threatbook_mcp_api_key`），并在 `mcp.threatbook_mcp.url` 中写入 `{secret:...}` 引用
    - ThreatBook API 工具: 中国区使用 `threatbook-cn` service + `threatbook_cn_api_key`，国际区使用 `threatbook-io` service + `threatbook_io_api_key`（兼容旧项目中的 `threatbook_api_key` / `threatbook_api`）
    - Security tools: 优先使用 `set_service_credentials(...)` 保存凭证，再调用 `update_api_service(enabled=True)` 启用服务，并用 `test_provider_credentials(...)` 立即测试/刷新状态。推荐使用各 provider 的 canonical secret id，例如 `virustotal_api_key`、`fofa_key`、`urlscan_api_key`、`shodan_api_key`；读取状态时兼容 `fofa_api_key`
-   - IM channels: 敏感凭据存入 `.secret.json`，命名约定：`channel_feishu_appSecret`、`channel_wecom_secret`、`channel_dingtalk_clientSecret`、`channel_telegram_botToken`；`flocks.json` 中对应字段写 `{secret:<key>}` 引用。非敏感字段（如 `appId`、`botId`、`clientId`）直接写入 `flocks.json` 明文。配置结构为**扁平结构**，字段直接放在 `channels.<name>` 下，不使用 `accounts.default` 嵌套。
+   - IM channels: 敏感凭据存入 `.secret.json`，命名约定：`channel_feishu_appSecret`、`channel_wecom_secret`、`channel_telegram_botToken`；`flocks.json` 中对应字段写 `{secret:<key>}` 引用。非敏感字段（如 `appId`、`botId`）直接写入 `flocks.json` 明文。配置结构为**扁平结构**，字段直接放在 `channels.<name>` 下，不使用 `accounts.default` 嵌套。
 4. **Placeholder detection**: A value starting with `<` is a placeholder, not a real credential. Treat such entries as unconfigured.
 5. **Error handling**: If a configuration step fails, explain the error and suggest manual config via the WebUI settings page.
 6. **Sensitive data**: Never echo full key values back in conversation.
