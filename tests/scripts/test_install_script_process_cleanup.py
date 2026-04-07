@@ -19,8 +19,15 @@ def test_bash_installer_stops_processes_before_retrying_locked_operations() -> N
     assert 'flocks stop >/dev/null 2>&1 || true' in script
     assert "list_flocks_process_ids()" in script
     assert "is_lock_error_output()" in script
-    assert 'run_with_lock_retry "Python 后端依赖安装" uv sync --group dev' in script
-    assert 'run_with_lock_retry "flocks 全局 CLI 安装" uv tool install --editable "$ROOT_DIR" --force' in script
+    assert 'UV_DEFAULT_INDEX="https://pypi.org/simple"' in script
+    assert 'NPM_REGISTRY="https://registry.npmjs.org/"' in script
+    assert "probe_url_time()" in script
+    assert "pick_fastest_url()" in script
+    assert "select_install_sources()" in script
+    assert 'run_with_lock_retry "Python backend dependency installation" uv sync --group dev --default-index "$UV_DEFAULT_INDEX"' in script
+    assert 'run_with_lock_retry "Global flocks CLI installation" uv tool install --editable "$ROOT_DIR" --force --default-index "$UV_DEFAULT_INDEX"' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
+    assert 'npm install --global agent-browser' in script
     assert "os\\ error\\ 5" in script
     assert 'pkill -f "uv sync"' not in script
     assert 'pkill -f "npm run preview"' not in script
@@ -33,6 +40,9 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
 
     assert "function Stop-FlocksProcesses" in script
+    assert "function Get-UrlProbeMilliseconds" in script
+    assert "function Select-FastestUrl" in script
+    assert "function Initialize-InstallSources" in script
     assert "function Invoke-NativeCommand" in script
     assert "& $flocksCommand.Source stop" in script
     assert 'Join-Path $runDir "upgrade_server.pid"' in script
@@ -43,8 +53,14 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert "Invoke-InstallerCommandWithLockRetry" in script
     assert "$result = Invoke-NativeCommandOrFail" in script
     assert "$null = Invoke-NativeCommandOrFail" in script
-    assert '-Description "Python 后端依赖安装"' in script
-    assert '-Description "flocks 全局 CLI 安装"' in script
+    assert '-Description "Python backend dependency installation"' in script
+    assert '-Description "Global flocks CLI installation"' in script
+    assert '$script:UvDefaultIndex = "https://pypi.org/simple"' in script
+    assert '$script:NpmRegistry = "https://registry.npmjs.org/"' in script
+    assert '-ArgumentList @("sync", "--group", "dev", "--default-index", $script:UvDefaultIndex)' in script
+    assert '-ArgumentList @("tool", "install", "--editable", $RootDir, "--force", "--default-index", $script:UvDefaultIndex)' in script
+    assert '-Description "Chrome for Testing installation"' in script
+    assert '-Environment @{ npm_config_registry = $script:NpmRegistry }' in script
     assert "Failed to update Windows PE resources" in script
     assert '& $ScriptBlock 2>&1' not in script
     assert "Stop-FlocksProcesses -Aggressive" not in script
