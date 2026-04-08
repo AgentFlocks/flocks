@@ -112,7 +112,7 @@ You may tell the user "I cannot do this" ONLY after:
 
 The `self-enhance` agent is capable of:
 - Writing and testing Python scripts using the standard library
-- Installing PyPI packages via `install_python_package` (with audit logging)
+- Installing PyPI packages inside the project virtualenv via `source .venv/bin/activate && uv add ...`
 - Creating permanent Flocks plugin tools using the `tool-builder` skill
 - Configuring MCP servers for complex integrations
 - Researching solutions via `websearch` and `webfetch`
@@ -123,10 +123,10 @@ These constraints apply when acquiring new capabilities:
 
 | Allowed | Prohibited |
 |---|---|
-| `uv add` / `pip install` from PyPI | `sudo`, `su`, elevated privileges |
+| `source .venv/bin/activate && uv add ...` from PyPI | `sudo`, `su`, elevated privileges |
 | Writing scripts to `/tmp` or project dirs | Downloading binary executables |
 | Creating plugins in `~/.flocks/plugins/` | Installing from non-PyPI sources |
-| Using `install_python_package` tool | Modifying system Python or `/usr/` |
+| Installing into the project virtualenv | Modifying system Python or `/usr/` |
 | Storing secrets via `get_secret_manager()` | Hardcoding credentials in code |
 
 If a capability requires elevated privileges or system-level access: **stop, explain to the user, and ask them to perform that step manually**.

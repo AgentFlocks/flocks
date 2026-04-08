@@ -1258,8 +1258,11 @@ class Message:
                     
                     if status == "completed":
                         output = getattr(state, "output", "")
+                        metadata = getattr(state, "metadata", {}) or {}
                         time_info = getattr(state, "time", {})
-                        if isinstance(time_info, dict) and time_info.get("compacted"):
+                        if metadata.get("context_compact_placeholder"):
+                            output = str(metadata["context_compact_placeholder"])
+                        elif isinstance(time_info, dict) and time_info.get("compacted"):
                             output = "[Tool output compacted]"
                         content_parts.append({
                             "type": "tool-result",
@@ -1328,7 +1331,10 @@ class Message:
             if part.type == "tool" and hasattr(part, 'state'):
                 if part.state.status == "completed":
                     time_info = getattr(part.state, 'time', None)
-                    if isinstance(time_info, dict) and time_info.get("compacted"):
+                    metadata = getattr(part.state, 'metadata', None) or {}
+                    if metadata.get("context_compact_placeholder"):
+                        output = str(metadata["context_compact_placeholder"])
+                    elif isinstance(time_info, dict) and time_info.get("compacted"):
                         output = "[Tool output compacted]"
                     else:
                         output = part.state.output
