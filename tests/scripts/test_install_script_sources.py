@@ -14,6 +14,8 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
     assert 'scripts/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
+    assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
+    assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
 
 
 def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_workspace_installer() -> None:
@@ -23,6 +25,8 @@ def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_
     assert 'scripts\\install_zh.ps1' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
+    assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
+    assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
 
 
 def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> None:
@@ -34,6 +38,8 @@ def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> 
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'FLOCKS_RAW_INSTALL_PS1_URL' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
+    assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
+    assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
@@ -50,6 +56,8 @@ def test_install_zh_powershell_wrapper_sets_cn_sources_and_reuses_main_installer
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'FLOCKS_RAW_INSTALL_PS1_URL' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
+    assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
+    assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script

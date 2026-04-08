@@ -42,6 +42,9 @@ function Set-CnInstallerEnvironment {
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
         $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
     }
+    if ([string]::IsNullOrWhiteSpace($env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL)) {
+        $env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing"
+    }
 }
 
 function Main {

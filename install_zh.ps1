@@ -131,6 +131,12 @@ function Resolve-ProjectRoot {
     return $null
 }
 
+function Set-CnInstallerEnvironment {
+    if ([string]::IsNullOrWhiteSpace($env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL)) {
+        $env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing"
+    }
+}
+
 function Main {
     if ($Help) {
         Show-Usage
@@ -175,6 +181,7 @@ function Main {
             $installerArgs += "-InstallTui"
         }
 
+        Set-CnInstallerEnvironment
         Invoke-WorkspaceInstaller -InstallerPath $installerPath -InstallerArgs $installerArgs
     }
     finally {

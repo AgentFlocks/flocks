@@ -124,6 +124,10 @@ resolve_project_dir() {
   return 1
 }
 
+configure_cn_environment() {
+  export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
+}
+
 main() {
   local archive_path download_url project_dir install_parent
 
@@ -152,6 +156,8 @@ main() {
   info "下载来源: $download_url"
   info "安装目录: $INSTALL_DIR"
   info "开始执行: $INSTALL_DIR/scripts/install_zh.sh"
+
+  configure_cn_environment
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     bash "$INSTALL_DIR/scripts/install_zh.sh" --with-tui
