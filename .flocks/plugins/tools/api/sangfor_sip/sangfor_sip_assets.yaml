@@ -1,0 +1,48 @@
+name: sangfor_sip_assets
+description: >
+  Query Sangfor SIP asset data. Use the `action` parameter to select:
+  - `ipgroup`   – 受监控IP模块（监控范围、资产组、责任人等）
+  - `server`    – 已配置服务器相关信息（服务器/网络设备/安全产品/云平台等 classify1_id∈{1,6,9,10,11}）
+  - `terminal`  – 资产信息-终端（classify1_id=2）
+description_cn: >
+  查询深信服 SIP 资产数据。通过 `action` 参数选择子接口：
+  - `ipgroup`  ：受监控IP模块，返回资产组信息（IP 范围、负责人、备注）
+  - `server`   ：已配置服务器相关信息（服务器/网络设备/安全产品/云平台）
+  - `terminal` ：资产信息-终端
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_sip
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        资产子接口类型：
+        - `ipgroup`  ：受监控IP资产组（建议 max_count=10000，时间范围可设较大）
+        - `server`   ：服务器/网络设备/安全产品/应用/云平台资产（classfy1_id=1,6,9,10,11）
+        - `terminal` ：终端资产（classfy1_id=2）
+      enum: [ipgroup, server, terminal]
+      default: ipgroup
+    from_time:
+      type: integer
+      description: >
+        起始时间戳（Unix 秒级），默认为 30 天前（ipgroup）或 24 小时前（其他）。
+        也可传入 ISO8601 字符串，如 "2024-01-01T00:00:00"。
+    to_time:
+      type: integer
+      description: 截止时间戳（Unix 秒级），默认为当前时间。
+    max_count:
+      type: integer
+      description: >
+        单次拉取最大数据条数（默认 2000，最大 10000；ipgroup 默认 10000）。
+        若实际数据量超过 max_count，需调整时间范围分批拉取。
+      default: 2000
+  required: [action]
+
+handler:
+  type: script
+  script_file: sangfor_sip.handler.py
+  function: run_assets

@@ -1,0 +1,48 @@
+name: sangfor_xdr_vulns
+description: >
+  Query and manage Sangfor XDR vulnerability data. Retrieve baseline
+  compliance data, vulnerability lists, update fix status, and query
+  data source devices. For vulnerability and compliance management.
+description_cn: >
+  查询和管理深信服 XDR 脆弱性数据。支持获取基线合规数据、
+  漏洞列表、修改修复状态和查询数据源设备。用于漏洞和合规管理。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        脆弱性操作类型：
+        - `baseline`      ：获取基线合规数据
+        - `vuln_list`     ：获取漏洞列表
+        - `update_status` ：修改漏洞修复状态
+        - `source_device` ：获取数据源设备列表
+      enum: [baseline, vuln_list, update_status, source_device]
+      default: baseline
+    page_size:
+      type: integer
+      description: 每页条数。
+      default: 20
+    page_num:
+      type: integer
+      description: 页码，从 1 开始。
+      default: 1
+    ids:
+      type: array
+      description: 漏洞 ID 列表（update_status 时使用）。
+      items:
+        type: string
+    fixStatus:
+      type: string
+      description: 修复状态（update_status 时使用）。
+  required: [action]
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_vulns

@@ -1,0 +1,80 @@
+name: sangfor_xdr_alerts
+description: >
+  Manage Sangfor XDR security alerts. Query alerts by time range,
+  update alert disposition status, retrieve alert proof/evidence,
+  and view alert details. Essential for security incident triage.
+description_cn: >
+  管理深信服 XDR 安全告警。支持按时间范围查询告警列表、
+  批量修改告警处置状态、获取告警举证信息和告警详情。
+  适用于安全事件分诊和告警运营。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        告警操作类型：
+        - `list`          ：查询安全告警列表（按时间范围分页查询）
+        - `update_status`  ：批量修改告警处置状态
+        - `status_list`    ：查询告警处置状态枚举列表
+        - `get_proof`      ：根据告警 UUID 获取举证信息
+        - `get_detail`     ：根据告警 UUID 获取告警详情
+      enum: [list, update_status, status_list, get_proof, get_detail]
+      default: list
+    start_time:
+      type: integer
+      description: >
+        查询起始时间（Unix 秒级时间戳），默认 24 小时前。
+        也可传 ISO8601 字符串如 "2024-01-01T00:00:00"。
+    end_time:
+      type: integer
+      description: 查询截止时间（Unix 秒级时间戳），默认当前时间。
+    page_size:
+      type: integer
+      description: 每页条数（list 时使用）。
+      default: 20
+    page_num:
+      type: integer
+      description: 页码，从 1 开始（list 时使用）。
+      default: 1
+    uuid:
+      type: string
+      description: 告警唯一ID（get_proof / get_detail 时必填）。
+    uuids:
+      type: array
+      description: 告警 UUID 数组（update_status 时必填）。
+      items:
+        type: string
+    deal_status:
+      type: integer
+      description: >
+        处置状态（update_status 时使用）：
+        1=待处置，2=处置中，3=处置完成。
+    deal_comment:
+      type: string
+      description: 处置备注（update_status 时可选）。
+  required: [action]
+
+response_hints: |
+  关键返回字段说明（list 接口）：
+  - data.list[].uuId: 告警唯一ID
+  - data.list[].name: 告警名称
+  - data.list[].riskLevel: 风险等级（0=严重 1=高危 2=中危 3=低危 4=信息）
+  - data.list[].severity: 严重性分值(0-100)
+  - data.list[].srcIp / dstIp: 源/目的IP
+  - data.list[].dealStatus: 处置状态
+  - data.list[].attackState: 攻击状态（0=尝试 1=失败 2=成功 3=失陷）
+  - data.list[].hostIp: 受影响主机IP
+  - data.list[].firstTimestamp / lastTimestamp: 首/末发现时间
+  - data.list[].attckTechnique: ATT&CK技术编号
+  - data.list[].riskTag: 风险标签数组
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_alerts
