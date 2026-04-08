@@ -7,5 +7,26 @@ hidden: false
 tags: [system]
 color: "#FF4500"
 delegatable: true
-# tools: null means allow all tools; call_omo_agent denied at base level
+tools:
+  - read
+  - list
+  - glob
+  - grep
+  - codesearch
+  - bash
+  - edit
+  - multiedit
+  - write
+  - apply_patch
+  - websearch
+  - webfetch
+  - skill
+  - delegate_task
+  - task
+  - todoread
+  - todowrite
+  - run_workflow
+  - run_workflow_node
+  - background_output
+  - background_cancel
 # prompt is left empty – injected dynamically by prompt_builder.py

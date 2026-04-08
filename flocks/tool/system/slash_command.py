@@ -5,6 +5,8 @@ Handles /help, /tools, /skills and other meta-commands that let agents
 inspect or control the Flocks runtime from within a conversation.
 """
 
+from collections import defaultdict
+
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -43,6 +45,68 @@ _HELP_TEXT = (
     + "\n".join(f"- /{cmd}: {desc}" for cmd, desc in _COMMAND_DESCRIPTIONS.items())
 )
 
+_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "custom"]
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return "No description provided."
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def build_tools_catalog_summary(
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    ToolRegistry.init()
+    tools = ToolRegistry.list_tools()
+    return format_tools_catalog_summary(
+        tools=tools,
+        max_description_chars=max_description_chars,
+        include_tip=include_tip,
+    )
+
+
+def format_tools_catalog_summary(
+    tools: list,
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for tool in tools:
+        if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):
+            continue
+        category = getattr(tool.category, "value", str(tool.category))
+        grouped[category].append((
+            tool.name,
+            _truncate_text(getattr(tool, "description", ""), max_description_chars),
+        ))
+
+    lines = ["Available Tools (grouped by category):", ""]
+    seen: set[str] = set()
+    for cat in _TOOL_CATEGORY_ORDER:
+        if cat in grouped:
+            lines.append(f"**{cat}**")
+            for name, description in sorted(grouped[cat], key=lambda item: item[0]):
+                lines.append(f"- {name}: {description}")
+            lines.append("")
+            seen.add(cat)
+
+    for cat, items in grouped.items():
+        if cat not in seen:
+            lines.append(f"**{cat}**")
+            for name, description in sorted(items, key=lambda item: item[0]):
+                lines.append(f"- {name}: {description}")
+            lines.append("")
+
+    if include_tip:
+        lines.append("Tip: use /tools info <name> for full details (UI only)")
+
+    return "\n".join(lines).strip()
+
 
 @ToolRegistry.register_function(
     name="run_slash_command",
@@ -66,24 +130,7 @@ async def run_slash_command_tool(ctx: ToolContext, command: str) -> ToolResult:
         return ToolResult(success=True, output=_HELP_TEXT)
 
     if command == "tools":
-        from collections import defaultdict
-        ToolRegistry.init()
-        tools = ToolRegistry.list_tools()
-        grouped: dict = defaultdict(list)
-        for tool in tools:
-            grouped[tool.category.value].append(tool.name)
-        category_order = ["file", "code", "search", "browser", "terminal", "system", "custom"]
-        lines = ["Available Tools (grouped by category):", ""]
-        seen: set = set()
-        for cat in category_order:
-            if cat in grouped:
-                lines.append(f"**{cat}**: {', '.join(grouped[cat])}")
-                seen.add(cat)
-        for cat, names in grouped.items():
-            if cat not in seen:
-                lines.append(f"**{cat}**: {', '.join(names)}")
-        lines += ["", "Tip: use /tools info <name> for full details (UI only)"]
-        return ToolResult(success=True, output="\n".join(lines))
+        return ToolResult(success=True, output=build_tools_catalog_summary())
 
     if command == "skills":
         from flocks.skill.skill import Skill

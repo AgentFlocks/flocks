@@ -57,11 +57,11 @@ You are a specialized {role} agent.
 - Open with a clear role identity
 - List concrete capabilities, not vague descriptions
 - Define a structured output format so callers can use results directly
-- Constraints must be consistent with the `permission` config (e.g. a `read_only` agent's prompt should state "do NOT create or modify files")
+- Constraints must be consistent with the declared `tools` allowlist (e.g. a read-only agent should not claim it can edit files)
 
 ### 3. Generate YAML Config File
 
-Create `~/.flocks/plugins/agents/{name}/agent.yaml`. Full schema:
+Create `~/.flocks/plugins/agents/{name}/agent.yaml`. Prefer an explicit `tools` allowlist; use `permission` only for advanced wildcard matching or deny/allow patterns that cannot be expressed as a simple list.
 
 ```yaml
 # Required
@@ -91,18 +91,23 @@ temperature: 0.3                # 0.0 - 1.0
 #   provider_id: custom-openai-compatible
 #   model_id: "claude-sonnet-4-5-20250929"
 
-# Permission rules
-permission:
-  "*": deny                     # Deny all by default
-  read: allow                   # Open as needed
-  grep: allow
-  glob: allow
-  # bash: allow                 # When shell execution is needed
-  # write: allow                # When file writing is needed
-  # edit: allow                 # When file editing is needed
-  # websearch: allow            # When web search is needed
-  # webfetch: allow             # When web fetching is needed
-  # delegate_task: allow        # When re-delegation is needed (use with caution)
+# Preferred tool allowlist
+tools:
+  - read                        # Open as needed
+  - grep
+  - glob
+  # - bash                      # When shell execution is needed
+  # - edit                      # Covers write/edit/apply_patch-style file mutations
+  # - websearch                 # When web search is needed
+  # - webfetch                  # When web fetching is needed
+  # - delegate_task             # When re-delegation is needed (use with caution)
+
+# Advanced / legacy alternative when wildcard rules are really needed
+# permission:
+#   "*": deny
+#   read: allow
+#   grep: allow
+#   glob: allow
 
 # Delegation metadata (tells Rex when to delegate to this agent)
 prompt_metadata:
@@ -127,38 +132,46 @@ prompt_metadata:
 | `plan_and_execute` | Complex tasks requiring planning before execution | All tools | rex, hephaestus |
 | `explore` | Codebase exploration and search | Search/read tools | explore |
 
-### 5. Permission Templates
+### 5. Tool Templates
 
 **Read-only analysis** (e.g. code review, security audit):
 ```yaml
-permission:
-  "*": deny
-  read: allow
-  grep: allow
-  glob: allow
-  codesearch: allow
+tools:
+  - read
+  - grep
+  - glob
+  - codesearch
 ```
 
 **Read-only + network** (e.g. documentation lookup, threat intelligence):
 ```yaml
-permission:
-  "*": deny
-  read: allow
-  grep: allow
-  glob: allow
-  bash: allow
-  websearch: allow
-  webfetch: allow
-  codesearch: allow
+tools:
+  - read
+  - grep
+  - glob
+  - bash
+  - websearch
+  - webfetch
+  - codesearch
 ```
 
 **Full execution** (e.g. code generation, refactoring):
 ```yaml
-permission:
-  "*": allow
-  delegate_task: deny
-  call_omo_agent: deny
+tools:
+  - read
+  - grep
+  - glob
+  - edit
+  - bash
+  - websearch
+  - webfetch
 ```
+
+**Tool naming rules**:
+- Prefer the exact tool names currently registered in the system; do not guess or invent names.
+- For ThreatBook MCP tools in this project, use the concrete prefixed names such as `threatbook_mcp_ip_query` and `threatbook_mcp_hrti_query`.
+- More generally, when an MCP server in the project has a stable prefix convention, keep that prefix in agent YAML instead of replacing it with a generic alias.
+- Do not mix the old `permission` style and the new `tools` style in the same agent unless there is a very specific reason.
 
 ### 6. Validation
 
@@ -168,7 +181,8 @@ After generating files, verify:
 2. **Prompt file exists**: confirm `~/.flocks/plugins/agents/{name}/prompt.md` has been created
 3. **Directory structure**: ensure files are inside `~/.flocks/plugins/agents/{name}/`, NOT as flat files like `agents/{name}.yaml`
 4. **Name uniqueness**: ensure no collision with built-in agents (reserved names: rex, hephaestus, oracle, librarian, explore, general, metis, momus, multimodal-looker, rex-junior, build, plan, compaction, title, summary)
-5. **Trigger reload**: call the refresh API so Rex recognizes the new agent immediately — **no restart needed**:
+5. **Tool names**: verify every listed tool exists in the current registry; if the repo exposes a `/tools` or tool listing command, check against that instead of relying on memory
+6. **Trigger reload**: call the refresh API so Rex recognizes the new agent immediately — **no restart needed**:
    ```bash
    curl -s -X POST http://localhost:8000/api/agents/refresh
    ```
@@ -191,3 +205,4 @@ After creation, inform the user:
 - **Files MUST be written to `~/.flocks/plugins/agents/<name>/` subdirectory** — flat files like `agents/<name>.yaml` are legacy and should NOT be created
 - The subdirectory name must match the agent `name` field exactly
 - Do not create agents with names that collide with built-in agents
+- Prefer `tools:` over `permission:` for new agents so the config stays aligned with the current UI and loader behavior

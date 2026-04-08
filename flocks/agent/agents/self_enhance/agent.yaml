@@ -2,16 +2,29 @@ name: self-enhance
 description: >-
   Capability acquisition agent. Delegate when Rex encounters a capability gap
   (missing library, no tool for a task). Researches solutions, installs packages
-  via install_python_package, creates permanent plugin tools using the tool-builder
-  skill, and verifies everything works before reporting back.
+  via the project virtualenv and uv, creates permanent plugin tools using the
+  tool-builder skill, and verifies everything works before reporting back.
 mode: subagent
 hidden: false
 tags: [system]
 color: "#27AE60"
 delegatable: true
 steps: 40
-# delegate_task is denied; all other base tools allowed
-# tools: null means allow all (minus delegate_task handled at permission level)
+tools:
+  - tool_search
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - apply_patch
+  - bash
+  - websearch
+  - webfetch
+  - skill
+  - background_output
+  - background_cancel
 prompt_metadata:
   category: self-enhancement
   cost: medium

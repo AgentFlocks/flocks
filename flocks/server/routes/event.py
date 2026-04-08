@@ -27,6 +27,13 @@ from flocks.utils.id import Identifier
 router = APIRouter()
 log = Log.create(service="event-routes")
 
+RUNTIME_EVENT_PREFIXES = (
+    "runtime.",
+    "turn.",
+    "context.",
+    "permission.",
+)
+
 
 # Current directory context for SSE events
 _current_directory: str = os.getcwd()
@@ -132,6 +139,19 @@ def wrap_global_event(event: dict, directory: str = None) -> dict:
     }
 
 
+def is_runtime_event(event_type: str) -> bool:
+    return event_type == "runtime.event" or any(
+        event_type.startswith(prefix) for prefix in RUNTIME_EVENT_PREFIXES
+    )
+
+
+def create_runtime_event(runtime_type: str, properties: dict = None) -> dict:
+    return create_event("runtime.event", {
+        "runtimeType": runtime_type,
+        **(properties or {}),
+    })
+
+
 # Helper to publish events
 async def publish_event(event_type: str, properties: dict = None, directory: str = None):
     """
@@ -155,6 +175,14 @@ async def publish_event(event_type: str, properties: dict = None, directory: str
     
     # Send direct event format for /event endpoint compatibility
     await broadcaster.publish(event)
+    if is_runtime_event(event_type) and event_type != "runtime.event":
+        await broadcaster.publish(create_runtime_event(event_type, properties))
+
+
+async def publish_runtime_event(runtime_type: str, properties: dict = None, directory: str = None):
+    """Publish runtime semantic event on the normalized runtime channel."""
+    broadcaster = EventBroadcaster.get()
+    await broadcaster.publish(create_runtime_event(runtime_type, properties))
 
 
 async def sse_generator(
@@ -231,9 +259,12 @@ async def subscribe_events(request: Request):
 __all__ = [
     "router", 
     "publish_event", 
+    "publish_runtime_event",
     "EventBroadcaster",
     "create_event",
+    "create_runtime_event",
     "wrap_global_event",
+    "is_runtime_event",
     "set_event_directory",
     "get_event_directory",
     "sse_generator",

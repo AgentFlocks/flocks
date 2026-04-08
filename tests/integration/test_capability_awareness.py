@@ -301,6 +301,16 @@ class TestRexPromptWorkflowAwareness:
         # Either the section was injected or the 'run_workflow' tool is mentioned
         assert "workflow" in prompt or "run_workflow" in prompt
 
+    @pytest.mark.asyncio
+    async def test_rex_prompt_prefers_direct_ioc_lookup_before_delegation(self):
+        """单 IOC 情报查询应在提示词中优先走 Rex 直查路径。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "Single IOC basic lookup only" in prompt
+        assert '"查询 8.8.8.8 的情报" -> Rex should directly query TI tools' in prompt
+        assert "tool_search` if needed -> direct TI query tool -> answer" in prompt
+
 
 # ===========================================================================
 # 4. /skills slash command 端到端（真实 Skill 扫描）

@@ -5,6 +5,7 @@ Provides agent management commands: list
 Ported from original cli/cmd/agent.ts
 """
 
+import asyncio
 import json
 from typing import Optional
 
@@ -256,9 +257,7 @@ def agent_permissions(
     ),
 ):
     """
-    Check agent permission for a specific tool
-    
-    Returns the effective permission (allow, ask, or deny) for the tool.
+    Check whether an agent declares a specific tool.
     """
     agent = Agent.get(name)
     
@@ -266,12 +265,7 @@ def agent_permissions(
         console.print(f"[red]Agent not found: {name}[/red]")
         raise typer.Exit(1)
     
-    result = Agent.check_permission(name, tool, pattern)
-    
-    color = {
-        "allow": "green",
-        "deny": "red",
-        "ask": "yellow",
-    }.get(result, "white")
-    
-    console.print(f"[{color}]{result}[/{color}]")
+    _ = pattern
+    result = asyncio.run(Agent.has_tool(name, tool))
+    color = "green" if result else "red"
+    console.print(f"[{color}]{'allow' if result else 'deny'}[/{color}]")

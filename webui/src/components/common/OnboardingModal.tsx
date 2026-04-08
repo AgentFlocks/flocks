@@ -564,11 +564,13 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
       const applyRes = await onboardingAPI.apply(payload);
       const applyData = applyRes.data;
-      const savedModelId = primaryProviderIsThreatBook
-        ? (selectedPrimaryProvider?.models[0]?.id || primaryModelId)
-        : primaryModelId;
+      const savedProviderId = applyData.default_model?.provider_id || primaryProviderId;
+      const savedModelId = applyData.default_model?.model_id
+        || primaryModelId
+        || selectedPrimaryProvider?.models[0]?.id
+        || '';
       setResolvedDefaultModel({
-        providerId: primaryProviderId,
+        providerId: savedProviderId,
         modelId: savedModelId,
       });
       setPrimaryModelId(savedModelId);
@@ -667,7 +669,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl mx-4 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[90vh] mx-4 overflow-hidden flex flex-col">
         <div className="relative px-6 pt-5 pb-4">
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-red-500 via-red-500 to-violet-500" />
           <button
@@ -679,7 +681,8 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
           <h2 className="text-lg font-bold text-gray-900 pr-8">{t('onboarding.title')}</h2>
         </div>
 
-        <div className="px-6 space-y-4 pb-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-4">
+          <div className="space-y-4">
           <div className="rounded-xl border border-amber-200 bg-amber-50/60 overflow-hidden">
             <div className="px-4 py-4">
               <div className="flex items-center gap-2">
@@ -1043,6 +1046,7 @@ export default function OnboardingModal({ onClose }: OnboardingModalProps) {
               )}
             </div>
           )}
+          </div>
         </div>
 
         <div className="px-6 py-4 bg-gray-50/80 border-t border-gray-100">

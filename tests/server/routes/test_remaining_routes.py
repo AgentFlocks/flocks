@@ -5,10 +5,12 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import status
 from httpx import AsyncClient
+from unittest.mock import AsyncMock
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,44 @@ async def _wait_for_execution_terminal_state(
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"Execution {exec_id} did not finish within {timeout_s} seconds")
         await asyncio.sleep(0.05)
+@pytest.fixture(autouse=True)
+def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect workflow route filesystem writes into a per-test temp dir."""
+    from flocks.server.routes import workflow as workflow_routes
+
+    workspace_root = tmp_path / "workspace"
+    project_root = workspace_root / ".flocks" / "plugins" / "workflows"
+    global_root = tmp_path / "home" / ".flocks" / "plugins" / "workflows"
+    legacy_project_plugin = workspace_root / ".flocks" / "plugins" / "workflow"
+    legacy_project_main = workspace_root / ".flocks" / "workflow"
+    legacy_global_plugin = tmp_path / "home" / ".flocks" / "plugins" / "workflow"
+    legacy_global_main = tmp_path / "home" / ".flocks" / "workflow"
+
+    for root in [
+        workspace_root / ".flocks",
+        project_root,
+        global_root,
+        legacy_project_plugin,
+        legacy_project_main,
+        legacy_global_plugin,
+        legacy_global_main,
+    ]:
+        root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
+    monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
+    monkeypatch.setattr(
+        workflow_routes,
+        "resolve_project_workflow_roots",
+        lambda workspace: [legacy_project_main, legacy_project_plugin, project_root],
+    )
+    monkeypatch.setattr(
+        workflow_routes,
+        "resolve_global_workflow_roots",
+        lambda: [legacy_global_main, legacy_global_plugin, global_root],
+    )
+
+    yield
 
 
 # ===========================================================================
@@ -341,6 +381,39 @@ class TestPermissionRoutes:
             json={},
         )
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    @pytest.mark.asyncio
+    async def test_permission_routes_preserve_request_created_time(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        """List/detail routes should expose the stored permission request timestamp."""
+        from flocks.permission.next import PermissionRequestInfo
+
+        info = PermissionRequestInfo(
+            id="perm_time_test",
+            sessionID="ses_time_test",
+            permission="bash",
+            patterns=["*"],
+            metadata={"messageID": "msg_time_test"},
+            always=["*"],
+            tool={"name": "bash"},
+            time={"created": 1234567890},
+        )
+
+        monkeypatch.setattr(
+            "flocks.server.routes.permission.PermissionNext.list_pending_infos",
+            AsyncMock(return_value=[info]),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.permission.PermissionNext.get_pending_info",
+            AsyncMock(return_value=info),
+        )
+
+        list_resp = await client.get("/permission")
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert list_resp.json()[0]["time"]["created"] == 1234567890
+
+        detail_resp = await client.get("/permission/perm_time_test")
+        assert detail_resp.status_code == status.HTTP_200_OK
+        assert detail_resp.json()["time"]["created"] == 1234567890
 
     @pytest.mark.asyncio
     async def test_api_prefix_permission_endpoint(self, client: AsyncClient):
