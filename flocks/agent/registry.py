@@ -39,6 +39,7 @@ from flocks.agent.agent import (
     AvailableWorkflow,
     DelegationTrigger,
 )
+from flocks.agent.toolset import agent_declares_tool
 from flocks.agent.prompt_utils import categorize_tools
 from flocks.agent.agent_factory import (
     scan_and_load,
@@ -270,6 +271,24 @@ class Agent:
 
         base_permissions = _build_base_permissions(user_perms, cli_overrides)
 
+        def _permission_dict_to_tools(permission_cfg: Dict[str, Any]) -> List[str]:
+            try:
+                from flocks.permission.next import PermissionNext
+                from flocks.tool.registry import ToolRegistry
+
+                ToolRegistry.init()
+                ruleset = from_config(permission_cfg)
+                return [
+                    tool.name
+                    for tool in ToolRegistry.list_tools()
+                    if getattr(tool, "enabled", True)
+                    and tool.name not in {"invalid", "_noop"}
+                    and PermissionNext.evaluate(tool.name, "*", ruleset) == "allow"
+                ]
+            except Exception as exc:
+                log.warn("agent.registry.permission_to_tools.error", {"error": str(exc)})
+                return []
+
         if cfg.agent:
             for key, value in cfg.agent.items():
                 alias_key = AGENT_ALIASES.get(key, key)
@@ -286,6 +305,7 @@ class Agent:
                         name=key,
                         mode="all",
                         permission=base_permissions,
+                        tools=[],
                         options={},
                         native=False,
                     )
@@ -316,6 +336,8 @@ class Agent:
                 item.options.update(value.options)
                 if value.permission:
                     item.permission = merge(item.permission, from_config(value.permission), cli_overrides)
+                    if isinstance(value.permission, dict):
+                        item.tools = _permission_dict_to_tools(value.permission)
 
         # enabled_agents whitelist filter
         if cfg.enabled_agents is not None:
@@ -463,19 +485,17 @@ class Agent:
             "modelID": agent.model.model_id,
         }
 
-    # ── Permission checking ─────────────────────────────────────────────────
+    # ── Tool declaration checking ───────────────────────────────────────────
 
     @classmethod
-    async def check_permission(cls, agent_name: str, tool: str, args: Optional[Dict[str, Any]] = None) -> str:
+    async def has_tool(cls, agent_name: str, tool: str) -> bool:
         agent = await cls.get(agent_name)
         if not agent:
-            return "deny"
-        from flocks.permission import PermissionNext
-        ruleset = agent.permission or []
-        if not ruleset:
-            return "deny"
-        result = PermissionNext._evaluate(tool, "*", ruleset)
-        return "allow" if result == "allow" else "deny"
+            return False
+        if agent_declares_tool(agent, tool):
+            return True
+        from flocks.tool.catalog import get_always_load_tool_names
+        return tool in get_always_load_tool_names()
 
     # ── Agent generation (LLM-assisted) ────────────────────────────────────
 

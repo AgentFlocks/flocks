@@ -18,12 +18,23 @@ tags:
   - threat-intelligence
   - ioc-analysis
 tools:
-  - __mcp_ip_query
-  - __mcp_ip_attribution
-  - __mcp_domain_query
-  - __mcp_domain_attribution
-  - __mcp_hash_query
-  - __mcp_threat_actor_query
-  - __mcp_threat_actor_list_query
-  - __mcp_web_search
-  - __mcp_web_browsing
+  - tool_search
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_ip_attribution
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_domain_attribution
+  - threatbook_mcp_hash_query
+  - threatbook_mcp_threat_actor_query
+  - threatbook_mcp_threat_actor_list_query
+  - threatbook_mcp_vuln_query
+  - threatbook_mcp_vuln_vendors_products_match
+  - threatbook_mcp_hrti_query
+  - websearch
+  - webfetch
+  - read
+  - grep
+  - glob
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_url_query
+  - virustotal_file_query

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from flocks.tool.registry import ToolContext
-from flocks.tool.system.slash_command import run_slash_command_tool
+from flocks.tool.system.slash_command import build_tools_catalog_summary, run_slash_command_tool
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,23 @@ class TestToolsCommand:
             result = await run_slash_command_tool(_make_ctx(), "tools")
         for tool in mock_tools:
             assert tool.name in result.output
+
+    async def test_tool_descriptions_present(self, mock_tools):
+        with patch("flocks.tool.system.slash_command.ToolRegistry.list_tools", return_value=mock_tools), \
+             patch("flocks.tool.system.slash_command.ToolRegistry.init"):
+            result = await run_slash_command_tool(_make_ctx(), "tools")
+        assert "Description of read" in result.output
+        assert "Description of bash" in result.output
+
+    async def test_catalog_truncates_descriptions(self):
+        long_tool = _make_tool_info("websearch", "browser")
+        long_tool.description = "x" * 140
+        with patch("flocks.tool.system.slash_command.ToolRegistry.list_tools", return_value=[long_tool]), \
+             patch("flocks.tool.system.slash_command.ToolRegistry.init"):
+            output = build_tools_catalog_summary(max_description_chars=100, include_tip=False)
+        assert "- websearch: " in output
+        assert "x" * 101 not in output
+        assert "..." in output
 
     async def test_empty_registry_no_crash(self):
         with patch("flocks.tool.system.slash_command.ToolRegistry.list_tools", return_value=[]), \

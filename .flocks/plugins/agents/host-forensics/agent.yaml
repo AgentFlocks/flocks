@@ -22,36 +22,23 @@ color: "#E74C3C"
 
 temperature: 0.3
 
-permission:
-  "*": deny
-  ssh_run_script: allow
-  ssh_host_cmd: allow
-  threatbook_ip_query: allow
-  threatbook_domain_query: allow
-  threatbook_file_report: allow
-  threatbook_url_reputation: allow
-  threatbook_file_sandbox_submit: allow
-  threatbook_ioc_report: allow
-  urlhaus_lookup_url: allow
-  urlhaus_lookup_host: allow
-  mitre_attack_get_technique: allow
-  mitre_attack_get_tactic: allow
-  mitre_attack_search: allow
-  mitre_attack_python_get_technique: allow
-  mitre_attack_python_search: allow
-  cve_search_cve: allow
-  cve_search_product: allow
-  osv_query: allow
-  cyberchef_magic: allow
-  cyberchef_run_recipe: allow
-  virustotal_ip_query: allow
-  virustotal_domain_query: allow
-  virustotal_file_query: allow
-  virustotal_url_query: allow
-  bash: allow
-  read: allow
-  websearch: allow
-  webfetch: allow
+tools:
+  - tool_search
+  - ssh_run_script
+  - ssh_host_cmd
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_hash_query
+  - threatbook_io_url_query
+  - threatbook_cn_file_upload
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_file_query
+  - virustotal_url_query
+  - bash
+  - read
+  - websearch
+  - webfetch
 
 prompt_metadata:
   category: security

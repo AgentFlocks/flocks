@@ -166,20 +166,20 @@ class TestPermissionFlow:
     """权限流程集成测试"""
     
     @pytest.mark.asyncio
-    async def test_permission_check_in_dialogue(self):
-        """测试对话中的权限检查"""
+    async def test_tool_declaration_check_in_dialogue(self):
+        """测试对话中的工具声明检查"""
         from flocks.agent import Agent
         
-        # 测试 build agent 的权限
-        result = await Agent.check_permission("rex", "read")
-        assert result in ["allow", "deny"]
+        # 测试 build agent 的工具声明
+        result = await Agent.has_tool("rex", "read")
+        assert result in [True, False]
         
-        # 测试 explore agent 的权限（只读）
-        read_result = await Agent.check_permission("explore", "read")
-        write_result = await Agent.check_permission("explore", "write")
+        # 测试 explore agent 的工具声明（只读）
+        read_result = await Agent.has_tool("explore", "read")
+        write_result = await Agent.has_tool("explore", "write")
         
-        assert read_result == "allow"
-        assert write_result == "deny"
+        assert read_result is True
+        assert write_result is False
 
 
 class TestSessionLifecycle:

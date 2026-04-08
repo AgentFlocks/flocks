@@ -25,6 +25,10 @@ from flocks.session.lifecycle.compaction.models import (
     DEFAULT_COMPACTION_PROMPT,
 )
 from flocks.session.lifecycle.compaction.compaction import SessionCompaction
+from flocks.session.lifecycle.compaction.orchestrator import (
+    build_compaction_policy,
+    run_compaction,
+)
 
 __all__ = [
     # Policy
@@ -46,4 +50,6 @@ __all__ = [
     "DEFAULT_COMPACTION_PROMPT",
     # Orchestrator
     "SessionCompaction",
+    "build_compaction_policy",
+    "run_compaction",
 ]

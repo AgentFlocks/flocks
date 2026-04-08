@@ -235,6 +235,22 @@ class Session:
         await Storage.set(storage_key, session, "session")
         cls._id_index[session.id] = storage_key
         cls._sync_list_cache(session)
+
+        try:
+            from flocks.agent.registry import Agent
+            from flocks.tool.catalog import get_always_load_tool_names
+            from flocks.session.callable_state import initialize_session_callable_tools
+
+            agent_info = await Agent.get(session.agent or "")
+            declared_tools = getattr(agent_info, "tools", None) if agent_info is not None else None
+            base_tools = list(declared_tools) if isinstance(declared_tools, (list, tuple, set)) else []
+            await initialize_session_callable_tools(
+                session.id,
+                base_tools,
+                always_load_tool_names=get_always_load_tool_names(),
+            )
+        except Exception as e:
+            log.warn("session.callable_tools.init_error", {"id": session.id, "error": str(e)})
         
         log.info("session.created", {
             "id": session.id,
@@ -516,6 +532,12 @@ class Session:
         
         # Clear messages
         await Message.clear(session_id)
+        try:
+            from flocks.session.callable_state import clear_session_callable_tools
+
+            await clear_session_callable_tools(session_id)
+        except Exception as e:
+            log.warn("session.callable_tools.clear_error", {"id": session_id, "error": str(e)})
         
         log.info("session.deleted", {
             "id": session_id,

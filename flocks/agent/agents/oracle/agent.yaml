@@ -6,7 +6,7 @@ mode: subagent
 hidden: false
 tags: [system]
 delegatable: true
-# Read-only: write, edit, task, delegate_task denied; others from base allowed
+# Read-only consultation tool allowlist.
 tools:
   - read
   - bash

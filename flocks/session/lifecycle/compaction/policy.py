@@ -38,6 +38,7 @@ _DEFAULT_RATIOS: Dict[str, float] = {
     "flush_reserve_ratio": 0.015,
     "summary_ratio": 0.04,
     "overflow_ratio": 0.85,
+    "overflow_buffer_ratio": 0.05,
 }
 
 _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
@@ -48,6 +49,7 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_reserve_ratio": 0.025,
         "summary_ratio": 0.06,
         "overflow_ratio": 0.80,
+        "overflow_buffer_ratio": 0.08,
     },
     ContextTier.MEDIUM: {},
     ContextTier.LARGE: {
@@ -55,6 +57,7 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_reserve_ratio": 0.01,
         "summary_ratio": 0.05,
         "overflow_ratio": 0.87,
+        "overflow_buffer_ratio": 0.04,
     },
     ContextTier.XLARGE: {
         "prune_protect_ratio": 0.20,
@@ -63,6 +66,7 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_reserve_ratio": 0.008,
         "summary_ratio": 0.05,
         "overflow_ratio": 0.90,
+        "overflow_buffer_ratio": 0.03,
     },
 }
 
@@ -79,6 +83,7 @@ _BOUNDS: Dict[str, tuple[int, int]] = {
     "flush_trigger":      (1_000,   20_000),
     "flush_reserve":      (  500,   10_000),
     "summary_max_tokens": (1_000,   16_000),
+    "overflow_buffer":    (2_000,   32_000),
 }
 
 # Minimum overflow threshold for models with sufficient context window.
@@ -121,6 +126,12 @@ class CompactionPolicy:
 
     overflow_threshold: int
     """Absolute token count that triggers context overflow."""
+
+    overflow_buffer: int
+    """Reserved headroom used for preemptive cleanup before hard overflow."""
+
+    preemptive_threshold: int
+    """Soft threshold that triggers cheap cleanup before full compaction."""
 
     preserve_last: int
     """Number of recent messages to always preserve during truncation."""
@@ -169,6 +180,7 @@ class CompactionPolicy:
             "flush_trigger":      usable * ratios["flush_trigger_ratio"],
             "flush_reserve":      usable * ratios["flush_reserve_ratio"],
             "summary_max_tokens": usable * ratios["summary_ratio"],
+            "overflow_buffer":    usable * ratios["overflow_buffer_ratio"],
         }
 
         clamped: Dict[str, int] = {}
@@ -181,6 +193,8 @@ class CompactionPolicy:
         overflow_threshold = int(usable * overflow_ratio)
         if usable >= _MIN_OVERFLOW_THRESHOLD:
             overflow_threshold = max(_MIN_OVERFLOW_THRESHOLD, overflow_threshold)
+        overflow_buffer = clamped["overflow_buffer"]
+        preemptive_threshold = max(0, overflow_threshold - overflow_buffer)
 
         preserve_last = _TIER_PRESERVE_LAST.get(tier, 4)
 
@@ -189,6 +203,12 @@ class CompactionPolicy:
                 clamped[key] = int(overrides[key])
         if "overflow_threshold" in overrides:
             overflow_threshold = int(overrides["overflow_threshold"])
+        if "overflow_buffer" in overrides:
+            overflow_buffer = int(overrides["overflow_buffer"])
+        if "preemptive_threshold" in overrides:
+            preemptive_threshold = int(overrides["preemptive_threshold"])
+        else:
+            preemptive_threshold = max(0, overflow_threshold - overflow_buffer)
         if "preserve_last" in overrides:
             preserve_last = int(overrides["preserve_last"])
 
@@ -203,6 +223,8 @@ class CompactionPolicy:
             flush_reserve=clamped["flush_reserve"],
             summary_max_tokens=clamped["summary_max_tokens"],
             overflow_threshold=overflow_threshold,
+            overflow_buffer=overflow_buffer,
+            preemptive_threshold=preemptive_threshold,
             preserve_last=preserve_last,
         )
 
@@ -217,6 +239,8 @@ class CompactionPolicy:
             "flush_reserve": policy.flush_reserve,
             "summary_max_tokens": policy.summary_max_tokens,
             "overflow_threshold": policy.overflow_threshold,
+            "overflow_buffer": policy.overflow_buffer,
+            "preemptive_threshold": policy.preemptive_threshold,
             "preserve_last": policy.preserve_last,
         })
 
@@ -251,6 +275,8 @@ class CompactionPolicy:
             flush_reserve=2_000,
             summary_max_tokens=4_000,
             overflow_threshold=int(123904 * 0.85),
+            overflow_buffer=8_192,
+            preemptive_threshold=max(0, int(123904 * 0.85) - 8_192),
             preserve_last=4,
         )
 

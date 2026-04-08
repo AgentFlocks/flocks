@@ -5,5 +5,24 @@ hidden: false
 tags: [system]
 color: "#20B2AA"
 delegatable: false
-# task and delegate_task denied; call_omo_agent allowed
-# tools: null means allow all (minus task/delegate_task handled at permission level)
+# Explicit tool allowlist for the focused executor.
+tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - skill
+  - delegate_task
+  - task
+  - todoread
+  - todowrite
+  - run_workflow
+  - run_workflow_node
+  - background_output
+  - background_cancel
+  - session_list
+  - channel_message
+

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import List, Optional, Any, Dict, Literal, Union
+from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
@@ -157,10 +157,15 @@ async def get_session_status() -> Dict[str, Any]:
     Flocks compatible endpoint.
     """
     from flocks.session.core.status import SessionStatus
+    from flocks.session.core.turn_state import get_turn_state, get_context_state
     
     statuses = SessionStatus.list()
     return {
-        session_id: status.model_dump() 
+        session_id: {
+            **status.model_dump(),
+            "turn": get_turn_state(session_id).model_dump(by_alias=True),
+            "context": get_context_state(session_id).model_dump(by_alias=True),
+        }
         for session_id, status in statuses.items()
     }
 
@@ -672,9 +677,9 @@ class SummarizeRequest(BaseModel):
 )
 async def summarize_session(sessionID: str, request: SummarizeRequest) -> bool:
     """Summarize session"""
-    from flocks.session.lifecycle.compaction import SessionCompaction
-    from flocks.session.lifecycle.revert import SessionRevert
-    from flocks.session.runner import SessionRunner
+    from flocks.project.bootstrap import instance_bootstrap
+    from flocks.project.instance import Instance
+    from flocks.server.routes.event import publish_event
     from flocks.session.message import Message, MessageRole
     
     session = await Session.get_by_id(sessionID)
@@ -683,9 +688,6 @@ async def summarize_session(sessionID: str, request: SummarizeRequest) -> bool:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
-    # Clean up revert state first (Flocks compatibility)
-    await SessionRevert.cleanup(session)
     
     # Get all messages to find current agent from last user message
     # This matches Flocks logic in session.ts:520-528
@@ -697,32 +699,39 @@ async def summarize_session(sessionID: str, request: SummarizeRequest) -> bool:
             current_agent = msg.agent or DEFAULT_AGENT
             break
     
-    await SessionCompaction.create(
-        session_id=sessionID,
-        agent=current_agent,
-        model_provider_id=request.providerID,
-        model_id=request.modelID,
-        auto=request.auto,
-    )
-    
-    # Start the session loop to process compaction (Flocks compatibility)
-    # In Flocks this is: await SessionPrompt.loop(sessionID)
-    # We'll start it in background to match async behavior
+    async def _run_in_background():
+        try:
+            await Instance.provide(
+                directory=session.directory,
+                init=instance_bootstrap,
+                fn=lambda: _run_session_compaction(
+                    sessionID,
+                    requested_agent=current_agent,
+                    explicit_provider_id=request.providerID,
+                    explicit_model_id=request.modelID,
+                    auto=request.auto,
+                    event_publish_callback=publish_event,
+                ),
+            )
+        except Exception as e:
+            log.error("session.summarize.error", {
+                "session_id": sessionID,
+                "error": str(e),
+            })
+            await publish_event("session.error", {
+                "sessionID": sessionID,
+                "error": {
+                    "name": type(e).__name__,
+                    "message": str(e),
+                    "data": {"message": str(e)},
+                },
+            })
+
     import asyncio
-    asyncio.create_task(_run_session_loop(sessionID, request.providerID, request.modelID))
+    asyncio.create_task(_run_in_background())
     
     log.info("session.summarized", {"session_id": sessionID})
     return True
-
-
-async def _run_session_loop(session_id: str, provider_id: str, model_id: str):
-    """Run session loop in background (matches Flocks SessionPrompt.loop)"""
-    from flocks.session.runner import SessionRunner
-    
-    try:
-        await SessionRunner.loop(session_id)
-    except Exception as e:
-        log.error("session.loop.error", {"session_id": session_id, "error": str(e)})
 
 
 class RevertRequest(BaseModel):
@@ -1294,6 +1303,180 @@ async def _get_last_model(session_id: str) -> Optional[Dict[str, str]]:
         log.debug("session.last_model.error", {"error": str(e)})
     
     return None
+
+
+def _parse_model_string(model: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Parse a provider/model string into separate IDs."""
+    if not model:
+        return None, None
+    provider_id, sep, model_id = model.partition("/")
+    if not sep or not provider_id or not model_id:
+        return None, None
+    return provider_id, model_id
+
+
+async def _resolve_compaction_context(
+    session_id: str,
+    *,
+    requested_agent: Optional[str] = None,
+    requested_model: Optional[str] = None,
+    explicit_provider_id: Optional[str] = None,
+    explicit_model_id: Optional[str] = None,
+) -> tuple[str, str, str]:
+    """Resolve agent/provider/model for an explicit compaction request."""
+    import os
+
+    from flocks.agent.registry import Agent
+    from flocks.config.config import Config
+    from flocks.session.message import Message, MessageRole
+    from flocks.storage.storage import Storage
+
+    provider_id = explicit_provider_id
+    model_id = explicit_model_id
+    parsed_provider_id, parsed_model_id = _parse_model_string(requested_model)
+    if not provider_id:
+        provider_id = parsed_provider_id
+    if not model_id:
+        model_id = parsed_model_id
+
+    agent_name = requested_agent or DEFAULT_AGENT
+
+    try:
+        messages = await Message.list(session_id)
+    except Exception as exc:
+        log.debug("session.compaction_context.messages_error", {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
+        messages = []
+
+    if not requested_agent:
+        for msg in reversed(messages):
+            if msg.role != MessageRole.USER:
+                continue
+            agent_name = getattr(msg, "agent", None) or agent_name
+            model_dict = getattr(msg, "model", None)
+            if isinstance(model_dict, dict):
+                provider_id = provider_id or model_dict.get("providerID")
+                model_id = model_id or model_dict.get("modelID")
+            if provider_id and model_id:
+                break
+
+    if not provider_id or not model_id:
+        try:
+            overrides = await Storage.read("agent/model_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            override = overrides.get(agent_name) if agent_name else None
+            if isinstance(override, dict):
+                provider_id = provider_id or override.get("providerID")
+                model_id = model_id or override.get("modelID")
+        except Exception as exc:
+            log.debug("session.compaction_context.agent_override_error", {
+                "sessionID": session_id,
+                "agent": agent_name,
+                "error": str(exc),
+            })
+
+    if not provider_id or not model_id:
+        try:
+            agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+            if agent and getattr(agent, "model", None):
+                if isinstance(agent.model, dict):
+                    provider_id = provider_id or agent.model.get("providerID") or agent.model.get("provider_id")
+                    model_id = model_id or agent.model.get("modelID") or agent.model.get("model_id")
+                else:
+                    provider_id = provider_id or getattr(agent.model, "providerID", None) or getattr(agent.model, "provider_id", None)
+                    model_id = model_id or getattr(agent.model, "modelID", None) or getattr(agent.model, "model_id", None)
+        except Exception as exc:
+            log.debug("session.compaction_context.agent_error", {
+                "sessionID": session_id,
+                "agent": agent_name,
+                "error": str(exc),
+            })
+
+    if not provider_id or not model_id:
+        try:
+            default_llm = await Config.resolve_default_llm()
+            if default_llm:
+                provider_id = provider_id or default_llm["provider_id"]
+                model_id = model_id or default_llm["model_id"]
+        except Exception as exc:
+            log.debug("session.compaction_context.default_model_error", {
+                "sessionID": session_id,
+                "error": str(exc),
+            })
+
+    if not provider_id or not model_id:
+        try:
+            last_model = await _get_last_model(session_id)
+            if last_model:
+                provider_id = provider_id or last_model.get("providerID")
+                model_id = model_id or last_model.get("modelID")
+        except Exception as exc:
+            log.debug("session.compaction_context.last_model_error", {
+                "sessionID": session_id,
+                "error": str(exc),
+            })
+
+    if not provider_id or not model_id:
+        provider_id = provider_id or os.environ.get("LLM_PROVIDER", "openai")
+        model_id = model_id or os.environ.get("LLM_MODEL", "gpt-4-turbo-preview")
+
+    return agent_name, provider_id, model_id
+
+
+async def _run_session_compaction(
+    session_id: str,
+    *,
+    requested_agent: Optional[str] = None,
+    requested_model: Optional[str] = None,
+    explicit_provider_id: Optional[str] = None,
+    explicit_model_id: Optional[str] = None,
+    parent_message_id: Optional[str] = None,
+    auto: bool = False,
+    event_publish_callback=None,
+) -> tuple[str, str, str]:
+    """Execute session compaction directly without routing through the LLM loop."""
+    from flocks.session.lifecycle.compaction import run_compaction
+    from flocks.session.lifecycle.revert import SessionRevert
+    from flocks.session.message import Message, MessageRole
+
+    session = await Session.get_by_id(session_id)
+    if not session:
+        raise ValueError(f"Session {session_id} not found")
+
+    await SessionRevert.cleanup(session)
+    agent_name, provider_id, model_id = await _resolve_compaction_context(
+        session_id,
+        requested_agent=requested_agent,
+        requested_model=requested_model,
+        explicit_provider_id=explicit_provider_id,
+        explicit_model_id=explicit_model_id,
+    )
+
+    messages = await Message.list(session_id)
+    if not parent_message_id:
+        for msg in reversed(messages):
+            if msg.role == MessageRole.USER:
+                parent_message_id = msg.id
+                break
+    if not parent_message_id:
+        raise ValueError(f"Session {session_id} has no user message to compact")
+
+    result = await run_compaction(
+        session_id,
+        parent_message_id=parent_message_id,
+        messages=messages,
+        provider_id=provider_id,
+        model_id=model_id,
+        auto=auto,
+        event_publish_callback=event_publish_callback,
+        status_after="idle",
+    )
+    if result == "stop":
+        raise RuntimeError("Compaction failed")
+    return agent_name, provider_id, model_id
 
 
 # JSON repair utilities — delegated to flocks.utils.json_repair
@@ -1883,17 +2066,23 @@ async def send_session_command(sessionID: str, request: CommandRequest):
         slash_text += f" {request.arguments}"
 
     # ── Helper: create user message + publish SSE ───────────────────────────
-    async def _create_user_message() -> str:
+    async def _create_user_message(
+        model_info: Optional[Dict[str, str]] = None,
+        *,
+        agent_override: Optional[str] = None,
+    ) -> str:
         now_ms = int(_time.time() * 1000)
         user_msg_id = Identifier.create("message")
         user_part_id = Identifier.create("part")
+        message_agent = agent_override or agent_name
         await Message.create(
             session_id=sessionID,
             role=MessageRole.USER,
             content=slash_text,
             id=user_msg_id,
             time={"created": now_ms},
-            agent=agent_name,
+            agent=message_agent,
+            **({"model": model_info} if model_info else {}),
             part_id=user_part_id,
         )
         await publish_event("message.updated", {
@@ -1902,7 +2091,8 @@ async def send_session_command(sessionID: str, request: CommandRequest):
                 "sessionID": sessionID,
                 "role": "user",
                 "time": {"created": now_ms},
-                "agent": agent_name,
+                "agent": message_agent,
+                **({"model": model_info} if model_info else {}),
             }
         })
         await publish_event("message.part.updated", {
@@ -1997,6 +2187,30 @@ async def send_session_command(sessionID: str, request: CommandRequest):
             ),
         )
 
+    async def _run_compaction_command(
+        parent_msg_id: str,
+        *,
+        agent_for_compaction: Optional[str],
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        from flocks.project.bootstrap import instance_bootstrap
+        from flocks.project.instance import Instance
+
+        await Instance.provide(
+            directory=working_directory,
+            init=instance_bootstrap,
+            fn=lambda: _run_session_compaction(
+                sessionID,
+                requested_agent=agent_for_compaction,
+                explicit_provider_id=provider_id,
+                explicit_model_id=model_id,
+                parent_message_id=parent_msg_id,
+                auto=False,
+                event_publish_callback=publish_event,
+            ),
+        )
+
     # ── Background task ──────────────────────────────────────────────────────
     async def _handle_command() -> None:
         result_texts: list[str] = []
@@ -2009,6 +2223,31 @@ async def send_session_command(sessionID: str, request: CommandRequest):
             llm_prompts.append(prompt)
 
         try:
+            if request.command.lower() == "compact":
+                if request.arguments.strip():
+                    user_msg_id = await _create_user_message()
+                    await _publish_direct_response("Usage: /compact", user_msg_id)
+                    return
+                compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
+                    sessionID,
+                    requested_agent=request.agent,
+                    requested_model=request.model,
+                )
+                user_msg_id = await _create_user_message(
+                    {
+                        "providerID": compact_provider_id,
+                        "modelID": compact_model_id,
+                    },
+                    agent_override=compact_agent,
+                )
+                await _run_compaction_command(
+                    user_msg_id,
+                    agent_for_compaction=compact_agent,
+                    provider_id=compact_provider_id,
+                    model_id=compact_model_id,
+                )
+                return
+
             handled = await handle_slash_command(
                 slash_text,
                 send_text=_send_text,
@@ -2130,7 +2369,7 @@ async def respond_to_permission(
     """Respond to permission request"""
     from flocks.permission.next import PermissionNext
     
-    PermissionNext.reply(
+    await PermissionNext.reply(
         request_id=permissionID,
         reply=request.response,
     )

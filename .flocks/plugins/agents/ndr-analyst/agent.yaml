@@ -15,14 +15,23 @@ prompt_file: prompt.md
 color: "#3498DB"
 temperature: 0.3
 
-permission:
-  "*": deny
-  read: allow
-  grep: allow
-  glob: allow
-  codesearch: allow
-  websearch: allow
-  webfetch: allow
+tools:
+  - tool_search
+  - read
+  - grep
+  - glob
+  - codesearch
+  - websearch
+  - webfetch
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_hash_query
+  - threatbook_mcp_vuln_query
+  - threatbook_mcp_vuln_vendors_products_match
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_url_query
+  - virustotal_file_query
 
 prompt_metadata:
   category: security

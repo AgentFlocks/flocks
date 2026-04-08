@@ -3,10 +3,10 @@ Agent Factory — YAML-based agent loader.
 
 Scans agent folders, parses agent.yaml files, resolves static prompts from
 prompt.md or marks agents for dynamic prompt injection via prompt_builder.py.
-Generates permission rulesets from the explicit ``tools`` list (deny-all +
-allow listed).  If ``tools`` is absent but a ``permission`` dict is present,
-that dict is used directly.  If neither is declared, falls back to allow-all
-for backward compatibility with plugin agents that haven't declared permissions.
+Resolves each agent to a concrete ``tools`` list. If legacy ``permission`` is
+present, it is expanded against the current tool registry for compatibility.
+If neither ``tools`` nor ``permission`` is declared, the static tool list stays
+empty and runtime exposure falls back to always-load tools only.
 
 Extension point:
   Built-in agents:         flocks/agent/agents/<name>/          native=True
@@ -22,12 +22,12 @@ from __future__ import annotations
 import importlib
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from flocks.agent.agent import AgentInfo, AgentModel, AgentPromptMetadata, DelegationTrigger
-from flocks.permission import from_config as permission_from_config
+from flocks.agent.toolset import resolve_agent_initial_tools
 from flocks.utils.log import Log
 
 log = Log.create(service="agent.factory")
@@ -41,34 +41,6 @@ try:
     _PLUGIN_AGENTS_DIR = DEFAULT_PLUGIN_ROOT / "agents"
 except ImportError:
     _PLUGIN_AGENTS_DIR = Path.home() / ".flocks" / "plugins" / "agents"
-
-
-# ---------------------------------------------------------------------------
-# Permission generation
-# ---------------------------------------------------------------------------
-
-def _tools_to_permission(tools: List[str]):
-    """
-    Convert an explicit tools list to a Ruleset.
-
-    Generates: deny-all wildcard + allow each listed tool.
-
-    Tool names starting with ``__mcp_`` are a portable alias meaning
-    "this MCP tool from any server".  Since the actual registered name
-    is ``{sanitized_server_name}_{tool_name}`` (e.g.
-    ``threatbook_mcp_vulnlist_query``), the prefix is replaced with a
-    ``*_`` wildcard so that ``fnmatch`` matching in
-    ``_pattern_matches`` resolves correctly.
-    """
-    config: Dict[str, Any] = {"*": "deny"}
-    for tool in tools:
-        if tool.startswith("__mcp_"):
-            suffix = tool[len("__mcp_"):]
-            config[f"*_{suffix}"] = "allow"
-        else:
-            config[tool] = "allow"
-    return permission_from_config(config)
-
 
 # ---------------------------------------------------------------------------
 # Prompt metadata parsing
@@ -110,7 +82,8 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     If neither exists, prompt stays None (valid for build/plan agents).
 
     Permission is generated from the ``tools`` list in agent.yaml.
-    If ``tools`` is absent, permission defaults to allow-all.
+    If ``tools`` is absent, the agent keeps an empty static tool list and only
+    runtime always-load tools remain available until the session expands them.
 
     Args:
         agent_dir: Path to the agent folder.
@@ -156,16 +129,10 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
             module_path = str(prompt_builder_py)
         prompt_builder = f"{module_path}:inject"
 
-    # ── Permission / tools ──────────────────────────────────────────────────
-    tools_list: Optional[List[str]] = raw.get("tools")
+    # ── Tools / legacy permission compatibility ─────────────────────────────
+    tools_list_raw: Optional[List[str]] = raw.get("tools")
     perm_raw = raw.get("permission")
-    if tools_list is not None:
-        permission = _tools_to_permission(tools_list)
-    elif isinstance(perm_raw, dict):
-        permission = permission_from_config(perm_raw)
-    else:
-        # No tools or permission declared → allow all (backward compat)
-        permission = permission_from_config({"*": "allow"})
+    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
 
     # ── Model ────────────────────────────────────────────────────────────────
     model_raw = raw.get("model")
@@ -183,7 +150,7 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
         native=native,
         hidden=raw.get("hidden", False),
         color=raw.get("color"),
-        permission=permission,
+        permission=legacy_permission,
         model=model,
         prompt=prompt,
         prompt_builder=prompt_builder,
@@ -357,15 +324,10 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
     model_raw = raw.get("model")
     model = AgentModel(**model_raw) if isinstance(model_raw, dict) else None
 
-    # Permission: prefer new tools list; fall back to old permission dict
-    tools_list: Optional[List[str]] = raw.get("tools")
+    # Tools: prefer new tools list; fall back to old permission dict
+    tools_list_raw: Optional[List[str]] = raw.get("tools")
     perm_raw = raw.get("permission")
-    if tools_list is not None:
-        permission = _tools_to_permission(tools_list)
-    elif isinstance(perm_raw, dict):
-        permission = permission_from_config(perm_raw)
-    else:
-        permission = permission_from_config({"*": "allow"})
+    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
 
     desc_cn = raw.get("description_cn")
     if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
@@ -379,7 +341,7 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
         native=False,
         hidden=raw.get("hidden", False),
         color=raw.get("color"),
-        permission=permission,
+        permission=legacy_permission,
         tools=tools_list,
         model=model,
         prompt=prompt,
