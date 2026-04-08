@@ -71,7 +71,7 @@ powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/ins
 powershell -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1))) -InstallTui"
 ```
 
-#### Install from source code
+### Install from source code
 
 If you prefer to inspect the repository before installation, clone it locally and run the installer from the workspace:
 

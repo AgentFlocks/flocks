@@ -4,9 +4,9 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/AgentFlocks/Flocks.git"
-RAW_INSTALL_SH_URL="https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh"
-RAW_INSTALL_PS1_URL="https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1"
+REPO_URL="${FLOCKS_INSTALL_REPO_URL:-https://github.com/AgentFlocks/Flocks.git}"
+RAW_INSTALL_SH_URL="${FLOCKS_RAW_INSTALL_SH_URL:-https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh}"
+RAW_INSTALL_PS1_URL="${FLOCKS_RAW_INSTALL_PS1_URL:-https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1}"
 ROOT_DIR=""
 INSTALL_TUI=0
 MIN_NODE_MAJOR=22
@@ -14,8 +14,8 @@ PATH_UPDATE_REQUIRED=0
 PATH_UPDATE_FILES=""
 PATH_UPDATE_DIRS=""
 PATH_REFRESH_HINT_REQUIRED=0
-UV_DEFAULT_INDEX="https://pypi.org/simple"
-NPM_REGISTRY="https://registry.npmjs.org/"
+UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
+NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -30,59 +30,11 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-probe_url_time() {
-  local url="$1"
-
-  has_cmd curl || return 1
-  curl -fsS -o /dev/null --connect-timeout 2 --max-time 4 -w '%{time_total}' "$url" 2>/dev/null
-}
-
-pick_fastest_url() {
-  local default_url="$1"
-  shift
-
-  local best_url="" best_time="" source_url probe_url probe_time
-  while [[ "$#" -ge 2 ]]; do
-    source_url="$1"
-    probe_url="$2"
-    shift 2
-
-    probe_time="$(probe_url_time "$probe_url" || true)"
-    [[ -n "$probe_time" ]] || continue
-
-    if [[ -z "$best_time" ]] || awk -v lhs="$probe_time" -v rhs="$best_time" 'BEGIN { exit !(lhs < rhs) }'; then
-      best_url="$source_url"
-      best_time="$probe_time"
-    fi
-  done
-
-  if [[ -n "$best_url" ]]; then
-    printf '%s' "$best_url"
-    return 0
-  fi
-
-  printf '%s' "$default_url"
-}
-
 select_install_sources() {
-  if ! has_cmd curl; then
-    info "curl was not found; skipping automatic mirror selection and using the default registries."
-    return 0
-  fi
-
-  info "Probing PyPI and npm registries to choose the faster source..."
-  UV_DEFAULT_INDEX="$(pick_fastest_url \
-    "https://pypi.org/simple" \
-    "https://pypi.org/simple" "https://pypi.org/simple/pip/" \
-    "https://pypi.tuna.tsinghua.edu.cn/simple" "https://pypi.tuna.tsinghua.edu.cn/simple/pip/")"
-  NPM_REGISTRY="$(pick_fastest_url \
-    "https://registry.npmjs.org/" \
-    "https://registry.npmjs.org/" "https://registry.npmjs.org/npm" \
-    "https://registry.npmmirror.com/" "https://registry.npmmirror.com/npm")"
-
-  info "Selected PyPI index: $UV_DEFAULT_INDEX"
-  info "Selected npm registry: $NPM_REGISTRY"
+  info "Using PyPI index: $UV_DEFAULT_INDEX"
+  info "Using npm registry: $NPM_REGISTRY"
 }
+
 
 run_with_privilege() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -656,7 +608,7 @@ install_dingtalk_channel_deps() {
   info "Detected DingTalk channel plugin. Installing npm dependencies..."
   (
     cd "$connector_dir"
-    npm install
+    npm_config_registry="$NPM_REGISTRY" npm install
   )
   info "DingTalk channel dependencies installed."
 }
@@ -766,7 +718,7 @@ install_agent_browser() {
   if ! has_cmd agent-browser; then
     ensure_npm_global_prefix_writable
     info "Installing the agent-browser CLI..."
-    npm install --global agent-browser
+    npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser
     refresh_path
     ensure_agent_browser_user_path_if_needed
     has_cmd agent-browser || fail "agent-browser finished installing, but it is still not available. Check PATH and retry."
@@ -799,7 +751,7 @@ main() {
   info "Installing WebUI dependencies..."
   (
     cd "$ROOT_DIR/webui"
-    npm install
+    npm_config_registry="$NPM_REGISTRY" npm install
   )
 
   install_dingtalk_channel_deps

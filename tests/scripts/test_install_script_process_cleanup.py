@@ -101,6 +101,14 @@ def test_bootstrap_powershell_installer_uses_utf8_without_bom_with_crlf() -> Non
     assert b"\n" not in data.replace(b"\r\n", b"")
 
 
+def test_bootstrap_powershell_install_zh_uses_utf8_without_bom_with_crlf() -> None:
+    data = (REPO_ROOT / "install_zh.ps1").read_bytes()
+
+    assert not data.startswith(b"\xef\xbb\xbf")
+    assert b"\r\n" in data
+    assert b"\n" not in data.replace(b"\r\n", b"")
+
+
 def test_bootstrap_powershell_installer_unblocks_files_and_bypasses_execution_policy() -> None:
     script = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
 

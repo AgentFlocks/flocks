@@ -9,12 +9,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = REPO_ROOT / "scripts"
 POWERSHELL_SCRIPTS = (
     REPO_ROOT / "install.ps1",
+    REPO_ROOT / "install_zh.ps1",
     SCRIPT_DIR / "install.ps1",
+    SCRIPT_DIR / "install_zh.ps1",
     SCRIPT_DIR / "run.ps1",
 )
 POWERSHELL_SCRIPT_ENCODINGS = (
     (REPO_ROOT / "install.ps1", False),
+    (REPO_ROOT / "install_zh.ps1", False),
     (SCRIPT_DIR / "install.ps1", True),
+    (SCRIPT_DIR / "install_zh.ps1", True),
     (SCRIPT_DIR / "run.ps1", True),
 )
 

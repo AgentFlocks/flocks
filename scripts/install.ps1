@@ -5,13 +5,13 @@
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/AgentFlocks/Flocks.git"
-$RawInstallShUrl = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh"
-$RawInstallPs1Url = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1"
+$RepoUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_REPO_URL)) { "https://github.com/AgentFlocks/Flocks.git" } else { $env:FLOCKS_INSTALL_REPO_URL }
+$RawInstallShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_SH_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh" } else { $env:FLOCKS_RAW_INSTALL_SH_URL }
+$RawInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_PS1_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1" } else { $env:FLOCKS_RAW_INSTALL_PS1_URL }
 $RootDir = $null
 $MinNodeMajor = 22
-$script:UvDefaultIndex = "https://pypi.org/simple"
-$script:NpmRegistry = "https://registry.npmjs.org/"
+$script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
+$script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
 
 function Write-Info {
     param([string]$Message)
@@ -29,78 +29,9 @@ function Test-Command {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-function Get-UrlProbeMilliseconds {
-    param([string]$Url)
-
-    if ([string]::IsNullOrWhiteSpace($Url)) {
-        return $null
-    }
-
-    foreach ($method in @("Head", "Get")) {
-        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        try {
-            Invoke-WebRequest -Uri $Url -Method $method -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop | Out-Null
-            $stopwatch.Stop()
-            return [double]$stopwatch.Elapsed.TotalMilliseconds
-        }
-        catch {
-            $stopwatch.Stop()
-        }
-    }
-
-    return $null
-}
-
-function Select-FastestUrl {
-    param(
-        [string]$DefaultUrl,
-        [object[]]$Candidates
-    )
-
-    $bestUrl = $null
-    $bestMilliseconds = $null
-
-    foreach ($candidate in $Candidates) {
-        if ($null -eq $candidate) {
-            continue
-        }
-
-        $probeMilliseconds = Get-UrlProbeMilliseconds -Url $candidate.Probe
-        if ($null -eq $probeMilliseconds) {
-            continue
-        }
-
-        if ($null -eq $bestMilliseconds -or $probeMilliseconds -lt $bestMilliseconds) {
-            $bestMilliseconds = $probeMilliseconds
-            $bestUrl = $candidate.Source
-        }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($bestUrl)) {
-        return $DefaultUrl
-    }
-
-    return $bestUrl
-}
-
 function Initialize-InstallSources {
-    Write-Info "Probing PyPI and npm registries to choose the faster source..."
-
-    $script:UvDefaultIndex = Select-FastestUrl `
-        -DefaultUrl "https://pypi.org/simple" `
-        -Candidates @(
-            [PSCustomObject]@{ Source = "https://pypi.org/simple"; Probe = "https://pypi.org/simple/pip/" }
-            [PSCustomObject]@{ Source = "https://pypi.tuna.tsinghua.edu.cn/simple"; Probe = "https://pypi.tuna.tsinghua.edu.cn/simple/pip/" }
-        )
-    $script:NpmRegistry = Select-FastestUrl `
-        -DefaultUrl "https://registry.npmjs.org/" `
-        -Candidates @(
-            [PSCustomObject]@{ Source = "https://registry.npmjs.org/"; Probe = "https://registry.npmjs.org/npm" }
-            [PSCustomObject]@{ Source = "https://registry.npmmirror.com/"; Probe = "https://registry.npmmirror.com/npm" }
-        )
-
-    Write-Info "Selected PyPI index: $script:UvDefaultIndex"
-    Write-Info "Selected npm registry: $script:NpmRegistry"
+    Write-Info "Using PyPI index: $script:UvDefaultIndex"
+    Write-Info "Using npm registry: $script:NpmRegistry"
 }
 
 function Get-NodeMajorVersion {
@@ -916,7 +847,8 @@ function Install-AgentBrowser {
         $null = Invoke-NativeCommandOrFail `
             -Description "agent-browser CLI installation" `
             -FilePath "npm.cmd" `
-            -ArgumentList @("install", "--global", "agent-browser")
+            -ArgumentList @("install", "--global", "agent-browser") `
+            -Environment @{ npm_config_registry = $script:NpmRegistry }
         Refresh-Path
 
         if (-not (Test-Command "agent-browser")) {
@@ -952,7 +884,8 @@ function Install-DingtalkChannelDeps {
             -Description "DingTalk channel npm dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
-            -WorkingDirectory $connectorDir
+            -WorkingDirectory $connectorDir `
+            -Environment @{ npm_config_registry = $script:NpmRegistry }
     }
     finally {
         Pop-Location
@@ -1007,7 +940,8 @@ function Main {
             -Description "WebUI dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
-            -WorkingDirectory (Join-Path $RootDir "webui")
+            -WorkingDirectory (Join-Path $RootDir "webui") `
+            -Environment @{ npm_config_registry = $script:NpmRegistry }
     }
     finally {
         Pop-Location

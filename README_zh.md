@@ -46,30 +46,30 @@ Flocks 支持两种部署方式：
 
 ### 快速安装
 
-> **中国大陆用户**：若 GitHub / `raw.githubusercontent.com` 访问不稳定，可从 Gitee 镜像克隆后安装，见下文「源码安装」。
+> **中国大陆用户**：默认推荐使用 Gitee 上的 `install_zh` 一键安装脚本；如果你希望先审查仓库内容，也可以先从 Gitee 克隆源码后再安装，见下文「源码安装」。
 
 #### macOS / Linux
 
 ```bash
 # 一键安装后端 + WebUI
-curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
+curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash
 # 默认会在当前目录下创建 ./flocks
 
 # 可选：同时安装 TUI 依赖
-curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash -s -- --with-tui
+curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash -s -- --with-tui
 ```
 
 #### Windows PowerShell (Administrator)
 
 ```powershell
 # 一键安装后端 + WebUI
-powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1 | iex"
+powershell -c "irm https://gitee.com/flocks/flocks/raw/main/install_zh.ps1 | iex"
 
 # 可选：同时安装 TUI 依赖
-powershell -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1))) -InstallTui"
+powershell -c "& ([scriptblock]::Create((irm https://gitee.com/flocks/flocks/raw/main/install_zh.ps1))) -InstallTui"
 ```
 
-#### github源码安装
+### github源码安装
 
 克隆到本地后在工作区执行安装脚本：
 
