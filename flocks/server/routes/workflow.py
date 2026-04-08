@@ -9,7 +9,9 @@ import asyncio
 import hashlib
 import json
 import shutil
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, HTTPException, status, Query
@@ -44,6 +46,17 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="workflow-routes")
+
+
+@dataclass
+class ActiveWorkflowExecution:
+    """Tracks an in-flight workflow execution that can be cancelled."""
+    workflow_id: str
+    task: asyncio.Task[Any]
+    cancel_event: threading.Event
+
+
+_active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
 
 
 # =============================================================================
@@ -107,7 +120,7 @@ class WorkflowExecutionResponse(BaseModel):
     workflowId: str = Field(..., description="Workflow ID")
     inputParams: Dict[str, Any] = Field(default_factory=dict, description="Input parameters")
     outputResults: Optional[Dict[str, Any]] = Field(None, description="Output results")
-    status: str = Field(..., description="Status: running/success/error/timeout")
+    status: str = Field(..., description="Status: running/success/error/timeout/cancelled")
     startedAt: int = Field(..., description="Start timestamp (ms)")
     finishedAt: Optional[int] = Field(None, description="Finish timestamp (ms)")
     duration: Optional[float] = Field(None, description="Duration (seconds)")
@@ -403,6 +416,119 @@ def _workflow_execution_key(exec_id: str) -> str:
     return f"workflow_execution/{exec_id}"
 
 
+def _normalize_execution_status(status: str) -> str:
+    """Map runner status values to API status values."""
+    normalized = (status or "").strip().upper()
+    if normalized == "SUCCEEDED":
+        return "success"
+    if normalized == "FAILED":
+        return "error"
+    if normalized == "TIMED_OUT":
+        return "timeout"
+    if normalized == "CANCELLED":
+        return "cancelled"
+    return (status or "error").strip().lower() or "error"
+
+
+async def _record_execution_result(workflow_id: str, exec_id: str, exec_data: Dict[str, Any]) -> None:
+    """Persist the final execution record and audit trail."""
+    await Storage.write(_workflow_execution_key(exec_id), exec_data)
+    try:
+        await Recorder.record_workflow_execution(
+            exec_id=exec_id,
+            workflow_id=workflow_id,
+            run_result=exec_data,
+        )
+    except Exception:
+        pass
+
+
+async def _run_workflow_execution_task(
+    *,
+    workflow_id: str,
+    workflow_json: Dict[str, Any],
+    req: WorkflowRunRequest,
+    exec_id: str,
+    cancel_event: threading.Event,
+) -> None:
+    """Execute a workflow in the background and keep the execution record updated."""
+    exec_key = _workflow_execution_key(exec_id)
+    start_time = time.time()
+    step_history: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    def _on_step_complete(step_result) -> None:
+        step_dict = step_result.model_dump(mode="json")
+        step_history.append(step_dict)
+        try:
+            current = asyncio.run_coroutine_threadsafe(Storage.read(exec_key), loop).result(timeout=5)
+            update = {
+                **current,
+                "executionLog": list(step_history),
+            }
+            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, update), loop).result(timeout=5)
+        except Exception as exc:
+            log.warning("workflow.step_progress.write_failed", {
+                "exec_id": exec_id,
+                "error": str(exc),
+            })
+
+    try:
+        result: RunWorkflowResult = await asyncio.to_thread(
+            run_workflow,
+            workflow=workflow_json,
+            inputs=req.inputs or {},
+            timeout_s=req.timeout_s,
+            trace=req.trace,
+            on_step_complete=_on_step_complete,
+            cancel=cancel_event.is_set,
+        )
+
+        duration = time.time() - start_time
+        current_data = await Storage.read(exec_key)
+        status_value = _normalize_execution_status(result.status)
+        current_data.update({
+            "outputResults": result.outputs,
+            "status": status_value,
+            "finishedAt": int(time.time() * 1000),
+            "duration": duration,
+            "executionLog": result.history or list(step_history),
+            "errorMessage": result.error,
+        })
+
+        if status_value == "success":
+            await _update_workflow_stats(workflow_id, True, duration)
+        elif status_value in {"error", "timeout"}:
+            await _update_workflow_stats(workflow_id, False, duration)
+
+        await _record_execution_result(workflow_id, exec_id, current_data)
+        log.info("workflow.executed", {
+            "id": workflow_id,
+            "exec_id": exec_id,
+            "status": status_value,
+            "duration": duration,
+        })
+    except Exception as exc:
+        duration = time.time() - start_time
+        current_data = await Storage.read(exec_key)
+        current_data.update({
+            "status": "cancelled" if cancel_event.is_set() else "error",
+            "finishedAt": int(time.time() * 1000),
+            "duration": duration,
+            "errorMessage": str(exc),
+            "executionLog": list(step_history),
+        })
+        if current_data["status"] == "error":
+            await _update_workflow_stats(workflow_id, False, duration)
+        await _record_execution_result(workflow_id, exec_id, current_data)
+        log.error("workflow.execute.error", {
+            "id": workflow_id,
+            "exec_id": exec_id,
+            "error": str(exc),
+        })
+    finally:
+        _active_workflow_executions.pop(exec_id, None)
+
+
 _DEFAULT_STATS: Dict[str, Any] = {
     "callCount": 0,
     "successCount": 0,
@@ -690,93 +816,74 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
         # Save initial execution record
         await Storage.write(_workflow_execution_key(exec_id), exec_data)
         
-        # Run workflow with real-time step progress updates
-        start_time = time.time()
-        _step_history: list[dict] = []
-        _exec_key = _workflow_execution_key(exec_id)
-        _loop = asyncio.get_running_loop()
-
-        def _on_step_complete(step_result) -> None:
-            step_dict = step_result.model_dump(mode="json")
-            _step_history.append(step_dict)
-            try:
-                update = {
-                    **exec_data,
-                    "executionLog": list(_step_history),
-                }
-                future = asyncio.run_coroutine_threadsafe(
-                    Storage.write(_exec_key, update), _loop
-                )
-                future.result(timeout=5)
-            except Exception as _exc:
-                log.warning("workflow.step_progress.write_failed", {
-                    "exec_id": exec_id, "error": str(_exc),
-                })
-
-        try:
-            result: RunWorkflowResult = await asyncio.to_thread(
-                run_workflow,
-                workflow=workflow_json,
-                inputs=req.inputs or {},
-                timeout_s=req.timeout_s,
-                trace=req.trace,
-                on_step_complete=_on_step_complete,
-            )
-            
-            duration = time.time() - start_time
-            _status = "success" if result.status == "SUCCEEDED" else (
-                "error" if result.status == "FAILED" else result.status
-            )
-            success = _status == "success"
-            
-            exec_data.update({
-                "outputResults": result.outputs,
-                "status": _status,
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "executionLog": result.history,
-                "errorMessage": result.error,
-            })
-            
-            await _update_workflow_stats(workflow_id, success, duration)
-            
-            log.info("workflow.executed", {
-                "id": workflow_id,
-                "exec_id": exec_id,
-                "status": _status,
-                "duration": duration,
-            })
-        except Exception as e:
-            duration = time.time() - start_time
-            exec_data.update({
-                "status": "error",
-                "finishedAt": int(time.time() * 1000),
-                "duration": duration,
-                "errorMessage": str(e),
-                "executionLog": _step_history,
-            })
-            await _update_workflow_stats(workflow_id, False, duration)
-            log.error("workflow.execute.error", {"id": workflow_id, "error": str(e)})
-        
-        # Save final execution record
-        await Storage.write(_workflow_execution_key(exec_id), exec_data)
-
-        # Append-only execution recording for audit/replay
-        try:
-            await Recorder.record_workflow_execution(
-                exec_id=exec_id,
+        cancel_event = threading.Event()
+        task = asyncio.create_task(
+            _run_workflow_execution_task(
                 workflow_id=workflow_id,
-                run_result=exec_data,
+                workflow_json=workflow_json,
+                req=req,
+                exec_id=exec_id,
+                cancel_event=cancel_event,
             )
-        except Exception:
-            pass
-        
+        )
+        _active_workflow_executions[exec_id] = ActiveWorkflowExecution(
+            workflow_id=workflow_id,
+            task=task,
+            cancel_event=cancel_event,
+        )
+
+        log.info("workflow.execution.started", {
+            "id": workflow_id,
+            "exec_id": exec_id,
+        })
         return WorkflowExecutionResponse(**exec_data)
     except HTTPException:
         raise
     except Exception as e:
         log.error("workflow.run.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to run workflow: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/history/{exec_id}/cancel")
+async def cancel_workflow_execution(workflow_id: str, exec_id: str):
+    """Request cooperative cancellation of a running workflow execution."""
+    try:
+        exec_data = await Storage.read(_workflow_execution_key(exec_id))
+        if exec_data.get("workflowId") != workflow_id:
+            raise HTTPException(status_code=404, detail="Execution not found for this workflow")
+
+        active = _active_workflow_executions.get(exec_id)
+        if active is None:
+            return {
+                "status": "ignored",
+                "message": f"Execution {exec_id} is already {exec_data.get('status', 'completed')}",
+                "executionId": exec_id,
+            }
+
+        if active.workflow_id != workflow_id:
+            raise HTTPException(status_code=404, detail="Execution not found for this workflow")
+
+        active.cancel_event.set()
+        log.info("workflow.execution.cancel_requested", {
+            "id": workflow_id,
+            "exec_id": exec_id,
+        })
+        return {
+            "status": "accepted",
+            "message": f"Cancellation requested for execution {exec_id}",
+            "executionId": exec_id,
+        }
+    except Storage.NotFoundError:
+        raise HTTPException(status_code=404, detail=f"Execution not found: {exec_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.execution.cancel.error", {
+            "id": workflow_id,
+            "exec_id": exec_id,
+            "error": str(e),
+        })
+        raise HTTPException(status_code=500, detail=f"Failed to cancel execution: {str(e)}")
 
 
 @router.post("/workflow/{workflow_id}/validate")

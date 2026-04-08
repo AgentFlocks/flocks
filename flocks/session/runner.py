@@ -630,8 +630,8 @@ Please address this message and continue with your tasks.
             role=MessageRole.ASSISTANT,
             content="",
             agent=agent.name,
-            model=self.model_id,
-            provider=self.provider_id,
+            model_id=self.model_id,
+            provider_id=self.provider_id,
             parent_id=last_user.id,
         )
         

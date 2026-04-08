@@ -62,6 +62,7 @@
     "error": "异常",
     "FAILED": "失败",
     "timeout": "超时",
+    "cancelled": "已取消",
     "stopped": "已停止"
   },
   "delegate": {

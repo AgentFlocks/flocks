@@ -132,6 +132,7 @@
       "inputParams": "输入参数（JSON）",
       "running": "运行中...",
       "testRun": "测试运行",
+      "stopRun": "停止运行",
       "outputResults": "输出结果",
       "executionLog": "执行日志 ({{count}})",
       "jsonFormatError": "JSON 格式错误，请检查输入",
@@ -312,6 +313,9 @@
       "statusSuccess": "成功",
       "statusError": "失败",
       "statusTimeout": "超时",
+      "statusCancelled": "已取消",
+      "stop": "停止",
+      "cancelledMessage": "执行已被手动停止",
       "stepLabel": "步骤 {{num}}"
     },
     "joinModeFlat": "Flat — 平铺合并",

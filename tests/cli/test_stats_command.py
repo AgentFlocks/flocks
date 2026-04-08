@@ -7,6 +7,8 @@ from flocks.session.message import (
     AssistantMessageInfo,
     MessagePath,
     MessageWithParts,
+    PartTime,
+    ReasoningPart,
     TextPart,
     TokenCache,
     TokenUsage,
@@ -121,7 +123,74 @@ def _build_zero_token_messages(session_id: str) -> list[MessageWithParts]:
         ),
         MessageWithParts(
             info=assistant,
-            parts=[TextPart(id=f"{session_id}_assistant_text", sessionID=session_id, messageID=assistant.id, text="ok")],
+            parts=[],
+        ),
+    ]
+
+
+def _build_estimated_token_messages(session_id: str) -> list[MessageWithParts]:
+    user = UserMessageInfo(
+        id=f"{session_id}_user_estimate",
+        sessionID=session_id,
+        role="user",
+        time={"created": 3_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    assistant = AssistantMessageInfo(
+        id=f"{session_id}_assistant_estimate",
+        sessionID=session_id,
+        role="assistant",
+        time={"created": 3_100, "completed": 3_200},
+        parentID=user.id,
+        modelID="claude-sonnet",
+        providerID="anthropic",
+        mode="standard",
+        agent="rex",
+        path=MessagePath(cwd="/tmp/stats-project", root="/tmp/stats-project"),
+        tokens=TokenUsage(),
+        cost=0.0,
+    )
+    return [
+        MessageWithParts(
+            info=user,
+            parts=[
+                TextPart(
+                    id=f"{session_id}_user_estimate_text",
+                    sessionID=session_id,
+                    messageID=user.id,
+                    text="Please investigate the issue carefully.",
+                )
+            ],
+        ),
+        MessageWithParts(
+            info=assistant,
+            parts=[
+                TextPart(
+                    id=f"{session_id}_assistant_estimate_text",
+                    sessionID=session_id,
+                    messageID=assistant.id,
+                    text="Estimated assistant answer.",
+                ),
+                ReasoningPart(
+                    id=f"{session_id}_assistant_estimate_reasoning",
+                    sessionID=session_id,
+                    messageID=assistant.id,
+                    text="Hidden chain of thought summary.",
+                    time=PartTime(start=3_120),
+                ),
+                ToolPart(
+                    id=f"{session_id}_assistant_estimate_tool",
+                    sessionID=session_id,
+                    messageID=assistant.id,
+                    callID=f"{session_id}_tool_call",
+                    tool="bash",
+                    state=ToolStatePending(
+                        input={"command": "echo estimated"},
+                        raw='{"command":"echo estimated"}',
+                    ),
+                ),
+            ],
         ),
     ]
 
@@ -185,6 +254,39 @@ async def test_aggregate_stats_median_ignores_zero_token_sessions(monkeypatch) -
 
     assert result.total_sessions == 2
     assert result.median_tokens_per_session == 21
+
+
+@pytest.mark.asyncio
+async def test_aggregate_stats_estimates_missing_assistant_tokens(monkeypatch) -> None:
+    session = _build_session()
+    messages = _build_estimated_token_messages(session.id)
+
+    async def fake_get_all_sessions():
+        return [session]
+
+    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
+        assert session_id == session.id
+        assert include_archived is False
+        return messages
+
+    monkeypatch.setattr(stats_cmd, "_get_all_sessions", fake_get_all_sessions)
+    monkeypatch.setattr(stats_cmd.Message, "list_with_parts", fake_list_with_parts)
+
+    result = await stats_cmd._aggregate_stats(days=None, project_filter=None)
+
+    expected_input = 800 + stats_cmd._estimate_message_context_tokens(messages[0])
+    expected_output = (
+        stats_cmd._count_tokens("Estimated assistant answer.")
+        + stats_cmd._count_tokens(stats_cmd._stringify_payload({"command": "echo estimated"}))
+    )
+    expected_reasoning = stats_cmd._count_tokens("Hidden chain of thought summary.")
+
+    assert result.total_tokens.input == expected_input
+    assert result.total_tokens.output == expected_output
+    assert result.total_tokens.reasoning == expected_reasoning
+    assert result.has_reasoning_tokens is True
+    assert result.model_usage["anthropic/claude-sonnet"].tokens_input == expected_input
+    assert result.model_usage["anthropic/claude-sonnet"].tokens_output == expected_output + expected_reasoning
 
 
 def test_stats_command_renders_output(monkeypatch) -> None:

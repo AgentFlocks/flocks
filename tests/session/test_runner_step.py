@@ -11,8 +11,11 @@ Covers:
 """
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
+import flocks.session.runner as runner_mod
+from flocks.session.message import UserMessageInfo
 from flocks.session.runner import (
     RunnerCallbacks,
     SessionRunner,
@@ -500,3 +503,49 @@ class TestMiniMaxTextToolMode:
         assert "action" in prompt
         assert "cur_page" in prompt
         assert "required" in prompt
+
+
+@pytest.mark.asyncio
+async def test_process_step_creates_assistant_message_with_provider_and_model(monkeypatch):
+    runner = _make_runner("ses_runner_provider_model")
+    runner.callbacks = RunnerCallbacks(
+        on_text_delta=AsyncMock(),
+        on_error=AsyncMock(),
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_runner",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, permission=None)
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    captured_kwargs = {}
+
+    async def fake_create(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        raise RuntimeError("assistant message created")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_tools", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", fake_create)
+
+    with pytest.raises(RuntimeError, match="assistant message created"):
+        await runner._process_step([last_user], last_user)
+
+    assert captured_kwargs["model_id"] == runner.model_id
+    assert captured_kwargs["provider_id"] == runner.provider_id

@@ -4,6 +4,8 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi import status
 from httpx import AsyncClient
@@ -30,6 +32,26 @@ _WORKFLOW_PAYLOAD = {
     "description": "A test workflow",
     "workflowJson": _WORKFLOW_JSON,
 }
+
+
+async def _wait_for_execution_terminal_state(
+    client: AsyncClient,
+    workflow_id: str,
+    exec_id: str,
+    *,
+    timeout_s: float = 3.0,
+) -> dict:
+    """Poll execution details until the workflow leaves the running state."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        resp = await client.get(f"/api/workflow/{workflow_id}/history/{exec_id}")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        if data["status"] != "running":
+            return data
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"Execution {exec_id} did not finish within {timeout_s} seconds")
+        await asyncio.sleep(0.05)
 
 
 # ===========================================================================
@@ -116,6 +138,77 @@ class TestWorkflowRoutes:
         resp = await client.get(f"/api/workflow/{wf_id}/history")
         assert resp.status_code == status.HTTP_200_OK
         assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_returns_running_execution(self, client: AsyncClient):
+        """POST /api/workflow/{id}/run should return immediately with a running execution."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {"topic": "demo"}})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        data = resp.json()
+        assert data["workflowId"] == wf_id
+        assert data["status"] == "running"
+        assert data["id"]
+        assert data["inputParams"] == {"topic": "demo"}
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_workflow_execution(self, client: AsyncClient):
+        """Cancelling a running workflow should eventually mark it as cancelled."""
+        payload = {
+            "name": "slow-workflow",
+            "description": "workflow that can be cancelled",
+            "workflowJson": {
+                "start": "step1",
+                "nodes": [
+                    {
+                        "id": "step1",
+                        "type": "python",
+                        "code": "import time\ntime.sleep(0.2)\noutputs['value'] = 1",
+                    },
+                    {
+                        "id": "step2",
+                        "type": "python",
+                        "code": "outputs['value'] = inputs['value'] + 1",
+                    },
+                ],
+                "edges": [
+                    {"from": "step1", "to": "step2"},
+                ],
+            },
+        }
+        create_resp = await client.post("/api/workflow", json=payload)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "accepted"
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "cancelled"
+        assert len(final["executionLog"]) == 1
+        assert final["executionLog"][0]["node_id"] == "step1"
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_workflow_execution_is_ignored(self, client: AsyncClient):
+        """Cancelling an already-finished workflow should return an ignored response."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        exec_id = run_resp.json()["id"]
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "success"
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "ignored"
 
 
 # ===========================================================================

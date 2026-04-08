@@ -8,11 +8,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Literal, Optional, Union
+from typing import Any, Callable, Dict, Literal, Optional, Union
 
 from flocks.config.config import Config
 from flocks.sandbox.context import resolve_sandbox_context
-from .errors import FlocksWorkflowError
+from .errors import FlocksWorkflowError, RunCancelledError, RunTimeoutError
 from .io import dump_workflow, load_workflow
 from .compiler import default_exec_path, compile_workflow, workflow_has_logic_nodes
 from .models import Workflow
@@ -215,6 +215,7 @@ def run_workflow(
     sandbox_requirements_installer: Optional[SandboxRequirementsInstaller] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
+    cancel: Optional[Callable[[], bool]] = None,
 ) -> RunWorkflowResult:
     # 确保日志已配置
     _ensure_logging_configured()
@@ -357,6 +358,7 @@ def run_workflow(
         result = engine.run(
             initial_inputs=initial_inputs,
             timeout_s=timeout_s,
+            cancel=cancel,
             on_step_start=_on_step_start,
             on_step_end=_on_step_end,
         )
@@ -371,8 +373,14 @@ def run_workflow(
         
         last_outputs = history_from_error[-1].get('outputs', {}) if history_from_error else {}
         
+        status = "FAILED"
+        if isinstance(e, RunCancelledError):
+            status = "CANCELLED"
+        elif isinstance(e, RunTimeoutError):
+            status = "TIMED_OUT"
+
         return RunWorkflowResult(
-            status="FAILED", 
+            status=status,
             error=f"{type(e).__name__}: {e}",
             run_id=exec_ctx.get('run_id'),
             steps=exec_ctx.get('steps', 0),
