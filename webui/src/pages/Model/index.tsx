@@ -95,6 +95,7 @@ export default function ModelPage() {
   const sseRefetchTimer = useRef<number | null>(null);
   const selectedProviderRef = useRef(selectedProvider);
   selectedProviderRef.current = selectedProvider;
+  const providerLoadSeqRef = useRef(0);
   const handleSelectProviderRef = useRef<(p: EnrichedProvider) => Promise<void>>(null!);
 
   useSSE({
@@ -174,38 +175,51 @@ export default function ModelPage() {
   // ==================== Handlers ====================
 
   const handleSelectProvider = useCallback(async (provider: EnrichedProvider) => {
+    const requestSeq = ++providerLoadSeqRef.current;
     setSelectedProvider(provider);
+    selectedProviderRef.current = provider;
     sessionStorage.setItem('model_page_selected_provider', provider.id);
+    setCredentials(null);
+    setProviderModels([]);
+    setLoadingModels(true);
 
     try {
-      setLoadingModels(true);
+      const modelsRes = await modelV2API
+        .listDefinitions({ provider: provider.id })
+        .catch(() => ({ data: { models: [], total: 0 } }));
 
-      const [modelsRes, credentialsRes] = await Promise.all([
-        modelV2API.listDefinitions({ provider: provider.id }).catch(() => ({ data: { models: [], total: 0 } })),
-        providerAPI.getCredentials(provider.id).catch(() => ({ data: null })),
-      ]);
+      if (providerLoadSeqRef.current !== requestSeq) return;
 
       const models = modelsRes.data.models || [];
       setProviderModels(models);
-      setCredentials(credentialsRes.data);
 
       const enabledMap: Record<string, boolean> = {};
-      await Promise.all(
-        models.map(async (m) => {
-          try {
-            const res = await modelSettingsAPI.get(provider.id, m.id);
-            enabledMap[`${provider.id}/${m.id}`] = res.data.enabled !== false;
-          } catch {
-            enabledMap[`${provider.id}/${m.id}`] = true;
-          }
-        })
-      );
+      const [credentialsResult] = await Promise.allSettled([
+        providerAPI.getCredentials(provider.id),
+        Promise.allSettled(
+          models.map(async (m) => {
+            try {
+              const res = await modelSettingsAPI.get(provider.id, m.id);
+              enabledMap[`${provider.id}/${m.id}`] = res.data.enabled !== false;
+            } catch {
+              enabledMap[`${provider.id}/${m.id}`] = true;
+            }
+          })
+        ),
+      ]);
+
+      if (providerLoadSeqRef.current !== requestSeq) return;
+
+      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value.data : null);
       setModelEnabledMap(prev => ({ ...prev, ...enabledMap }));
     } catch {
+      if (providerLoadSeqRef.current !== requestSeq) return;
       setProviderModels([]);
       setCredentials(null);
     } finally {
-      setLoadingModels(false);
+      if (providerLoadSeqRef.current === requestSeq) {
+        setLoadingModels(false);
+      }
     }
   }, []);
   handleSelectProviderRef.current = handleSelectProvider;
@@ -447,7 +461,12 @@ export default function ModelPage() {
                   isSelected={selectedProvider?.id === provider.id}
                   connStatus={connectionStatus[provider.id] || 'unknown'}
                   onClick={() => handleSelectProvider(provider)}
-                  onConfigure={() => { setSelectedProvider(provider); setShowConfigDialog(true); }}
+                  onConfigure={async () => {
+                    await handleSelectProvider(provider);
+                    if (selectedProviderRef.current?.id === provider.id) {
+                      setShowConfigDialog(true);
+                    }
+                  }}
                 />
               ))
             )}
@@ -1966,6 +1985,21 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
+
+  useEffect(() => {
+    setApiKey(existingKey);
+    setBaseUrl(existingBaseUrl);
+    setProviderName(provider.name);
+  }, [existingBaseUrl, existingKey, provider.id, provider.name]);
+
+  useEffect(() => {
+    setSelectedModelIds(new Set(models.map(m => m.id)));
+    setTestModelId(prev => (
+      prev && models.some(m => m.id === prev)
+        ? prev
+        : (models[0]?.id ?? '')
+    ));
+  }, [provider.id, models]);
 
   useEffect(() => {
     catalogAPI.list().then(res => {
