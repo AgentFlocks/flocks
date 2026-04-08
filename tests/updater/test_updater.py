@@ -248,6 +248,63 @@ def test_build_restart_argv_prefers_windows_orig_argv_launcher(
     ]
 
 
+def test_gitee_archive_url_uses_public_repository_archive_endpoint() -> None:
+    assert updater._gitee_archive_url("flocks/flocks", "2026.4.7", "tar.gz") == (
+        "https://gitee.com/flocks/flocks/repository/archive/v2026.4.7.tar.gz"
+    )
+    assert updater._gitee_archive_url("flocks/flocks", "v2026.4.7", "zip") == (
+        "https://gitee.com/flocks/flocks/repository/archive/v2026.4.7.zip"
+    )
+    assert updater._gitee_archive_url(
+        "flocks/flocks",
+        "2026.4.7",
+        "tar.gz",
+        gitee_token="secret-token",
+    ) == "https://gitee.com/flocks/flocks/repository/archive/v2026.4.7.tar.gz"
+
+
+@pytest.mark.asyncio
+async def test_fetch_gitee_release_returns_public_archive_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str | None]:
+            return {
+                "tag_name": "v2026.4.7",
+                "body": "notes",
+                "html_url": "https://gitee.com/flocks/flocks/releases/v2026.4.7",
+            }
+
+    class DummyClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, params=None, follow_redirects=True):
+            assert url == "https://gitee.com/api/v5/repos/flocks/flocks/releases/latest"
+            assert params == {"access_token": "secret-token"}
+            assert follow_redirects is True
+            return DummyResponse()
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout: DummyClient())
+
+    tag, notes, html_url, zipball_url, tarball_url = await updater._fetch_gitee_release(
+        "flocks/flocks",
+        "secret-token",
+    )
+
+    assert tag == "2026.4.7"
+    assert notes == "notes"
+    assert html_url == "https://gitee.com/flocks/flocks/releases/v2026.4.7"
+    assert zipball_url == "https://gitee.com/flocks/flocks/repository/archive/v2026.4.7.zip"
+    assert tarball_url == "https://gitee.com/flocks/flocks/repository/archive/v2026.4.7.tar.gz"
+
+
 def test_build_restart_argv_preserves_windows_module_invocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

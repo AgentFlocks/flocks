@@ -451,22 +451,16 @@ async def _fetch_gitee_release(
     notes: str | None = data.get("body") or None
     html_url: str | None = data.get("html_url") or None
 
-    zip_url = f"https://gitee.com/api/v5/repos/{repo}/zipball?ref={raw_tag}"
-    tar_url = f"https://gitee.com/api/v5/repos/{repo}/tarball?ref={raw_tag}"
-    if token:
-        zip_url += f"&access_token={token}"
-        tar_url += f"&access_token={token}"
+    zip_url = f"https://gitee.com/{repo}/repository/archive/{raw_tag}.zip"
+    tar_url = f"https://gitee.com/{repo}/repository/archive/{raw_tag}.tar.gz"
     return tag, notes, html_url, zip_url, tar_url
 
 
 def _gitee_archive_url(repo: str, tag: str, fmt: str, gitee_token: str | None = None) -> str:
-    """Gitee archive download via API endpoint."""
+    """Public Gitee archive download URL that does not require API auth."""
     raw_tag = tag if tag.startswith("v") else f"v{tag}"
-    kind = "zipball" if fmt == "zip" else "tarball"
-    url = f"https://gitee.com/api/v5/repos/{repo}/{kind}?ref={raw_tag}"
-    if gitee_token:
-        url += f"&access_token={gitee_token}"
-    return url
+    suffix = "zip" if fmt == "zip" else "tar.gz"
+    return f"https://gitee.com/{repo}/repository/archive/{raw_tag}.{suffix}"
 
 
 # ------------------------------------------------------------------ #
