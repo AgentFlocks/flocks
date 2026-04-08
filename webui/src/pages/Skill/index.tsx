@@ -23,7 +23,9 @@ export default function SkillPage() {
   const [showCreateSheet, setShowCreateSheet] = useState(false);
   const [showInstallDialog, setShowInstallDialog] = useState(false);
 
-  const fetchSkills = async ({ silent = false }: { silent?: boolean } = {}) => {
+  const fetchSkills = async (
+    { silent = false, invalidateOnError = false }: { silent?: boolean; invalidateOnError?: boolean } = {}
+  ) => {
     try {
       if (!silent) {
         setLoading(true);
@@ -32,22 +34,25 @@ export default function SkillPage() {
       // Use /status endpoint to get eligibility info
       const response = await skillAPI.status();
       setSkills(Array.isArray(response.data) ? response.data : []);
-      if (!silent) {
-        setError(null);
-      }
+      setError(null);
+      return true;
     } catch {
       // Fallback to plain list if status endpoint isn't available yet
       try {
         const fallback = await skillAPI.list();
         setSkills(Array.isArray(fallback.data) ? fallback.data : []);
-        if (!silent) {
-          setError(null);
-        }
+        setError(null);
+        return true;
       } catch (listErr: unknown) {
-        if (!silent) {
-          setError(listErr instanceof Error ? listErr.message : t('fetchListFailed'));
+        const message = listErr instanceof Error ? listErr.message : t('fetchListFailed');
+        if (invalidateOnError || !silent) {
           setSkills([]);
+          setError(message);
         }
+        if (silent) {
+          toast.error(t('refreshFailed'), message);
+        }
+        return false;
       }
     } finally {
       if (!silent) {
@@ -100,7 +105,7 @@ export default function SkillPage() {
     } catch {
       // Fall back to a plain fetch if refresh is temporarily unavailable.
     }
-    await fetchSkills({ silent: true });
+    return fetchSkills({ silent: true, invalidateOnError: true });
   };
 
   const handleSelectSkill = async (skill: Skill) => {
@@ -120,7 +125,7 @@ export default function SkillPage() {
       const allOk = res.data.results.every(r => r.success);
       if (allOk) {
         toast.success(t('eligibility.installSuccess'));
-        fetchSkills({ silent: true });
+        await fetchSkills({ silent: true, invalidateOnError: true });
       } else {
         const errors = res.data.results
           .filter(r => !r.success)
@@ -135,8 +140,8 @@ export default function SkillPage() {
     }
   };
 
-  const handleInstalled = () => {
-    refreshSkillsAndFetch();
+  const handleInstalled = async () => {
+    await refreshSkillsAndFetch();
   };
 
   const handleDeleteFromCard = async (skill: Skill, e: React.MouseEvent) => {
@@ -145,7 +150,7 @@ export default function SkillPage() {
     if (!confirm(t('sheet.deleteConfirm', { name: skill.name }))) return;
     try {
       await skillAPI.delete(skill.name);
-      fetchSkills({ silent: true });
+      await fetchSkills({ silent: true, invalidateOnError: true });
     } catch (err: unknown) {
       toast.error(t('sheet.deleteFailed'), err instanceof Error ? err.message : String(err));
     }
@@ -309,8 +314,14 @@ export default function SkillPage() {
         <SkillSheet
           skill={sheetSkill}
           onClose={() => setSheetSkill(null)}
-          onSaved={() => { fetchSkills({ silent: true }); setSheetSkill(null); }}
-          onDeleted={() => { fetchSkills({ silent: true }); setSheetSkill(null); }}
+          onSaved={async () => {
+            await fetchSkills({ silent: true, invalidateOnError: true });
+            setSheetSkill(null);
+          }}
+          onDeleted={async () => {
+            await fetchSkills({ silent: true, invalidateOnError: true });
+            setSheetSkill(null);
+          }}
         />
       )}
 
