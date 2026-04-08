@@ -10,6 +10,8 @@ $RawInstallShUrl = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/in
 $RawInstallPs1Url = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1"
 $RootDir = $null
 $MinNodeMajor = 22
+$script:UvDefaultIndex = "https://pypi.org/simple"
+$script:NpmRegistry = "https://registry.npmjs.org/"
 
 function Write-Info {
     param([string]$Message)
@@ -25,6 +27,80 @@ function Fail {
 function Test-Command {
     param([string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Get-UrlProbeMilliseconds {
+    param([string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) {
+        return $null
+    }
+
+    foreach ($method in @("Head", "Get")) {
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        try {
+            Invoke-WebRequest -Uri $Url -Method $method -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop | Out-Null
+            $stopwatch.Stop()
+            return [double]$stopwatch.Elapsed.TotalMilliseconds
+        }
+        catch {
+            $stopwatch.Stop()
+        }
+    }
+
+    return $null
+}
+
+function Select-FastestUrl {
+    param(
+        [string]$DefaultUrl,
+        [object[]]$Candidates
+    )
+
+    $bestUrl = $null
+    $bestMilliseconds = $null
+
+    foreach ($candidate in $Candidates) {
+        if ($null -eq $candidate) {
+            continue
+        }
+
+        $probeMilliseconds = Get-UrlProbeMilliseconds -Url $candidate.Probe
+        if ($null -eq $probeMilliseconds) {
+            continue
+        }
+
+        if ($null -eq $bestMilliseconds -or $probeMilliseconds -lt $bestMilliseconds) {
+            $bestMilliseconds = $probeMilliseconds
+            $bestUrl = $candidate.Source
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($bestUrl)) {
+        return $DefaultUrl
+    }
+
+    return $bestUrl
+}
+
+function Initialize-InstallSources {
+    Write-Info "Probing PyPI and npm registries to choose the faster source..."
+
+    $script:UvDefaultIndex = Select-FastestUrl `
+        -DefaultUrl "https://pypi.org/simple" `
+        -Candidates @(
+            [PSCustomObject]@{ Source = "https://pypi.org/simple"; Probe = "https://pypi.org/simple/pip/" }
+            [PSCustomObject]@{ Source = "https://pypi.tuna.tsinghua.edu.cn/simple"; Probe = "https://pypi.tuna.tsinghua.edu.cn/simple/pip/" }
+        )
+    $script:NpmRegistry = Select-FastestUrl `
+        -DefaultUrl "https://registry.npmjs.org/" `
+        -Candidates @(
+            [PSCustomObject]@{ Source = "https://registry.npmjs.org/"; Probe = "https://registry.npmjs.org/npm" }
+            [PSCustomObject]@{ Source = "https://registry.npmmirror.com/"; Probe = "https://registry.npmmirror.com/npm" }
+        )
+
+    Write-Info "Selected PyPI index: $script:UvDefaultIndex"
+    Write-Info "Selected npm registry: $script:NpmRegistry"
 }
 
 function Get-NodeMajorVersion {
@@ -134,15 +210,15 @@ function Resolve-RootDir {
 }
 
 function Show-CloneHintAndExit {
-    Write-Host "[flocks] 当前未检测到 Flocks 仓库代码。"
+    Write-Host "[flocks] Flocks repository source was not found in the current location."
     Write-Host ""
-    Write-Host "如需源码安装，请先拉取代码，再执行安装："
+    Write-Host "To install from source, clone the repository first and then run:"
     Write-Host ""
     Write-Host "  git clone $RepoUrl"
     Write-Host "  cd Flocks"
     Write-Host "  .\scripts\install.ps1"
     Write-Host ""
-    Write-Host "或直接使用 GitHub 一键安装入口："
+    Write-Host "Or use the one-line GitHub bootstrap installer:"
     Write-Host ""
     Write-Host "  curl -fsSL $RawInstallShUrl | bash"
     Write-Host "  iwr -useb $RawInstallPs1Url | iex"
@@ -181,8 +257,8 @@ function Show-Usage {
     Write-Host "Usage: .\scripts\install.ps1 [-InstallTui] [-Help]"
     Write-Host ""
     Write-Host "Options:"
-    Write-Host "  -InstallTui  安装 TUI 依赖（此时会自动安装 bun）"
-    Write-Host "  -Help        查看帮助"
+    Write-Host "  -InstallTui  Install TUI dependencies as well (bun will be installed automatically)"
+    Write-Host "  -Help        Show this help message"
 }
 
 function Get-ChocoCommand {
@@ -218,7 +294,7 @@ function Ensure-ChocolateyInstalled {
         return $chocoPath
     }
 
-    Write-Info "未检测到 Chocolatey，开始自动安装..."
+    Write-Info "Chocolatey was not found. Installing it automatically..."
 
     try {
         & powershell -NoProfile -ExecutionPolicy Bypass -Command "Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iwr https://community.chocolatey.org/install.ps1 -UseBasicParsing | iex" | Out-Host
@@ -237,14 +313,14 @@ function Ensure-ChocolateyInstalled {
 function Install-NodeJsWithChocolatey {
     $chocoPath = Ensure-ChocolateyInstalled
     if (-not $chocoPath) {
-        Write-Info "Chocolatey 安装失败，无法自动安装 Node.js。"
+        Write-Info "Chocolatey installation failed, so Node.js cannot be installed automatically."
         return $false
     }
 
-    Write-Info "未检测到满足要求的 npm，尝试使用 Chocolatey 安装或升级 Node.js 24.14.0..."
+    Write-Info "A compatible npm installation was not found. Trying to install or upgrade Node.js 24.14.0 with Chocolatey..."
     & $chocoPath install nodejs --version="24.14.0" -y | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Info "Chocolatey 安装 Node.js 失败。"
+        Write-Info "Chocolatey failed to install Node.js."
         return $false
     }
 
@@ -259,27 +335,27 @@ function Ensure-NpmInstalled {
 
     $currentMajor = Get-NodeMajorVersion
     if ($null -ne $currentMajor) {
-        Write-Info "检测到当前 Node.js 版本为 v${currentMajor}，尝试升级到 Node.js $MinNodeMajor+..."
+        Write-Info "Detected current Node.js version v${currentMajor}. Trying to upgrade to Node.js $MinNodeMajor+..."
     }
     else {
-        Write-Info "未检测到满足要求的 npm，尝试自动安装 Node.js..."
+        Write-Info "A compatible npm installation was not found. Trying to install Node.js automatically..."
     }
 
     if (-not (Install-NodeJsWithChocolatey)) {
-        Fail "未检测到满足要求的 npm，或当前 Node.js 版本低于 $MinNodeMajor，且无法通过 Chocolatey 自动安装 Node.js。请先从 https://nodejs.org/ 手动安装 Node.js $MinNodeMajor+（确保包含 npm），安装完成后重新打开 PowerShell 再重试。"
+        Fail "A compatible npm installation was not found, or the current Node.js version is below $MinNodeMajor, and Chocolatey could not install Node.js automatically. Install Node.js $MinNodeMajor+ manually from https://nodejs.org/ (including npm), reopen PowerShell, and retry."
     }
 
     if (-not (Test-Command "npm.cmd")) {
-        Fail "Node.js（包含 npm）安装完成后仍不可用，请检查 PATH。"
+        Fail "Node.js (including npm) finished installing, but npm is still not available. Check PATH and retry."
     }
 
     if (-not (Test-NodeVersionRequirement)) {
-        Fail "检测到的 Node.js 版本过低。当前项目至少需要 Node.js $MinNodeMajor+，请安装或升级后重试。"
+        Fail "Detected Node.js version is too old. This project requires Node.js $MinNodeMajor+."
     }
 
     try {
-        Write-Info "Node.js 版本: $((& node -v).Trim())"
-        Write-Info "npm 版本: $((& npm.cmd -v).Trim())"
+        Write-Info "Node.js version: $((& node -v).Trim())"
+        Write-Info "npm version: $((& npm.cmd -v).Trim())"
     }
     catch {
     }
@@ -290,12 +366,12 @@ function Install-Uv {
         return
     }
 
-    Write-Info "未检测到 uv，开始自动安装..."
+    Write-Info "uv was not found. Installing it automatically..."
     powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://astral.sh/uv/install.ps1 | iex"
     Refresh-Path
 
     if (-not (Test-Command "uv")) {
-        Fail "uv 安装完成后仍不可用，请检查 PATH。"
+        Fail "uv finished installing, but it is still not available. Check PATH and retry."
     }
 }
 
@@ -359,15 +435,15 @@ function Stop-TrackedProcess {
 
     try {
         Stop-Process -Id $ProcessId -Force -ErrorAction Stop
-        Write-Info ("已停止 {0} (PID: {1})" -f $Reason, $ProcessId)
+        Write-Info ("Stopped {0} (PID: {1})" -f $Reason, $ProcessId)
     }
     catch {
         try {
             & taskkill.exe /PID $ProcessId /T /F | Out-Null
-            Write-Info ("已停止 {0} (PID: {1})" -f $Reason, $ProcessId)
+            Write-Info ("Stopped {0} (PID: {1})" -f $Reason, $ProcessId)
         }
         catch {
-            Write-Info ("无法停止 {0} (PID: {1})，继续安装" -f $Reason, $ProcessId)
+            Write-Info ("Could not stop {0} (PID: {1}); continuing installation" -f $Reason, $ProcessId)
         }
     }
 }
@@ -422,7 +498,7 @@ function Get-FlocksProcessIds {
 }
 
 function Stop-FlocksProcesses {
-    Write-Info "检查并停止可能锁定安装目录的 Flocks 相关进程..."
+    Write-Info "Checking for Flocks-related processes that may be locking the install directory..."
 
     $flocksCommand = Get-Command flocks -ErrorAction SilentlyContinue
     if ($flocksCommand) {
@@ -557,11 +633,13 @@ function Invoke-NativeCommand {
     param(
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
-        [string]$WorkingDirectory = (Get-Location).Path
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [hashtable]$Environment = @{}
     )
 
     $stdoutPath = [System.IO.Path]::GetTempFileName()
     $stderrPath = [System.IO.Path]::GetTempFileName()
+    $originalEnvironment = @{}
 
     try {
         $resolvedFilePath = $FilePath
@@ -577,6 +655,21 @@ function Invoke-NativeCommand {
 
             $resolvedFilePath = "cmd.exe"
             $resolvedArgs = @("/d", "/s", "/c", ($cmdParts -join " "))
+        }
+
+        foreach ($entry in $Environment.GetEnumerator()) {
+            $name = [string]$entry.Key
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+            }
+
+            $originalEnvironment[$name] = [System.Environment]::GetEnvironmentVariable($name, "Process")
+            if ($null -eq $entry.Value) {
+                Remove-Item -Path ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$entry.Value)
+            }
         }
 
         $process = Start-Process `
@@ -596,6 +689,20 @@ function Invoke-NativeCommand {
         }
     }
     finally {
+        foreach ($entry in $originalEnvironment.GetEnumerator()) {
+            $name = [string]$entry.Key
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                continue
+            }
+
+            if ($null -eq $entry.Value) {
+                Remove-Item -Path ("Env:{0}" -f $name) -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$entry.Value)
+            }
+        }
+
         foreach ($path in @($stdoutPath, $stderrPath)) {
             if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) {
                 Remove-Item -Path $path -Force -ErrorAction SilentlyContinue
@@ -609,15 +716,16 @@ function Invoke-NativeCommandOrFail {
         [string]$Description,
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
-        [string]$WorkingDirectory = (Get-Location).Path
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [hashtable]$Environment = @{}
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
     Write-ProcessOutputText -Text $result.StdOut
     Write-ProcessOutputText -Text $result.StdErr
 
     if ($result.ExitCode -ne 0) {
-        Fail "$Description 失败。"
+        Fail "$Description failed."
     }
 
     return $result
@@ -628,10 +736,11 @@ function Invoke-InstallerCommandWithLockRetry {
         [string]$Description,
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
-        [string]$WorkingDirectory = (Get-Location).Path
+        [string]$WorkingDirectory = (Get-Location).Path,
+        [hashtable]$Environment = @{}
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
     Write-ProcessOutputText -Text $result.StdOut
     Write-ProcessOutputText -Text $result.StdErr
 
@@ -641,31 +750,31 @@ function Invoke-InstallerCommandWithLockRetry {
 
     $combinedOutput = @($result.StdOut, $result.StdErr) -join [Environment]::NewLine
     if (-not (Test-IsLockError -Text $combinedOutput)) {
-        Fail "$Description 失败。"
+        Fail "$Description failed."
     }
 
-    Write-Info "$Description 检测到文件锁定，尝试清理残留进程后重试..."
+    Write-Info "$Description detected a file lock. Cleaning up leftover processes before retrying..."
     Stop-FlocksProcesses
     Start-Sleep -Seconds 3
 
-    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
+    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
     Write-ProcessOutputText -Text $retryResult.StdOut
     Write-ProcessOutputText -Text $retryResult.StdErr
 
     if ($retryResult.ExitCode -ne 0) {
-        Fail "$Description 失败。"
+        Fail "$Description failed."
     }
 }
 
 function Install-FlocksCli {
-    Write-Info "安装 flocks 全局 CLI..."
+    Write-Info "Installing the global flocks CLI..."
 
     Push-Location $RootDir
     try {
         Invoke-InstallerCommandWithLockRetry `
-            -Description "flocks 全局 CLI 安装" `
+            -Description "Global flocks CLI installation" `
             -FilePath "uv" `
-            -ArgumentList @("tool", "install", "--editable", $RootDir, "--force") `
+            -ArgumentList @("tool", "install", "--editable", $RootDir, "--force", "--default-index", $script:UvDefaultIndex) `
             -WorkingDirectory $RootDir
     }
     finally {
@@ -679,7 +788,7 @@ function Install-FlocksCli {
 
     Refresh-Path
     if (-not (Test-Command "flocks")) {
-        Fail "flocks CLI 安装完成后仍不可用，请检查 PATH。"
+        Fail "The flocks CLI finished installing, but it is still not available. Check PATH and retry."
     }
 }
 
@@ -688,12 +797,12 @@ function Install-Bun {
         return
     }
 
-    Write-Info "未检测到 bun，开始自动安装..."
+    Write-Info "bun was not found. Installing it automatically..."
     powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://bun.sh/install.ps1 | iex"
     Refresh-Path
 
     if (-not (Test-Command "bun")) {
-        Fail "bun 安装完成后仍不可用，请检查 PATH。"
+        Fail "bun finished installing, but it is still not available. Check PATH and retry."
     }
 }
 
@@ -740,21 +849,22 @@ function Install-ChromeForTesting {
     $browserDir = Get-ChromeForTestingDir
 
     if (-not (Test-Command "npx.cmd")) {
-        Fail "未检测到 npx，请先安装 Node.js（包含 npm）后重试。"
+        Fail "npx was not found. Install Node.js (including npm) and retry."
     }
 
     New-Item -ItemType Directory -Path $browserDir -Force | Out-Null
-    Write-Info "未检测到系统 Chrome/Chromium，开始安装 Chrome for Testing 到: $browserDir"
+    Write-Info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browserDir"
 
     $result = Invoke-NativeCommandOrFail `
-        -Description "Chrome for Testing 安装" `
+        -Description "Chrome for Testing installation" `
         -FilePath "npx.cmd" `
         -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
-        -WorkingDirectory $browserDir
+        -WorkingDirectory $browserDir `
+        -Environment @{ npm_config_registry = $script:NpmRegistry }
 
     $browserPath = Resolve-ChromeForTestingPath -InstallOutputText (@($result.StdOut, $result.StdErr) -join [Environment]::NewLine)
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
-        Fail "Chrome for Testing 安装成功，但未能从安装输出解析浏览器路径。"
+        Fail "Chrome for Testing finished installing, but the browser path could not be parsed from the installer output."
     }
 
     return $browserPath
@@ -790,10 +900,10 @@ function Configure-AgentBrowserBrowser {
 
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
         $browserPath = Install-ChromeForTesting
-        Write-Info "已安装 Chrome for Testing，agent-browser 将默认使用: $browserPath"
+        Write-Info "Installed Chrome for Testing. agent-browser will use: $browserPath"
     }
     else {
-        Write-Info "检测到系统 Chrome/Chromium，agent-browser 将默认使用: $browserPath"
+        Write-Info "Detected system Chrome/Chromium. agent-browser will use: $browserPath"
     }
 
     $env:AGENT_BROWSER_EXECUTABLE_PATH = $browserPath
@@ -802,19 +912,19 @@ function Configure-AgentBrowserBrowser {
 
 function Install-AgentBrowser {
     if (-not (Test-Command "agent-browser")) {
-        Write-Info "安装 agent-browser CLI..."
+        Write-Info "Installing the agent-browser CLI..."
         $null = Invoke-NativeCommandOrFail `
-            -Description "agent-browser CLI 安装" `
+            -Description "agent-browser CLI installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install", "--global", "agent-browser")
         Refresh-Path
 
         if (-not (Test-Command "agent-browser")) {
-            Fail "agent-browser 安装完成后仍不可用，请检查 PATH。"
+            Fail "agent-browser finished installing, but it is still not available. Check PATH and retry."
         }
     }
     else {
-        Write-Info "检测到 agent-browser，跳过 CLI 安装。"
+        Write-Info "agent-browser is already installed. Skipping CLI installation."
     }
 
     Configure-AgentBrowserBrowser
@@ -830,16 +940,16 @@ function Install-DingtalkChannelDeps {
 
     $nodeModulesDir = Join-Path $connectorDir "node_modules"
     if (Test-Path $nodeModulesDir) {
-        Write-Info "钉钉 channel 依赖已存在，跳过安装。"
+        Write-Info "DingTalk channel dependencies already exist. Skipping installation."
         return
     }
 
-    Write-Info "检测到钉钉 channel 插件，安装 npm 依赖..."
+    Write-Info "Detected DingTalk channel plugin. Installing npm dependencies..."
 
     Push-Location $connectorDir
     try {
         $null = Invoke-NativeCommandOrFail `
-            -Description "钉钉 channel npm 依赖安装" `
+            -Description "DingTalk channel npm dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
             -WorkingDirectory $connectorDir
@@ -848,7 +958,7 @@ function Install-DingtalkChannelDeps {
         Pop-Location
     }
 
-    Write-Info "钉钉 channel 依赖安装完成。"
+    Write-Info "DingTalk channel dependencies installed."
 }
 
 function Write-RunCommandHint {
@@ -870,17 +980,18 @@ function Main {
         Show-CloneHintAndExit
     }
 
-    Write-Info "项目目录: $RootDir"
+    Write-Info "Project directory: $RootDir"
     Install-Uv
     Ensure-NpmInstalled
+    Initialize-InstallSources
 
-    Write-Info "使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint）..."
+    Write-Info "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..."
     Push-Location $RootDir
     try {
         Invoke-InstallerCommandWithLockRetry `
-            -Description "Python 后端依赖安装" `
+            -Description "Python backend dependency installation" `
             -FilePath "uv" `
-            -ArgumentList @("sync", "--group", "dev") `
+            -ArgumentList @("sync", "--group", "dev", "--default-index", $script:UvDefaultIndex) `
             -WorkingDirectory $RootDir
     }
     finally {
@@ -889,11 +1000,11 @@ function Main {
 
     Install-FlocksCli
 
-    Write-Info "安装 WebUI 依赖..."
+    Write-Info "Installing WebUI dependencies..."
     Push-Location (Join-Path $RootDir "webui")
     try {
         $null = Invoke-NativeCommandOrFail `
-            -Description "WebUI 依赖安装" `
+            -Description "WebUI dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
             -WorkingDirectory (Join-Path $RootDir "webui")
@@ -906,11 +1017,11 @@ function Main {
 
     if ($InstallTui) {
         Install-Bun
-        Write-Info "安装 TUI 依赖..."
+        Write-Info "Installing TUI dependencies..."
         Push-Location (Join-Path $RootDir "tui")
         try {
             $null = Invoke-NativeCommandOrFail `
-                -Description "TUI 依赖安装" `
+                -Description "TUI dependency installation" `
                 -FilePath "bun" `
                 -ArgumentList @("install") `
                 -WorkingDirectory (Join-Path $RootDir "tui")
@@ -920,25 +1031,25 @@ function Main {
         }
     }
     else {
-        Write-Info "跳过 TUI 依赖安装。如需安装，请重新执行 .\scripts\install.ps1 -InstallTui"
+        Write-Info "Skipping TUI dependency installation. Re-run .\scripts\install.ps1 -InstallTui to install them."
     }
 
     Install-AgentBrowser
 
     Write-Host ""
-    Write-Host "[flocks] 安装完成。"
+    Write-Host "[flocks] Installation complete."
     Write-Host ""
-    Write-Host "请启动新的终端会话，以加载环境变量并启用相关命令"
+    Write-Host "Start a new terminal session to load the updated environment and enable the installed commands."
     Write-Host ""
-    Write-Host "后续可用命令："
-    Write-Host "  1. 以 daemon 模式启动后端 + WebUI"
+    Write-Host "Next commands:"
+    Write-Host "  1. Start the backend and WebUI in daemon mode"
     Write-Host "     flocks start"
     Write-Host ""
-    Write-Host "  2. 查看更多命令帮助"
+    Write-Host "  2. Show command help"
     Write-Host "     flocks --help"
     Write-Host ""
     if ($InstallTui) {
-        Write-Host "  3. 启动 TUI"
+        Write-Host "  3. Launch the TUI"
         Write-Host "     flocks tui"
     }
 }
