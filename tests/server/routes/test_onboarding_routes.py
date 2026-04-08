@@ -42,7 +42,7 @@ class TestOnboardingStatusRoutes:
         self, client, monkeypatch: pytest.MonkeyPatch
     ):
         async def fake_resolve():
-            return {"provider_id": "threatbook-cn-llm", "model_id": "minimax-m2.7"}
+            return {"provider_id": "threatbook-cn-llm", "model_id": "qwen3.6-plus"}
 
         monkeypatch.setattr(onboarding_routes.Config, "resolve_default_llm", fake_resolve)
         monkeypatch.setattr(onboarding_routes, "_llm_provider_has_usable_credentials", lambda _pid: True)
