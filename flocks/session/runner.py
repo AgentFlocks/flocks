@@ -59,6 +59,33 @@ TOOL_RESULT_MIN_CHAR_BUDGET = 12_000
 TOOL_RESULT_MIN_TURN_BUDGET = 6_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
+# Maximum seconds to wait for each chunk (including the first) from the LLM
+# stream.  If the model hangs without returning any data, the stream times out
+# and the session surfaces a clear error rather than hanging forever.
+LLM_STREAM_CHUNK_TIMEOUT_S = 60
+
+
+async def _iter_with_chunk_timeout(aiter, timeout_s: float):
+    """Yield chunks from an async generator, raising TimeoutError if any
+    individual chunk (including the first) takes longer than *timeout_s*."""
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout_s)
+                yield chunk
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError(
+                    f"LLM stream timed out after {timeout_s:.0f}s with no response. "
+                    "The model may be overloaded or incompatible. Please try again or switch models."
+                )
+    finally:
+        try:
+            await aiter.aclose()
+        except Exception:
+            pass
+
 
 @dataclass
 class ToolCall:
@@ -867,6 +894,37 @@ Please address this message and continue with your tasks.
                         )
                         await SessionRetry.sleep(delay_ms, self._abort)
                         continue
+                    else:
+                        # All retries exhausted — surface a clear error so the
+                        # user knows the model is incompatible, rather than
+                        # silently hanging or showing a blank response.
+                        empty_error_msg = (
+                            f"Model '{self.model_id}' returned an empty response "
+                            f"after {MAX_EMPTY_RETRIES} retries."
+                        )
+                        log.error("runner.step.empty_response_exhausted", {
+                            "session_id": self.session.id,
+                            "model": self.model_id,
+                            "attempts": empty_attempt,
+                        })
+                        empty_error_dict = {
+                            "name": "EmptyResponseError",
+                            "message": empty_error_msg,
+                            "data": {
+                                "message": empty_error_msg,
+                                "model": self.model_id,
+                                "attempts": empty_attempt,
+                            },
+                        }
+                        if self.callbacks.on_error:
+                            await self.callbacks.on_error(empty_error_msg)
+                        await Message.update(
+                            self.session.id,
+                            assistant_msg.id,
+                            error=empty_error_dict,
+                            finish="error",
+                        )
+                        return StepResult(action="stop", error=empty_error_msg)
 
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"
@@ -1769,11 +1827,14 @@ Please address this message and continue with your tasks.
                 "tool_count": len(tools),
             })
 
-        async for chunk in provider.chat_stream(
-            model_id=self.model_id,
-            messages=messages,
-            tools=provider_tools,
-            **provider_options,
+        async for chunk in _iter_with_chunk_timeout(
+            provider.chat_stream(
+                model_id=self.model_id,
+                messages=messages,
+                tools=provider_tools,
+                **provider_options,
+            ),
+            timeout_s=LLM_STREAM_CHUNK_TIMEOUT_S,
         ):
             chunk_counts["total"] += 1
             
