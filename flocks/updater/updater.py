@@ -24,6 +24,7 @@ import tarfile
 import tempfile
 import time
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, AsyncGenerator
@@ -43,6 +44,11 @@ _UPGRADE_PHASE_CUTOVER_APPLIED = "cutover_applied"
 _UPGRADE_PHASE_ROLLBACK_IN_PROGRESS = "rollback_in_progress"
 _UPGRADE_PHASE_ROLLBACK_FAILED = "rollback_failed"
 _STATE_FIELD_UNSET = object()
+_UPDATE_REGION_CN = "cn"
+_CN_NPM_REGISTRY = "https://registry.npmmirror.com/"
+_CN_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
+_CN_PIP_INDEX_URL = _CN_UV_DEFAULT_INDEX
+_CURL_USER_AGENT = "curl/8.7.1"
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -55,6 +61,17 @@ _PRESERVE_NAMES: set[str] = {
 }
 
 log = Log.create(service="updater")
+
+
+@dataclass(frozen=True)
+class UpdateMirrorProfile:
+    """Resolved download/runtime mirror settings for a single upgrade request."""
+
+    region: str | None
+    sources: list[str]
+    npm_registry: str | None = None
+    uv_default_index: str | None = None
+    pip_index_url: str | None = None
 
 
 # ------------------------------------------------------------------ #
@@ -165,8 +182,13 @@ async def _run_async(
     cmd: list[str],
     cwd: Path | None = None,
     timeout: int = 60,
+    env: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Run a subprocess in a thread pool so the async event loop stays free."""
+    merged_env = None
+    if env:
+        merged_env = os.environ.copy()
+        merged_env.update(env)
     result = await asyncio.to_thread(
         subprocess.run,
         cmd,
@@ -174,6 +196,7 @@ async def _run_async(
         capture_output=True,
         text=False,
         timeout=timeout,
+        env=merged_env,
     )
     return (
         result.returncode,
@@ -413,6 +436,59 @@ async def _get_updater_config():
         return UpdaterConfig()
 
 
+def _normalize_update_region(region: str | None, locale: str | None = None) -> str | None:
+    """Resolve an explicit region or locale hint into a known mirror profile."""
+    raw_region = region
+    normalized_region = (region or "").strip().lower().replace("_", "-")
+    if raw_region is not None and normalized_region in {"", "auto", "default", "global"}:
+        return None
+    if normalized_region in {"cn", "china", "zh", "zh-cn"}:
+        return _UPDATE_REGION_CN
+    if normalized_region:
+        return None
+
+    normalized_locale = (locale or "").strip().lower().replace("_", "-")
+    if normalized_locale.startswith("zh"):
+        return _UPDATE_REGION_CN
+    return None
+
+
+def _prioritize_sources_for_region(sources: list[str], region: str | None) -> list[str]:
+    """Reorder sources for a region without changing the configured source set."""
+    prioritized = list(sources)
+    if region != _UPDATE_REGION_CN:
+        return prioritized
+
+    def sort_key(source: str) -> tuple[int, int]:
+        if source == "gitee":
+            return (0, 0)
+        if source == "github":
+            return (1, 0)
+        return (2, prioritized.index(source))
+
+    return sorted(prioritized, key=sort_key)
+
+
+def _resolve_update_mirror_profile(
+    configured_sources: list[str],
+    *,
+    region: str | None = None,
+    locale: str | None = None,
+) -> UpdateMirrorProfile:
+    """Return the effective upgrade source order and package mirrors."""
+    resolved_region = _normalize_update_region(region, locale)
+    sources = _prioritize_sources_for_region(configured_sources, resolved_region)
+    if resolved_region == _UPDATE_REGION_CN:
+        return UpdateMirrorProfile(
+            region=resolved_region,
+            sources=sources,
+            npm_registry=_CN_NPM_REGISTRY,
+            uv_default_index=_CN_UV_DEFAULT_INDEX,
+            pip_index_url=_CN_PIP_INDEX_URL,
+        )
+    return UpdateMirrorProfile(region=None, sources=sources)
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitHub
 # ------------------------------------------------------------------ #
@@ -481,22 +557,30 @@ async def _fetch_gitee_release(
     notes: str | None = data.get("body") or None
     html_url: str | None = data.get("html_url") or None
 
-    zip_url = f"https://gitee.com/api/v5/repos/{repo}/zipball?ref={raw_tag}"
-    tar_url = f"https://gitee.com/api/v5/repos/{repo}/tarball?ref={raw_tag}"
-    if token:
-        zip_url += f"&access_token={token}"
-        tar_url += f"&access_token={token}"
+    zip_url = _gitee_archive_url(repo, raw_tag, "zip")
+    tar_url = zip_url
     return tag, notes, html_url, zip_url, tar_url
 
 
 def _gitee_archive_url(repo: str, tag: str, fmt: str, gitee_token: str | None = None) -> str:
-    """Gitee archive download via API endpoint."""
+    """Gitee archive download via the webpage archive endpoint."""
     raw_tag = tag if tag.startswith("v") else f"v{tag}"
-    kind = "zipball" if fmt == "zip" else "tarball"
-    url = f"https://gitee.com/api/v5/repos/{repo}/{kind}?ref={raw_tag}"
-    if gitee_token:
-        url += f"&access_token={gitee_token}"
-    return url
+    return f"https://gitee.com/{repo}/archive/refs/tags/{raw_tag}.zip"
+
+
+def _is_gitee_tag_archive_url(url: str) -> bool:
+    normalized = url.split("?", 1)[0]
+    return normalized.startswith("https://gitee.com/") and "/archive/refs/tags/" in normalized and normalized.endswith(".zip")
+
+
+def _download_filename_for_url(url: str, filename: str) -> str:
+    if not _is_gitee_tag_archive_url(url):
+        return filename
+    if filename.endswith(".zip"):
+        return filename
+    if filename.endswith(".tar.gz"):
+        return f"{filename[:-7]}.zip"
+    return str(Path(filename).with_suffix(".zip"))
 
 
 # ------------------------------------------------------------------ #
@@ -678,10 +762,12 @@ async def _download_archive(
 ) -> Path:
     """Stream-download an archive from *url* into *dest_dir/filename*."""
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / filename
+    dest = dest_dir / _download_filename_for_url(url, filename)
 
     headers: dict[str, str] = {}
-    if token and "gitee.com" not in url:
+    if _is_gitee_tag_archive_url(url):
+        headers["User-Agent"] = _CURL_USER_AGENT
+    elif token and "gitee.com" not in url:
         headers["Authorization"] = f"Bearer {token}"
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
@@ -1475,6 +1561,7 @@ async def get_latest_release(
     base_url: str | None = None,
     repo: str | None = None,
     token: str | None = None,
+    sources_override: list[str] | None = None,
 ) -> tuple[str, str | None, str | None, str | None, str | None]:
     """
     Query Releases API using the configured sources list in priority order.
@@ -1485,7 +1572,7 @@ async def get_latest_release(
     repo = repo or ucfg.repo
     token = token or ucfg.token
     base_url = base_url or ucfg.base_url
-    sources = ucfg.sources
+    sources = list(sources_override or ucfg.sources)
 
     if provider:
         sources = [provider]
@@ -1522,13 +1609,18 @@ async def get_latest_release(
     raise RuntimeError("No sources configured and git fallback failed")
 
 
-async def check_update() -> VersionInfo:
+async def check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
     """Return version comparison info without performing any upgrade."""
     from flocks.updater.deploy import detect_deploy_mode
 
     current = get_current_version()
     mode = detect_deploy_mode()
     ucfg = await _get_updater_config()
+    profile = _resolve_update_mirror_profile(
+        ucfg.sources,
+        region=region,
+        locale=locale,
+    )
 
     if not ucfg.enabled:
         return VersionInfo(
@@ -1541,6 +1633,7 @@ async def check_update() -> VersionInfo:
         tag, notes, url, zipball, tarball = await get_latest_release(
             repo=ucfg.repo,
             token=ucfg.token,
+            sources_override=profile.sources,
         )
     except Exception as exc:
         log.warning("updater.check_failed", {"error": str(exc)})
@@ -1576,6 +1669,8 @@ async def perform_update(
     zipball_url: str | None = None,
     tarball_url: str | None = None,
     restart: bool = True,
+    locale: str | None = None,
+    region: str | None = None,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """
     Async generator that executes the upgrade steps and yields progress events.
@@ -1587,6 +1682,11 @@ async def perform_update(
     If one source fails the download, the next source is tried automatically.
     """
     ucfg = await _get_updater_config()
+    profile = _resolve_update_mirror_profile(
+        ucfg.sources,
+        region=region,
+        locale=locale,
+    )
     install_root = _get_repo_root()
     current_version = get_current_version()
     handover_prepared = False
@@ -1596,14 +1696,14 @@ async def perform_update(
     # ------------------------------------------------------------------ #
     # Step 1 – download source archive
     # ------------------------------------------------------------------ #
-    sources_desc = " → ".join(ucfg.sources)
-    yield UpdateProgress(stage="fetching", message=f"Downloading {fmt} archive (sources: {sources_desc})...")
+    sources_desc = " → ".join(profile.sources)
+    yield UpdateProgress(stage="fetching", message=f"Downloading source archive (sources: {sources_desc})...")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-update-"))
     archive_filename = f"flocks-{latest_tag}.{fmt}"
     try:
         archive_path = await _download_with_fallback(
-            sources=ucfg.sources,
+            sources=profile.sources,
             repo=ucfg.repo,
             tag=latest_tag,
             fmt=fmt,
@@ -1672,10 +1772,12 @@ async def perform_update(
         npm = _find_executable("npm.cmd") or _find_executable("npm")
         if npm:
             yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
+            npm_env = {"npm_config_registry": profile.npm_registry} if profile.npm_registry else None
             code, _, err = await _run_async(
                 [npm, "install"],
                 cwd=staged_webui_dir,
                 timeout=180,
+                env=npm_env,
             )
             if code != 0:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1691,6 +1793,7 @@ async def perform_update(
                 [npm, "run", "build"],
                 cwd=staged_webui_dir,
                 timeout=300,
+                env=npm_env,
             )
             if code != 0:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1775,13 +1878,18 @@ async def perform_update(
 
     if uv_path:
         log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
-        code, _, err = await _run_async([uv_path, "sync"], cwd=install_root, timeout=120)
+        uv_cmd = [uv_path, "sync"]
+        if profile.uv_default_index:
+            uv_cmd.extend(["--default-index", profile.uv_default_index])
+        code, _, err = await _run_async(uv_cmd, cwd=install_root, timeout=120)
     else:
         log.warning("updater.dependencies.sync_fallback", {"tool": "pip"})
+        pip_env = {"PIP_INDEX_URL": profile.pip_index_url} if profile.pip_index_url else None
         code, _, err = await _run_async(
             [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
             cwd=install_root,
             timeout=120,
+            env=pip_env,
         )
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1836,8 +1944,9 @@ async def perform_update(
         "updater.restart",
         {
             "tag": latest_tag,
-            "sources": ucfg.sources,
+            "sources": profile.sources,
             "repo": ucfg.repo,
+            "region": profile.region,
         },
     )
     await asyncio.sleep(0.8)

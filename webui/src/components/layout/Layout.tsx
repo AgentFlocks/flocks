@@ -34,7 +34,7 @@ export default function Layout() {
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showUpdate, setShowUpdate] = useState(false);
-  const { t } = useTranslation('nav');
+  const { t, i18n } = useTranslation('nav');
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -66,7 +66,7 @@ export default function Layout() {
     lastUpdateCheckAtRef.current = now;
 
     try {
-      const info = await checkUpdate();
+      const info = await checkUpdate(i18n.language);
 
       if (info.current_version) {
         setCurrentVersion(info.current_version);
@@ -95,7 +95,7 @@ export default function Layout() {
     } finally {
       checkingUpdateRef.current = false;
     }
-  }, []);
+  }, [i18n.language]);
 
   useEffect(() => {
     refreshUpdateStatus(true);

@@ -85,12 +85,12 @@ parse_args() {
 
 ensure_dependencies() {
   has_cmd curl || fail "缺少 curl，无法下载 Gitee 源码压缩包。"
-  has_cmd tar || fail "缺少 tar，无法解压 Gitee 源码压缩包。"
+  has_cmd unzip || fail "缺少 unzip，无法解压 Gitee zip 源码包。"
   has_cmd bash || fail "缺少 bash，无法执行仓库内安装脚本。"
 }
 
 build_candidate_urls() {
-  printf 'https://gitee.com/%s/repository/archive/%s.tar.gz\n' "$REPO_SLUG" "$VERSION"
+  printf 'https://gitee.com/%s/archive/refs/tags/%s.zip\n' "$REPO_SLUG" "$VERSION"
 }
 
 download_archive() {
@@ -132,7 +132,7 @@ main() {
   ensure_dependencies
 
   TMP_DIR="$(mktemp -d)"
-  archive_path="$TMP_DIR/flocks.tar.gz"
+  archive_path="$TMP_DIR/flocks.zip"
 
   info "仓库: $REPO_SLUG"
   info "版本: $VERSION"
@@ -140,7 +140,7 @@ main() {
   download_url="$(download_archive "$archive_path")"
 
   info "正在解压源码压缩包..."
-  tar -xzf "$archive_path" -C "$TMP_DIR"
+  unzip -q "$archive_path" -d "$TMP_DIR"
 
   project_dir="$(resolve_project_dir)" || fail "压缩包已解压，但未找到 scripts/install_zh.sh。"
 

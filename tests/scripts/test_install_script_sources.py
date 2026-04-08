@@ -7,7 +7,10 @@ SCRIPT_DIR = REPO_ROOT / "scripts"
 def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_workspace_installer() -> None:
     script = (REPO_ROOT / "install_zh.sh").read_text(encoding="utf-8")
 
-    assert 'https://gitee.com/%s/repository/archive/%s.tar.gz' in script
+    assert 'https://gitee.com/%s/archive/refs/tags/%s.zip' in script
+    assert 'has_cmd unzip || fail "缺少 unzip，无法解压 Gitee zip 源码包。"' in script
+    assert 'archive_path="$TMP_DIR/flocks.zip"' in script
+    assert 'unzip -q "$archive_path" -d "$TMP_DIR"' in script
     assert 'scripts/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
@@ -16,7 +19,7 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
 def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_workspace_installer() -> None:
     script = (REPO_ROOT / "install_zh.ps1").read_text(encoding="utf-8-sig")
 
-    assert 'https://gitee.com/$RepoSlug/repository/archive/$Version.zip' in script
+    assert 'https://gitee.com/$RepoSlug/archive/refs/tags/$Version.zip' in script
     assert 'scripts\\install_zh.ps1' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
     assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
@@ -27,6 +30,10 @@ def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> 
 
     assert 'FLOCKS_INSTALL_REPO_URL' in script
     assert 'https://gitee.com/flocks/flocks.git' in script
+    assert 'FLOCKS_RAW_INSTALL_SH_URL' in script
+    assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
+    assert 'FLOCKS_RAW_INSTALL_PS1_URL' in script
+    assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
@@ -39,6 +46,10 @@ def test_install_zh_powershell_wrapper_sets_cn_sources_and_reuses_main_installer
 
     assert 'FLOCKS_INSTALL_REPO_URL' in script
     assert 'https://gitee.com/flocks/flocks.git' in script
+    assert 'FLOCKS_RAW_INSTALL_SH_URL' in script
+    assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.sh' in script
+    assert 'FLOCKS_RAW_INSTALL_PS1_URL' in script
+    assert 'https://gitee.com/flocks/flocks/raw/main/install_zh.ps1' in script
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script

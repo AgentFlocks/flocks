@@ -16,6 +16,11 @@ def update_command(
     check: bool = typer.Option(False, "--check", help="仅检查是否有新版本，不执行升级"),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认直接升级"),
     force: bool = typer.Option(False, "--force", "-f", help="即使已是最新版本也强制重新安装"),
+    region: str | None = typer.Option(
+        None,
+        "--region",
+        help="升级镜像区域。设置为 cn 时优先使用中国大陆镜像源。",
+    ),
 ):
     """
     Check for and upgrade Flocks to the latest version.
@@ -24,14 +29,14 @@ def update_command(
     current version to ~/.flocks/version/, extracts and replaces source files,
     re-syncs dependencies, then restarts the service automatically.
     """
-    asyncio.run(_update(check=check, yes=yes, force=force))
+    asyncio.run(_update(check=check, yes=yes, force=force, region=region))
 
 
-async def _update(check: bool, yes: bool, force: bool = False) -> None:
+async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
     from flocks.updater import check_update, perform_update, detect_deploy_mode
 
     with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
-        info = await check_update()
+        info = await check_update(region=region)
 
     if info.error:
         console.print(f"[red]检查失败：{info.error}[/red]")
@@ -93,6 +98,7 @@ async def _update(check: bool, yes: bool, force: bool = False) -> None:
         zipball_url=info.zipball_url,
         tarball_url=info.tarball_url,
         restart=False,
+        region=region,
     ):
         if progress.stage == "error":
             console.print(f"\n[red]✗ 升级失败：{progress.message}[/red]")

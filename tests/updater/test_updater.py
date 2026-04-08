@@ -1,5 +1,6 @@
 import shutil
 import subprocess
+import sys
 import tarfile
 from os import utime
 from pathlib import Path
@@ -166,6 +167,180 @@ def test_upgrade_page_probe_urls_support_ipv6_loopback_fallback() -> None:
     ]
 
 
+def test_resolve_update_mirror_profile_uses_cn_defaults_for_zh_locale() -> None:
+    profile = updater._resolve_update_mirror_profile(
+        ["github", "gitee", "gitlab"],
+        locale="zh-CN",
+    )
+
+    assert profile.region == "cn"
+    assert profile.sources == ["gitee", "github", "gitlab"]
+    assert profile.npm_registry == "https://registry.npmmirror.com/"
+    assert profile.uv_default_index == "https://mirrors.aliyun.com/pypi/simple"
+    assert profile.pip_index_url == "https://mirrors.aliyun.com/pypi/simple"
+
+
+def test_resolve_update_mirror_profile_prefers_explicit_region_over_locale() -> None:
+    profile = updater._resolve_update_mirror_profile(
+        ["github", "gitee"],
+        region="default",
+        locale="zh-CN",
+    )
+
+    assert profile.region is None
+    assert profile.sources == ["github", "gitee"]
+    assert profile.npm_registry is None
+
+
+def test_gitee_archive_url_uses_web_archive_zip_endpoint() -> None:
+    assert updater._gitee_archive_url("flocks/flocks", "2026.4.1", "tar.gz") == (
+        "https://gitee.com/flocks/flocks/archive/refs/tags/v2026.4.1.zip"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_gitee_release_returns_web_archive_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {
+                "tag_name": "v2026.4.1",
+                "body": "notes",
+                "html_url": "https://gitee.com/flocks/flocks/releases/v2026.4.1",
+            }
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params=None, follow_redirects=True):
+            assert url == "https://gitee.com/api/v5/repos/flocks/flocks/releases/latest"
+            assert params == {"access_token": "token"}
+            assert follow_redirects is True
+            return _FakeResponse()
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _FakeClient())
+
+    tag, notes, html_url, zip_url, tar_url = await updater._fetch_gitee_release("flocks/flocks", "token")
+
+    assert tag == "2026.4.1"
+    assert notes == "notes"
+    assert html_url == "https://gitee.com/flocks/flocks/releases/v2026.4.1"
+    assert zip_url == "https://gitee.com/flocks/flocks/archive/refs/tags/v2026.4.1.zip"
+    assert tar_url == zip_url
+
+
+@pytest.mark.asyncio
+async def test_download_archive_uses_curl_user_agent_for_gitee_web_archive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeStreamResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self, chunk_size=65536):
+            assert chunk_size == 65536
+            yield b"zip-bytes"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = headers
+            return _FakeStreamResponse()
+
+    monkeypatch.setattr(
+        updater.httpx,
+        "AsyncClient",
+        lambda timeout, follow_redirects=True: _FakeClient(),
+    )
+
+    archive_path = await updater._download_archive(
+        "https://gitee.com/flocks/flocks/archive/refs/tags/v2026.4.1.zip",
+        token="secret",
+        dest_dir=tmp_path,
+        filename="flocks-2026.4.1.tar.gz",
+    )
+
+    assert archive_path.name == "flocks-2026.4.1.zip"
+    assert archive_path.read_bytes() == b"zip-bytes"
+    assert captured["method"] == "GET"
+    assert captured["url"] == "https://gitee.com/flocks/flocks/archive/refs/tags/v2026.4.1.zip"
+    assert captured["headers"] == {"User-Agent": updater._CURL_USER_AGENT}
+
+
+@pytest.mark.asyncio
+async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeStreamResponse:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self, chunk_size=65536):
+            yield b"archive"
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = headers
+            return _FakeStreamResponse()
+
+    monkeypatch.setattr(
+        updater.httpx,
+        "AsyncClient",
+        lambda timeout, follow_redirects=True: _FakeClient(),
+    )
+
+    archive_path = await updater._download_archive(
+        "https://github.com/AgentFlocks/Flocks/archive/refs/tags/v2026.4.1.tar.gz",
+        token="secret",
+        dest_dir=tmp_path,
+        filename="flocks-2026.4.1.tar.gz",
+    )
+
+    assert archive_path.name == "flocks-2026.4.1.tar.gz"
+    assert archive_path.read_bytes() == b"archive"
+    assert captured["method"] == "GET"
+    assert captured["headers"] == {"Authorization": "Bearer secret"}
+
+
 def test_build_restart_argv_uses_windows_venv_python(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -229,7 +404,7 @@ async def test_validate_windows_restart_runtime_reports_import_failures(
     python_exe.parent.mkdir(parents=True)
     python_exe.write_text("", encoding="utf-8")
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 1, "", "No module named uvicorn"
 
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
@@ -769,7 +944,7 @@ async def test_perform_update_builds_staged_frontend_before_handover(
             gitee_repo=None,
         )
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         if cmd[1] == "install":
             events.append("npm-install")
         elif cmd[:3] == ["/usr/bin/npm", "run", "build"]:
@@ -824,6 +999,144 @@ async def test_perform_update_builds_staged_frontend_before_handover(
 
 
 @pytest.mark.asyncio
+async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+    run_calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github", "gitee"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**kwargs):
+        captured["sources"] = kwargs["sources"]
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append((list(cmd), env))
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_update(
+            "2026.4.1",
+            restart=False,
+            locale="zh-CN",
+        )
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert captured["sources"] == ["gitee", "github"]
+    assert run_calls == [
+        (
+            ["/usr/bin/npm", "install"],
+            {"npm_config_registry": "https://registry.npmmirror.com/"},
+        ),
+        (
+            ["/usr/bin/npm", "run", "build"],
+            {"npm_config_registry": "https://registry.npmmirror.com/"},
+        ),
+        (
+            ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
+            None,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_uses_cn_pip_index_when_uv_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github", "gitee"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    captured: list[tuple[list[str], dict[str, str] | None]] = []
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        captured.append((list(cmd), env))
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+
+    progresses = [
+        step
+        async for step in updater.perform_update(
+            "2026.4.1",
+            restart=False,
+            region="cn",
+        )
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert captured == [
+        (
+            [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
+            {"PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple"},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -854,7 +1167,7 @@ async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_fi
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         if cmd[1] == "install":
             events.append("npm-install")
         elif cmd[:3] == ["/usr/bin/npm", "run", "build"]:
@@ -934,7 +1247,7 @@ async def test_perform_update_does_not_handover_when_staged_frontend_build_fails
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         if cmd[:3] == ["/usr/bin/npm", "run", "build"]:
             events.append("npm-build")
             return 1, "", "boom"
@@ -995,7 +1308,7 @@ async def test_perform_update_no_orphan_state_when_generator_abandoned_before_ha
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
@@ -1056,7 +1369,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
     async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
@@ -1126,7 +1439,7 @@ async def test_perform_update_stops_when_windows_restart_runtime_validation_fail
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
 
-    async def fake_run_async(cmd, cwd=None, timeout=None):
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         return 0, "", ""
 
     async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:

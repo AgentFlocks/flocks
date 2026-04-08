@@ -95,7 +95,7 @@ function Invoke-WorkspaceInstaller {
 }
 
 function Get-ArchiveCandidateUrls {
-    return @("https://gitee.com/$RepoSlug/repository/archive/$Version.zip")
+    return @("https://gitee.com/$RepoSlug/archive/refs/tags/$Version.zip")
 }
 
 function Download-Archive {
