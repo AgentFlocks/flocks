@@ -10,7 +10,7 @@ Supports any API that implements OpenAI's chat completions API, including:
 """
 
 import asyncio
-from typing import List, AsyncIterator, Optional, Any
+from typing import Dict, List, AsyncIterator, Optional, Any
 import os
 
 from flocks.provider.provider import (
@@ -21,7 +21,12 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
-from flocks.provider.sdk.openai_base import extract_reasoning_content, ThinkTagExtractor
+from flocks.provider.sdk.openai_base import (
+    ThinkTagExtractor,
+    _normalize_stream_usage,
+    _supports_include_usage_fallback,
+    extract_reasoning_content,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_compatible")
@@ -229,6 +234,7 @@ class OpenAICompatibleProvider(BaseProvider):
             "model": model_id,
             "messages": formatted_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
 
         if thinking:
@@ -252,19 +258,36 @@ class OpenAICompatibleProvider(BaseProvider):
             "thinking_enabled": bool(thinking),
             "has_tools": bool(tools),
             "max_tokens": max_tokens,
+            "include_usage": True,
         })
 
-        stream = await client.chat.completions.create(**request_params)
+        try:
+            stream = await client.chat.completions.create(**request_params)
+        except Exception as exc:
+            if not _supports_include_usage_fallback(exc):
+                raise
+            self.log.warn("openai_compatible.stream.include_usage_unsupported", {
+                "model": model_id,
+                "error": str(exc),
+            })
+            request_params = dict(request_params)
+            request_params.pop("stream_options", None)
+            stream = await client.chat.completions.create(**request_params)
 
         # Stateful extractor to separate <think>...</think> from content.
         think_extractor = ThinkTagExtractor()
         _first_delta_logged = False
         emitted_substantive_chunk = False
+        stream_usage: Optional[Dict[str, int]] = None
 
         async for chunk in stream:
+            normalized_usage = _normalize_stream_usage(getattr(chunk, "usage", None))
+            if normalized_usage:
+                stream_usage = normalized_usage
             if chunk.choices:
                 choice = chunk.choices[0]
                 delta = choice.delta
+                yielded_finish_for_this_chunk = False
 
                 if delta is not None:
                     if not _first_delta_logged:
@@ -313,7 +336,7 @@ class OpenAICompatibleProvider(BaseProvider):
                                     emitted_substantive_chunk = True
                                 yield StreamChunk(
                                     delta=seg_text,
-                                    finish_reason=choice.finish_reason,
+                                    finish_reason=None,
                                 )
 
                 # Flush think extractor on finish (before tool-call chunks; matches prior behavior)
@@ -364,7 +387,16 @@ class OpenAICompatibleProvider(BaseProvider):
                                 delta="",  # Empty string, not None
                                 finish_reason=choice.finish_reason,
                                 tool_calls=tool_calls,
+                                usage=stream_usage,
                             )
+                            yielded_finish_for_this_chunk = True
+
+                if choice.finish_reason and not yielded_finish_for_this_chunk:
+                    yield StreamChunk(
+                        delta="",
+                        finish_reason=choice.finish_reason,
+                        usage=stream_usage,
+                    )
 
         if not emitted_substantive_chunk:
             self.log.warn("openai_compatible.stream.empty_response", {
@@ -416,6 +448,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     yield StreamChunk(
                         delta=fallback_content,
                         finish_reason=fallback.finish_reason or "stop",
+                        usage=fallback.usage or None,
                     )
                     return
                 if minimax_empty_response_target:
@@ -479,6 +512,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     yield StreamChunk(
                         delta=fallback_content,
                         finish_reason=fallback.finish_reason or "stop",
+                        usage=fallback.usage or None,
                     )
                     return
                 if minimax_empty_response_target:

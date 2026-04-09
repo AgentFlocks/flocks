@@ -23,6 +23,64 @@ from flocks.utils.log import Log
 log = Log.create(service="provider.openai_base")
 
 
+def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
+    """Normalize provider usage objects to a shared stream usage schema."""
+    if not raw_usage:
+        return None
+
+    _pt = getattr(raw_usage, "prompt_tokens", None)
+    prompt_tokens = (_pt if _pt is not None else getattr(raw_usage, "input_tokens", 0)) or 0
+    _ct = getattr(raw_usage, "completion_tokens", None)
+    completion_tokens = (_ct if _ct is not None else getattr(raw_usage, "output_tokens", 0)) or 0
+    reasoning_tokens = getattr(raw_usage, "reasoning_tokens", 0) or 0
+    total_tokens = getattr(raw_usage, "total_tokens", 0) or (
+        prompt_tokens + completion_tokens + reasoning_tokens
+    )
+    cache_read_tokens = getattr(raw_usage, "cache_read_input_tokens", 0) or 0
+    cache_write_tokens = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+
+    if not any(
+        [
+            prompt_tokens,
+            completion_tokens,
+            reasoning_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        ]
+    ):
+        return None
+
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+    if reasoning_tokens:
+        usage["reasoning_tokens"] = reasoning_tokens
+    if cache_read_tokens:
+        usage["cache_read_input_tokens"] = cache_read_tokens
+    if cache_write_tokens:
+        usage["cache_creation_input_tokens"] = cache_write_tokens
+    return usage
+
+
+def _supports_include_usage_fallback(exc: Exception) -> bool:
+    """Return True when the provider rejects OpenAI stream usage options."""
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "stream_options",
+            "include_usage",
+            "unknown parameter",
+            "unsupported parameter",
+            "extra inputs are not permitted",
+            "extra fields not permitted",
+        )
+    )
+
+
 class ThinkTagExtractor:
     """Extract reasoning content from streaming LLM output.
 
@@ -434,6 +492,7 @@ class OpenAIBaseProvider(BaseProvider):
             "model": model_id,
             "messages": openai_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
 
         extra_body = dict(kwargs.get("extra_body") or {})
@@ -458,17 +517,33 @@ class OpenAIBaseProvider(BaseProvider):
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": kwargs.get("max_tokens"),
             "has_temperature": "temperature" in params,
+            "include_usage": True,
         })
 
-        stream = await client.chat.completions.create(**params)
+        try:
+            stream = await client.chat.completions.create(**params)
+        except Exception as exc:
+            if not _supports_include_usage_fallback(exc):
+                raise
+            log.warn("openai_base.stream.include_usage_unsupported", {
+                "model": model_id,
+                "error": str(exc),
+            })
+            params_without_usage = dict(params)
+            params_without_usage.pop("stream_options", None)
+            stream = await client.chat.completions.create(**params_without_usage)
         tool_calls: Dict[int, Dict[str, Any]] = {}
         emitted_substantive_chunk = False
+        stream_usage: Optional[Dict[str, int]] = None
 
         # Stateful extractor to separate <think>...</think> from content.
         think_extractor = ThinkTagExtractor()
         _first_delta_logged = False
 
         async for chunk in stream:
+            normalized_usage = _normalize_stream_usage(getattr(chunk, "usage", None))
+            if normalized_usage:
+                stream_usage = normalized_usage
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
@@ -567,9 +642,14 @@ class OpenAIBaseProvider(BaseProvider):
                         delta="",
                         finish_reason=choice.finish_reason,
                         tool_calls=sorted_calls,
+                        usage=stream_usage,
                     )
                 else:
-                    yield StreamChunk(delta="", finish_reason=choice.finish_reason)
+                    yield StreamChunk(
+                        delta="",
+                        finish_reason=choice.finish_reason,
+                        usage=stream_usage,
+                    )
 
         if not emitted_substantive_chunk:
             log.warn("openai_base.stream.empty_response", {
@@ -581,7 +661,11 @@ class OpenAIBaseProvider(BaseProvider):
                 fallback = await self.chat(model_id, messages, **kwargs)
                 fallback_content = fallback.content or ""
                 if fallback_content:
-                    yield StreamChunk(delta=fallback_content, finish_reason=fallback.finish_reason or "stop")
+                    yield StreamChunk(
+                        delta=fallback_content,
+                        finish_reason=fallback.finish_reason or "stop",
+                        usage=fallback.usage or None,
+                    )
                     return
             except Exception as exc:
                 fallback_error = exc
@@ -597,7 +681,11 @@ class OpenAIBaseProvider(BaseProvider):
                     fallback = await self.chat(model_id, messages, **no_tool_kwargs)
                     fallback_content = fallback.content or ""
                     if fallback_content:
-                        yield StreamChunk(delta=fallback_content, finish_reason=fallback.finish_reason or "stop")
+                        yield StreamChunk(
+                            delta=fallback_content,
+                            finish_reason=fallback.finish_reason or "stop",
+                            usage=fallback.usage or None,
+                        )
                         return
                 except Exception as exc:
                     if fallback_error is None:

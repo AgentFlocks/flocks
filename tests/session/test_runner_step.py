@@ -705,7 +705,7 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
-    monkeypatch.setattr(runner, "_build_tools", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
         "_to_chat_messages",
@@ -719,3 +719,142 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
 
     assert captured_kwargs["model_id"] == runner.model_id
     assert captured_kwargs["provider_id"] == runner.provider_id
+
+
+@pytest.mark.asyncio
+async def test_process_step_records_usage_after_success(monkeypatch):
+    runner = _make_runner("ses_runner_usage_success")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_usage_success",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_usage_success")
+    update_mock = AsyncMock(return_value=None)
+    record_mock = AsyncMock(return_value=None)
+    usage = {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done", usage=usage)),
+    )
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_mock)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    record_mock.assert_awaited_once_with(usage)
+    update_mock.assert_any_await(runner.session.id, assistant_msg.id, finish="stop")
+
+
+@pytest.mark.asyncio
+async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
+    """Each empty-response attempt records its own usage so that provider
+    charges are not lost when the model returns tokens but no content."""
+    runner = _make_runner("ses_runner_usage_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_usage_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_usage_retry")
+    record_mock = AsyncMock(return_value=None)
+    sleep_mock = AsyncMock(return_value=None)
+    first_usage = {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+    second_usage = {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(
+            side_effect=[
+                StepResult(action="stop", content="", usage=first_usage),
+                StepResult(action="stop", content="recovered", usage=second_usage),
+            ]
+        ),
+    )
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "recovered"
+    sleep_mock.assert_awaited_once()
+    # Both the empty attempt and the successful attempt must be recorded so
+    # that provider charges are not silently dropped during retries.
+    assert record_mock.await_count == 2
+    record_mock.assert_any_await(first_usage)
+    record_mock.assert_any_await(second_usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_import_error():
+    """ImportError from the server-routes import must not propagate out of
+    _record_usage_if_available so that a CLI-only environment (where fastapi /
+    server deps may be absent) never turns a successful step into an error."""
+    runner = _make_runner("ses_runner_import_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    with patch.dict("sys.modules", {"flocks.server.routes.usage": None}):
+        # Should complete without raising, even though the import will fail.
+        await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_runtime_error():
+    """Any exception raised by record_usage() itself must also be silently
+    swallowed so that usage-recording failures never corrupt step results."""
+    runner = _make_runner("ses_runner_record_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    fake_module = SimpleNamespace(
+        RecordUsageRequest=MagicMock(return_value=SimpleNamespace()),
+        record_usage=AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+    with patch.dict("sys.modules", {"flocks.server.routes.usage": fake_module}):
+        await runner._record_usage_if_available(usage)
