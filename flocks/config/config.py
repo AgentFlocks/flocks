@@ -299,7 +299,7 @@ class UpdaterConfig(BaseModel):
         description="Repository path in 'owner/repo' format (used for GitHub / GitLab).",
     )
     gitee_repo: Optional[str] = Field(
-        "flocks/Flocks",
+        "flocks/flocks",
         description="Repository path on Gitee if different from 'repo'. Falls back to 'repo' if unset.",
     )
     sources: List[str] = Field(

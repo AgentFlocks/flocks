@@ -4,9 +4,9 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/AgentFlocks/Flocks.git"
-RAW_INSTALL_SH_URL="https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh"
-RAW_INSTALL_PS1_URL="https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1"
+REPO_URL="${FLOCKS_INSTALL_REPO_URL:-https://github.com/AgentFlocks/Flocks.git}"
+RAW_INSTALL_SH_URL="${FLOCKS_RAW_INSTALL_SH_URL:-https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh}"
+RAW_INSTALL_PS1_URL="${FLOCKS_RAW_INSTALL_PS1_URL:-https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1}"
 ROOT_DIR=""
 INSTALL_TUI=0
 MIN_NODE_MAJOR=22
@@ -14,8 +14,9 @@ PATH_UPDATE_REQUIRED=0
 PATH_UPDATE_FILES=""
 PATH_UPDATE_DIRS=""
 PATH_REFRESH_HINT_REQUIRED=0
-UV_DEFAULT_INDEX="https://pypi.org/simple"
-NPM_REGISTRY="https://registry.npmjs.org/"
+UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
+NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
+NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -30,59 +31,15 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-probe_url_time() {
-  local url="$1"
-
-  has_cmd curl || return 1
-  curl -fsS -o /dev/null --connect-timeout 2 --max-time 4 -w '%{time_total}' "$url" 2>/dev/null
-}
-
-pick_fastest_url() {
-  local default_url="$1"
-  shift
-
-  local best_url="" best_time="" source_url probe_url probe_time
-  while [[ "$#" -ge 2 ]]; do
-    source_url="$1"
-    probe_url="$2"
-    shift 2
-
-    probe_time="$(probe_url_time "$probe_url" || true)"
-    [[ -n "$probe_time" ]] || continue
-
-    if [[ -z "$best_time" ]] || awk -v lhs="$probe_time" -v rhs="$best_time" 'BEGIN { exit !(lhs < rhs) }'; then
-      best_url="$source_url"
-      best_time="$probe_time"
-    fi
-  done
-
-  if [[ -n "$best_url" ]]; then
-    printf '%s' "$best_url"
-    return 0
-  fi
-
-  printf '%s' "$default_url"
+nodejs_manual_download_hint() {
+  printf ' Manual download: %s' "$NODEJS_MANUAL_DOWNLOAD_URL"
 }
 
 select_install_sources() {
-  if ! has_cmd curl; then
-    info "curl was not found; skipping automatic mirror selection and using the default registries."
-    return 0
-  fi
-
-  info "Probing PyPI and npm registries to choose the faster source..."
-  UV_DEFAULT_INDEX="$(pick_fastest_url \
-    "https://pypi.org/simple" \
-    "https://pypi.org/simple" "https://pypi.org/simple/pip/" \
-    "https://pypi.tuna.tsinghua.edu.cn/simple" "https://pypi.tuna.tsinghua.edu.cn/simple/pip/")"
-  NPM_REGISTRY="$(pick_fastest_url \
-    "https://registry.npmjs.org/" \
-    "https://registry.npmjs.org/" "https://registry.npmjs.org/npm" \
-    "https://registry.npmmirror.com/" "https://registry.npmmirror.com/npm")"
-
-  info "Selected PyPI index: $UV_DEFAULT_INDEX"
-  info "Selected npm registry: $NPM_REGISTRY"
+  info "Using PyPI index: $UV_DEFAULT_INDEX"
+  info "Using npm registry: $NPM_REGISTRY"
 }
+
 
 run_with_privilege() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
@@ -363,7 +320,7 @@ node_version_satisfies_requirement() {
 }
 
 install_nodejs_macos() {
-  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
 
   info "Trying to install or upgrade Node.js with Homebrew..."
   brew install node
@@ -373,7 +330,7 @@ install_nodejs_linux() {
   info "A compatible npm installation was not found. Trying to install or upgrade Node.js automatically..."
 
   if has_cmd apt-get; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically on Debian/Ubuntu."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically on Debian/Ubuntu.$(nodejs_manual_download_hint)"
     info "Detected Debian/Ubuntu. Installing Node.js 22 from NodeSource..."
     run_with_privilege apt-get update
     curl -fsSL https://deb.nodesource.com/setup_22.x | run_with_privilege bash -
@@ -382,7 +339,7 @@ install_nodejs_linux() {
   fi
 
   if has_cmd dnf; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically with dnf."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with dnf.$(nodejs_manual_download_hint)"
     info "Detected dnf. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege dnf install -y nodejs
@@ -390,7 +347,7 @@ install_nodejs_linux() {
   fi
 
   if has_cmd yum; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically with yum."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with yum.$(nodejs_manual_download_hint)"
     info "Detected yum. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege yum install -y nodejs
@@ -419,7 +376,7 @@ install_nodejs_linux() {
     return
   fi
 
-  fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically."
+  fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically.$(nodejs_manual_download_hint)"
 }
 
 ensure_npm_installed() {
@@ -445,17 +402,17 @@ ensure_npm_installed() {
       install_nodejs_linux
       ;;
     *)
-      fail "Automatic installation of Node.js (including npm) is not supported on this system. Install it manually and retry."
+      fail "Automatic installation of Node.js (including npm) is not supported on this system. Install it manually and retry.$(nodejs_manual_download_hint)"
       ;;
   esac
 
   refresh_path
-  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry."
-  node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+."
+  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry.$(nodejs_manual_download_hint)"
+  node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+.$(nodejs_manual_download_hint)"
 }
 
 ensure_npm_global_prefix_writable() {
-  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry."
+  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry.$(nodejs_manual_download_hint)"
 
   local npm_prefix target_dir user_prefix
   npm_prefix="$(get_npm_prefix || true)"
@@ -590,12 +547,15 @@ run_with_lock_retry() {
   local description="$1"
   shift
 
-  local output status
+  local tmpfile output status
+  tmpfile="$(mktemp)"
+
   set +e
-  output="$("$@" 2>&1)"
-  status=$?
+  "$@" 2>&1 | tee "$tmpfile"
+  status=${PIPESTATUS[0]}
   set -e
-  [[ -n "$output" ]] && printf '%s\n' "$output"
+  output="$(<"$tmpfile")"
+  rm -f "$tmpfile"
 
   if [[ "$status" -eq 0 ]]; then
     return 0
@@ -656,7 +616,7 @@ install_dingtalk_channel_deps() {
   info "Detected DingTalk channel plugin. Installing npm dependencies..."
   (
     cd "$connector_dir"
-    npm install
+    npm_config_registry="$NPM_REGISTRY" npm install
   )
   info "DingTalk channel dependencies installed."
 }
@@ -718,19 +678,26 @@ get_chrome_for_testing_dir() {
 }
 
 install_chrome_for_testing() {
-  local browser_dir install_output browser_path="" line candidate
-  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry."
+  local browser_dir install_output browser_path="" line candidate tmpfile
+  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry.$(nodejs_manual_download_hint)"
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 
   info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browser_dir" >&2
-  if ! install_output="$(npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1)"; then
-    printf '%s\n' "$install_output" >&2
+
+  tmpfile="$(mktemp)"
+  set +e
+  npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1 | tee "$tmpfile" >&2
+  local install_status=${PIPESTATUS[0]}
+  set -e
+  install_output="$(<"$tmpfile")"
+  rm -f "$tmpfile"
+
+  if [[ "$install_status" -ne 0 ]]; then
     fail "Chrome for Testing installation failed."
   fi
 
   while IFS= read -r line; do
-    [[ -n "$line" ]] && printf '%s\n' "$line" >&2
     case "$line" in
       chrome@*' '*|chromium@*' '*)
         candidate="${line#* }"
@@ -766,7 +733,7 @@ install_agent_browser() {
   if ! has_cmd agent-browser; then
     ensure_npm_global_prefix_writable
     info "Installing the agent-browser CLI..."
-    npm install --global agent-browser
+    npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser
     refresh_path
     ensure_agent_browser_user_path_if_needed
     has_cmd agent-browser || fail "agent-browser finished installing, but it is still not available. Check PATH and retry."
@@ -799,7 +766,7 @@ main() {
   info "Installing WebUI dependencies..."
   (
     cd "$ROOT_DIR/webui"
-    npm install
+    npm_config_registry="$NPM_REGISTRY" npm install
   )
 
   install_dingtalk_channel_deps

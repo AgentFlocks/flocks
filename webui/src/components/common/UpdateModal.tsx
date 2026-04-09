@@ -31,7 +31,7 @@ interface UpdateModalProps {
 }
 
 export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
-  const { t } = useTranslation('update');
+  const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
@@ -55,7 +55,7 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate();
+      const data = await checkUpdate(i18n.language);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -63,7 +63,7 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
     } finally {
       setChecking(false);
     }
-  }, [t]);
+  }, [i18n.language, t]);
 
   const handleUpgrade = useCallback(async () => {
     if (!info?.has_update) return;
@@ -73,12 +73,21 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
 
     try {
       await applyUpdate(info.latest_version!, (progress) => {
-        setSteps((prev) => [...prev, progress]);
+        setSteps((prev) => {
+          const existingIndex = prev.findIndex((item) => item.stage === progress.stage);
+          if (existingIndex === -1) {
+            return [...prev, progress];
+          }
+
+          const next = [...prev];
+          next[existingIndex] = progress;
+          return next;
+        });
         if (progress.stage === 'restarting') {
           setRestartingSync(true);
           pollUntilReady();
         }
-      });
+      }, i18n.language);
     } catch (e: any) {
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
@@ -87,7 +96,7 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
         setUpgrading(false);
       }
     }
-  }, [info, t]);
+  }, [i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
   const showProgressDialog = upgrading || restarting || steps.length > 0;

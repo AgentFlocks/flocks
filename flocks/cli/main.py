@@ -29,6 +29,7 @@ from flocks.cli.commands.update import update_command
 from flocks.cli.service_manager import (
     ServiceConfig,
     ServiceError,
+    resolve_flocks_cli_command,
     restart_all,
     show_logs,
     show_status,
@@ -384,10 +385,7 @@ def tui(
             console.print("[dim]Auto-approve enabled: All permissions will be automatically granted[/dim]")
 
         server_process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "flocks.cli.main",
+            resolve_flocks_cli_command() + [
                 "serve",
                 "--host",
                 host,

@@ -21,17 +21,18 @@ def test_update_cli_accepts_force_option(monkeypatch, tmp_path) -> None:
 
     captured: dict[str, object] = {}
 
-    async def fake_update(*, check: bool, yes: bool, force: bool) -> None:
+    async def fake_update(*, check: bool, yes: bool, force: bool, region: str | None) -> None:
         captured["check"] = check
         captured["yes"] = yes
         captured["force"] = force
+        captured["region"] = region
 
     monkeypatch.setattr(update_cmd, "_update", fake_update)
 
-    result = runner.invoke(cli_main.app, ["update", "--force", "--yes"])
+    result = runner.invoke(cli_main.app, ["update", "--force", "--yes", "--region", "cn"])
 
     assert result.exit_code == 0, result.stdout
-    assert captured == {"check": False, "yes": True, "force": True}
+    assert captured == {"check": False, "yes": True, "force": True, "region": "cn"}
 
 
 async def _fake_progress():
@@ -47,7 +48,8 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         Console(file=output, force_terminal=False, color_system=None, width=120),
     )
 
-    async def fake_check_update() -> VersionInfo:
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        captured["check_region"] = region
         return VersionInfo(
             current_version="2026.4.2",
             latest_version="2026.4.2",
@@ -65,10 +67,15 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         *,
         zipball_url: str | None = None,
         tarball_url: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
     ):
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
         captured["tarball_url"] = tarball_url
+        captured["perform_region"] = region
+        captured["restart"] = restart
         async for step in _fake_progress():
             yield step
 
@@ -78,12 +85,15 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
 
     import asyncio
 
-    asyncio.run(update_cmd._update(check=False, yes=True, force=True))
+    asyncio.run(update_cmd._update(check=False, yes=True, force=True, region="cn"))
 
     assert captured == {
         "latest_tag": "2026.4.2",
         "zipball_url": "https://example.com/flocks.zip",
         "tarball_url": "https://example.com/flocks.tar.gz",
+        "check_region": "cn",
+        "perform_region": "cn",
+        "restart": False,
     }
     assert "强制重新安装 v2026.4.2" in output.getvalue()
     assert "升级完成" in output.getvalue()

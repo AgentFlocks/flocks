@@ -29,8 +29,10 @@ export interface UpdateProgress {
 // API
 // ======================================================================
 
-export const checkUpdate = async (): Promise<VersionInfo> => {
-  const response = await client.get<VersionInfo>('/api/update/check');
+export const checkUpdate = async (locale?: string): Promise<VersionInfo> => {
+  const response = await client.get<VersionInfo>('/api/update/check', {
+    params: locale ? { locale } : undefined,
+  });
   return response.data;
 };
 
@@ -46,9 +48,16 @@ export const checkUpdate = async (): Promise<VersionInfo> => {
 export const applyUpdate = (
   targetVersion: string,
   onProgress: (progress: UpdateProgress) => void,
+  locale?: string,
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
-    const url = `/api/update/apply?target_version=${encodeURIComponent(targetVersion)}`;
+    const params = new URLSearchParams({
+      target_version: targetVersion,
+    });
+    if (locale) {
+      params.set('locale', locale);
+    }
+    const url = `/api/update/apply?${params.toString()}`;
     fetch(url, { method: 'POST' })
       .then((res) => {
         if (!res.ok || !res.body) {

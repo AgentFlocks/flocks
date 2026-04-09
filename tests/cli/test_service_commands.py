@@ -102,6 +102,11 @@ def test_hidden_serve_command_is_not_listed_but_still_invocable(monkeypatch, tmp
 def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        cli_main,
+        "resolve_flocks_cli_command",
+        lambda: [cli_main.sys.executable, "-m", "flocks.cli.main"],
+    )
 
     tui_dir = tmp_path / "tui"
     node_modules = tui_dir / "node_modules"

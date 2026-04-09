@@ -5,13 +5,14 @@
 
 $ErrorActionPreference = "Stop"
 
-$RepoUrl = "https://github.com/AgentFlocks/Flocks.git"
-$RawInstallShUrl = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh"
-$RawInstallPs1Url = "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1"
+$RepoUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_REPO_URL)) { "https://github.com/AgentFlocks/Flocks.git" } else { $env:FLOCKS_INSTALL_REPO_URL }
+$RawInstallShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_SH_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh" } else { $env:FLOCKS_RAW_INSTALL_SH_URL }
+$RawInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_PS1_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1" } else { $env:FLOCKS_RAW_INSTALL_PS1_URL }
 $RootDir = $null
 $MinNodeMajor = 22
-$script:UvDefaultIndex = "https://pypi.org/simple"
-$script:NpmRegistry = "https://registry.npmjs.org/"
+$script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
+$script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
+$script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
 function Write-Info {
     param([string]$Message)
@@ -29,78 +30,13 @@ function Test-Command {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-function Get-UrlProbeMilliseconds {
-    param([string]$Url)
-
-    if ([string]::IsNullOrWhiteSpace($Url)) {
-        return $null
-    }
-
-    foreach ($method in @("Head", "Get")) {
-        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-        try {
-            Invoke-WebRequest -Uri $Url -Method $method -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop | Out-Null
-            $stopwatch.Stop()
-            return [double]$stopwatch.Elapsed.TotalMilliseconds
-        }
-        catch {
-            $stopwatch.Stop()
-        }
-    }
-
-    return $null
-}
-
-function Select-FastestUrl {
-    param(
-        [string]$DefaultUrl,
-        [object[]]$Candidates
-    )
-
-    $bestUrl = $null
-    $bestMilliseconds = $null
-
-    foreach ($candidate in $Candidates) {
-        if ($null -eq $candidate) {
-            continue
-        }
-
-        $probeMilliseconds = Get-UrlProbeMilliseconds -Url $candidate.Probe
-        if ($null -eq $probeMilliseconds) {
-            continue
-        }
-
-        if ($null -eq $bestMilliseconds -or $probeMilliseconds -lt $bestMilliseconds) {
-            $bestMilliseconds = $probeMilliseconds
-            $bestUrl = $candidate.Source
-        }
-    }
-
-    if ([string]::IsNullOrWhiteSpace($bestUrl)) {
-        return $DefaultUrl
-    }
-
-    return $bestUrl
+function Get-NodejsManualDownloadHint {
+    return " Manual download: $script:NodejsManualDownloadUrl"
 }
 
 function Initialize-InstallSources {
-    Write-Info "Probing PyPI and npm registries to choose the faster source..."
-
-    $script:UvDefaultIndex = Select-FastestUrl `
-        -DefaultUrl "https://pypi.org/simple" `
-        -Candidates @(
-            [PSCustomObject]@{ Source = "https://pypi.org/simple"; Probe = "https://pypi.org/simple/pip/" }
-            [PSCustomObject]@{ Source = "https://pypi.tuna.tsinghua.edu.cn/simple"; Probe = "https://pypi.tuna.tsinghua.edu.cn/simple/pip/" }
-        )
-    $script:NpmRegistry = Select-FastestUrl `
-        -DefaultUrl "https://registry.npmjs.org/" `
-        -Candidates @(
-            [PSCustomObject]@{ Source = "https://registry.npmjs.org/"; Probe = "https://registry.npmjs.org/npm" }
-            [PSCustomObject]@{ Source = "https://registry.npmmirror.com/"; Probe = "https://registry.npmmirror.com/npm" }
-        )
-
-    Write-Info "Selected PyPI index: $script:UvDefaultIndex"
-    Write-Info "Selected npm registry: $script:NpmRegistry"
+    Write-Info "Using PyPI index: $script:UvDefaultIndex"
+    Write-Info "Using npm registry: $script:NpmRegistry"
 }
 
 function Get-NodeMajorVersion {
@@ -313,14 +249,14 @@ function Ensure-ChocolateyInstalled {
 function Install-NodeJsWithChocolatey {
     $chocoPath = Ensure-ChocolateyInstalled
     if (-not $chocoPath) {
-        Write-Info "Chocolatey installation failed, so Node.js cannot be installed automatically."
+        Write-Info "Chocolatey installation failed, so Node.js cannot be installed automatically.$(Get-NodejsManualDownloadHint)"
         return $false
     }
 
     Write-Info "A compatible npm installation was not found. Trying to install or upgrade Node.js 24.14.0 with Chocolatey..."
     & $chocoPath install nodejs --version="24.14.0" -y | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Info "Chocolatey failed to install Node.js."
+        Write-Info "Chocolatey failed to install Node.js.$(Get-NodejsManualDownloadHint)"
         return $false
     }
 
@@ -342,15 +278,15 @@ function Ensure-NpmInstalled {
     }
 
     if (-not (Install-NodeJsWithChocolatey)) {
-        Fail "A compatible npm installation was not found, or the current Node.js version is below $MinNodeMajor, and Chocolatey could not install Node.js automatically. Install Node.js $MinNodeMajor+ manually from https://nodejs.org/ (including npm), reopen PowerShell, and retry."
+        Fail "A compatible npm installation was not found, or the current Node.js version is below $MinNodeMajor, and Chocolatey could not install Node.js automatically. Install Node.js $MinNodeMajor+ manually (including npm), reopen PowerShell, and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     if (-not (Test-Command "npm.cmd")) {
-        Fail "Node.js (including npm) finished installing, but npm is still not available. Check PATH and retry."
+        Fail "Node.js (including npm) finished installing, but npm is still not available. Check PATH and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     if (-not (Test-NodeVersionRequirement)) {
-        Fail "Detected Node.js version is too old. This project requires Node.js $MinNodeMajor+."
+        Fail "Detected Node.js version is too old. This project requires Node.js $MinNodeMajor+.$(Get-NodejsManualDownloadHint)"
     }
 
     try {
@@ -634,11 +570,16 @@ function Invoke-NativeCommand {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $stdoutPath = $null
+    $stderrPath = $null
+    if (-not $StreamOutput) {
+        $stdoutPath = [System.IO.Path]::GetTempFileName()
+        $stderrPath = [System.IO.Path]::GetTempFileName()
+    }
     $originalEnvironment = @{}
 
     try {
@@ -669,6 +610,32 @@ function Invoke-NativeCommand {
             }
             else {
                 Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$entry.Value)
+            }
+        }
+
+        if ($StreamOutput) {
+            $outputLines = [System.Collections.Generic.List[string]]::new()
+            $savedLocation = Get-Location
+            $savedErrorAction = $ErrorActionPreference
+            Set-Location $WorkingDirectory
+            try {
+                $ErrorActionPreference = "Continue"
+                & $resolvedFilePath @resolvedArgs 2>&1 | ForEach-Object {
+                    $lineText = "$_"
+                    Write-Host $lineText
+                    $outputLines.Add($lineText)
+                }
+            }
+            finally {
+                $ErrorActionPreference = $savedErrorAction
+                Set-Location $savedLocation
+            }
+            $streamExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+
+            return [PSCustomObject]@{
+                ExitCode = $streamExitCode
+                StdOut   = ($outputLines -join [Environment]::NewLine)
+                StdErr   = ""
             }
         }
 
@@ -717,12 +684,15 @@ function Invoke-NativeCommandOrFail {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $result.StdOut
-    Write-ProcessOutputText -Text $result.StdErr
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $result.StdOut
+        Write-ProcessOutputText -Text $result.StdErr
+    }
 
     if ($result.ExitCode -ne 0) {
         Fail "$Description failed."
@@ -737,12 +707,15 @@ function Invoke-InstallerCommandWithLockRetry {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $result.StdOut
-    Write-ProcessOutputText -Text $result.StdErr
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $result.StdOut
+        Write-ProcessOutputText -Text $result.StdErr
+    }
 
     if ($result.ExitCode -eq 0) {
         return
@@ -757,9 +730,11 @@ function Invoke-InstallerCommandWithLockRetry {
     Stop-FlocksProcesses
     Start-Sleep -Seconds 3
 
-    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $retryResult.StdOut
-    Write-ProcessOutputText -Text $retryResult.StdErr
+    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $retryResult.StdOut
+        Write-ProcessOutputText -Text $retryResult.StdErr
+    }
 
     if ($retryResult.ExitCode -ne 0) {
         Fail "$Description failed."
@@ -775,7 +750,8 @@ function Install-FlocksCli {
             -Description "Global flocks CLI installation" `
             -FilePath "uv" `
             -ArgumentList @("tool", "install", "--editable", $RootDir, "--force", "--default-index", $script:UvDefaultIndex) `
-            -WorkingDirectory $RootDir
+            -WorkingDirectory $RootDir `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -849,7 +825,7 @@ function Install-ChromeForTesting {
     $browserDir = Get-ChromeForTestingDir
 
     if (-not (Test-Command "npx.cmd")) {
-        Fail "npx was not found. Install Node.js (including npm) and retry."
+        Fail "npx was not found. Install Node.js (including npm) and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     New-Item -ItemType Directory -Path $browserDir -Force | Out-Null
@@ -860,7 +836,8 @@ function Install-ChromeForTesting {
         -FilePath "npx.cmd" `
         -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
         -WorkingDirectory $browserDir `
-        -Environment @{ npm_config_registry = $script:NpmRegistry }
+        -Environment @{ npm_config_registry = $script:NpmRegistry } `
+        -StreamOutput
 
     $browserPath = Resolve-ChromeForTestingPath -InstallOutputText (@($result.StdOut, $result.StdErr) -join [Environment]::NewLine)
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
@@ -916,7 +893,9 @@ function Install-AgentBrowser {
         $null = Invoke-NativeCommandOrFail `
             -Description "agent-browser CLI installation" `
             -FilePath "npm.cmd" `
-            -ArgumentList @("install", "--global", "agent-browser")
+            -ArgumentList @("install", "--global", "agent-browser") `
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
         Refresh-Path
 
         if (-not (Test-Command "agent-browser")) {
@@ -952,7 +931,9 @@ function Install-DingtalkChannelDeps {
             -Description "DingTalk channel npm dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
-            -WorkingDirectory $connectorDir
+            -WorkingDirectory $connectorDir `
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -992,7 +973,8 @@ function Main {
             -Description "Python backend dependency installation" `
             -FilePath "uv" `
             -ArgumentList @("sync", "--group", "dev", "--default-index", $script:UvDefaultIndex) `
-            -WorkingDirectory $RootDir
+            -WorkingDirectory $RootDir `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -1007,7 +989,9 @@ function Main {
             -Description "WebUI dependency installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
-            -WorkingDirectory (Join-Path $RootDir "webui")
+            -WorkingDirectory (Join-Path $RootDir "webui") `
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -1024,7 +1008,8 @@ function Main {
                 -Description "TUI dependency installation" `
                 -FilePath "bun" `
                 -ArgumentList @("install") `
-                -WorkingDirectory (Join-Path $RootDir "tui")
+                -WorkingDirectory (Join-Path $RootDir "tui") `
+                -StreamOutput
         }
         finally {
             Pop-Location

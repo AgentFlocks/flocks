@@ -21,8 +21,13 @@ log = Log.create(service="update-routes")
     response_model=VersionInfo,
     summary="Check for new version",
 )
-async def check_version() -> VersionInfo:
-    return await check_update()
+async def check_version(
+    locale: str | None = Query(
+        default=None,
+        description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
+    ),
+) -> VersionInfo:
+    return await check_update(locale=locale)
 
 
 @router.post(
@@ -39,6 +44,10 @@ async def apply_update(
     target_version: str | None = Query(
         default=None,
         description="Target version (e.g. 2026.03.24). Omit to auto-detect the latest.",
+    ),
+    locale: str | None = Query(
+        default=None,
+        description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
 ):
     """
@@ -66,7 +75,7 @@ async def apply_update(
     if target_version:
         version_to_apply = target_version
     else:
-        info = await check_update()
+        info = await check_update(locale=locale)
         if info.error:
             return StreamingResponse(_error(info.error), media_type="text/event-stream")
         if not info.has_update or not info.latest_version:
@@ -84,6 +93,7 @@ async def apply_update(
             version_to_apply,
             zipball_url=zipball_url,
             tarball_url=tarball_url,
+            locale=locale,
         )
         try:
             async for progress in gen:
