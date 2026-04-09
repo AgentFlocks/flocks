@@ -12,6 +12,7 @@ $RootDir = $null
 $MinNodeMajor = 22
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
 $script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
+$script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
 function Write-Info {
     param([string]$Message)
@@ -27,6 +28,10 @@ function Fail {
 function Test-Command {
     param([string]$Name)
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Get-NodejsManualDownloadHint {
+    return " Manual download: $script:NodejsManualDownloadUrl"
 }
 
 function Initialize-InstallSources {
@@ -244,14 +249,14 @@ function Ensure-ChocolateyInstalled {
 function Install-NodeJsWithChocolatey {
     $chocoPath = Ensure-ChocolateyInstalled
     if (-not $chocoPath) {
-        Write-Info "Chocolatey installation failed, so Node.js cannot be installed automatically."
+        Write-Info "Chocolatey installation failed, so Node.js cannot be installed automatically.$(Get-NodejsManualDownloadHint)"
         return $false
     }
 
     Write-Info "A compatible npm installation was not found. Trying to install or upgrade Node.js 24.14.0 with Chocolatey..."
     & $chocoPath install nodejs --version="24.14.0" -y | Out-Host
     if ($LASTEXITCODE -ne 0) {
-        Write-Info "Chocolatey failed to install Node.js."
+        Write-Info "Chocolatey failed to install Node.js.$(Get-NodejsManualDownloadHint)"
         return $false
     }
 
@@ -273,15 +278,15 @@ function Ensure-NpmInstalled {
     }
 
     if (-not (Install-NodeJsWithChocolatey)) {
-        Fail "A compatible npm installation was not found, or the current Node.js version is below $MinNodeMajor, and Chocolatey could not install Node.js automatically. Install Node.js $MinNodeMajor+ manually from https://nodejs.org/ (including npm), reopen PowerShell, and retry."
+        Fail "A compatible npm installation was not found, or the current Node.js version is below $MinNodeMajor, and Chocolatey could not install Node.js automatically. Install Node.js $MinNodeMajor+ manually (including npm), reopen PowerShell, and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     if (-not (Test-Command "npm.cmd")) {
-        Fail "Node.js (including npm) finished installing, but npm is still not available. Check PATH and retry."
+        Fail "Node.js (including npm) finished installing, but npm is still not available. Check PATH and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     if (-not (Test-NodeVersionRequirement)) {
-        Fail "Detected Node.js version is too old. This project requires Node.js $MinNodeMajor+."
+        Fail "Detected Node.js version is too old. This project requires Node.js $MinNodeMajor+.$(Get-NodejsManualDownloadHint)"
     }
 
     try {
@@ -820,7 +825,7 @@ function Install-ChromeForTesting {
     $browserDir = Get-ChromeForTestingDir
 
     if (-not (Test-Command "npx.cmd")) {
-        Fail "npx was not found. Install Node.js (including npm) and retry."
+        Fail "npx was not found. Install Node.js (including npm) and retry.$(Get-NodejsManualDownloadHint)"
     }
 
     New-Item -ItemType Directory -Path $browserDir -Force | Out-Null

@@ -37,6 +37,7 @@ configure_cn_environment() {
   export FLOCKS_UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://mirrors.aliyun.com/pypi/simple}"
   export FLOCKS_NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmmirror.com/}"
   export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
+  export FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/zh-cn/download}"
 }
 
 main() {

@@ -44,6 +44,8 @@ def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> 
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
+    assert 'FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL' in script
+    assert "https://nodejs.org/zh-cn/download" in script
     assert 'exec bash "$SCRIPT_DIR/install.sh" "$@"' in script
 
 
@@ -62,6 +64,8 @@ def test_install_zh_powershell_wrapper_sets_cn_sources_and_reuses_main_installer
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
+    assert 'FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL' in script
+    assert "https://nodejs.org/zh-cn/download" in script
     assert 'Join-Path $PSScriptRoot "install.ps1"' in script
 
 
@@ -76,6 +80,9 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'Probing PyPI and npm registries to choose the faster source' not in script
     assert 'npm_config_registry="$NPM_REGISTRY" npm install' in script
     assert 'npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser' in script
+    assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
+    assert "https://nodejs.org/en/download" in script
+    assert "nodejs_manual_download_hint" in script
 
 
 def test_main_powershell_installer_uses_configured_default_sources_without_probing() -> None:
@@ -88,3 +95,6 @@ def test_main_powershell_installer_uses_configured_default_sources_without_probi
     assert 'Select-FastestUrl' not in script
     assert 'Probing PyPI and npm registries to choose the faster source' not in script
     assert '-Environment @{ npm_config_registry = $script:NpmRegistry }' in script
+    assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
+    assert "https://nodejs.org/en/download" in script
+    assert "Get-NodejsManualDownloadHint" in script

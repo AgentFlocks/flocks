@@ -16,6 +16,7 @@ PATH_UPDATE_DIRS=""
 PATH_REFRESH_HINT_REQUIRED=0
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
+NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -28,6 +29,10 @@ fail() {
 
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+nodejs_manual_download_hint() {
+  printf ' Manual download: %s' "$NODEJS_MANUAL_DOWNLOAD_URL"
 }
 
 select_install_sources() {
@@ -315,7 +320,7 @@ node_version_satisfies_requirement() {
 }
 
 install_nodejs_macos() {
-  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
+  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
 
   info "Trying to install or upgrade Node.js with Homebrew..."
   brew install node
@@ -325,7 +330,7 @@ install_nodejs_linux() {
   info "A compatible npm installation was not found. Trying to install or upgrade Node.js automatically..."
 
   if has_cmd apt-get; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically on Debian/Ubuntu."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically on Debian/Ubuntu.$(nodejs_manual_download_hint)"
     info "Detected Debian/Ubuntu. Installing Node.js 22 from NodeSource..."
     run_with_privilege apt-get update
     curl -fsSL https://deb.nodesource.com/setup_22.x | run_with_privilege bash -
@@ -334,7 +339,7 @@ install_nodejs_linux() {
   fi
 
   if has_cmd dnf; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically with dnf."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with dnf.$(nodejs_manual_download_hint)"
     info "Detected dnf. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege dnf install -y nodejs
@@ -342,7 +347,7 @@ install_nodejs_linux() {
   fi
 
   if has_cmd yum; then
-    has_cmd curl || fail "curl is required to install Node.js 22 automatically with yum."
+    has_cmd curl || fail "curl is required to install Node.js 22 automatically with yum.$(nodejs_manual_download_hint)"
     info "Detected yum. Installing Node.js 22 from NodeSource..."
     curl -fsSL https://rpm.nodesource.com/setup_22.x | run_with_privilege bash -
     run_with_privilege yum install -y nodejs
@@ -371,7 +376,7 @@ install_nodejs_linux() {
     return
   fi
 
-  fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically."
+  fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically.$(nodejs_manual_download_hint)"
 }
 
 ensure_npm_installed() {
@@ -397,17 +402,17 @@ ensure_npm_installed() {
       install_nodejs_linux
       ;;
     *)
-      fail "Automatic installation of Node.js (including npm) is not supported on this system. Install it manually and retry."
+      fail "Automatic installation of Node.js (including npm) is not supported on this system. Install it manually and retry.$(nodejs_manual_download_hint)"
       ;;
   esac
 
   refresh_path
-  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry."
-  node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+."
+  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry.$(nodejs_manual_download_hint)"
+  node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+.$(nodejs_manual_download_hint)"
 }
 
 ensure_npm_global_prefix_writable() {
-  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry."
+  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry.$(nodejs_manual_download_hint)"
 
   local npm_prefix target_dir user_prefix
   npm_prefix="$(get_npm_prefix || true)"
@@ -674,7 +679,7 @@ get_chrome_for_testing_dir() {
 
 install_chrome_for_testing() {
   local browser_dir install_output browser_path="" line candidate tmpfile
-  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry."
+  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry.$(nodejs_manual_download_hint)"
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 

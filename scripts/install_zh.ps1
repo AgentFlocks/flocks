@@ -45,6 +45,9 @@ function Set-CnInstallerEnvironment {
     if ([string]::IsNullOrWhiteSpace($env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL)) {
         $env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing"
     }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) {
+        $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL = "https://nodejs.org/zh-cn/download"
+    }
 }
 
 function Main {
