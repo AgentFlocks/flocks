@@ -565,11 +565,16 @@ function Invoke-NativeCommand {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $stdoutPath = [System.IO.Path]::GetTempFileName()
-    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $stdoutPath = $null
+    $stderrPath = $null
+    if (-not $StreamOutput) {
+        $stdoutPath = [System.IO.Path]::GetTempFileName()
+        $stderrPath = [System.IO.Path]::GetTempFileName()
+    }
     $originalEnvironment = @{}
 
     try {
@@ -600,6 +605,29 @@ function Invoke-NativeCommand {
             }
             else {
                 Set-Item -Path ("Env:{0}" -f $name) -Value ([string]$entry.Value)
+            }
+        }
+
+        if ($StreamOutput) {
+            $outputLines = [System.Collections.Generic.List[string]]::new()
+            $savedLocation = Get-Location
+            Set-Location $WorkingDirectory
+            try {
+                & $resolvedFilePath @resolvedArgs 2>&1 | ForEach-Object {
+                    $lineText = "$_"
+                    Write-Host $lineText
+                    $outputLines.Add($lineText)
+                }
+            }
+            finally {
+                Set-Location $savedLocation
+            }
+            $streamExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+
+            return [PSCustomObject]@{
+                ExitCode = $streamExitCode
+                StdOut   = ($outputLines -join [Environment]::NewLine)
+                StdErr   = ""
             }
         }
 
@@ -648,12 +676,15 @@ function Invoke-NativeCommandOrFail {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $result.StdOut
-    Write-ProcessOutputText -Text $result.StdErr
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $result.StdOut
+        Write-ProcessOutputText -Text $result.StdErr
+    }
 
     if ($result.ExitCode -ne 0) {
         Fail "$Description failed."
@@ -668,12 +699,15 @@ function Invoke-InstallerCommandWithLockRetry {
         [string]$FilePath,
         [string[]]$ArgumentList = @(),
         [string]$WorkingDirectory = (Get-Location).Path,
-        [hashtable]$Environment = @{}
+        [hashtable]$Environment = @{},
+        [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $result.StdOut
-    Write-ProcessOutputText -Text $result.StdErr
+    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $result.StdOut
+        Write-ProcessOutputText -Text $result.StdErr
+    }
 
     if ($result.ExitCode -eq 0) {
         return
@@ -688,9 +722,11 @@ function Invoke-InstallerCommandWithLockRetry {
     Stop-FlocksProcesses
     Start-Sleep -Seconds 3
 
-    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment
-    Write-ProcessOutputText -Text $retryResult.StdOut
-    Write-ProcessOutputText -Text $retryResult.StdErr
+    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+    if (-not $StreamOutput) {
+        Write-ProcessOutputText -Text $retryResult.StdOut
+        Write-ProcessOutputText -Text $retryResult.StdErr
+    }
 
     if ($retryResult.ExitCode -ne 0) {
         Fail "$Description failed."
@@ -706,7 +742,8 @@ function Install-FlocksCli {
             -Description "Global flocks CLI installation" `
             -FilePath "uv" `
             -ArgumentList @("tool", "install", "--editable", $RootDir, "--force", "--default-index", $script:UvDefaultIndex) `
-            -WorkingDirectory $RootDir
+            -WorkingDirectory $RootDir `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -791,7 +828,8 @@ function Install-ChromeForTesting {
         -FilePath "npx.cmd" `
         -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
         -WorkingDirectory $browserDir `
-        -Environment @{ npm_config_registry = $script:NpmRegistry }
+        -Environment @{ npm_config_registry = $script:NpmRegistry } `
+        -StreamOutput
 
     $browserPath = Resolve-ChromeForTestingPath -InstallOutputText (@($result.StdOut, $result.StdErr) -join [Environment]::NewLine)
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
@@ -848,7 +886,8 @@ function Install-AgentBrowser {
             -Description "agent-browser CLI installation" `
             -FilePath "npm.cmd" `
             -ArgumentList @("install", "--global", "agent-browser") `
-            -Environment @{ npm_config_registry = $script:NpmRegistry }
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
         Refresh-Path
 
         if (-not (Test-Command "agent-browser")) {
@@ -885,7 +924,8 @@ function Install-DingtalkChannelDeps {
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
             -WorkingDirectory $connectorDir `
-            -Environment @{ npm_config_registry = $script:NpmRegistry }
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -925,7 +965,8 @@ function Main {
             -Description "Python backend dependency installation" `
             -FilePath "uv" `
             -ArgumentList @("sync", "--group", "dev", "--default-index", $script:UvDefaultIndex) `
-            -WorkingDirectory $RootDir
+            -WorkingDirectory $RootDir `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -941,7 +982,8 @@ function Main {
             -FilePath "npm.cmd" `
             -ArgumentList @("install") `
             -WorkingDirectory (Join-Path $RootDir "webui") `
-            -Environment @{ npm_config_registry = $script:NpmRegistry }
+            -Environment @{ npm_config_registry = $script:NpmRegistry } `
+            -StreamOutput
     }
     finally {
         Pop-Location
@@ -958,7 +1000,8 @@ function Main {
                 -Description "TUI dependency installation" `
                 -FilePath "bun" `
                 -ArgumentList @("install") `
-                -WorkingDirectory (Join-Path $RootDir "tui")
+                -WorkingDirectory (Join-Path $RootDir "tui") `
+                -StreamOutput
         }
         finally {
             Pop-Location

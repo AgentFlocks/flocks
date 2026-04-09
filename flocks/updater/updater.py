@@ -155,22 +155,58 @@ def _windows_upgrade_python_path(install_root: Path) -> Path:
     return install_root / ".venv" / "Scripts" / "python.exe"
 
 
-async def _validate_windows_restart_runtime(install_root: Path) -> str | None:
-    """Validate the Windows project runtime that will be used for restart."""
+async def _validate_windows_restart_runtime(
+    install_root: Path,
+    *,
+    max_attempts: int = 2,
+    timeout: int = 60,
+    retry_delay: float = 3.0,
+) -> str | None:
+    """Validate the Windows project runtime that will be used for restart.
+
+    Retries up to *max_attempts* times to tolerate transient delays caused by
+    antivirus scanning or filesystem cache warm-up after ``uv sync``.
+    """
     python_exe = _windows_upgrade_python_path(install_root)
     if not python_exe.exists():
         return f"Windows restart runtime is missing: {python_exe}"
 
-    code, _, err = await _run_async(
-        [str(python_exe), "-c", "import flocks; import uvicorn"],
-        cwd=install_root,
-        timeout=30,
-    )
-    if code == 0:
-        return None
+    last_error: str = ""
+    for attempt in range(max_attempts):
+        try:
+            code, _, err = await _run_async(
+                [str(python_exe), "-c", "import flocks; import uvicorn"],
+                cwd=install_root,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            last_error = (
+                f"Validation timed out ({timeout}s) — "
+                "antivirus or filesystem cache may still be warming up."
+            )
+            log.warning(
+                "updater.validate_runtime.timeout",
+                {"attempt": attempt + 1, "timeout": timeout},
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            log.warning(
+                "updater.validate_runtime.error",
+                {"attempt": attempt + 1, "error": last_error},
+            )
+        else:
+            if code == 0:
+                return None
+            last_error = err or "unknown error"
+            log.warning(
+                "updater.validate_runtime.nonzero",
+                {"attempt": attempt + 1, "code": code, "error": last_error},
+            )
 
-    detail = err or "unknown error"
-    return f"Windows restart runtime validation failed: {detail}"
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(retry_delay)
+
+    return f"Windows restart runtime validation failed: {last_error}"
 
 
 # ------------------------------------------------------------------ #
@@ -1955,7 +1991,16 @@ async def perform_update(
         log.info("updater.restart.reload_exit3")
         sys.exit(3)
 
-    restart_argv = _build_restart_argv(install_root)
+    try:
+        restart_argv = _build_restart_argv(install_root)
+    except Exception as exc:
+        log.error("updater.restart.build_argv_failed", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to build restart command: {exc}",
+            success=False,
+        )
+        return
 
     if needs_handover:
         try:
@@ -1979,7 +2024,12 @@ async def perform_update(
                     rollback_upgrade_handover()
                 except Exception:
                     pass
-            raise
+            yield UpdateProgress(
+                stage="error",
+                message=f"Failed to restart service: {exc}",
+                success=False,
+            )
+            return
 
     log.info("updater.restart.execv", {"argv": restart_argv})
     try:
@@ -1991,7 +2041,12 @@ async def perform_update(
                 rollback_upgrade_handover()
             except Exception:
                 pass
-        raise
+        yield UpdateProgress(
+            stage="error",
+            message=f"Failed to restart service: {exc}",
+            success=False,
+        )
+        return
 
 
 def _build_restart_argv(install_root: Path | None = None) -> list[str]:

@@ -542,12 +542,15 @@ run_with_lock_retry() {
   local description="$1"
   shift
 
-  local output status
+  local tmpfile output status
+  tmpfile="$(mktemp)"
+
   set +e
-  output="$("$@" 2>&1)"
-  status=$?
+  "$@" 2>&1 | tee "$tmpfile"
+  status=${PIPESTATUS[0]}
   set -e
-  [[ -n "$output" ]] && printf '%s\n' "$output"
+  output="$(<"$tmpfile")"
+  rm -f "$tmpfile"
 
   if [[ "$status" -eq 0 ]]; then
     return 0
@@ -670,19 +673,26 @@ get_chrome_for_testing_dir() {
 }
 
 install_chrome_for_testing() {
-  local browser_dir install_output browser_path="" line candidate
+  local browser_dir install_output browser_path="" line candidate tmpfile
   has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry."
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 
   info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browser_dir" >&2
-  if ! install_output="$(npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1)"; then
-    printf '%s\n' "$install_output" >&2
+
+  tmpfile="$(mktemp)"
+  set +e
+  npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1 | tee "$tmpfile" >&2
+  local install_status=${PIPESTATUS[0]}
+  set -e
+  install_output="$(<"$tmpfile")"
+  rm -f "$tmpfile"
+
+  if [[ "$install_status" -ne 0 ]]; then
     fail "Chrome for Testing installation failed."
   fi
 
   while IFS= read -r line; do
-    [[ -n "$line" ]] && printf '%s\n' "$line" >&2
     case "$line" in
       chrome@*' '*|chromium@*' '*)
         candidate="${line#* }"

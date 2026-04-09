@@ -409,9 +409,79 @@ async def test_validate_windows_restart_runtime_reports_import_failures(
 
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
 
-    assert await updater._validate_windows_restart_runtime(tmp_path) == (
-        "Windows restart runtime validation failed: No module named uvicorn"
+    result = await updater._validate_windows_restart_runtime(
+        tmp_path, max_attempts=1,
     )
+    assert result == "Windows restart runtime validation failed: No module named uvicorn"
+
+
+@pytest.mark.asyncio
+async def test_validate_windows_restart_runtime_handles_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        raise subprocess.TimeoutExpired(cmd, timeout or 60)
+
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+
+    result = await updater._validate_windows_restart_runtime(
+        tmp_path, max_attempts=1, timeout=10,
+    )
+    assert result is not None
+    assert "timed out" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_validate_windows_restart_runtime_handles_generic_exception(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+
+    result = await updater._validate_windows_restart_runtime(
+        tmp_path, max_attempts=1,
+    )
+    assert result is not None
+    assert "access denied" in result
+
+
+@pytest.mark.asyncio
+async def test_validate_windows_restart_runtime_retries_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python_exe = tmp_path / ".venv" / "Scripts" / "python.exe"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    call_count = 0
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise subprocess.TimeoutExpired(cmd, timeout or 60)
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+
+    result = await updater._validate_windows_restart_runtime(
+        tmp_path, max_attempts=2, retry_delay=0.0,
+    )
+    assert result is None
+    assert call_count == 2
 
 
 def test_rmtree_onerror_retries_before_logging_skip(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -987,10 +1057,12 @@ async def test_perform_update_builds_staged_frontend_before_handover(
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda *_args: events.append("rollback_handover"))
     monkeypatch.setattr(updater.os, "execv", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
 
-    with pytest.raises(OSError, match="boom"):
-        async for step in updater.perform_update("2026.4.1"):
-            pass
+    progresses = []
+    async for step in updater.perform_update("2026.4.1"):
+        progresses.append(step)
 
+    assert progresses[-1].stage == "error"
+    assert "Failed to restart service" in progresses[-1].message
     assert events[:4] == ["npm-install", "npm-build", "replace", "uv-sync"]
     assert "marker:2026.4.1" in events
     assert "handover" in events
@@ -1470,3 +1542,132 @@ async def test_perform_update_stops_when_windows_restart_runtime_validation_fail
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "No module named uvicorn"
     assert events == ["restore"]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_yields_error_when_build_restart_argv_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """_build_restart_argv raising FileNotFoundError should yield a graceful
+    error instead of letting the exception propagate to the route handler."""
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_root.mkdir()
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        return 0, "", ""
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: events.append("marker"))
+    monkeypatch.setattr(
+        updater,
+        "_build_restart_argv",
+        lambda install_root=None: (_ for _ in ()).throw(
+            FileNotFoundError("python.exe not found"),
+        ),
+    )
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert "Failed to build restart command" in progresses[-1].message
+    assert "handover" not in events
+
+
+@pytest.mark.asyncio
+async def test_perform_update_yields_error_when_windows_spawn_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """subprocess.Popen failure on Windows should yield a graceful error
+    instead of re-raising the OSError."""
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        return 0, "", ""
+
+    async def fake_validate(_install_root: Path) -> str | None:
+        return None
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main"])
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate)
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda: events.append("rollback_handover"))
+    monkeypatch.setattr(
+        updater.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
+    )
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert "Failed to restart service" in progresses[-1].message
+    assert "rollback_handover" in events
