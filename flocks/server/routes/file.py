@@ -8,7 +8,9 @@ from typing import List, Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from flocks.config.config import Config
 from flocks.utils.file import File, FileNode, FileContent, FileInfo
+from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -23,8 +25,13 @@ async def list_files(path: str = Query(..., description="Directory path")):
     List files and directories in a specified path.
     """
     try:
-        nodes = await File.list(path)
+        cfg = await Config.get()
+        safe_path = await resolve_path_for_http_file_access(path, cfg)
+        nodes = await File.list(safe_path)
         return nodes
+    except PermissionError:
+        log.warning("http_file.list.denied")
+        raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.list.error", {"error": str(e), "path": path})
         raise HTTPException(status_code=500, detail=str(e))
@@ -38,10 +45,15 @@ async def read_file(path: str = Query(..., description="File path")):
     Read the content of a specified file.
     """
     try:
-        content = await File.read(path)
+        cfg = await Config.get()
+        safe_path = await resolve_path_for_http_file_access(path, cfg)
+        content = await File.read(safe_path)
         return content
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError:
+        log.warning("http_file.read.denied")
+        raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
         raise HTTPException(status_code=500, detail=str(e))

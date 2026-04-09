@@ -533,7 +533,16 @@ class ConfigInfo(BaseModel):
             "workspace_access (none/ro/rw), workspace_root, docker, tools, prune."
         ),
     )
-    
+    allow_read_paths: Optional[List[str]] = Field(
+        None,
+        alias="allowReadPaths",
+        description=(
+            "Extra absolute paths (directories or prefixes) allowed for HTTP "
+            "/api/file/content and /api/file/list. Does not replace project root, data, or "
+            "workspace; the Flocks config directory and ~/.ssh are never allowed."
+        ),
+    )
+
     # Channel configuration (IM platform integrations)
     channels: Optional[Dict[str, ChannelConfig]] = Field(
         None,
