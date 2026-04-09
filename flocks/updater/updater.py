@@ -124,6 +124,27 @@ def _looks_like_windows_python_launcher(entry: str) -> bool:
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
 
 
+def _resolve_windows_long_path(path: Path) -> Path:
+    """Resolve Windows 8.3 short path names (e.g. THREAT~1) to their full long form.
+
+    ``tempfile.mkdtemp`` may return paths containing 8.3 short names when the
+    user profile directory exceeds eight characters.  Passing such a path as
+    ``cwd`` to a Node.js subprocess causes ``process.cwd()`` to return the
+    short form while Vite internally resolves files to the long form, breaking
+    ``path.relative()`` in the ``build-html`` plugin.
+    """
+    try:
+        import ctypes
+
+        buf = ctypes.create_unicode_buffer(32768)
+        length = ctypes.windll.kernel32.GetLongPathNameW(str(path), buf, 32768)
+        if length > 0:
+            return Path(buf.value)
+    except Exception:
+        pass
+    return path
+
+
 def _get_repo_root() -> Path:
     """
     Return the root of the flocks installation (the directory that owns
@@ -1736,6 +1757,8 @@ async def perform_update(
     yield UpdateProgress(stage="fetching", message=f"Downloading source archive (sources: {sources_desc})...")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-update-"))
+    if sys.platform == "win32":
+        tmp_dir = _resolve_windows_long_path(tmp_dir)
     archive_filename = f"flocks-{latest_tag}.{fmt}"
     try:
         archive_path = await _download_with_fallback(
