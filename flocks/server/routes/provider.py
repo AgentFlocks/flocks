@@ -1236,7 +1236,8 @@ def _build_api_service_summary(
 
     status = "disabled" if not enabled else cached_status.get("status", "unknown")
     raw_config = ConfigWriter.get_api_service_raw(provider_id) or {}
-    verify_ssl_raw = raw_config.get("verify_ssl", meta.get("verify_ssl", False))
+    # "verify_ssl" is canonical; fall back to legacy "ssl_verify" for backward compatibility
+    verify_ssl_raw = raw_config.get("verify_ssl", raw_config.get("ssl_verify", meta.get("verify_ssl", False)))
     if isinstance(verify_ssl_raw, str):
         verify_ssl = verify_ssl_raw.strip().lower() in {"1", "true", "yes", "on"}
     else:

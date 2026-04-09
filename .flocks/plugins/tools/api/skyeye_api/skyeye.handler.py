@@ -110,7 +110,10 @@ def _resolve_username(raw_service: dict[str, Any]) -> str:
 
 
 def _verify_ssl(raw_service: dict[str, Any]) -> bool:
+    # "verify_ssl" is the canonical field; "ssl_verify" is accepted for backward compatibility
     raw_value = raw_service.get("verify_ssl")
+    if raw_value is None:
+        raw_value = raw_service.get("ssl_verify")
     if raw_value is None:
         raw_value = _get_custom_setting(raw_service, "verify_ssl", False)
     if isinstance(raw_value, bool):

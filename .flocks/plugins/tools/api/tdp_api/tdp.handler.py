@@ -64,7 +64,10 @@ def _service_config() -> dict[str, Any]:
 
 
 def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
+    # "verify_ssl" is the canonical field; "ssl_verify" is accepted for backward compatibility
     value = raw.get("verify_ssl")
+    if value is None:
+        value = raw.get("ssl_verify")
     if value is None:
         custom_settings = raw.get("custom_settings", {})
         if isinstance(custom_settings, dict):
