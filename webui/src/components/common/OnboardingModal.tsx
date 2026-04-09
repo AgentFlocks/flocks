@@ -19,7 +19,7 @@ const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
 
 const TBCLOUD_LINKS = {
   cn: 'https://x.threatbook.com/flocks/activate',
-  global: 'https://threatbook.io/flocks/activate',
+  global: 'https://i.threatbook.io/flocks/activate',
 };
 
 const THREATBOOK_PROVIDER_IDS = ['threatbook-cn-llm', 'threatbook-io-llm'] as const;
