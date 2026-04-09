@@ -112,11 +112,11 @@ describe('OnboardingModal', () => {
         providers: [
           makeProvider('threatbook-cn-llm', 'ThreatBook CN', [
             { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
-            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+            { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('threatbook-io-llm', 'ThreatBook Global', [
             { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
-            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+            { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
           makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
@@ -173,7 +173,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3.6-plus',
+        model_id: 'qwen3-max',
       },
     });
 
@@ -195,7 +195,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3.6-plus',
+        model_id: 'qwen3-max',
       },
     });
 
@@ -290,7 +290,7 @@ describe('OnboardingModal', () => {
         skipped: [],
         default_model: {
           provider_id: 'threatbook-cn-llm',
-          model_id: 'qwen3.6-plus',
+          model_id: 'qwen3-max',
         },
       },
     });
@@ -304,7 +304,7 @@ describe('OnboardingModal', () => {
     await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
     await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
 
-    expect(screen.getByText('Qwen 3.6 Plus')).toBeInTheDocument();
+    expect(screen.getByText('Qwen 3 Max')).toBeInTheDocument();
     expect(screen.queryByText('MiniMax M2.7')).not.toBeInTheDocument();
   });
 });

@@ -38,7 +38,7 @@ async def test_onboarding_status_uses_default_model_services_and_channels(isolat
             "default_models": {
                 "llm": {
                     "provider_id": "threatbook-cn-llm",
-                    "model_id": "qwen3.6-plus",
+                    "model_id": "qwen3-max",
                 }
             },
             "api_services": {

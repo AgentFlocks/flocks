@@ -165,7 +165,7 @@ describe('Layout onboarding entry', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3.6-plus',
+        model_id: 'qwen3-max',
       },
     });
 
@@ -174,11 +174,11 @@ describe('Layout onboarding entry', () => {
         providers: [
           makeProvider('threatbook-cn-llm', 'ThreatBook CN', [
             { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
-            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+            { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('threatbook-io-llm', 'ThreatBook Global', [
             { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
-            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+            { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
           makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
