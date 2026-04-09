@@ -238,6 +238,20 @@ export default function APITabContent({
     }
   };
 
+  const handleToggleSsl = async (serviceId: string, verifySsl: boolean) => {
+    const service = services.find((s) => s.id === serviceId);
+    if (!service) return;
+    try {
+      const res = await providerAPI.updateApiService(serviceId, {
+        enabled: service.enabled,
+        verify_ssl: verifySsl,
+      });
+      setServices((prev) => prev.map((s) => (s.id === serviceId ? res.data : s)));
+    } catch (err: any) {
+      alert(err.response?.data?.detail || err.message);
+    }
+  };
+
   const handleDeleteService = async (serviceId: string) => {
     if (!window.confirm(t('alert.confirmRemoveApiService', { name: serviceId }))) return;
     try {
@@ -515,6 +529,8 @@ export default function APITabContent({
                     status: selectedService.enabled ? selectedService.status : 'disabled',
                     latency_ms: selectedService.latency_ms,
                   }}
+                  verifySsl={selectedService.verify_ssl}
+                  onToggleVerifySsl={async (verifySsl) => handleToggleSsl(selectedServiceId, verifySsl)}
                 />
               </div>
             </div>

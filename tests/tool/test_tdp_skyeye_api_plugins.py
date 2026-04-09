@@ -316,15 +316,17 @@ def test_skyeye_alarm_list_yaml_loads_with_provider():
     assert tool.info.provider == "skyeye_api"
 
 
-def test_skyeye_verify_ssl_defaults_true_when_unset():
+def test_skyeye_verify_ssl_defaults_false_when_unset():
     module = _load_module("test_skyeye_handler_verify_ssl", _SKYEYE_HANDLER)
-    assert module._verify_ssl({}) is True
-    assert module._verify_ssl({"custom_settings": {}}) is True
+    assert module._verify_ssl({}) is False
+    assert module._verify_ssl({"custom_settings": {}}) is False
+    assert module._verify_ssl({"verify_ssl": True}) is True
     assert module._verify_ssl({"verify_ssl": False}) is False
 
 
-def test_tdp_resolve_verify_ssl_defaults_true_when_unset():
+def test_tdp_resolve_verify_ssl_defaults_false_when_unset():
     module = _load_module("test_tdp_handler_verify_ssl", _TDP_HANDLER)
-    assert module._resolve_verify_ssl({}) is True
-    assert module._resolve_verify_ssl({"custom_settings": {}}) is True
+    assert module._resolve_verify_ssl({}) is False
+    assert module._resolve_verify_ssl({"custom_settings": {}}) is False
+    assert module._resolve_verify_ssl({"verify_ssl": True}) is True
     assert module._resolve_verify_ssl({"verify_ssl": False}) is False

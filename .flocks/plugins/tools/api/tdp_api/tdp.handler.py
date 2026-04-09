@@ -68,7 +68,7 @@ def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
     if value is None:
         custom_settings = raw.get("custom_settings", {})
         if isinstance(custom_settings, dict):
-            value = custom_settings.get("verify_ssl", True)
+            value = custom_settings.get("verify_ssl", False)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):

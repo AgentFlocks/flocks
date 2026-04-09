@@ -19,4 +19,4 @@ DEFAULT_HEADERS = {
 }
 
 TIMEOUT = 30
-SSL_VERIFY = os.getenv("SKYEYE_SSL_VERIFY", "true").lower() in ("1", "true", "yes")
+SSL_VERIFY = os.getenv("SKYEYE_SSL_VERIFY", "false").lower() in ("1", "true", "yes")
