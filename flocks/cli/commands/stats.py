@@ -6,16 +6,18 @@ Ported from original cli/cmd/stats.ts
 """
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 
 import typer
 from rich.console import Console
 
 from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message
+from flocks.session.prompt import SessionPrompt
 from flocks.project.project import Project
 from flocks.storage.storage import Storage
 
@@ -68,6 +70,82 @@ class SessionStats:
     tokens_per_session: float = 0.0
     median_tokens_per_session: float = 0.0
     has_reasoning_tokens: bool = False
+
+
+def _count_tokens(text: str) -> int:
+    """Count tokens using the shared prompt tokenizer fallback."""
+    return SessionPrompt.count_tokens(text)
+
+
+def _stringify_payload(payload: Any) -> str:
+    """Convert tool payloads to text for token estimation."""
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return str(payload)
+
+
+def _estimate_message_context_tokens(msg: Message) -> int:
+    """Estimate how many tokens this message adds to future prompts."""
+    total = 0
+    for part in msg.parts:
+        if part.type in {"text", "reasoning"}:
+            total += _count_tokens(getattr(part, "text", ""))
+            continue
+
+        if part.type != "tool":
+            continue
+
+        state = getattr(part, "state", None)
+        if state is None:
+            continue
+
+        total += _count_tokens(_stringify_payload(getattr(state, "input", None)))
+
+        time_info = getattr(state, "time", None)
+        is_compacted = isinstance(time_info, dict) and time_info.get("compacted")
+        if is_compacted:
+            total += 10
+        else:
+            total += _count_tokens(_stringify_payload(getattr(state, "output", None)))
+
+    return total
+
+
+def _estimate_assistant_tokens(msg: Message, prior_context_tokens: int) -> TokenStats:
+    """Estimate assistant token usage when providers persisted no usage data."""
+    estimated_output = 0
+    estimated_reasoning = 0
+
+    for part in msg.parts:
+        if part.type == "text":
+            estimated_output += _count_tokens(getattr(part, "text", ""))
+            continue
+
+        if part.type == "reasoning":
+            estimated_reasoning += _count_tokens(getattr(part, "text", ""))
+            continue
+
+        if part.type != "tool":
+            continue
+
+        state = getattr(part, "state", None)
+        if state is None:
+            continue
+        estimated_output += _count_tokens(_stringify_payload(getattr(state, "input", None)))
+
+    if estimated_output == 0 and estimated_reasoning == 0:
+        return TokenStats()
+
+    return TokenStats(
+        input=prior_context_tokens + 800,
+        output=estimated_output,
+        reasoning=estimated_reasoning,
+    )
 
 
 def _format_number(num: int) -> str:
@@ -142,9 +220,9 @@ async def _aggregate_stats(
     for session in filtered_sessions:
         messages = await Message.list_with_parts(session.id)
         stats.total_messages += len(messages)
-        
+        prior_context_tokens = 0
         session_tokens = TokenStats()
-        
+
         for msg in messages:
             info = msg.info
 
@@ -153,42 +231,60 @@ async def _aggregate_stats(
                 provider_id = getattr(info, "providerID", None)
                 model_id = getattr(info, "modelID", None)
                 tokens = getattr(info, "tokens", None)
+                cache = getattr(tokens, "cache", None) if tokens else None
+                cache_read = getattr(cache, "read", 0) if cache else 0
+                cache_write = getattr(cache, "write", 0) if cache else 0
+                total_recorded_tokens = (
+                    (getattr(tokens, "input", 0) if tokens else 0)
+                    + (getattr(tokens, "output", 0) if tokens else 0)
+                    + (getattr(tokens, "reasoning", 0) if tokens else 0)
+                    + cache_read
+                    + cache_write
+                )
+                tokens_to_add = tokens
 
                 stats.total_cost += cost
-                
+
                 # Model usage
                 if provider_id and model_id:
                     model_key = f"{provider_id}/{model_id}"
                     if model_key not in stats.model_usage:
                         stats.model_usage[model_key] = ModelUsage()
-                    
+
                     stats.model_usage[model_key].messages += 1
                     stats.model_usage[model_key].cost += cost
-                
+
+                if total_recorded_tokens == 0:
+                    tokens_to_add = _estimate_assistant_tokens(msg, prior_context_tokens)
+
                 # Token usage
-                if tokens:
-                    cache = getattr(tokens, "cache", None)
+                if tokens_to_add:
+                    cache = getattr(tokens_to_add, "cache", None)
                     cache_read = getattr(cache, "read", 0) if cache else 0
                     cache_write = getattr(cache, "write", 0) if cache else 0
 
-                    session_tokens.input += tokens.input
-                    session_tokens.output += tokens.output
-                    session_tokens.reasoning += tokens.reasoning
+                    session_tokens.input += tokens_to_add.input
+                    session_tokens.output += tokens_to_add.output
+                    session_tokens.reasoning += tokens_to_add.reasoning
                     session_tokens.cache_read += cache_read
                     session_tokens.cache_write += cache_write
-                    if tokens.reasoning > 0:
+                    if tokens_to_add.reasoning > 0:
                         stats.has_reasoning_tokens = True
-                    
+
                     if provider_id and model_id:
                         model_key = f"{provider_id}/{model_id}"
-                        stats.model_usage[model_key].tokens_input += tokens.input
-                        stats.model_usage[model_key].tokens_output += tokens.output + tokens.reasoning
+                        stats.model_usage[model_key].tokens_input += tokens_to_add.input
+                        stats.model_usage[model_key].tokens_output += (
+                            tokens_to_add.output + tokens_to_add.reasoning
+                        )
             
             # Tool usage
             for part in msg.parts:
                 if part.type == "tool":
                     tool_name = getattr(part, "tool", None) or "unknown"
                     stats.tool_usage[tool_name] = stats.tool_usage.get(tool_name, 0) + 1
+
+            prior_context_tokens += _estimate_message_context_tokens(msg)
         
         # Aggregate token stats
         stats.total_tokens.input += session_tokens.input

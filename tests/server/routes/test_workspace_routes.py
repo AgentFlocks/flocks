@@ -248,6 +248,113 @@ class TestWorkspaceUpload:
         assert resp.status_code == status.HTTP_200_OK
         assert (mock_workspace / "subdir" / "nested.txt").exists()
 
+    @pytest.mark.asyncio
+    async def test_upload_binary_file_succeeds_without_chat_purpose(
+        self, client: AsyncClient, mock_workspace: Path
+    ):
+        """Generic workspace uploads remain unrestricted for non-chat usage."""
+        resp = await client.post(
+            "/api/workspace/upload",
+            files={"files": ("archive.zip", io.BytesIO(b"zip"), "application/zip")},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        result = resp.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == "archive.zip"
+        assert (mock_workspace / "archive.zip").exists()
+
+    @pytest.mark.asyncio
+    async def test_chat_upload_rejects_disallowed_file_type(
+        self, client: AsyncClient, mock_workspace: Path
+    ):
+        """Chat uploads reject unsupported file types via purpose=chat."""
+        resp = await client.post(
+            "/api/workspace/upload",
+            params={"purpose": "chat"},
+            files={"files": ("archive.zip", io.BytesIO(b"zip"), "application/zip")},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        result = resp.json()["uploaded"][0]
+        assert "Unsupported file type" in result["error"]
+        assert not (mock_workspace / "archive.zip").exists()
+
+    @pytest.mark.asyncio
+    async def test_upload_overwrites_duplicate_file_without_chat_purpose(
+        self, client: AsyncClient, mock_workspace: Path
+    ):
+        """Generic workspace uploads overwrite duplicate filenames by default."""
+        first = await client.post(
+            "/api/workspace/upload",
+            params={"dest": "uploads"},
+            files={"files": ("report.pdf", io.BytesIO(b"first"), "application/pdf")},
+        )
+        second = await client.post(
+            "/api/workspace/upload",
+            params={"dest": "uploads"},
+            files={"files": ("report.pdf", io.BytesIO(b"second"), "application/pdf")},
+        )
+        assert first.status_code == status.HTTP_200_OK
+        assert second.status_code == status.HTTP_200_OK
+        first_item = first.json()["uploaded"][0]
+        second_item = second.json()["uploaded"][0]
+        assert first_item["name"] == "report.pdf"
+        assert second_item["name"] == "report.pdf"
+        assert first_item["path"] == "uploads/report.pdf"
+        assert second_item["path"] == "uploads/report.pdf"
+        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"second"
+
+    @pytest.mark.asyncio
+    async def test_chat_upload_renames_duplicate_file(
+        self, client: AsyncClient, mock_workspace: Path
+    ):
+        """Chat uploads auto-rename duplicates to preserve attachment paths."""
+        first = await client.post(
+            "/api/workspace/upload",
+            params={"dest": "uploads", "purpose": "chat"},
+            files={"files": ("report.pdf", io.BytesIO(b"first"), "application/pdf")},
+        )
+        second = await client.post(
+            "/api/workspace/upload",
+            params={"dest": "uploads", "purpose": "chat"},
+            files={"files": ("report.pdf", io.BytesIO(b"second"), "application/pdf")},
+        )
+        assert first.status_code == status.HTTP_200_OK
+        assert second.status_code == status.HTTP_200_OK
+        first_item = first.json()["uploaded"][0]
+        second_item = second.json()["uploaded"][0]
+        assert first_item["name"] == "report.pdf"
+        assert second_item["name"] == "report (1).pdf"
+        assert first_item["path"] == "uploads/report.pdf"
+        assert second_item["path"] == "uploads/report (1).pdf"
+        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"first"
+        assert (mock_workspace / "uploads" / "report (1).pdf").read_bytes() == b"second"
+
+    @pytest.mark.asyncio
+    async def test_chat_upload_returns_error_after_too_many_name_conflicts(
+        self, client: AsyncClient, mock_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Chat uploads stop probing once the rename limit is exhausted."""
+        from flocks.server.routes import workspace as workspace_routes
+
+        monkeypatch.setattr(workspace_routes, "_MAX_UPLOAD_RENAME_ATTEMPTS", 1)
+        uploads_dir = mock_workspace / "uploads"
+        uploads_dir.mkdir(exist_ok=True)
+        (uploads_dir / "report.pdf").write_bytes(b"first")
+        (uploads_dir / "report (1).pdf").write_bytes(b"second")
+
+        resp = await client.post(
+            "/api/workspace/upload",
+            params={"dest": "uploads", "purpose": "chat"},
+            files={"files": ("report.pdf", io.BytesIO(b"third"), "application/pdf")},
+        )
+
+        assert resp.status_code == status.HTTP_409_CONFLICT
+        assert "Too many conflicting filenames" in resp.json()["detail"]
+        result = resp.json()["uploaded"][0]
+        assert "Too many conflicting filenames" in result["error"]
+        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"first"
+        assert (mock_workspace / "uploads" / "report (1).pdf").read_bytes() == b"second"
+
 
 # ===========================================================================
 # Download

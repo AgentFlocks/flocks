@@ -921,6 +921,33 @@ def _log_startup_config(
         handle.write(line)
 
 
+def _run_legacy_task_migration(root: Path, console) -> None:
+    """Run the legacy task migration script before backend startup."""
+    migration_script = root / "scripts" / "migrate_legacy_task_tables.py"
+    if not migration_script.exists():
+        return
+
+    try:
+        completed = subprocess.run(
+            [sys.executable, str(migration_script)],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        if console is not None:
+            console.print(f"[flocks] 旧任务迁移脚本启动失败: {error}")
+        return
+
+    if completed.returncode != 0 and console is not None:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        if detail:
+            console.print(f"[flocks] 旧任务迁移失败: {detail}")
+        else:
+            console.print("[flocks] 旧任务迁移失败，请检查日志。")
+
+
 def stop_all(console) -> None:
     """Stop frontend then backend using ports persisted in runtime records."""
     paths = ensure_runtime_dirs()

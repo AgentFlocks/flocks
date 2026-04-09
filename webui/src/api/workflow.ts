@@ -84,7 +84,7 @@ export interface WorkflowExecution {
   workflowId: string;
   inputParams: Record<string, any>;
   outputResults?: Record<string, any>;
-  status: 'running' | 'success' | 'error' | 'timeout';
+  status: 'running' | 'success' | 'error' | 'timeout' | 'cancelled';
   startedAt: number;
   finishedAt?: number;
   duration?: number;
@@ -146,6 +146,11 @@ export const workflowAPI = {
   
   getExecution: (workflowId: string, execId: string) =>
     client.get<WorkflowExecution>(`/api/workflow/${workflowId}/history/${execId}`),
+
+  cancelExecution: (workflowId: string, execId: string) =>
+    client.post<{ status: string; message: string; executionId: string }>(
+      `/api/workflow/${workflowId}/history/${execId}/cancel`
+    ),
   
   getStats: (id: string) =>
     client.get(`/api/workflow/${id}/stats`),

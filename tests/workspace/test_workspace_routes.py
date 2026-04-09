@@ -219,7 +219,7 @@ class TestUpload:
         assert result.get("error") is None
         assert (_ws(workspace_client) / "outputs" / "hello.txt").read_text() == "hello world"
 
-    def test_upload_binary_file_succeeds_with_warning(self, workspace_client):
+    def test_upload_binary_file_succeeds_without_chat_purpose(self, workspace_client):
         client = _client(workspace_client)
         r = client.post(
             "/api/workspace/upload",
@@ -228,9 +228,19 @@ class TestUpload:
         assert r.status_code == 200
         result = r.json()["uploaded"][0]
         assert result.get("error") is None
-        assert result["is_text_file"] is False
-        assert "preview_warning" in result
-        assert result["preview_warning"] is not None
+        assert result["name"] == "archive.zip"
+        assert (_ws(workspace_client) / "archive.zip").exists()
+
+    def test_chat_upload_rejects_disallowed_file_type(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("archive.zip", b"\x50\x4b\x03\x04", "application/zip"))],
+        )
+        assert r.status_code == 200
+        result = r.json()["uploaded"][0]
+        assert "Unsupported file type" in result["error"]
+        assert not (_ws(workspace_client) / "archive.zip").exists()
 
     def test_upload_multiple_files(self, workspace_client):
         client = _client(workspace_client)
@@ -267,6 +277,69 @@ class TestUpload:
         )
         assert r.status_code == 200
         assert (_ws(workspace_client) / "new_folder" / "x.txt").exists()
+
+    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client):
+        client = _client(workspace_client)
+        first = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", ("report.pdf", b"first", "application/pdf"))],
+        )
+        second = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", ("report.pdf", b"second", "application/pdf"))],
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_item = first.json()["uploaded"][0]
+        second_item = second.json()["uploaded"][0]
+        assert first_item["name"] == "report.pdf"
+        assert second_item["name"] == "report.pdf"
+        assert first_item["path"] == "uploads/report.pdf"
+        assert second_item["path"] == "uploads/report.pdf"
+        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
+
+    def test_chat_upload_renames_duplicate_file(self, workspace_client):
+        client = _client(workspace_client)
+        first = client.post(
+            "/api/workspace/upload?dest=uploads&purpose=chat",
+            files=[("files", ("report.pdf", b"first", "application/pdf"))],
+        )
+        second = client.post(
+            "/api/workspace/upload?dest=uploads&purpose=chat",
+            files=[("files", ("report.pdf", b"second", "application/pdf"))],
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_item = first.json()["uploaded"][0]
+        second_item = second.json()["uploaded"][0]
+        assert first_item["name"] == "report.pdf"
+        assert second_item["name"] == "report (1).pdf"
+        assert first_item["path"] == "uploads/report.pdf"
+        assert second_item["path"] == "uploads/report (1).pdf"
+        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"first"
+        assert (_ws(workspace_client) / "uploads" / "report (1).pdf").read_bytes() == b"second"
+
+    def test_chat_upload_returns_error_after_too_many_name_conflicts(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        monkeypatch.setattr(workspace_routes, "_MAX_UPLOAD_RENAME_ATTEMPTS", 1)
+        ws = _ws(workspace_client)
+        uploads_dir = ws / "uploads"
+        uploads_dir.mkdir(exist_ok=True)
+        (uploads_dir / "report.pdf").write_bytes(b"first")
+        (uploads_dir / "report (1).pdf").write_bytes(b"second")
+
+        r = _client(workspace_client).post(
+            "/api/workspace/upload?dest=uploads&purpose=chat",
+            files=[("files", ("report.pdf", b"third", "application/pdf"))],
+        )
+
+        assert r.status_code == 409
+        assert "Too many conflicting filenames" in r.json()["detail"]
+        result = r.json()["uploaded"][0]
+        assert "Too many conflicting filenames" in result["error"]
+        assert (uploads_dir / "report.pdf").read_bytes() == b"first"
+        assert (uploads_dir / "report (1).pdf").read_bytes() == b"second"
 
     def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
         # Set the limit to 0 MB; _max_upload_bytes() reads the env var at

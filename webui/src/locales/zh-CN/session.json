@@ -53,6 +53,15 @@
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
     "removeNodeRef": "移除节点引用",
+    "upload": {
+      "select": "上传文档",
+      "remove": "移除文件",
+      "retry": "重试上传",
+      "dropHint": "松开以上传文档文件",
+      "waiting": "文件上传中，请等待完成后发送",
+      "invalidType": "仅支持 txt、md、json、yaml、yml、xml、csv、pdf、doc、docx",
+      "errorGeneric": "上传失败，请重试"
+    },
     "tool": {
       "pending": "等待中",
       "running": "执行中",

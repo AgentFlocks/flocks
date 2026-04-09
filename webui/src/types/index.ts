@@ -220,6 +220,7 @@ export interface APIServiceSummary {
   description?: string;
   description_cn?: string;
   builtin?: boolean;
+  verify_ssl: boolean;
 }
 
 export interface APIServiceCredentialField {
@@ -250,6 +251,7 @@ export interface APIServiceMetadata {
   base_url?: string;
   docs_url?: string;
   credential_schema?: APIServiceCredentialField[];
+  verify_ssl?: boolean;
 }
 
 export interface MCPServerConfig {

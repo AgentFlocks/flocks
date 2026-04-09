@@ -1555,6 +1555,7 @@ export default function ChannelPage() {
 
   // Track unsaved changes per channel
   const originalConfigsRef = useRef<Record<string, ChannelConfig>>({});
+  const toggleInFlightRef = useRef(false);
 
   const fetchAll = useCallback(async () => {
     try {
@@ -1687,12 +1688,63 @@ export default function ChannelPage() {
     setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
   };
 
-  const handleToggleEnabled = (enabled: boolean) => {
-    if (!selectedId) return;
+  const refreshListAndStatus = useCallback(async () => {
+    try {
+      const res = await client.get('/api/channel/list');
+      setChannels(res.data);
+    } catch { /* list may be unavailable briefly during restart */ }
+    fetchStatuses(true);
+  }, [fetchStatuses]);
+
+  const handleToggleEnabled = async (enabled: boolean) => {
+    if (!selectedId || toggleInFlightRef.current) return;
+    toggleInFlightRef.current = true;
+
     setChannelConfigs((prev) => ({
       ...prev,
       [selectedId]: { ...prev[selectedId], enabled },
     }));
+
+    try {
+      setSavePhase('saving');
+
+      // Persist only the enabled change using the last-saved channel config,
+      // so other unsaved field edits are not accidentally flushed.
+      const savedChannelCfg = fullConfig.channels?.[selectedId] ?? {};
+      const updatedChannelCfg = { ...savedChannelCfg, enabled };
+      const updatedChannels = { ...(fullConfig.channels ?? {}), [selectedId]: updatedChannelCfg };
+      const updated = { ...fullConfig, channels: updatedChannels };
+
+      await client.patch('/api/config/', updated);
+
+      setFullConfig(updated);
+      originalConfigsRef.current = {
+        ...originalConfigsRef.current,
+        [selectedId]: { ...originalConfigsRef.current[selectedId], enabled },
+      };
+
+      const wasEnabled = (fullConfig.channels?.[selectedId] as any)?.enabled ?? false;
+      const shouldRestart = enabled || wasEnabled;
+
+      if (shouldRestart) {
+        setSavePhase('applying');
+        client.post(`/api/channel/${selectedId}/restart`, {}, { timeout: 5000 }).catch(() => {});
+        toast.success(enabled ? t('saveAndApplySuccess') : t('saveAndStopSuccess'));
+        setTimeout(refreshListAndStatus, 3000);
+        setTimeout(refreshListAndStatus, 8000);
+      } else {
+        toast.success(t('saveSucess'));
+      }
+    } catch (err: any) {
+      setChannelConfigs((prev) => ({
+        ...prev,
+        [selectedId]: { ...prev[selectedId], enabled: !enabled },
+      }));
+      toast.error(t('saveFailed'), err.message);
+    } finally {
+      toggleInFlightRef.current = false;
+      setSavePhase('idle');
+    }
   };
 
   const handleChannelConfigChange = (id: string, cfg: ChannelConfig) => {

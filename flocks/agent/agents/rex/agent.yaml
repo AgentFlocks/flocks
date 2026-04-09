@@ -6,6 +6,23 @@ mode: primary
 hidden: false
 color: "#00CED1"
 delegatable: false
-# tools: null means allow all tools (rex is primary orchestrator with full access)
-# minus call_omo_agent which is denied
+tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - skill
+  - delegate_task
+  - task
+  - todoread
+  - todowrite
+  - run_workflow
+  - run_workflow_node
+  - background_output
+  - background_cancel
+  - session_list
+  - channel_message
 # prompt is left empty – injected dynamically by prompt_builder.py

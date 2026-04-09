@@ -13,7 +13,8 @@ import asyncio
 import json
 import os
 import sys
-from typing import Optional, Dict, Any, List, Callable, Awaitable
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Set, Tuple
 from dataclasses import dataclass, field
 
 from flocks.utils.log import Log
@@ -35,9 +36,12 @@ from flocks.session.streaming.stream_events import (
     ReasoningDeltaEvent,
     ReasoningEndEvent,
 )
+from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
+from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
+from flocks.tool.catalog import get_tool_catalog_metadata, list_tool_catalog_infos
 from flocks.tool.registry import ToolRegistry, ToolResult
 from flocks.utils.langfuse import generation_scope, trace_scope
 from flocks.session.utils.file_extractor import (
@@ -48,6 +52,39 @@ from flocks.session.utils.file_extractor import (
 
 
 log = Log.create(service="session.runner")
+
+TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
+TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
+TOOL_RESULT_MIN_CHAR_BUDGET = 12_000
+TOOL_RESULT_MIN_TURN_BUDGET = 6_000
+TOOL_RESULT_PREVIEW_CHARS = 160
+
+# Maximum seconds to wait for each chunk (including the first) from the LLM
+# stream.  If the model hangs without returning any data, the stream times out
+# and the session surfaces a clear error rather than hanging forever.
+LLM_STREAM_CHUNK_TIMEOUT_S = 60
+
+
+async def _iter_with_chunk_timeout(aiter, timeout_s: float):
+    """Yield chunks from an async generator, raising TimeoutError if any
+    individual chunk (including the first) takes longer than *timeout_s*."""
+    try:
+        while True:
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout_s)
+                yield chunk
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError(
+                    f"LLM stream timed out after {timeout_s:.0f}s with no response. "
+                    "The model may be overloaded or incompatible. Please try again or switch models."
+                )
+    finally:
+        try:
+            await aiter.aclose()
+        except Exception:
+            pass
 
 
 @dataclass
@@ -68,6 +105,7 @@ class StepResult:
     content: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
     error: Optional[str] = None
+    usage: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -127,6 +165,156 @@ class SessionRunner:
         self.session_ctx = session_ctx  # SessionContext interface for decoupled access
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
+
+    async def _list_callable_tool_infos_for_turn(
+        self,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        result = await list_session_callable_tool_infos(
+            session_id=self.session.id,
+            declared_tool_names=getattr(agent, "tools", None),
+            step=self._step,
+            event_publish_callback=self.callbacks.event_publish_callback,
+        )
+        return result.tool_infos, dict(result.metadata)
+
+    async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
+        if not self.callbacks.event_publish_callback:
+            return
+        try:
+            await self.callbacks.event_publish_callback("turn.tools_selected", {
+                "sessionID": self.session.id,
+                "step": self._step,
+                **selection_metadata,
+            })
+        except Exception as exc:
+            log.debug("runner.turn_tools_selected.publish_failed", {"error": str(exc)})
+
+    def _tool_compact_placeholder(self, tool_name: str, text: str) -> Tuple[str, str]:
+        normalized = " ".join(text.split())
+        preview = normalized[:TOOL_RESULT_PREVIEW_CHARS]
+        suffix = "..." if len(normalized) > TOOL_RESULT_PREVIEW_CHARS else ""
+        if preview:
+            placeholder = (
+                f"[Context compacted: `{tool_name}` output omitted to save space. "
+                f"Preview: {preview}{suffix}]"
+            )
+        else:
+            placeholder = f"[Context compacted: `{tool_name}` output omitted to save space.]"
+        return placeholder, preview
+
+    def _get_persisted_tool_placeholder(self, part: Any, fallback_tool_name: str) -> Optional[str]:
+        state = getattr(part, "state", None)
+        metadata = getattr(state, "metadata", None) or {}
+        placeholder = metadata.get("context_compact_placeholder")
+        if placeholder:
+            return str(placeholder)
+        time_info = getattr(state, "time", None) or {}
+        if isinstance(time_info, dict) and time_info.get("compacted"):
+            return f"[Context compacted: `{fallback_tool_name}` output omitted to save space.]"
+        return None
+
+    async def _persist_tool_compaction(self, refs: List[Dict[str, Any]]) -> int:
+        dirty_refs = [ref for ref in refs if ref.get("dirty")]
+        if not dirty_refs:
+            return 0
+
+        updated_count = 0
+        for ref in dirty_refs:
+            part = ref["part"]
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            await Message.update_part(
+                self.session.id,
+                ref["message_id"],
+                part.id,
+                state=state.model_dump() if hasattr(state, "model_dump") else state,
+            )
+            ref["dirty"] = False
+            updated_count += 1
+        return updated_count
+
+    async def _compact_tool_ref(self, ref: Dict[str, Any], reason: str) -> bool:
+        current_content = ref["chat_message"].content or ""
+        if ref.get("compacted") or len(current_content) <= TOOL_RESULT_PREVIEW_CHARS:
+            return False
+
+        placeholder, preview = self._tool_compact_placeholder(ref["tool_name"], current_content)
+        ref["chat_message"].content = placeholder
+        ref["char_count"] = len(placeholder)
+        ref["compacted"] = True
+
+        part = ref["part"]
+        state = getattr(part, "state", None)
+        if state is not None:
+            metadata = dict(getattr(state, "metadata", None) or {})
+            metadata.update({
+                "context_compacted": True,
+                "context_compact_reason": reason,
+                "context_compact_preview": preview,
+                "context_compact_placeholder": placeholder,
+                "context_compacted_step": self._step,
+            })
+            state.metadata = metadata
+            time_info = dict(getattr(state, "time", None) or {})
+            time_info["compacted"] = int(datetime.now().timestamp() * 1000)
+            state.time = time_info
+            ref["dirty"] = True
+
+        return True
+
+    async def _apply_tool_result_budget(
+        self,
+        tool_result_refs: List[Dict[str, Any]],
+        ctx_window_tokens: int,
+    ) -> Dict[str, int]:
+        if not tool_result_refs:
+            return {"compacted": 0, "persisted": 0}
+
+        total_budget = max(
+            TOOL_RESULT_MIN_CHAR_BUDGET,
+            int(ctx_window_tokens * 4 * TOOL_RESULT_CHAR_BUDGET_RATIO),
+        )
+        per_turn_budget = max(
+            TOOL_RESULT_MIN_TURN_BUDGET,
+            int(total_budget * TOOL_RESULT_TURN_BUDGET_RATIO),
+        )
+        compacted = 0
+
+        latest_turn = max(ref["turn_index"] for ref in tool_result_refs)
+        latest_turn_refs = [ref for ref in tool_result_refs if ref["turn_index"] == latest_turn]
+        latest_turn_chars = sum(ref["char_count"] for ref in latest_turn_refs)
+        for ref in latest_turn_refs[:-1]:
+            if latest_turn_chars <= per_turn_budget:
+                break
+            if await self._compact_tool_ref(ref, "tool_result_budget"):
+                latest_turn_chars = sum(item["char_count"] for item in latest_turn_refs)
+                compacted += 1
+
+        total_chars = sum(ref["char_count"] for ref in tool_result_refs)
+        for ref in tool_result_refs:
+            if total_chars <= total_budget:
+                break
+            if await self._compact_tool_ref(ref, "context_budget"):
+                total_chars = sum(item["char_count"] for item in tool_result_refs)
+                compacted += 1
+
+        persisted = await self._persist_tool_compaction(tool_result_refs)
+        if compacted and self.callbacks.event_publish_callback:
+            try:
+                await self.callbacks.event_publish_callback("context.compacted", {
+                    "sessionID": self.session.id,
+                    "step": self._step,
+                    "reason": "tool_result_budget",
+                    "compactedToolResults": compacted,
+                    "persistedToolResults": persisted,
+                })
+            except Exception as exc:
+                log.debug("runner.context_compacted.publish_failed", {"error": str(exc)})
+
+        return {"compacted": compacted, "persisted": persisted}
 
     def _supports_multimodal_user_content(self) -> bool:
         return self.provider_id in {"anthropic", "openai", "openai-compatible"}
@@ -470,7 +658,7 @@ class SessionRunner:
         
         # Build prompts and tools
         system_prompts = await self._build_system_prompts(agent)
-        tools = await self._build_tools(agent)
+        tools = await self._build_callable_tool_schema(agent, messages)
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -630,8 +818,8 @@ Please address this message and continue with your tasks.
             role=MessageRole.ASSISTANT,
             content="",
             agent=agent.name,
-            model=self.model_id,
-            provider=self.provider_id,
+            model_id=self.model_id,
+            provider_id=self.provider_id,
             parent_id=last_user.id,
         )
         
@@ -689,6 +877,10 @@ Please address this message and continue with your tasks.
                         and not result.content and not result.tool_calls):
                     empty_attempt += 1
                     if empty_attempt <= MAX_EMPTY_RETRIES:
+                        # Record usage for this empty attempt even though we are
+                        # about to retry – the provider may have already charged
+                        # for the tokens returned in this response.
+                        await self._record_usage_if_available(result.usage)
                         delay_ms = SessionRetry.delay(empty_attempt)
                         next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
                         log.warn("runner.step.empty_response_retry", {
@@ -707,10 +899,42 @@ Please address this message and continue with your tasks.
                         )
                         await SessionRetry.sleep(delay_ms, self._abort)
                         continue
+                    else:
+                        # All retries exhausted — surface a clear error so the
+                        # user knows the model is incompatible, rather than
+                        # silently hanging or showing a blank response.
+                        empty_error_msg = (
+                            f"Model '{self.model_id}' returned an empty response "
+                            f"after {MAX_EMPTY_RETRIES} retries."
+                        )
+                        log.error("runner.step.empty_response_exhausted", {
+                            "session_id": self.session.id,
+                            "model": self.model_id,
+                            "attempts": empty_attempt,
+                        })
+                        empty_error_dict = {
+                            "name": "EmptyResponseError",
+                            "message": empty_error_msg,
+                            "data": {
+                                "message": empty_error_msg,
+                                "model": self.model_id,
+                                "attempts": empty_attempt,
+                            },
+                        }
+                        if self.callbacks.on_error:
+                            await self.callbacks.on_error(empty_error_msg)
+                        await Message.update(
+                            self.session.id,
+                            assistant_msg.id,
+                            error=empty_error_dict,
+                            finish="error",
+                        )
+                        return StepResult(action="stop", error=empty_error_msg)
 
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
+                await self._record_usage_if_available(result.usage)
                 
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
@@ -787,6 +1011,110 @@ Please address this message and continue with your tasks.
         
         # Aborted
         return StepResult(action="stop", error="Aborted")
+
+    @staticmethod
+    def _build_tokens_update(stream_usage: Optional[Dict[str, int]]) -> Optional[Dict[str, Any]]:
+        """Normalize runner token updates from provider usage."""
+        if not stream_usage:
+            return None
+        return {
+            "input": stream_usage.get("prompt_tokens", 0),
+            "output": stream_usage.get("completion_tokens", 0),
+            "reasoning": stream_usage.get("reasoning_tokens", 0),
+            "cache": {
+                "read": stream_usage.get("cache_read_input_tokens", 0),
+                "write": stream_usage.get("cache_creation_input_tokens", 0),
+            },
+        }
+
+    def _resolve_usage_pricing(self) -> Optional[Any]:
+        """Resolve pricing config for the current provider/model pair."""
+        from flocks.provider.types import PriceConfig
+
+        model_info = None
+        provider = Provider.get(self.provider_id)
+        if provider:
+            for candidate in getattr(provider, "_config_models", []):
+                if candidate.id == self.model_id:
+                    model_info = candidate
+                    break
+
+        if model_info is None:
+            model_info = Provider.get_model(self.model_id)
+
+        pricing = getattr(model_info, "pricing", None) if model_info else None
+        if pricing is None:
+            return None
+
+        if isinstance(pricing, PriceConfig):
+            # Already the correct type – returned as-is.
+            return pricing
+
+        if hasattr(pricing, "input") and hasattr(pricing, "output"):
+            # Defensive branch: handles any duck-typed object with input/output
+            # attributes (e.g. legacy dataclass or proxy object). In practice
+            # ModelInfo.pricing is typed as Optional[Dict[str, Any]], so this
+            # branch is unlikely to be hit at runtime.
+            return PriceConfig(
+                input=getattr(pricing, "input", 0.0),
+                output=getattr(pricing, "output", 0.0),
+                unit=getattr(pricing, "unit", 1_000_000),
+                currency=getattr(pricing, "currency", "USD"),
+                cache_read=getattr(pricing, "cache_read", None),
+                cache_write=getattr(pricing, "cache_write", None),
+            )
+
+        if isinstance(pricing, dict):
+            # Standard runtime path: ModelInfo.pricing is a plain dict from JSON.
+            return PriceConfig(
+                input=pricing.get("input", 0.0),
+                output=pricing.get("output", 0.0),
+                unit=pricing.get("unit", 1_000_000),
+                currency=pricing.get("currency", "USD"),
+                cache_read=pricing.get("cache_read"),
+                cache_write=pricing.get("cache_write"),
+            )
+
+        return None
+
+    async def _record_usage_if_available(self, usage: Optional[Dict[str, int]]) -> None:
+        """Persist usage records without blocking successful session steps.
+
+        All exceptions – including ImportError when server routes are absent
+        in CLI-only environments – are caught here so that a usage-recording
+        failure can never corrupt an already-successful step result.
+
+        Note: This imports from flocks.server.routes.usage, creating a
+        core→server-routes dependency.
+        TODO: Move record_usage logic to a provider-layer service
+        (e.g. flocks.provider.usage_service) to remove the architectural
+        inversion.
+        """
+        if not usage:
+            return
+
+        try:
+            from flocks.server.routes.usage import RecordUsageRequest, record_usage
+
+            await record_usage(
+                RecordUsageRequest(
+                    provider_id=self.provider_id,
+                    model_id=self.model_id,
+                    session_id=self.session.id,
+                    input_tokens=usage.get("prompt_tokens", 0),
+                    output_tokens=usage.get("completion_tokens", 0),
+                    cached_tokens=usage.get("cache_read_input_tokens", 0),
+                    reasoning_tokens=usage.get("reasoning_tokens", 0),
+                    pricing=self._resolve_usage_pricing(),
+                )
+            )
+        except Exception as exc:
+            log.warn("runner.usage_record_failed", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "error": str(exc),
+            })
     
     async def _build_system_prompts(self, agent: AgentInfo) -> List[str]:
         """Build system prompts."""
@@ -852,6 +1180,10 @@ Please address this message and continue with your tasks.
 
         # Tool instructions
         prompts.append(self._get_tool_instructions())
+
+        tool_catalog_prompt = self._build_tool_catalog_prompt(agent)
+        if tool_catalog_prompt:
+            prompts.append(tool_catalog_prompt)
 
         # Debug: optionally print system prompt during execution
         if os.getenv("FLOCKS_PRINT_SYSTEM_PROMPT", "").lower() in ("1", "true", "yes"):
@@ -966,6 +1298,66 @@ Please address this message and continue with your tasks.
             )
         return PROMPT_TOOL_INSTRUCTIONS
 
+    def _list_catalog_tool_infos(self, agent: AgentInfo) -> List[Any]:
+        tool_infos: List[Any] = []
+        is_rex = getattr(agent, "name", "") == "rex"
+
+        for tool_info in list_tool_catalog_infos():
+            if is_rex:
+                tool_infos.append(tool_info)
+                continue
+
+            if not isinstance(getattr(agent, "tools", None), (list, tuple, set)):
+                tool_infos.append(tool_info)
+                continue
+            metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
+            if not agent_declares_tool(agent, tool_info.name) and not metadata.always_load:
+                continue
+            tool_infos.append(tool_info)
+
+        return tool_infos
+
+    def _build_tool_catalog_prompt(self, agent: AgentInfo) -> Optional[str]:
+        from flocks.tool.system.slash_command import format_tools_catalog_summary
+
+        catalog_tools = self._list_catalog_tool_infos(agent)
+        if not catalog_tools:
+            return None
+
+        catalog_summary = format_tools_catalog_summary(
+            tools=catalog_tools,
+            max_description_chars=100,
+            include_tip=False,
+        )
+        if not catalog_summary:
+            return None
+
+        is_rex = getattr(agent, "name", "") == "rex"
+        if is_rex:
+            rules = (
+                "You can see the full tool catalog for awareness. "
+                "This catalog is reference-only and does not define parameter names. "
+                "Only tools exposed in the current callable schema may be called directly. "
+                "If a tool appears in the catalog but is not exposed this turn, use `tool_search` first. "
+                "Use the current callable schema as the sole source of truth for parameters. "
+                "Do not invent parameters for tools that are not currently exposed."
+            )
+        else:
+            rules = (
+                "You can see a tool catalog derived from your configured callable tool set. "
+                "This catalog is reference-only and does not define parameter names. "
+                "Only tools exposed in the current callable schema may be called directly. "
+                "Use the current callable schema as the sole source of truth for parameters. "
+                "Do not infer argument names from the catalog. "
+                "Do not invent parameters for tools that are not currently exposed."
+            )
+
+        return (
+            "## Tool Catalog Awareness\n\n"
+            f"{rules}\n\n"
+            f"{catalog_summary}"
+        )
+
     def _should_use_text_tool_call_mode(self) -> bool:
         model_lower = (self.model_id or "").lower()
         provider_lower = (self.provider_id or "").lower()
@@ -985,6 +1377,8 @@ Please address this message and continue with your tasks.
         lines = [
             "## Available Tools",
             "Use only the following tools when emitting MiniMax XML tool calls.",
+            "This section is the authoritative callable schema for this turn.",
+            "Parameter names must match exactly. Never infer or rename arguments from the awareness catalog.",
         ]
         for tool in tools:
             fn = tool.get("function", {})
@@ -1010,30 +1404,17 @@ Please address this message and continue with your tasks.
 
         return "\n".join(lines)
     
-    async def _build_tools(self, agent: AgentInfo) -> List[Dict[str, Any]]:
+    async def _build_callable_tool_schema(
+        self,
+        agent: AgentInfo,
+        messages: Optional[List[MessageInfo]] = None,
+    ) -> List[Dict[str, Any]]:
         """Build tool definitions for LLM."""
-        tool_revision = ToolRegistry.revision()
-        cache_key = f"tools:{self.session.id}:{agent.name}:{self.provider_id}:{self.model_id}:{tool_revision}"
-        cached = self._static_cache.get(cache_key)
-        if cached is not None:
-            return list(cached)
+        selected_tool_infos, selection_metadata = await self._list_callable_tool_infos_for_turn(agent, messages or [])
+        await self._publish_turn_tools_event(selection_metadata)
 
-        # Tools that should not be exposed to LLM (internal use only)
-        # matching Flocks' activeTools.filter(x => x !== "invalid" && x !== "_noop")
-        excluded_tools = {"invalid", "_noop"}
-        
         tools = []
-        
-        for tool_info in ToolRegistry.list_tools():
-            # Skip excluded or disabled tools
-            if tool_info.name in excluded_tools:
-                continue
-            if not tool_info.enabled:
-                continue
-            
-            if not self._agent_allows_tool(agent, tool_info.name):
-                continue
-            
+        for tool_info in selected_tool_infos:
             # Get dynamic description for skill tool
             description = tool_info.description
             if tool_info.name == "skill":
@@ -1058,36 +1439,22 @@ Please address this message and continue with your tasks.
                 }
             }
             tools.append(tool_def)
-        
-        self._static_cache[cache_key] = list(tools)
-        return list(tools)
+
+        log.info("runner.tools_selected", {
+            "session_id": self.session.id,
+            "step": self._step,
+            "selected": len(tools),
+            "enabled": selection_metadata.get("enabledToolCount"),
+        })
+        return tools
     
-    def _agent_allows_tool(self, agent: AgentInfo, tool_name: str) -> bool:
-        """Check if agent allows a tool."""
-        if agent.name == "rex":
-            return True
-        
-        if hasattr(agent, 'permission') and agent.permission:
-            try:
-                from flocks.permission import PermissionNext, PermissionLevel
-                for rule in reversed(agent.permission):
-                    rule_perm = getattr(rule, "permission", None) or (rule.get("permission") if isinstance(rule, dict) else None)
-                    if not rule_perm:
-                        continue
-                    if PermissionNext._pattern_matches(tool_name, rule_perm):
-                        level = getattr(rule, "level", None) or (rule.get("level") if isinstance(rule, dict) else None)
-                        if isinstance(level, PermissionLevel):
-                            level_value = level.value
-                        else:
-                            level_value = str(level)
-                        if level_value == "deny":
-                            return False
-                        if level_value == "allow":
-                            return True
-            except Exception as _perm_err:
-                log.debug("runner.permission_check.fallback", {"tool": tool_name, "error": str(_perm_err)})
-        
-        return True
+    def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
+        """Check if agent statically declares a tool."""
+        tool = ToolRegistry.get(tool_name)
+        if tool is None:
+            return False
+        metadata = get_tool_catalog_metadata(tool_name, tool.info)
+        return agent_declares_tool(agent, tool_name) or metadata.always_load
     
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
@@ -1156,6 +1523,8 @@ Please address this message and continue with your tasks.
         """
         chat_messages = []
         ctx_window_tokens = self._get_context_window_tokens()
+        tool_result_refs: List[Dict[str, Any]] = []
+        turn_index = 0
         
         # Add system prompts
         if system_prompts:
@@ -1166,6 +1535,8 @@ Please address this message and continue with your tasks.
         
         # Convert each message with parts
         for msg in messages:
+            if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
+                turn_index += 1
             # Get message parts
             parts = await Message.parts(msg.id, self.session.id)
             
@@ -1276,14 +1647,9 @@ Please address this message and continue with your tasks.
                         tool_input = getattr(part.state, 'input', {})
                         
                         if part.state.status == "completed":
-                            # Check if this tool output was pruned (compacted)
-                            time_info = getattr(part.state, 'time', None)
-                            is_compacted = False
-                            if isinstance(time_info, dict) and time_info.get("compacted"):
-                                is_compacted = True
-
-                            if is_compacted:
-                                tool_output_str = "[Old tool result content cleared]"
+                            persisted_placeholder = self._get_persisted_tool_placeholder(part, tool_name)
+                            if persisted_placeholder:
+                                tool_output_str = persisted_placeholder
                             else:
                                 tool_output = getattr(part.state, 'output', '')
                                 if hasattr(part.state, 'get_output_str'):
@@ -1325,13 +1691,23 @@ Please address this message and continue with your tasks.
                                 tool_call_id=call_id,
                                 name=tool_name,
                             ))
+                            tool_result_refs.append({
+                                "chat_message": pending_tool_results[-1],
+                                "part": part,
+                                "message_id": msg.id,
+                                "tool_name": tool_name,
+                                "turn_index": turn_index,
+                                "char_count": len(tool_output_str),
+                                "compacted": bool(persisted_placeholder),
+                                "dirty": False,
+                            })
                             
                             log.debug("runner.to_chat_messages.tool_result_added", {
                                 "message_id": msg.id,
                                 "tool_name": tool_name,
                                 "call_id": call_id,
                                 "output_length": len(tool_output_str),
-                                "compacted": is_compacted,
+                                "compacted": bool(persisted_placeholder),
                             })
                         
                         elif part.state.status == "error":
@@ -1394,61 +1770,15 @@ Please address this message and continue with your tasks.
                         "has_error": hasattr(msg, 'error') and bool(msg.error),
                     })
         
-        # ------------------------------------------------------------------
-        # Total context budget enforcement (mirrors OpenClaw's
-        # enforceToolResultContextBudgetInPlace).
-        #
-        # After individual tool-result truncation, enforce an overall
-        # character budget.  If the combined context exceeds the budget,
-        # replace the OLDEST tool-result messages with a short placeholder
-        # until the total fits.  This handles the "many tools each near
-        # the single-tool limit" scenario that individual truncation
-        # cannot catch.
-        # ------------------------------------------------------------------
-        CONTEXT_INPUT_HEADROOM_RATIO = 0.75
-        CHARS_PER_TOKEN = 4
-        TOOL_COMPACT_PLACEHOLDER = "[compacted: tool output removed to free context]"
-
-        context_budget_chars = max(
-            4_096,
-            int(ctx_window_tokens * CHARS_PER_TOKEN * CONTEXT_INPUT_HEADROOM_RATIO),
-        )
-
-        def _estimate_msg_chars(m: ChatMessage) -> int:
-            c = m.content
-            if isinstance(c, str):
-                return len(c)
-            if isinstance(c, list):
-                return sum(len(str(b.get("text", ""))) if isinstance(b, dict) else len(str(b)) for b in c)
-            return 0
-
-        total_chars = sum(_estimate_msg_chars(m) for m in chat_messages)
-
-        if total_chars > context_budget_chars:
-            chars_to_free = total_chars - context_budget_chars
-            freed = 0
-            compacted_count = 0
-
-            for m in chat_messages:
-                if freed >= chars_to_free:
-                    break
-                if m.role != "tool":
-                    continue
-                before = _estimate_msg_chars(m)
-                if before <= len(TOOL_COMPACT_PLACEHOLDER):
-                    continue
-                m.content = TOOL_COMPACT_PLACEHOLDER
-                freed += before - len(TOOL_COMPACT_PLACEHOLDER)
-                compacted_count += 1
-
-            if compacted_count > 0:
-                log.info("runner.context_budget_enforced", {
-                    "total_chars_before": total_chars,
-                    "budget": context_budget_chars,
-                    "context_window": ctx_window_tokens,
-                    "freed_chars": freed,
-                    "compacted_tool_results": compacted_count,
-                })
+        budget_result = await self._apply_tool_result_budget(tool_result_refs, ctx_window_tokens)
+        if budget_result.get("compacted"):
+            log.info("runner.context_budget_enforced", {
+                "session_id": self.session.id,
+                "step": self._step,
+                "context_window": ctx_window_tokens,
+                "compacted_tool_results": budget_result.get("compacted", 0),
+                "persisted_tool_results": budget_result.get("persisted", 0),
+            })
 
         log.debug("runner.to_chat_messages.result", {
             "total_messages": len(chat_messages),
@@ -1607,11 +1937,14 @@ Please address this message and continue with your tasks.
                 "tool_count": len(tools),
             })
 
-        async for chunk in provider.chat_stream(
-            model_id=self.model_id,
-            messages=messages,
-            tools=provider_tools,
-            **provider_options,
+        async for chunk in _iter_with_chunk_timeout(
+            provider.chat_stream(
+                model_id=self.model_id,
+                messages=messages,
+                tools=provider_tools,
+                **provider_options,
+            ),
+            timeout_s=LLM_STREAM_CHUNK_TIMEOUT_S,
         ):
             chunk_counts["total"] += 1
             
@@ -1707,16 +2040,8 @@ Please address this message and continue with your tasks.
         reasoning = processor.get_reasoning_content()
         
         # Update message tokens if provider reported usage
-        if stream_usage:
-            tokens_update = {
-                "input": stream_usage.get("prompt_tokens", 0),
-                "output": stream_usage.get("completion_tokens", 0),
-                "reasoning": 0,
-                "cache": {
-                    "read": stream_usage.get("cache_read_input_tokens", 0),
-                    "write": stream_usage.get("cache_creation_input_tokens", 0),
-                },
-            }
+        tokens_update = self._build_tokens_update(stream_usage)
+        if tokens_update:
             try:
                 await Message.update(
                     self.session.id,
@@ -1784,6 +2109,7 @@ Please address this message and continue with your tasks.
                 action="continue",
                 content=content,
                 tool_calls=tool_calls_for_result,
+                usage=stream_usage,
             )
         
         self._end_observability(
@@ -1805,7 +2131,7 @@ Please address this message and continue with your tasks.
                 "finish_reason": processor.get_finish_reason(),
             },
         )
-        return StepResult(action="stop", content=content)
+        return StepResult(action="stop", content=content, usage=stream_usage)
     
     @staticmethod
     def _end_observability(
@@ -1852,6 +2178,47 @@ Please address this message and continue with your tasks.
             allowed = await self.callbacks.on_permission_request(request)
             if not allowed:
                 raise PermissionError(f"Permission denied: {request.permission}")
+            return
+
+        tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
+        if self.callbacks.event_publish_callback:
+            await self.callbacks.event_publish_callback("runtime.permission_gate", {
+                "sessionID": self.session.id,
+                "step": self._step,
+                "toolName": getattr(request, "permission", ""),
+                "alwaysLoad": tool_metadata.always_load,
+                "patterns": list(getattr(request, "patterns", None) or []),
+            })
+
+        from flocks.permission.next import PermissionNext
+        from flocks.permission.rule import PermissionRule, PermissionLevel
+
+        session_rules: List[PermissionRule] = []
+        for rule in getattr(self.session, "permission", None) or []:
+            raw_level = getattr(rule, "action", None) or getattr(rule, "level", None) or "ask"
+            try:
+                level = PermissionLevel(str(raw_level))
+            except Exception:
+                level = PermissionLevel.ASK
+            session_rules.append(PermissionRule(
+                permission=getattr(rule, "permission", "*"),
+                level=level,
+                pattern=getattr(rule, "pattern", "*"),
+            ))
+
+        metadata = dict(getattr(request, "metadata", None) or {})
+        metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
+        metadata.setdefault("sessionID", self.session.id)
+
+        await PermissionNext.ask(
+            session_id=self.session.id,
+            permission=request.permission,
+            patterns=list(getattr(request, "patterns", None) or []),
+            ruleset=session_rules,
+            metadata=metadata,
+            always=list(getattr(request, "always", None) or []),
+            tool={"name": request.permission},
+        )
 
 
 async def run_session(

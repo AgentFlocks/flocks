@@ -41,10 +41,10 @@ import shutil
 import stat as stat_module
 import zipfile
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Literal
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from flocks.workspace.manager import WorkspaceManager
@@ -57,6 +57,12 @@ log = Log.create(service="workspace.routes")
 # Upload size limit read at request time so env-var changes take effect
 # without restarting the process.
 _DEFAULT_MAX_UPLOAD_MB = 100
+_ALLOWED_UPLOAD_EXTENSIONS = {
+    ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
+    ".pdf", ".doc", ".docx",
+}
+_ALLOWED_UPLOAD_LABEL = "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx"
+_MAX_UPLOAD_RENAME_ATTEMPTS = 100
 
 
 def _max_upload_bytes() -> int:
@@ -69,6 +75,30 @@ def _get_manager() -> WorkspaceManager:
     mgr = WorkspaceManager.get_instance()
     mgr.ensure_dirs()
     return mgr
+
+
+def _is_allowed_upload_filename(filename: str) -> bool:
+    return Path(filename).suffix.lower() in _ALLOWED_UPLOAD_EXTENSIONS
+
+
+def _resolve_upload_target(dest_dir: Path, filename: str, *, auto_rename: bool) -> Path:
+    candidate = dest_dir / Path(filename).name
+    if not auto_rename or not candidate.exists():
+        return candidate
+
+    stem = candidate.stem
+    suffix = candidate.suffix
+    counter = 1
+    while counter <= _MAX_UPLOAD_RENAME_ATTEMPTS:
+        renamed = dest_dir / f"{stem} ({counter}){suffix}"
+        if not renamed.exists():
+            return renamed
+        counter += 1
+
+    raise ValueError(
+        f"Too many conflicting filenames for upload: {filename}. "
+        "Please rename the file and try again."
+    )
 
 
 def _node_from_path(path: Path, root: Path) -> WorkspaceNode:
@@ -214,6 +244,7 @@ async def delete_dir(
 @router.post("/upload", summary="Upload file(s)")
 async def upload_files(
     dest: str = Query("", description="Destination directory (relative)"),
+    purpose: Optional[Literal["chat"]] = Query(None, description="Upload purpose"),
     files: List[UploadFile] = File(...),
 ):
     mgr = _get_manager()
@@ -227,10 +258,19 @@ async def upload_files(
     max_mb = max_bytes // (1024 * 1024)
 
     results = []
+    conflict_detail: str | None = None
     for upload in files:
         raw_name: Optional[str] = upload.filename
         if not raw_name:
             results.append({"name": "", "error": "Filename is missing"})
+            continue
+
+        filename = Path(raw_name).name  # strip any dir component from client
+        if purpose == "chat" and not _is_allowed_upload_filename(filename):
+            results.append({
+                "name": filename,
+                "error": f"Unsupported file type (allowed: {_ALLOWED_UPLOAD_LABEL})",
+            })
             continue
 
         # Read file in chunks to enforce size limit without loading entire
@@ -253,24 +293,33 @@ async def upload_files(
             continue
 
         content = b"".join(chunks)
-        filename = Path(raw_name).name  # strip any dir component from client
-        target = dest_dir / filename
+        try:
+            target = _resolve_upload_target(dest_dir, filename, auto_rename=purpose == "chat")
+        except ValueError as exc:
+            message = str(exc)
+            results.append({"name": filename, "error": message})
+            conflict_detail = message
+            continue
         target.write_bytes(content)
 
         is_text = WorkspaceManager.is_text_file(target)
         log.info("workspace.file.uploaded", {
-            "name": filename,
+            "name": target.name,
             "size": total,
             "dest": dest,
+            "purpose": purpose,
             "is_text": is_text,
         })
         results.append({
-            "name": filename,
+            "name": target.name,
             "path": str(target.relative_to(mgr.get_workspace_dir())),
             "size": total,
             "is_text_file": is_text,
             "preview_warning": None if is_text else "Binary file — download only",
         })
+
+    if conflict_detail is not None:
+        return JSONResponse(status_code=409, content={"detail": conflict_detail, "uploaded": results})
 
     return {"uploaded": results}
 

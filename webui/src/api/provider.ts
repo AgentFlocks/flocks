@@ -73,7 +73,7 @@ export const providerAPI = {
   listApiServices: () =>
     client.get<APIServiceSummary[]>('/api/provider/api-services'),
 
-  updateApiService: (id: string, data: { enabled: boolean }) =>
+  updateApiService: (id: string, data: { enabled: boolean; verify_ssl?: boolean }) =>
     client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data),
 
   deleteApiService: (id: string) =>

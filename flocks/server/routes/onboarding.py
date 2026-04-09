@@ -141,7 +141,7 @@ ONBOARDING_REGION_PRESETS: Dict[Region, Dict[str, Any]] = {
     "cn": {
         "activation_url": "https://x.threatbook.com/flocks/activate",
         "threatbook_llm_provider_id": "threatbook-cn-llm",
-        "threatbook_default_model_id": "minimax-m2.7",
+        "threatbook_default_model_id": "qwen3.6-plus",
         "threatbook_api_service_id": "threatbook-cn",
         "threatbook_mcp_name": "threatbook_mcp",
         "threatbook_mcp_url": "https://mcp.threatbook.cn/mcp?apikey={api_key}",
@@ -151,7 +151,7 @@ ONBOARDING_REGION_PRESETS: Dict[Region, Dict[str, Any]] = {
     "global": {
         "activation_url": "https://threatbook.io/flocks/activate",
         "threatbook_llm_provider_id": "threatbook-io-llm",
-        "threatbook_default_model_id": "minimax-m2.7",
+        "threatbook_default_model_id": "qwen3.6-plus",
         "threatbook_api_service_id": "threatbook-io",
         "threatbook_mcp_name": None,
         "threatbook_mcp_url": None,

@@ -30,7 +30,7 @@ export const statsApi = {
   getSystemStats: async (): Promise<SystemStats> => {
     try {
       const [taskDash, agents, workflows, skills, tools, providers, health] = await Promise.all([
-        apiClient.get('/api/tasks/dashboard').catch(() => ({ data: {} })),
+        apiClient.get('/api/task-system/dashboard').catch(() => ({ data: {} })),
         apiClient.get('/api/agent').catch(() => ({ data: [] })),
         apiClient.get('/api/workflow').catch(() => ({ data: [] })),
         apiClient.get('/api/skills').catch(() => ({ data: [] })),

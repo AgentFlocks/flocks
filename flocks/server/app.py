@@ -142,6 +142,8 @@ async def lifespan(app: FastAPI):
         await TaskManager.start()
         log.info("task_manager.started")
     except Exception as e:
+        from flocks.task.manager import TaskManager
+        TaskManager.mark_start_failed(e)
         log.warning("task_manager.start.failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
@@ -489,7 +491,7 @@ from flocks.server.routes.custom_provider import router as custom_provider_route
 # Onboarding routes
 from flocks.server.routes.onboarding import router as onboarding_router
 # Task Center routes
-from flocks.server.routes.task import router as task_router
+from flocks.server.routes.task_entities import router as task_entities_router
 # Background Task routes (agent-spawned async tasks)
 from flocks.server.routes.background_task import router as background_task_router
 # Channel routes (webhook + status)
@@ -538,7 +540,7 @@ app.include_router(event_router, prefix="/api/event", tags=["Event"])
 # WebUI: Question reply routes (for production reverse proxies forwarding /api/*)
 app.include_router(question_router, prefix="/api/question", tags=["Question"])
 # Task Center
-app.include_router(task_router, prefix="/api/tasks", tags=["Task"])
+app.include_router(task_entities_router, prefix="/api", tags=["TaskV2"])
 # Background Tasks (agent-spawned async tasks)
 app.include_router(background_task_router, prefix="/api/background-task", tags=["BackgroundTask"])
 # Channel (webhook callbacks + status)

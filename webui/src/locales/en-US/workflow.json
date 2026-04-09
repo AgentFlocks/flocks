@@ -132,6 +132,7 @@
       "inputParams": "Input Parameters (JSON)",
       "running": "Running...",
       "testRun": "Test Run",
+      "stopRun": "Stop Run",
       "outputResults": "Output Results",
       "executionLog": "Execution Log ({{count}})",
       "jsonFormatError": "JSON format error, please check input",
@@ -312,6 +313,9 @@
       "statusSuccess": "Success",
       "statusError": "Failed",
       "statusTimeout": "Timeout",
+      "statusCancelled": "Cancelled",
+      "stop": "Stop",
+      "cancelledMessage": "Execution was stopped by the user",
       "stepLabel": "Step {{num}}"
     },
     "joinModeFlat": "Flat — Flatten Merge",

@@ -55,6 +55,7 @@
   "defaultModelCleared": "默认模型已自动清除",
   "providerRemoved": "Provider 已移除",
   "removeFailed": "移除失败",
+  "providerAdded": "供应商已添加",
   "modelAdded": "模型已添加",
   "modelDeleted": "模型已删除",
   "modelEnabled": "模型已启用",
@@ -112,5 +113,14 @@
     "noModelsToTest": "没有已启用的模型可测试",
     "batchTestDone": "批量测试完成",
     "batchTestSummary": "{{success}} 成功, {{failed}} 失败"
+  },
+  "wizard": {
+    "providerSaved": "Provider 已保存",
+    "providerSavedHint": "已成功添加 {{name}}，你可以继续添加自定义模型或完成配置",
+    "noModelsNote": "此 Provider 没有预定义的模型，请添加自定义模型以开始使用",
+    "addCustomModel": "添加自定义模型",
+    "skipForNow": "跳过",
+    "addAnother": "再添加一个",
+    "modelsAdded": "已添加 {{count}} 个模型"
   }
 }

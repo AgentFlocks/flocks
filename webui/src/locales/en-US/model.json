@@ -55,6 +55,7 @@
   "defaultModelCleared": "Default model has been cleared",
   "providerRemoved": "Provider removed",
   "removeFailed": "Remove failed",
+  "providerAdded": "Provider added",
   "modelAdded": "Model added",
   "modelDeleted": "Model deleted",
   "modelEnabled": "Model enabled",
@@ -112,5 +113,14 @@
     "noModelsToTest": "No enabled models to test",
     "batchTestDone": "Batch test complete",
     "batchTestSummary": "{{success}} succeeded, {{failed}} failed"
+  },
+  "wizard": {
+    "providerSaved": "Provider Saved",
+    "providerSavedHint": "Successfully added {{name}}. You can add custom models or finish setup.",
+    "noModelsNote": "This provider has no predefined models. Please add a custom model to get started.",
+    "addCustomModel": "Add Custom Model",
+    "skipForNow": "Skip",
+    "addAnother": "Add Another",
+    "modelsAdded": "{{count}} model(s) added"
   }
 }

@@ -848,11 +848,13 @@ class APIServiceSummary(BaseModel):
     description: Optional[str] = None
     description_cn: Optional[str] = None
     builtin: bool = False
+    verify_ssl: bool = False
 
 
 class APIServiceUpdateRequest(BaseModel):
     """API service update request."""
     enabled: bool = Field(..., description="Enable or disable the API service")
+    verify_ssl: Optional[bool] = Field(None, description="SSL verification for HTTP requests (default: False)")
 
 
 class APIServiceCredentialField(BaseModel):
@@ -1233,6 +1235,13 @@ def _build_api_service_summary(
     matched_tools = _get_api_service_tool_infos(provider_id)
 
     status = "disabled" if not enabled else cached_status.get("status", "unknown")
+    raw_config = ConfigWriter.get_api_service_raw(provider_id) or {}
+    # "verify_ssl" is canonical; fall back to legacy "ssl_verify" for backward compatibility
+    verify_ssl_raw = raw_config.get("verify_ssl", raw_config.get("ssl_verify", meta.get("verify_ssl", False)))
+    if isinstance(verify_ssl_raw, str):
+        verify_ssl = verify_ssl_raw.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        verify_ssl = bool(verify_ssl_raw)
     return APIServiceSummary(
         id=provider_id,
         name=meta.get("name", provider_id),
@@ -1245,6 +1254,7 @@ def _build_api_service_summary(
         description=meta.get("description"),
         description_cn=meta.get("description_cn"),
         builtin=_is_api_service_builtin(provider_id, matched_tools),
+        verify_ssl=verify_ssl,
     )
 
 
@@ -1278,6 +1288,8 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
     try:
         existing = ConfigWriter.get_api_service_raw(provider_id) or {}
         existing["enabled"] = request.enabled
+        if request.verify_ssl is not None:
+            existing["verify_ssl"] = request.verify_ssl
         ConfigWriter.set_api_service(provider_id, existing)
 
         matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
@@ -1298,6 +1310,7 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         log.info("api_service.updated", {
             "provider_id": provider_id,
             "enabled": request.enabled,
+            "verify_ssl": request.verify_ssl,
             "matched_tools": matched_count,
         })
         return _build_api_service_summary(provider_id, statuses)

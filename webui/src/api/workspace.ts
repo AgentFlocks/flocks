@@ -29,6 +29,8 @@ export interface UploadResult {
   error?: string;
 }
 
+export type UploadPurpose = 'chat';
+
 // ─── API ───────────────────────────────────────────────────────────────────
 
 export const workspaceAPI = {
@@ -46,15 +48,19 @@ export const workspaceAPI = {
     client.delete<{ path: string; deleted: boolean }>('/api/workspace/dir', { params: { path } }),
 
   // File operations
-  upload: (files: File[], dest = '') => {
+  upload: (files: File[], dest = '', purpose?: UploadPurpose) => {
     const form = new FormData();
     files.forEach((f) => form.append('files', f));
     // Set Content-Type to undefined to remove the axios instance default
     // "application/json", allowing XHR to automatically set
     // "multipart/form-data; boundary=----XYZ".
+    // Uploads can legitimately exceed the global 30s API timeout for large PDFs/DOCs,
+    // so disable per-request timeout here and let the browser keep the connection open.
     return client.post<{ uploaded: UploadResult[] }>('/api/workspace/upload', form, {
-      params: { dest },
+      params: { dest, purpose },
       headers: { 'Content-Type': undefined },
+      timeout: 0,
+      validateStatus: (status) => (status >= 200 && status < 300) || status === 409,
     });
   },
 

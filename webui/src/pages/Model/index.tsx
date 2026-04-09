@@ -7,6 +7,7 @@ import {
   Plus, ToggleLeft, ToggleRight,
   ChevronDown, Check, AlertCircle, Loader2,
   X, Shield, Pencil, Star, AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -94,6 +95,7 @@ export default function ModelPage() {
   const sseRefetchTimer = useRef<number | null>(null);
   const selectedProviderRef = useRef(selectedProvider);
   selectedProviderRef.current = selectedProvider;
+  const providerLoadSeqRef = useRef(0);
   const handleSelectProviderRef = useRef<(p: EnrichedProvider) => Promise<void>>(null!);
 
   useSSE({
@@ -173,38 +175,51 @@ export default function ModelPage() {
   // ==================== Handlers ====================
 
   const handleSelectProvider = useCallback(async (provider: EnrichedProvider) => {
+    const requestSeq = ++providerLoadSeqRef.current;
     setSelectedProvider(provider);
+    selectedProviderRef.current = provider;
     sessionStorage.setItem('model_page_selected_provider', provider.id);
+    setCredentials(null);
+    setProviderModels([]);
+    setLoadingModels(true);
 
     try {
-      setLoadingModels(true);
+      const modelsRes = await modelV2API
+        .listDefinitions({ provider: provider.id })
+        .catch(() => ({ data: { models: [], total: 0 } }));
 
-      const [modelsRes, credentialsRes] = await Promise.all([
-        modelV2API.listDefinitions({ provider: provider.id }).catch(() => ({ data: { models: [], total: 0 } })),
-        providerAPI.getCredentials(provider.id).catch(() => ({ data: null })),
-      ]);
+      if (providerLoadSeqRef.current !== requestSeq) return;
 
       const models = modelsRes.data.models || [];
       setProviderModels(models);
-      setCredentials(credentialsRes.data);
 
       const enabledMap: Record<string, boolean> = {};
-      await Promise.all(
-        models.map(async (m) => {
-          try {
-            const res = await modelSettingsAPI.get(provider.id, m.id);
-            enabledMap[`${provider.id}/${m.id}`] = res.data.enabled !== false;
-          } catch {
-            enabledMap[`${provider.id}/${m.id}`] = true;
-          }
-        })
-      );
+      const [credentialsResult] = await Promise.allSettled([
+        providerAPI.getCredentials(provider.id),
+        Promise.allSettled(
+          models.map(async (m) => {
+            try {
+              const res = await modelSettingsAPI.get(provider.id, m.id);
+              enabledMap[`${provider.id}/${m.id}`] = res.data.enabled !== false;
+            } catch {
+              enabledMap[`${provider.id}/${m.id}`] = true;
+            }
+          })
+        ),
+      ]);
+
+      if (providerLoadSeqRef.current !== requestSeq) return;
+
+      setCredentials(credentialsResult.status === 'fulfilled' ? credentialsResult.value.data : null);
       setModelEnabledMap(prev => ({ ...prev, ...enabledMap }));
     } catch {
+      if (providerLoadSeqRef.current !== requestSeq) return;
       setProviderModels([]);
       setCredentials(null);
     } finally {
-      setLoadingModels(false);
+      if (providerLoadSeqRef.current === requestSeq) {
+        setLoadingModels(false);
+      }
     }
   }, []);
   handleSelectProviderRef.current = handleSelectProvider;
@@ -446,7 +461,12 @@ export default function ModelPage() {
                   isSelected={selectedProvider?.id === provider.id}
                   connStatus={connectionStatus[provider.id] || 'unknown'}
                   onClick={() => handleSelectProvider(provider)}
-                  onConfigure={() => { setSelectedProvider(provider); setShowConfigDialog(true); }}
+                  onConfigure={async () => {
+                    await handleSelectProvider(provider);
+                    if (selectedProviderRef.current?.id === provider.id) {
+                      setShowConfigDialog(true);
+                    }
+                  }}
                 />
               ))
             )}
@@ -1008,6 +1028,18 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
+  // ── Wizard step management ──
+  const [step, setStep] = useState<'provider' | 'success' | 'add-model'>('provider');
+  const [savedProviderId, setSavedProviderId] = useState<string | null>(null);
+  const [savedProviderName, setSavedProviderName] = useState('');
+  const [addedModelCount, setAddedModelCount] = useState(0);
+
+  // ── Model form state (for add-model step) ──
+  const modelForm = useModelForm();
+  const [addingModel, setAddingModel] = useState(false);
+  const [modelTestResult, setModelTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
+  const [modelTesting, setModelTesting] = useState(false);
+
   // Load catalog
   useEffect(() => {
     catalogAPI.list()
@@ -1123,7 +1155,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     }
   };
 
-  // Save — catalog provider
+  // Save — catalog provider (transitions to next wizard step instead of closing)
   const handleSaveCatalog = async () => {
     if (!selectedCatalogId) { toast.warning('Please select a Provider'); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
@@ -1140,8 +1172,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
           api_key: apiKey.trim() || 'not-needed',
           description: description.trim() || selectedCatalog?.description || undefined,
         });
-        toast.success(t('modelAdded'), providerName.trim());
-        onAdded(created.data.id);
+        toast.success(t('providerAdded'), providerName.trim());
+        setSavedProviderId(created.data.id);
+        setSavedProviderName(providerName.trim());
+        setStep('add-model');
         return;
       }
 
@@ -1153,8 +1187,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
         await Promise.all(unselected.map(id => modelV2API.deleteDefinition(selectedCatalogId, id).catch(() => {})));
       }
-      toast.success(t('modelAdded'), displayName);
-      onAdded(selectedCatalogId);
+      toast.success(t('providerAdded'), displayName);
+      setSavedProviderId(selectedCatalogId);
+      setSavedProviderName(displayName);
+      setStep('success');
     } catch (err: any) {
       toast.error(t('deleteFailed'), err.response?.data?.detail || err.message);
     } finally {
@@ -1164,8 +1200,126 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 
   const handleSave = () => handleSaveCatalog();
 
+  // Complete wizard — notify parent to refresh & close
+  const handleComplete = () => {
+    onAdded(savedProviderId || undefined);
+  };
+
+  // Close handler — if provider was already saved, treat as complete
+  const handleWizardClose = () => {
+    if (savedProviderId) {
+      onAdded(savedProviderId);
+    } else {
+      onClose();
+    }
+  };
+
+  // Add model (wizard step 2)
+  const handleAddModel = async () => {
+    if (!savedProviderId || !modelForm.isValid) return;
+    try {
+      setAddingModel(true);
+      setModelTestResult(null);
+      const payload = modelForm.toPayload();
+      await modelV2API.createDefinition(savedProviderId, payload);
+      setAddedModelCount(prev => prev + 1);
+      toast.success(t('modelAdded'), `${payload.name} (${payload.model_id})`);
+
+      setModelTesting(true);
+      try {
+        const res = await providerAPI.testCredentials(savedProviderId, payload.model_id);
+        setModelTestResult({
+          success: res.data.success,
+          message: res.data.success
+            ? `${t('status.connected')}${res.data.latency_ms ? ` (${res.data.latency_ms}ms)` : ''}`
+            : (res.data.error || res.data.message || t('form.testFailed')),
+          latency: res.data.latency_ms,
+        });
+      } catch (err: any) {
+        setModelTestResult({ success: false, message: err.response?.data?.detail || 'Request failed' });
+      } finally {
+        setModelTesting(false);
+      }
+    } catch (err: any) {
+      toast.error(t('operationFailed'), err.response?.data?.detail || err.message);
+    } finally {
+      setAddingModel(false);
+    }
+  };
+
+  const resetModelFormState = () => {
+    modelForm.reset();
+    setModelTestResult(null);
+    setModelTesting(false);
+  };
+
   const canSave = !!selectedCatalogId && (selectedCatalogId !== 'openai-compatible' || !!providerName.trim());
   const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible';
+
+  // Dynamic EntitySheet props based on wizard step
+  const getSheetProps = () => {
+    switch (step) {
+      case 'provider':
+        return {
+          submitDisabled: !canSave,
+          submitLoading: saving || testing,
+          submitLabel: 'Save',
+          onSubmit: handleSave,
+          footerLeft: undefined as React.ReactNode,
+        };
+      case 'success':
+        return {
+          submitDisabled: false,
+          submitLoading: false,
+          submitLabel: t('form.done'),
+          onSubmit: handleComplete,
+          footerLeft: (
+            <button
+              onClick={() => setStep('add-model')}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              {t('wizard.addCustomModel')}
+            </button>
+          ),
+        };
+      case 'add-model': {
+        if (modelTestResult) {
+          return {
+            submitDisabled: false,
+            submitLoading: false,
+            submitLabel: t('form.done'),
+            onSubmit: handleComplete,
+            footerLeft: (
+              <button
+                onClick={resetModelFormState}
+                className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-700 border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                {t('wizard.addAnother')}
+              </button>
+            ),
+          };
+        }
+        return {
+          submitDisabled: !modelForm.isValid || addingModel || modelTesting,
+          submitLoading: addingModel || modelTesting,
+          submitLabel: t('form.addModelBtn'),
+          onSubmit: handleAddModel,
+          footerLeft: (
+            <button
+              onClick={handleComplete}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors"
+            >
+              {t('wizard.skipForNow')}
+            </button>
+          ),
+        };
+      }
+    }
+  };
+
+  const sheetProps = getSheetProps();
 
   const rexContext = `你是 AI 模型配置助手，帮助用户添加和配置 AI 模型 Provider。
 
@@ -1192,251 +1346,293 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     <EntitySheet
       open
       mode="create"
-      entityType={t('form.model')}
+      entityType={step === 'add-model' ? 'Custom Model' : t('form.model')}
+      entityName={step !== 'provider' ? savedProviderName : undefined}
       icon={<Brain className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={!canSave}
-      submitLoading={saving || testing}
-      submitLabel="Save"
-      onClose={onClose}
-      onSubmit={handleSave}
+      submitDisabled={sheetProps.submitDisabled}
+      submitLoading={sheetProps.submitLoading}
+      submitLabel={sheetProps.submitLabel}
+      onClose={handleWizardClose}
+      onSubmit={sheetProps.onSubmit}
+      footerLeft={sheetProps.footerLeft}
       initialTab="form"
     >
-      <div className="space-y-0">
-        <div className="space-y-5">
-          {loadingCatalog ? (
-              <div className="flex items-center justify-center py-12"><LoadingSpinner /></div>
-            ) : (
-              <>
-                {/* Provider Selector Dropdown */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                    {t('form.providerType')} <span className="text-slate-500">*</span>
-                  </label>
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => setShowDropdown(!showDropdown)}
-                      className="w-full flex items-center justify-between px-3 py-2.5 border border-gray-300 rounded-lg text-left text-sm hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
-                    >
-                      {selectedCatalog ? (
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium">{selectedCatalog.name}</span>
-                          <span className="text-gray-400 text-xs">
-                            {t('status.models', { count: selectedCatalog.model_count })}
-                          </span>
-                          {connectedSet.has(selectedCatalog.id) && !selectedCatalog.allow_multiple && (
-                            <span className="text-amber-600 text-xs">({t('form.alreadyAdded')})</span>
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-gray-400">{t('form.selectProvider')}</span>
-                      )}
-                      <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
-                    </button>
+      {/* ── Step 1: Provider Configuration ── */}
+      {step === 'provider' && (
+        <div className="space-y-0">
+          <div className="space-y-5">
+            {loadingCatalog ? (
+                <div className="flex items-center justify-center py-12"><LoadingSpinner /></div>
+              ) : (
+                <>
+                  {/* Provider Selector Dropdown */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                      {t('form.providerType')} <span className="text-slate-500">*</span>
+                    </label>
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => setShowDropdown(!showDropdown)}
+                        className="w-full flex items-center justify-between px-3 py-2.5 border border-gray-300 rounded-lg text-left text-sm hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-slate-400 bg-white"
+                      >
+                        {selectedCatalog ? (
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium">{selectedCatalog.name}</span>
+                            <span className="text-gray-400 text-xs">
+                              {t('status.models', { count: selectedCatalog.model_count })}
+                            </span>
+                            {connectedSet.has(selectedCatalog.id) && !selectedCatalog.allow_multiple && (
+                              <span className="text-amber-600 text-xs">({t('form.alreadyAdded')})</span>
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">{t('form.selectProvider')}</span>
+                        )}
+                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`} />
+                      </button>
 
-                    {showDropdown && (
-                      <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
-                        <div className="p-2 border-b border-gray-100">
-                          <div className="relative">
-                            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
-                            <input
-                              type="text"
-                              value={dropdownSearch}
-                              onChange={e => setDropdownSearch(e.target.value)}
-                              placeholder={t('form.searchProvider')}
-                              className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-slate-400"
-                              autoFocus
-                            />
+                      {showDropdown && (
+                        <div className="absolute z-20 mt-1 w-full bg-white border border-gray-200 rounded-lg shadow-lg max-h-[50vh] overflow-hidden">
+                          <div className="p-2 border-b border-gray-100">
+                            <div className="relative">
+                              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+                              <input
+                                type="text"
+                                value={dropdownSearch}
+                                onChange={e => setDropdownSearch(e.target.value)}
+                                placeholder={t('form.searchProvider')}
+                                className="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-slate-400"
+                                autoFocus
+                              />
+                            </div>
+                          </div>
+                          <div className="overflow-y-auto max-h-[calc(50vh-3rem)]">
+                            {filteredDropdownItems.length === 0 ? (
+                              <div className="px-3 py-4 text-center text-sm text-gray-500">{t('form.noResults')}</div>
+                            ) : (
+                              filteredDropdownItems.map(p => {
+                                const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
+                                return (
+                                  <button
+                                    key={p.id}
+                                    type="button"
+                                    disabled={alreadyAdded}
+                                    onClick={() => handleSelectCatalogProvider(p.id)}
+                                    className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-slate-50 transition-colors ${
+                                      alreadyAdded ? 'opacity-40 cursor-not-allowed' : ''
+                                    } ${selectedCatalogId === p.id ? 'bg-slate-100' : ''}`}
+                                  >
+                                    <div className="flex-1 min-w-0">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-medium text-gray-900">{p.name}</span>
+                                        {alreadyAdded && (
+                                          <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[9px] rounded font-medium">
+                                            {t('form.alreadyAdded')}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
+                                    </div>
+                                    <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
+                                    {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
+                                  </button>
+                                );
+                              })
+                            )}
                           </div>
                         </div>
-                        <div className="overflow-y-auto max-h-[calc(50vh-3rem)]">
-                          {filteredDropdownItems.length === 0 ? (
-                            <div className="px-3 py-4 text-center text-sm text-gray-500">{t('form.noResults')}</div>
-                          ) : (
-                            filteredDropdownItems.map(p => {
-                              const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
-                              return (
-                                <button
-                                  key={p.id}
-                                  type="button"
-                                  disabled={alreadyAdded}
-                                  onClick={() => handleSelectCatalogProvider(p.id)}
-                                  className={`w-full flex items-center gap-3 px-3 py-2.5 text-left text-sm hover:bg-slate-50 transition-colors ${
-                                    alreadyAdded ? 'opacity-40 cursor-not-allowed' : ''
-                                  } ${selectedCatalogId === p.id ? 'bg-slate-100' : ''}`}
-                                >
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-medium text-gray-900">{p.name}</span>
-                                      {alreadyAdded && (
-                                        <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[9px] rounded font-medium">
-                                          {t('form.alreadyAdded')}
-                                        </span>
-                                      )}
-                                    </div>
-                                    <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
-                                  </div>
-                                  <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
-                                  {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
-                                </button>
-                              );
-                            })
-                          )}
-                        </div>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
-                </div>
 
-                {/* Catalog provider form */}
-                {selectedCatalog && (
-                  <>
-                    {selectedCatalogId === 'openai-compatible' && (
-                      <div>
+                  {/* Catalog provider form */}
+                  {selectedCatalog && (
+                    <>
+                      {selectedCatalogId === 'openai-compatible' && (
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Provider Name
+                            <span className="text-slate-500 ml-1">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            value={providerName}
+                            onChange={e => setProviderName(e.target.value)}
+                            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                            placeholder="e.g. SiliconFlow, LM Studio, My API"
+                          />
+                          <p className="mt-1 text-xs text-gray-500">
+                            用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。
+                          </p>
+                        </div>
+                      )}
+
+                      <div className="col-span-2">
                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                          Provider Name
-                          <span className="text-slate-500 ml-1">*</span>
+                          Base URL
+                          <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
                         </label>
                         <input
                           type="text"
-                          value={providerName}
-                          onChange={e => setProviderName(e.target.value)}
+                          value={baseUrl}
+                          onChange={e => setBaseUrl(e.target.value)}
                           className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                          placeholder="e.g. SiliconFlow, LM Studio, My API"
+                          placeholder={selectedCatalog.default_base_url || 'https://api.example.com/v1'}
                         />
-                        <p className="mt-1 text-xs text-gray-500">
-                          用于创建独立的 OpenAI-compatible Provider 实例，不会覆盖已有配置。
-                        </p>
                       </div>
-                    )}
 
-                    <div className="col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Base URL
-                        <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
-                      </label>
-                      <input
-                        type="text"
-                        value={baseUrl}
-                        onChange={e => setBaseUrl(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                        placeholder={selectedCatalog.default_base_url || 'https://api.example.com/v1'}
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        API Key
-                        {selectedCatalogId !== 'ollama' && <span className="text-slate-500"> *</span>}
-                        {selectedCatalogId === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showApiKey ? 'text' : 'password'}
-                          value={apiKey}
-                          onChange={e => setApiKey(e.target.value)}
-                          className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-                          placeholder={credentialFields.find(f => f.name === 'api_key')?.placeholder || 'sk-...'}
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowApiKey(!showApiKey)}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
-                          title={showApiKey ? t('form.hide') : t('form.show')}
-                        >
-                          {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-
-                    {testResult && (
-                      <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
-                        testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
-                      }`}>
-                        {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
-                        <span>{testResult.message}</span>
-                      </div>
-                    )}
-
-                    {selectedCatalog.models.length > 0 && (
                       <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label className="text-sm font-medium text-gray-700">
-                            {t('form.availableModels')}
-                            <span className="text-gray-400 font-normal ml-1">
-                              ({selectedModelIds.size}/{selectedCatalog.models.length} {t('form.selected')})
-                            </span>
-                          </label>
-                          <button type="button" onClick={handleToggleAllModels} className="text-xs text-slate-600 hover:text-slate-800">
-                            {selectedModelIds.size === selectedCatalog.models.length ? t('form.deselectAll') : t('form.selectAll')}
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                          API Key
+                          {selectedCatalogId !== 'ollama' && <span className="text-slate-500"> *</span>}
+                          {selectedCatalogId === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showApiKey ? 'text' : 'password'}
+                            value={apiKey}
+                            onChange={e => setApiKey(e.target.value)}
+                            className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+                            placeholder={credentialFields.find(f => f.name === 'api_key')?.placeholder || 'sk-...'}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-gray-400 hover:text-gray-600 rounded"
+                            title={showApiKey ? t('form.hide') : t('form.show')}
+                          >
+                            {showApiKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                           </button>
                         </div>
-                        <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
-                          {selectedCatalog.models.map(model => (
-                            <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={selectedModelIds.has(model.id)}
-                                onChange={() => handleToggleModel(model.id)}
-                                className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
-                              />
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center gap-2">
-                                  <span className="text-sm font-medium text-gray-900">{model.name}</span>
-                                  <CatalogModelBadges model={model} />
-                                </div>
-                                <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                                  <span className="font-mono">{model.id}</span>
-                                  {model.limits && (
-                                    <span>
-                                      {model.limits.context_window >= 1000000
-                                        ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
-                                        : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
-                                    </span>
-                                  )}
-                                  {model.pricing && model.pricing.input > 0 && (
-                                    <span>
-                                      {model.pricing.currency === 'CNY' ? '¥' : '$'}
-                                      {model.pricing.input}/{model.pricing.currency === 'CNY' ? '¥' : '$'}{model.pricing.output}/M
-                                    </span>
-                                  )}
-                                  {model.pricing && model.pricing.input === 0 && (
-                                    <span className="text-green-600">{t('status.free')}</span>
-                                  )}
-                                </div>
-                              </div>
-                            </label>
-                          ))}
-                        </div>
                       </div>
-                    )}
 
-                    <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                      <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
-                      <p className="text-xs text-slate-700">
-                        {t('form.credentialNote')}
-                      </p>
-                    </div>
-                  </>
-                )}
-              </>
-            )}
-        </div>
+                      {testResult && (
+                        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+                          testResult.success ? 'bg-green-50 text-green-800 border border-green-200' : 'bg-red-50 text-red-800 border border-red-200'
+                        }`}>
+                          {testResult.success ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
+                          <span>{testResult.message}</span>
+                        </div>
+                      )}
 
-        {/* Test Connection Button (inside form) */}
-        <div className="pt-2">
-          <button
-            onClick={handleTest}
-            disabled={!canTest || testing || saving}
-            className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
-          >
-            {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
-            {testing ? t('form.testingConnection') : t('form.testConnection')}
-          </button>
+                      {selectedCatalog.models.length > 0 && (
+                        <div>
+                          <div className="flex items-center justify-between mb-2">
+                            <label className="text-sm font-medium text-gray-700">
+                              {t('form.availableModels')}
+                              <span className="text-gray-400 font-normal ml-1">
+                                ({selectedModelIds.size}/{selectedCatalog.models.length} {t('form.selected')})
+                              </span>
+                            </label>
+                            <button type="button" onClick={handleToggleAllModels} className="text-xs text-slate-600 hover:text-slate-800">
+                              {selectedModelIds.size === selectedCatalog.models.length ? t('form.deselectAll') : t('form.selectAll')}
+                            </button>
+                          </div>
+                          <div className="border border-gray-200 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-100">
+                            {selectedCatalog.models.map(model => (
+                              <label key={model.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedModelIds.has(model.id)}
+                                  onChange={() => handleToggleModel(model.id)}
+                                  className="w-4 h-4 text-slate-600 rounded border-gray-300 focus:ring-slate-400"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-sm font-medium text-gray-900">{model.name}</span>
+                                    <CatalogModelBadges model={model} />
+                                  </div>
+                                  <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                                    <span className="font-mono">{model.id}</span>
+                                    {model.limits && (
+                                      <span>
+                                        {model.limits.context_window >= 1000000
+                                          ? `${(model.limits.context_window / 1000000).toFixed(0)}M`
+                                          : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
+                                      </span>
+                                    )}
+                                    {model.pricing && model.pricing.input > 0 && (
+                                      <span>
+                                        {model.pricing.currency === 'CNY' ? '¥' : '$'}
+                                        {model.pricing.input}/{model.pricing.currency === 'CNY' ? '¥' : '$'}{model.pricing.output}/M
+                                      </span>
+                                    )}
+                                    {model.pricing && model.pricing.input === 0 && (
+                                      <span className="text-green-600">{t('status.free')}</span>
+                                    )}
+                                  </div>
+                                </div>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex items-start gap-2 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+                        <Shield className="w-4 h-4 text-slate-600 mt-0.5 flex-shrink-0" />
+                        <p className="text-xs text-slate-700">
+                          {t('form.credentialNote')}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+          </div>
+
+          {/* Test Connection Button (inside form) */}
+          <div className="pt-2">
+            <button
+              onClick={handleTest}
+              disabled={!canTest || testing || saving}
+              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 text-sm"
+            >
+              {testing ? <Loader2 className="w-4 h-4 animate-spin" /> : <TestTube className="w-4 h-4" />}
+              {testing ? t('form.testingConnection') : t('form.testConnection')}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* ── Step: Success (catalog providers with predefined models) ── */}
+      {step === 'success' && (
+        <div className="flex flex-col items-center justify-center py-8 text-center">
+          <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center mb-4">
+            <CheckCircle2 className="w-8 h-8 text-green-600" />
+          </div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('wizard.providerSaved')}</h3>
+          <p className="text-sm text-gray-500 max-w-xs">
+            {t('wizard.providerSavedHint', { name: savedProviderName })}
+          </p>
+          {addedModelCount > 0 && (
+            <p className="mt-3 text-sm text-green-600 font-medium">
+              {t('wizard.modelsAdded', { count: addedModelCount })}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Step: Add Model (wizard step 2) ── */}
+      {step === 'add-model' && (
+        <div className="space-y-4">
+          {addedModelCount === 0 && (
+            <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+              <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-amber-800">{t('wizard.noModelsNote')}</p>
+            </div>
+          )}
+          {addedModelCount > 0 && !modelTestResult && (
+            <div className="flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded-lg">
+              <CheckCircle2 className="w-4 h-4 text-green-600 flex-shrink-0" />
+              <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
+            </div>
+          )}
+          <ModelFormFields form={modelForm} testResult={modelTestResult} testing={modelTesting} />
+        </div>
+      )}
     </EntitySheet>
   );
 }
@@ -1463,13 +1659,9 @@ function CatalogModelBadges({ model }: { model: CatalogModel }) {
   );
 }
 
-// ==================== Add Model Dialog ====================
+// ==================== Shared Model Form ====================
 
-function AddModelDialog({ provider, onClose, onCreated }: {
-  provider: EnrichedProvider; onClose: () => void; onCreated: () => void;
-}) {
-  const toast = useToast();
-  const { t } = useTranslation('model');
+function useModelForm() {
   const [modelId, setModelId] = useState('');
   const [name, setName] = useState('');
   const [contextWindow, setContextWindow] = useState('128000');
@@ -1481,41 +1673,196 @@ function AddModelDialog({ provider, onClose, onCreated }: {
   const [inputPrice, setInputPrice] = useState('0');
   const [outputPrice, setOutputPrice] = useState('0');
   const [currency, setCurrency] = useState('USD');
+
+  const reset = useCallback(() => {
+    setModelId(''); setName('');
+    setContextWindow('128000'); setMaxOutput('128000');
+    setSupportsVision(false); setSupportsTools(true);
+    setSupportsStreaming(true); setSupportsReasoning(false);
+    setInputPrice('0'); setOutputPrice('0'); setCurrency('USD');
+  }, []);
+
+  const toPayload = useCallback(() => ({
+    model_id: modelId.trim(),
+    name: name.trim(),
+    context_window: parseInt(contextWindow) || 128000,
+    max_output_tokens: parseInt(maxOutput) || 4096,
+    supports_vision: supportsVision,
+    supports_tools: supportsTools,
+    supports_streaming: supportsStreaming,
+    supports_reasoning: supportsReasoning,
+    input_price: parseFloat(inputPrice) || 0,
+    output_price: parseFloat(outputPrice) || 0,
+    currency,
+  }), [modelId, name, contextWindow, maxOutput, supportsVision, supportsTools, supportsStreaming, supportsReasoning, inputPrice, outputPrice, currency]);
+
+  const isValid = modelId.trim() !== '' && name.trim() !== '';
+
+  return {
+    modelId, setModelId, name, setName,
+    contextWindow, setContextWindow, maxOutput, setMaxOutput,
+    supportsVision, setSupportsVision, supportsTools, setSupportsTools,
+    supportsStreaming, setSupportsStreaming, supportsReasoning, setSupportsReasoning,
+    inputPrice, setInputPrice, outputPrice, setOutputPrice,
+    currency, setCurrency,
+    reset, toPayload, isValid,
+  };
+}
+
+function ModelFormFields({ form, testResult, testing }: {
+  form: ReturnType<typeof useModelForm>;
+  testResult: { success: boolean; message: string; latency?: number } | null;
+  testing: boolean;
+}) {
+  const { t } = useTranslation('model');
+  return (
+    <>
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            {t('form.modelId')} <span className="text-slate-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={form.modelId}
+            onChange={e => form.setModelId(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            placeholder="gpt-4o-custom"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            {t('form.displayName')} <span className="text-slate-500">*</span>
+          </label>
+          <input
+            type="text"
+            value={form.name}
+            onChange={e => form.setName(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            placeholder="GPT-4o Custom"
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.contextWindow')}</label>
+          <input
+            type="number"
+            value={form.contextWindow}
+            onChange={e => form.setContextWindow(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.maxOutput')}</label>
+          <input
+            type="number"
+            value={form.maxOutput}
+            onChange={e => form.setMaxOutput(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+          />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
+        <div className="grid grid-cols-2 gap-2">
+          <ToggleField label={t('form.toolCall')} checked={form.supportsTools} onChange={form.setSupportsTools} />
+          <ToggleField label={t('form.vision')} checked={form.supportsVision} onChange={form.setSupportsVision} />
+          <ToggleField label={t('form.streaming')} checked={form.supportsStreaming} onChange={form.setSupportsStreaming} />
+          <ToggleField label={t('form.reasoning')} checked={form.supportsReasoning} onChange={form.setSupportsReasoning} />
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
+            <input
+              type="number"
+              step="0.01"
+              value={form.inputPrice}
+              onChange={e => form.setInputPrice(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
+            <input
+              type="number"
+              step="0.01"
+              value={form.outputPrice}
+              onChange={e => form.setOutputPrice(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
+            <select
+              value={form.currency}
+              onChange={e => form.setCurrency(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            >
+              <option value="USD">USD</option>
+              <option value="CNY">CNY</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {(testing || testResult) && (
+        <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
+          testing
+            ? 'bg-slate-50 text-slate-800 border border-slate-200'
+            : testResult?.success
+              ? 'bg-green-50 text-green-800 border border-green-200'
+              : 'bg-red-50 text-red-800 border border-red-200'
+        }`}>
+          {testing ? (
+            <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
+          ) : testResult?.success ? (
+            <Check className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          ) : (
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          )}
+          <span>{testing ? t('form.testingConnection') : testResult?.message}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ==================== Add Model Dialog ====================
+
+function AddModelDialog({ provider, onClose, onCreated }: {
+  provider: EnrichedProvider; onClose: () => void; onCreated: () => void;
+}) {
+  const toast = useToast();
+  const { t } = useTranslation('model');
+  const form = useModelForm();
   const [loading, setLoading] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string; latency?: number } | null>(null);
   const [testing, setTesting] = useState(false);
-  // Track whether a model was successfully saved (used to trigger refresh on close)
   const modelSavedRef = useRef(false);
 
   const handleSubmit = async () => {
-    if (!modelId.trim() || !name.trim()) {
+    if (!form.isValid) {
       toast.warning(t('form.fillModelId'));
       return;
     }
     try {
       setLoading(true);
       setTestResult(null);
-      await modelV2API.createDefinition(provider.id, {
-        model_id: modelId.trim(),
-        name: name.trim(),
-        context_window: parseInt(contextWindow) || 128000,
-        max_output_tokens: parseInt(maxOutput) || 4096,
-        supports_vision: supportsVision,
-        supports_tools: supportsTools,
-        supports_streaming: supportsStreaming,
-        supports_reasoning: supportsReasoning,
-        input_price: parseFloat(inputPrice) || 0,
-        output_price: parseFloat(outputPrice) || 0,
-        currency,
-      });
+      await modelV2API.createDefinition(provider.id, form.toPayload());
       modelSavedRef.current = true;
-      // Refresh model list immediately — don't wait for user to click "完成"
       onCreated();
-      toast.success(t('modelAdded'), `${name.trim()} (${modelId.trim()})`);
+      toast.success(t('modelAdded'), `${form.name.trim()} (${form.modelId.trim()})`);
 
       setTesting(true);
       try {
-        const res = await providerAPI.testCredentials(provider.id, modelId.trim());
+        const res = await providerAPI.testCredentials(provider.id, form.modelId.trim());
         setTestResult({
           success: res.data.success,
           message: res.data.success
@@ -1536,7 +1883,6 @@ function AddModelDialog({ provider, onClose, onCreated }: {
     }
   };
 
-  // Close the dialog; onCreated already fired in handleSubmit so no need to call again
   const handleClose = () => onClose();
 
   const rexContext = `你是 AI 模型配置助手，帮助用户为 ${provider.name} 添加自定义模型定义。
@@ -1568,7 +1914,7 @@ Provider: ${provider.name} (${provider.id})
       icon={<Plus className="w-5 h-5" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
-      submitDisabled={loading || testing || !modelId.trim() || !name.trim()}
+      submitDisabled={loading || testing || !form.isValid}
       submitLoading={loading || testing}
       submitLabel={testResult ? t('form.done') : t('form.addModelBtn')}
       onClose={handleClose}
@@ -1576,7 +1922,6 @@ Provider: ${provider.name} (${provider.id})
       initialTab="form"
     >
       <div className="space-y-4">
-        {/* Provider — 默认当前选中的 Provider，只读展示 */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
           <input
@@ -1586,125 +1931,7 @@ Provider: ${provider.name} (${provider.id})
             className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
           />
         </div>
-
-        {/* Model ID + Name */}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('form.modelId')} <span className="text-slate-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={modelId}
-              onChange={e => setModelId(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              placeholder="gpt-4o-custom"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              {t('form.displayName')} <span className="text-slate-500">*</span>
-            </label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              placeholder="GPT-4o Custom"
-            />
-          </div>
-        </div>
-
-        {/* Context + Output */}
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.contextWindow')}</label>
-            <input
-              type="number"
-              value={contextWindow}
-              onChange={e => setContextWindow(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.maxOutput')}</label>
-            <input
-              type="number"
-              value={maxOutput}
-              onChange={e => setMaxOutput(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            />
-          </div>
-        </div>
-
-        {/* Capabilities */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
-          <div className="grid grid-cols-2 gap-2">
-            <ToggleField label={t('form.toolCall')} checked={supportsTools} onChange={setSupportsTools} />
-            <ToggleField label={t('form.vision')} checked={supportsVision} onChange={setSupportsVision} />
-            <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
-            <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
-          </div>
-        </div>
-
-        {/* Pricing */}
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
-              <input
-                type="number"
-                step="0.01"
-                value={inputPrice}
-                onChange={e => setInputPrice(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">{t('form.output')}</label>
-              <input
-                type="number"
-                step="0.01"
-                value={outputPrice}
-                onChange={e => setOutputPrice(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
-              <select
-                value={currency}
-                onChange={e => setCurrency(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-              >
-                <option value="USD">USD</option>
-                <option value="CNY">CNY</option>
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* Auto-test result */}
-        {(testing || testResult) && (
-          <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${
-            testing
-              ? 'bg-red-50 text-red-800 border border-red-200'
-              : testResult?.success
-                ? 'bg-green-50 text-green-800 border border-green-200'
-                : 'bg-red-50 text-red-800 border border-red-200'
-          }`}>
-            {testing ? (
-              <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
-            ) : testResult?.success ? (
-              <Check className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            ) : (
-              <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            )}
-            <span>{testing ? t('form.testingConnection') : testResult?.message}</span>
-          </div>
-        )}
+        <ModelFormFields form={form} testResult={testResult} testing={testing} />
       </div>
     </EntitySheet>
   );
@@ -1758,6 +1985,21 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
+
+  useEffect(() => {
+    setApiKey(existingKey);
+    setBaseUrl(existingBaseUrl);
+    setProviderName(provider.name);
+  }, [existingBaseUrl, existingKey, provider.id, provider.name]);
+
+  useEffect(() => {
+    setSelectedModelIds(new Set(models.map(m => m.id)));
+    setTestModelId(prev => (
+      prev && models.some(m => m.id === prev)
+        ? prev
+        : (models[0]?.id ?? '')
+    ));
+  }, [provider.id, models]);
 
   useEffect(() => {
     catalogAPI.list().then(res => {
@@ -1904,6 +2146,15 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
       submitLabel="Save"
       onClose={onClose}
       onSubmit={handleSubmit}
+      footerLeft={
+        <button
+          onClick={onDelete}
+          className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition-colors"
+        >
+          <Trash2 className="w-4 h-4" />
+          {t('form.removeProvider')}
+        </button>
+      }
     >
       <div className="space-y-5">
         {/* openai-compatible badge */}
@@ -2073,16 +2324,6 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           </p>
         </div>
 
-        {/* 移除此 Provider */}
-        <div className="pt-2 border-t border-gray-100">
-          <button
-            onClick={onDelete}
-            className="flex items-center gap-1.5 text-sm text-slate-600 hover:text-slate-800 transition-colors"
-          >
-            <Trash2 className="w-4 h-4" />
-            {t('form.removeProvider')}
-          </button>
-        </div>
       </div>
     </EntitySheet>
   );

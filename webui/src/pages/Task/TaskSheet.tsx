@@ -2,38 +2,38 @@
  * TaskSheet — 统一的任务创建/编辑侧边面板
  *
  * 合并原有的 CreateTaskDialog 和 EditScheduledTaskDialog，支持：
- * - 创建队列任务 / 定时任务（两种类型）
+ * - 统一任务创建，按需配置调度
  * - 编辑现有定时任务
  * - Rex 对话模式（自然语言描述任务 → 填充表单）
  */
 
 import { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Clock, ListTodo, Sparkles } from 'lucide-react';
-import { taskAPI, Task, TaskType, TaskPriority, TaskCreateParams, ExecutionMode } from '@/api/task';
+import { Calendar, Clock, Sparkles } from 'lucide-react';
+import { taskAPI, TaskScheduler, TaskPriority, TaskCreateParams, ExecutionMode } from '@/api/task';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
 import PillGroup from '@/components/common/PillGroup';
-import { describeCron, CRON_PRESETS } from './helpers';
+import { useTaskExecutionsByScheduler } from '@/hooks/useTasks';
+import { describeCron, CRON_PRESETS, formatDuration, formatTime } from './helpers';
 import { agentAPI, Agent } from '@/api/agent';
 import { workflowAPI, Workflow } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { StatusBadge } from './components';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface TaskFormData {
   title: string;
   description: string;
-  type: TaskType;
+  scheduleKind: 'immediate' | 'once' | 'recurring';
   priority: TaskPriority;
   executionMode: ExecutionMode;
   agentName: string;
   workflowID: string;
   userPrompt: string;
-  // Scheduling (only for scheduled tasks)
-  scheduleMode: 'recurring' | 'once';
   cron: string;
   runAt: string;
   timezone: string;
@@ -43,56 +43,54 @@ interface TaskFormData {
 // ─── TaskSheet ────────────────────────────────────────────────────────────────
 
 interface TaskSheetProps {
-  /** undefined = 创建模式；传入 Task = 编辑模式（仅限定时任务） */
-  task?: Task | null;
-  /** 创建时的默认类型 */
-  defaultType?: TaskType;
+  /** undefined = 创建模式；传入 Scheduler = 编辑模式（仅限定时任务） */
+  task?: TaskScheduler | null;
+  /** 创建时默认调度方式 */
+  defaultScheduleKind?: TaskFormData['scheduleKind'];
   onClose: () => void;
   onSaved: () => void;
 }
 
-export default function TaskSheet({ task, defaultType = 'queued', onClose, onSaved }: TaskSheetProps) {
+export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onClose, onSaved }: TaskSheetProps) {
   const isEdit = !!task;
   const { t } = useTranslation('task');
   const toast = useToast();
 
-  const isRunOnce = task?.schedule?.runOnce ?? false;
+  const isRunOnce = task?.mode === 'once';
 
   const [formData, setFormData] = useState<TaskFormData>(() => {
     if (task) {
-      const preset = CRON_PRESETS.find((p) => p.value === task.schedule?.cron && p.value !== '__custom__');
+      const preset = CRON_PRESETS.find((p) => p.value === task.trigger?.cron && p.value !== '__custom__');
       return {
         title: task.title,
         description: task.description ?? '',
-        type: task.type ?? 'scheduled',
+        scheduleKind: task.trigger?.runImmediately ? 'immediate' : isRunOnce ? 'once' : 'recurring',
         priority: task.priority,
         executionMode: task.executionMode,
         agentName: task.agentName ?? 'rex',
         workflowID: task.workflowID ?? '',
         userPrompt: task.source?.userPrompt ?? '',
-        scheduleMode: isRunOnce ? 'once' : 'recurring',
-        cron: preset ? preset.value : (task.schedule?.cron ?? ''),
+        cron: preset ? preset.value : (task.trigger?.cron ?? ''),
         runAt: (() => {
-          const src = task.schedule?.runAt ?? task.schedule?.nextRun;
+          const src = task.trigger?.runAt ?? task.trigger?.nextRun;
           if (!src) return '';
           const d = new Date(src);
           const pad = (n: number) => String(n).padStart(2, '0');
           return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
         })(),
-        timezone: task.schedule?.timezone ?? 'Asia/Shanghai',
-        cronDescription: task.schedule?.cronDescription ?? '',
+        timezone: task.trigger?.timezone ?? 'Asia/Shanghai',
+        cronDescription: task.trigger?.cronDescription ?? '',
       };
     }
     return {
       title: '',
       description: '',
-      type: defaultType,
+      scheduleKind: defaultScheduleKind,
       priority: 'normal',
       executionMode: 'agent',
       agentName: 'rex',
       workflowID: '',
       userPrompt: '',
-      scheduleMode: 'recurring',
       cron: '',
       runAt: '',
       timezone: 'Asia/Shanghai',
@@ -109,8 +107,9 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
     workflowAPI.list({ status: 'active' }).then((res) => setWorkflows(res.data)).catch(() => {});
   }, []);
 
-  const isScheduled = formData.type === 'scheduled';
-  const isOnce = isScheduled && formData.scheduleMode === 'once';
+  const isImmediate = formData.scheduleKind === 'immediate';
+  const isOnce = formData.scheduleKind === 'once';
+  const isRecurring = formData.scheduleKind === 'recurring';
   const effectiveCron = (() => {
     const preset = CRON_PRESETS.find((p) => p.value === formData.cron && p.value !== '__custom__');
     return preset ? preset.value : formData.cron;
@@ -118,7 +117,7 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
 
   const canSubmit =
     formData.title.trim() &&
-    (!isScheduled || (isOnce ? formData.runAt : effectiveCron.trim()));
+    (isImmediate || (isOnce ? formData.runAt : effectiveCron.trim()));
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -126,7 +125,7 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
     try {
       if (isEdit) {
         if (isRunOnce) {
-          await taskAPI.update(task!.id, {
+          await taskAPI.updateScheduler(task!.id, {
             title: formData.title.trim(),
             description: formData.description.trim(),
             priority: formData.priority,
@@ -138,7 +137,7 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
             userPrompt: formData.userPrompt || undefined,
           });
         } else {
-          await taskAPI.update(task!.id, {
+          await taskAPI.updateScheduler(task!.id, {
             title: formData.title.trim(),
             description: formData.description.trim(),
             priority: formData.priority,
@@ -155,7 +154,7 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
         const params: TaskCreateParams = {
           title: formData.title.trim(),
           description: formData.description,
-          type: formData.type,
+          type: isImmediate ? 'queued' : 'scheduled',
           priority: formData.priority,
           executionMode: formData.executionMode,
           agentName: formData.executionMode === 'agent' ? formData.agentName : undefined,
@@ -165,10 +164,10 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
         if (isOnce) {
           params.runOnce = true;
           params.runAt = formData.runAt ? new Date(formData.runAt).toISOString() : undefined;
-        } else if (isScheduled) {
+        } else if (isRecurring) {
           params.cron = effectiveCron;
         }
-        await taskAPI.create(params);
+        await taskAPI.createScheduler(params);
       }
       onSaved();
       onClose();
@@ -186,7 +185,7 @@ export default function TaskSheet({ task, defaultType = 'queued', onClose, onSav
       ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "..."}`
       : isEdit
       ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "cron": "...", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "..."}`
-      : `{"title": "...", "description": "...", "type": "queued|scheduled", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "...", "cron": "（定时任务的 cron 表达式，队列任务留空）"}`;
+      : `{"title": "...", "description": "...", "scheduleKind": "immediate|once|recurring", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "...", "runAt": "（指定时间执行一次时填写）", "cron": "（循环执行时填写）"}`;
 
     const extractPrompt = `请将以上讨论的任务配置整理为 JSON，只输出 JSON 对象：
 \`\`\`json
@@ -221,11 +220,13 @@ ${fields}
               ...prev,
               title: config.title || prev.title,
               description: config.description ?? prev.description,
-              type: config.type || prev.type,
+              scheduleKind: config.scheduleKind
+                || (config.type === 'queued' ? 'immediate' : config.type === 'scheduled' ? 'recurring' : prev.scheduleKind),
               priority: config.priority || prev.priority,
               executionMode: config.executionMode || prev.executionMode,
               agentName: config.agentName || prev.agentName,
               userPrompt: config.userPrompt ?? prev.userPrompt,
+              runAt: config.runAt ?? prev.runAt,
               cron: config.cron || prev.cron,
             }));
             return;
@@ -237,7 +238,7 @@ ${fields}
     throw new Error(t('taskSheet.extractTimeout'));
   };
 
-  const icon = isScheduled ? <Calendar className="w-5 h-5" /> : <ListTodo className="w-5 h-5" />;
+  const icon = isRecurring ? <Calendar className="w-5 h-5" /> : <Clock className="w-5 h-5" />;
 
   return (
     <EntitySheet
@@ -250,11 +251,15 @@ ${fields}
       rexWelcomeMessage={buildRexWelcome(isEdit, task?.title)}
       submitDisabled={!canSubmit || loading}
       submitLoading={loading}
+      width={640}
+      minWidth={480}
+      maxWidth={960}
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={handleExtractFromRex}
     >
       <TaskFormContent
+        task={task ?? undefined}
         formData={formData}
         onChange={setFormData}
         isEdit={isEdit}
@@ -270,6 +275,7 @@ ${fields}
 // ─── TaskFormContent ──────────────────────────────────────────────────────────
 
 interface TaskFormContentProps {
+  task?: TaskScheduler;
   formData: TaskFormData;
   onChange: (data: TaskFormData) => void;
   isEdit: boolean;
@@ -280,6 +286,7 @@ interface TaskFormContentProps {
 }
 
 function TaskFormContent({
+  task,
   formData,
   onChange,
   isEdit,
@@ -292,10 +299,15 @@ function TaskFormContent({
   const { openRex } = useEntitySheet();
   const update = (fields: Partial<TaskFormData>) => onChange({ ...formData, ...fields });
 
-  const isScheduled = formData.type === 'scheduled';
-  const isOnce = isScheduled && formData.scheduleMode === 'once';
+  const isImmediate = formData.scheduleKind === 'immediate';
+  const isOnce = formData.scheduleKind === 'once';
+  const isRecurring = formData.scheduleKind === 'recurring';
   const showCustomCron = !CRON_PRESETS.find(
     (p) => p.value === formData.cron && p.value !== '__custom__',
+  );
+  const { records, loading: recordsLoading } = useTaskExecutionsByScheduler(
+    task?.id,
+    { limit: 5 },
   );
 
   return (
@@ -324,7 +336,7 @@ function TaskFormContent({
         />
       </div>
 
-      {/* Priority + Type */}
+      {/* Priority + Scheduling */}
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
           <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.priorityLabel')}</span>
@@ -340,26 +352,27 @@ function TaskFormContent({
           />
         </div>
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.typeLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.scheduleKindLabel')}</span>
           {isEdit ? (
             <span className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700">
-              {isRunOnce ? t('form.runOnceType') : t('form.recurringType')}
+              {isRunOnce ? t('form.onceAtTimeOption') : t('form.recurringOption')}
             </span>
           ) : (
             <PillGroup
               options={[
-                { value: 'queued', label: t('form.queueOption'), activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { value: 'scheduled', label: t('form.scheduledOption'), activeClass: 'bg-purple-600 text-white border-purple-600' },
+                { value: 'immediate', label: t('form.immediateOption'), activeClass: 'bg-sky-600 text-white border-sky-600' },
+                { value: 'once', label: t('form.onceAtTimeOption'), activeClass: 'bg-orange-500 text-white border-orange-500' },
+                { value: 'recurring', label: t('form.recurringOption'), activeClass: 'bg-purple-600 text-white border-purple-600' },
               ]}
-              value={formData.type}
-              onChange={(v) => update({ type: v, cron: '', scheduleMode: 'recurring', runAt: '' })}
+              value={formData.scheduleKind}
+              onChange={(v) => update({ scheduleKind: v, cron: '', runAt: '' })}
             />
           )}
         </div>
       </div>
 
       {/* Scheduling config */}
-      {isScheduled && (
+      {!isImmediate && (
         <div
           className={`rounded-xl p-4 space-y-3 border ${
             isOnce || isRunOnce
@@ -374,37 +387,6 @@ function TaskFormContent({
           >
             <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
           </p>
-
-          {/* Schedule mode toggle (create only) */}
-          {!isEdit && (
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1.5">{t('form.frequencyLabel')}</label>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => update({ scheduleMode: 'recurring', cron: '', runAt: '' })}
-                  className={`flex-1 py-2 text-sm rounded-lg border transition-colors font-medium ${
-                    formData.scheduleMode === 'recurring'
-                      ? 'bg-purple-600 text-white border-purple-600'
-                      : 'bg-white text-gray-600 border-gray-300 hover:border-purple-400'
-                  }`}
-                >
-                  {t('form.recurring')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => update({ scheduleMode: 'once', cron: '', runAt: '' })}
-                  className={`flex-1 py-2 text-sm rounded-lg border transition-colors font-medium ${
-                    formData.scheduleMode === 'once'
-                      ? 'bg-orange-500 text-white border-orange-500'
-                      : 'bg-white text-gray-600 border-gray-300 hover:border-orange-400'
-                  }`}
-                >
-                  {t('form.runOnce')}
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* Run-once mode: locked badge (edit) */}
           {isEdit && isRunOnce && (
@@ -427,7 +409,7 @@ function TaskFormContent({
           )}
 
           {/* Recurring: cron preset + custom input */}
-          {!isOnce && !isRunOnce && (
+          {!isOnce && !isRunOnce && isRecurring && (
             <>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1.5">
@@ -597,6 +579,47 @@ function TaskFormContent({
           placeholder={t('form.additionalInfoPlaceholder')}
         />
       </div>
+
+      {task && (
+        <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
+          <p className="text-xs text-slate-600 leading-5">{t('taskSheet.selfContainedHint')}</p>
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-slate-800">{t('taskSheet.recentRuns')}</div>
+            {recordsLoading ? (
+              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsLoading')}</div>
+            ) : records.length === 0 ? (
+              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsEmpty')}</div>
+            ) : (
+              <div className="space-y-2">
+                {records.map((record) => (
+                  <div key={record.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <StatusBadge status={record.status} />
+                      <div className="text-xs text-slate-400">
+                        {record.startedAt ? formatTime(record.startedAt) : '--'}
+                      </div>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                      {record.durationMs != null && (
+                        <span>{formatDuration(record.durationMs)}</span>
+                      )}
+                      {record.sessionID && (
+                        <span className="font-mono text-[11px] text-slate-400">{record.sessionID}</span>
+                      )}
+                    </div>
+                    {record.resultSummary && (
+                      <div className="mt-1 text-xs text-slate-600 line-clamp-2">{record.resultSummary}</div>
+                    )}
+                    {record.error && (
+                      <div className="mt-1 text-xs text-red-500 line-clamp-2">{record.error}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -604,26 +627,32 @@ function TaskFormContent({
 // ─── Rex context builders ─────────────────────────────────────────────────────
 
 function buildRexContext(formData: TaskFormData, isEdit: boolean): string {
-  const isScheduled = formData.type === 'scheduled';
+  const scheduleLabel = formData.scheduleKind === 'immediate'
+    ? '立即执行一次'
+    : formData.scheduleKind === 'once'
+    ? '指定时间执行一次'
+    : '定时循环执行';
   return [
     `你是一个任务配置专家，正在帮助用户${isEdit ? '修改' : '创建'}一个任务。`,
     ``,
     `**当前配置状态：**`,
     `- 标题：${formData.title || '（未填写）'}`,
     `- 描述：${formData.description || '（未填写）'}`,
-    `- 类型：${isScheduled ? '定时任务' : '任务队列'}`,
+    `- 调度方式：${scheduleLabel}`,
     `- 优先级：${formData.priority}`,
     `- 执行模式：${formData.executionMode === 'agent' ? `Agent（${formData.agentName || 'rex'}）` : `Workflow（${formData.workflowID || '未指定'}）`}`,
     `- 任务补充信息：${formData.userPrompt || '（未填写）'}`,
-    isScheduled ? `- 执行频率：${formData.cron ? describeCron(formData.cron) : '（未配置）'}` : '',
+    formData.scheduleKind === 'once' ? `- 执行时间：${formData.runAt || '（未配置）'}` : '',
+    formData.scheduleKind === 'recurring' ? `- 执行频率：${formData.cron ? describeCron(formData.cron) : '（未配置）'}` : '',
     ``,
     `**字段说明：**`,
     `- **标题**：任务的简短标题`,
     `- **任务补充信息（userPrompt）**：Agent 执行时的具体指令，说明做什么、怎么做、输出什么`,
-    `- **类型**：queued（立即进入队列执行）或 scheduled（定时触发）`,
+    `- **调度方式**：immediate（立即执行一次）、once（指定时间执行一次）或 recurring（定时循环执行）`,
     `- **优先级**：urgent/high/normal/low`,
     `- **执行模式**：agent（使用指定 Agent）或 workflow（运行工作流）`,
-    isScheduled ? `- **Cron**：标准5段 cron 表达式，例如 "0 9 * * 1-5" 表示工作日早9点` : '',
+    formData.scheduleKind === 'once' ? `- **runAt**：一次执行的具体时间` : '',
+    formData.scheduleKind === 'recurring' ? `- **Cron**：标准5段 cron 表达式，例如 "0 9 * * 1-5" 表示工作日早9点` : '',
     ``,
     `请帮助用户明确任务的目标、执行指令，以及调度安排。`,
   ]

@@ -157,7 +157,8 @@ Agent: *runs gh pr list, gh pr view, searches recent commits*
 **Delegation Check (MANDATORY before acting directly):**
 1. Is there a specialized agent that perfectly matches this request?
 2. If not, is there a `delegate_task` category that best describes this task? What skills are available to equip the agent with?
-   - MUST FIND skills to use: `delegate_task(load_skills=[{skill1}, ...])`
+   - If delegating by `category=...`, evaluate relevant skills and pass them via `load_skills=[...]`.
+   - If delegating by `subagent_type=...`, `load_skills` may be omitted unless a specific skill is clearly needed.
 3. Can I do it myself for the best result, FOR SURE?
 
 **Default Bias: DELEGATE for complex tasks. Work yourself ONLY when trivial.**

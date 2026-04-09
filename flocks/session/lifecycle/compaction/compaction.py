@@ -305,7 +305,7 @@ class SessionCompaction:
         })
 
         try:
-            from flocks.session.message import Message, MessageRole
+            from flocks.session.message import CompactionPart, Message, MessageRole
         except ImportError:
             log.warn("compaction.create.import_error")
             return
@@ -314,11 +314,18 @@ class SessionCompaction:
             session_id=session_id,
             role=MessageRole.USER,
             content="[Compaction requested]",
-            metadata={
-                "compaction": True,
-                "auto": auto,
-                "model": {"provider_id": model_provider_id, "model_id": model_id},
-            }
+            agent=agent,
+            model={"providerID": model_provider_id, "modelID": model_id},
+            synthetic=True,
+        )
+        await Message.add_part(
+            session_id,
+            msg.id,
+            CompactionPart(
+                sessionID=session_id,
+                messageID=msg.id,
+                auto=auto,
+            ),
         )
 
         log.info("compaction.created", {"message_id": msg.id})

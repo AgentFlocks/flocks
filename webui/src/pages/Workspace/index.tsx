@@ -127,9 +127,16 @@ function FilesTab() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const loadDir = useCallback(async (path: string) => {
+  const loadFileContent = useCallback(async (path: string) => {
+    const res = await workspaceAPI.readFile(path);
+    dispatchPanel({ type: 'content_loaded', content: res.data.content });
+  }, []);
+
+  const loadDir = useCallback(async (path: string, options?: { preservePanel?: boolean }) => {
     setLoading(true);
-    dispatchPanel({ type: 'close' });
+    if (!options?.preservePanel) {
+      dispatchPanel({ type: 'close' });
+    }
     try {
       const res = await workspaceAPI.list(path);
       setItems(Array.isArray(res.data) ? res.data : []);
@@ -139,7 +146,7 @@ function FilesTab() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [toast, t]);
 
   useEffect(() => {
     loadDir('');
@@ -153,13 +160,24 @@ function FilesTab() {
     dispatchPanel({ type: 'select', node });
     if (node.is_text_file) {
       try {
-        const res = await workspaceAPI.readFile(node.path);
-        dispatchPanel({ type: 'content_loaded', content: res.data.content });
+        await loadFileContent(node.path);
       } catch (e: any) {
         toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
       }
     }
-  }, [loadDir, toast]);
+  }, [loadDir, loadFileContent, toast, t]);
+
+  const handleRefresh = useCallback(async () => {
+    await loadDir(currentPath, { preservePanel: true });
+
+    if (panel.node?.is_text_file) {
+      try {
+        await loadFileContent(panel.node.path);
+      } catch (e: any) {
+        toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+      }
+    }
+  }, [currentPath, loadDir, loadFileContent, panel.node, toast, t]);
 
   const handleSave = useCallback(async () => {
     if (!panel.node || panel.editContent === null) return;
@@ -259,6 +277,14 @@ function FilesTab() {
                 <ArrowLeft className="w-4 h-4" />
               </button>
             )}
+            <button
+              onClick={handleRefresh}
+              disabled={loading}
+              title={t('files.refresh')}
+              className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            </button>
             <button onClick={() => setNewDir({ show: true, name: '' })} title={t('files.newDir')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
               <FolderPlus className="w-4 h-4" />
             </button>

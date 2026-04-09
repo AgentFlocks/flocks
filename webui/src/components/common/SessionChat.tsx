@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCircle, X, RefreshCw } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -30,6 +30,7 @@ import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
 import client from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
+import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import type { Message, MessagePart, ToolState } from '@/types';
 
@@ -105,7 +106,18 @@ export interface SessionChatProps {
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and update sessionId + initialMessage props.
    */
-  onCreateAndSend?: (text: string) => void;
+  onCreateAndSend?: (text: string) => Promise<void> | void;
+}
+
+type AttachmentStatus = 'uploading' | 'success' | 'error';
+
+interface ComposerAttachment {
+  id: string;
+  file: File;
+  name: string;
+  status: AttachmentStatus;
+  workspacePath?: string;
+  error?: string;
 }
 
 // ============================================================================
@@ -155,6 +167,21 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
+const WORKSPACE_UPLOAD_DEST = 'uploads';
+const FILE_INPUT_ACCEPT = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx';
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
+]);
+
+function getFileExtension(filename: string): string {
+  const normalized = filename.toLowerCase();
+  const idx = normalized.lastIndexOf('.');
+  return idx >= 0 ? normalized.slice(idx + 1) : '';
+}
+
+function isAllowedUploadFile(file: File): boolean {
+  return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
+}
 
 export default function SessionChat({
   sessionId,
@@ -186,6 +213,8 @@ export default function SessionChat({
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
   const isCompactingRef = useRef(false);
@@ -209,6 +238,7 @@ export default function SessionChat({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
 
   // Slash command autocomplete state
@@ -217,6 +247,12 @@ export default function SessionChat({
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const commandsLoadedRef = useRef(false);
+  const successfulAttachments = useMemo(
+    () => attachments.filter((attachment) => attachment.status === 'success' && attachment.workspacePath),
+    [attachments],
+  );
+  const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
+  const canSend = !sending && !isStreaming && !hasUploadingFiles && (!!input.trim() || successfulAttachments.length > 0);
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
@@ -388,6 +424,8 @@ export default function SessionChat({
   // Reset state on session change
   useEffect(() => {
     setIsStreaming(false);
+    setAttachments([]);
+    setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
     abortingRef.current = false;
@@ -469,6 +507,159 @@ export default function SessionChat({
       commandsLoadedRef.current = false; // Allow retry on failure
     }
   }, []);
+
+  const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
+    if (items.length === 0) return '';
+    const lines = items
+      .map((attachment) => attachment.workspacePath)
+      .filter((path): path is string => Boolean(path))
+      .map((path) => `- ${path}`);
+    if (lines.length === 0) return '';
+    return `Attached files:\n${lines.join('\n')}`;
+  }, []);
+
+  const buildMessageText = useCallback((rawText: string, items: ComposerAttachment[]) => {
+    const attachmentBlock = buildAttachmentBlock(items);
+    const content = rawText
+      ? attachmentBlock
+        ? `${rawText}\n\n${attachmentBlock}`
+        : rawText
+      : attachmentBlock;
+
+    if (!content) return '';
+    return nodeRef
+      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${content}`
+      : content;
+  }, [buildAttachmentBlock, nodeRef]);
+
+  const updateAttachment = useCallback((id: string, updater: (attachment: ComposerAttachment) => ComposerAttachment) => {
+    setAttachments((prev) => prev.map((attachment) => (
+      attachment.id === id ? updater(attachment) : attachment
+    )));
+  }, []);
+
+  const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
+    if (entries.length === 0) return;
+    try {
+      const response = await workspaceAPI.upload(
+        entries.map((entry) => entry.file),
+        WORKSPACE_UPLOAD_DEST,
+        'chat',
+      );
+      const uploaded = response.data.uploaded ?? [];
+      setAttachments((prev) => prev.map((attachment) => {
+        const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
+        if (entryIndex < 0) return attachment;
+        const result = uploaded[entryIndex];
+        if (!result || result.error || !result.path) {
+          return {
+            ...attachment,
+            status: 'error',
+            error: result?.error || t('chat.upload.errorGeneric'),
+          };
+        }
+        return {
+          ...attachment,
+          name: result.name || attachment.name,
+          status: 'success',
+          workspacePath: result.path,
+          error: undefined,
+        };
+      }));
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
+      setAttachments((prev) => prev.map((attachment) => (
+        entries.some((entry) => entry.id === attachment.id)
+          ? { ...attachment, status: 'error', error: detail }
+          : attachment
+      )));
+    }
+  }, [t]);
+
+  const queueFilesForUpload = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    const validEntries: Array<{ id: string; file: File }> = [];
+    const invalidAttachments: ComposerAttachment[] = [];
+
+    files.forEach((file, index) => {
+      const id = `attachment-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+      if (!isAllowedUploadFile(file)) {
+        invalidAttachments.push({
+          id,
+          file,
+          name: file.name,
+          status: 'error',
+          error: t('chat.upload.invalidType'),
+        });
+        return;
+      }
+      validEntries.push({ id, file });
+    });
+
+    if (invalidAttachments.length > 0) {
+      setAttachments((prev) => [...prev, ...invalidAttachments]);
+    }
+
+    if (validEntries.length === 0) return;
+
+    setAttachments((prev) => [
+      ...prev,
+      ...validEntries.map(({ id, file }) => ({
+        id,
+        file,
+        name: file.name,
+        status: 'uploading' as const,
+      })),
+    ]);
+
+    void uploadSelectedFiles(validEntries);
+  }, [t, uploadSelectedFiles]);
+
+  const handleFileSelection = useCallback((fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    queueFilesForUpload(Array.from(fileList));
+  }, [queueFilesForUpload]);
+
+  const handleRetryAttachment = useCallback((attachmentId: string) => {
+    const attachment = attachments.find((item) => item.id === attachmentId);
+    if (!attachment) return;
+    updateAttachment(attachmentId, (current) => ({
+      ...current,
+      status: 'uploading',
+      error: undefined,
+    }));
+    void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
+  }, [attachments, updateAttachment, uploadSelectedFiles]);
+
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+  }, []);
+
+  const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    queueFilesForUpload(files);
+  }, [queueFilesForUpload]);
+
+  const handleComposerDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+    event.preventDefault();
+    setIsDragOver(true);
+  }, []);
+
+  const handleComposerDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleComposerDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (event.dataTransfer.files.length === 0) return;
+    event.preventDefault();
+    setIsDragOver(false);
+    handleFileSelection(event.dataTransfer.files);
+  }, [handleFileSelection]);
 
   /**
    * Execute a slash command via the dedicated command API.
@@ -557,13 +748,17 @@ export default function SessionChat({
   };
 
   const handleSend = async () => {
-    if (!input.trim() || sending) return;
+    if (!canSend) return;
     const rawText = input.trim();
+    const attachmentsToSend = [...successfulAttachments];
+    const text = buildMessageText(rawText, attachmentsToSend);
+    if (!text) return;
+
     setInput('');
     setShowCommandDropdown(false);
 
     // Route slash commands through the command API (requires an active session)
-    const parsed = parseSlashCommand(rawText);
+    const parsed = attachmentsToSend.length === 0 ? parseSlashCommand(rawText) : null;
     if (parsed) {
       if (!sessionId) {
         // Slash commands need an existing session; restore input and do nothing
@@ -578,17 +773,14 @@ export default function SessionChat({
       return;
     }
 
-    const text = nodeRef
-      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${rawText}`
-      : rawText;
-
     if (!sessionId) {
       if (onCreateAndSend) {
         setSending(true);
         try {
           await onCreateAndSend(text);
+          setAttachments([]);
         } catch {
-          setInput(text);
+          setInput(rawText);
         } finally {
           setSending(false);
         }
@@ -598,8 +790,9 @@ export default function SessionChat({
 
     try {
       await sendText(text);
+      setAttachments([]);
     } catch {
-      setInput(text);
+      setInput(rawText);
     }
   };
 
@@ -878,6 +1071,28 @@ export default function SessionChat({
       {!hideInput && (
         <div className={`flex-shrink-0 border-t border-gray-200 bg-white ${compact ? 'px-4 py-3' : 'px-6 py-4'}`}>
           <div className={`flex items-end gap-2 ${!compact ? 'max-w-3xl mx-auto w-full gap-3' : ''}`}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept={FILE_INPUT_ACCEPT}
+              multiple
+              onChange={(event) => {
+                handleFileSelection(event.target.files);
+                event.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending || isStreaming}
+              title={t('chat.upload.select')}
+              className={`flex-shrink-0 rounded-lg border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
+                compact ? 'w-10 h-[40px]' : 'w-12 h-[52px] rounded-xl'
+              } inline-flex items-center justify-center`}
+            >
+              <Plus className="w-4 h-4" />
+            </button>
             <div className="relative flex-1">
               <CommandDropdown
                 visible={showCommandDropdown}
@@ -890,77 +1105,151 @@ export default function SessionChat({
                   textareaRef.current?.focus();
                 }}
               />
-            <div className={`border rounded-lg focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-100 transition-all bg-white overflow-hidden ${
-              isCompacting ? 'border-amber-200 bg-amber-50/30' : isStreaming ? 'border-gray-200 bg-gray-50' : 'border-gray-300'
-            } ${!compact ? 'border-2 rounded-xl focus-within:ring-4' : ''}`}>
-              {/* Node reference chip */}
-              {nodeRef && (
-                <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
-                  <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1">{nodeRef.id}</code>
-                  <span className="text-[10px] text-slate-400 flex-shrink-0">{nodeRef.type}</span>
-                  {onNodeRefDismiss && (
-                    <button
-                      onClick={onNodeRefDismiss}
-                      className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
-                      title={t('chat.removeNodeRef')}
-                    >
-                      <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5">
-                        <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              )}
-              <div className={nodeRef ? 'px-3 pb-2.5' : `px-3 ${compact ? 'py-2' : 'py-3'}`}>
-                <textarea
-                  ref={textareaRef}
-                  value={input}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    setInput(val);
-                    const trimmed = val.trimStart();
-                    if (trimmed.startsWith('/') && !trimmed.includes(' ')) {
-                      void loadCommandsIfNeeded();
-                      const q = trimmed.slice(1);
-                      setCommandQuery(q);
-                      setSelectedCommandIndex(0);
-                      setShowCommandDropdown(true);
-                    } else {
-                      setShowCommandDropdown(false);
-                    }
-                  }}
-                  onBlur={() => { setTimeout(() => setShowCommandDropdown(false), 100); }}
-                  onCompositionStart={() => { isComposingRef.current = true; }}
-                  onCompositionEnd={() => { isComposingRef.current = false; }}
-                  onKeyDown={handleKeyDown}
-                  placeholder={
-                    isCompacting
-                      ? t('chat.placeholderCompacting')
+              <div
+                onDragOver={handleComposerDragOver}
+                onDragLeave={handleComposerDragLeave}
+                onDrop={handleComposerDrop}
+                className={`border rounded-lg focus-within:border-gray-400 focus-within:ring-2 focus-within:ring-gray-100 transition-all bg-white overflow-hidden ${
+                  isCompacting
+                    ? 'border-amber-200 bg-amber-50/30'
+                    : isDragOver
+                      ? 'border-sky-400 bg-sky-50/70 ring-2 ring-sky-100'
                       : isStreaming
-                        ? t('chat.placeholderStreaming')
-                        : nodeRef
-                          ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
-                          : effectivePlaceholder
-                  }
-                  className={`w-full resize-none outline-none text-sm placeholder-gray-400 ${
-                    isStreaming ? 'text-gray-400 cursor-not-allowed' : 'text-gray-900'
-                  } ${!compact ? 'bg-transparent' : ''}`}
-                  style={{ minHeight: '24px', maxHeight: compact ? '96px' : '200px' }}
-                  disabled={sending || isStreaming}
-                  rows={1}
-                />
+                        ? 'border-gray-200 bg-gray-50'
+                        : 'border-gray-300'
+                } ${!compact ? 'border-2 rounded-xl focus-within:ring-4' : ''}`}
+              >
+                {/* Node reference chip */}
+                {nodeRef && (
+                  <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
+                    <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1">{nodeRef.id}</code>
+                    <span className="text-[10px] text-slate-400 flex-shrink-0">{nodeRef.type}</span>
+                    {onNodeRefDismiss && (
+                      <button
+                        onClick={onNodeRefDismiss}
+                        className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+                        title={t('chat.removeNodeRef')}
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )}
+                {attachments.length > 0 && (
+                  <div className={`flex flex-wrap gap-2 px-3 ${nodeRef ? 'pb-2' : 'pt-2'} ${attachments.length > 0 ? '' : 'hidden'}`}>
+                    {attachments.map((attachment) => {
+                      const isUploading = attachment.status === 'uploading';
+                      const isError = attachment.status === 'error';
+                      const attachmentPath = attachment.workspacePath ?? null;
+                      return (
+                        <div
+                          key={attachment.id}
+                          className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                            isError
+                              ? 'border-red-200 bg-red-50 text-red-700'
+                              : isUploading
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : 'border-gray-200 bg-gray-50 text-gray-700'
+                          }`}
+                        >
+                          {isUploading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                          ) : isError ? (
+                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                          ) : (
+                            <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{attachment.name}</div>
+                            {attachmentPath && (
+                              <div className="truncate text-[11px] opacity-70">{attachmentPath}</div>
+                            )}
+                            {attachment.error && (
+                              <div className="truncate text-[11px]">{attachment.error}</div>
+                            )}
+                          </div>
+                          {isError && (
+                            <button
+                              type="button"
+                              onClick={() => handleRetryAttachment(attachment.id)}
+                              className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                              title={t('chat.upload.retry')}
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAttachment(attachment.id)}
+                            className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                            title={t('chat.upload.remove')}
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {isDragOver && (
+                  <div className="px-3 pb-1 text-[11px] text-sky-600">
+                    {t('chat.upload.dropHint')}
+                  </div>
+                )}
+                <div className={nodeRef || attachments.length > 0 ? 'px-3 pb-2.5' : `px-3 ${compact ? 'py-2' : 'py-3'}`}>
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setInput(val);
+                      const trimmed = val.trimStart();
+                      if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                        void loadCommandsIfNeeded();
+                        const q = trimmed.slice(1);
+                        setCommandQuery(q);
+                        setSelectedCommandIndex(0);
+                        setShowCommandDropdown(true);
+                      } else {
+                        setShowCommandDropdown(false);
+                      }
+                    }}
+                    onBlur={() => { setTimeout(() => setShowCommandDropdown(false), 100); }}
+                    onCompositionStart={() => { isComposingRef.current = true; }}
+                    onCompositionEnd={() => { isComposingRef.current = false; }}
+                    onPaste={handleComposerPaste}
+                    onKeyDown={handleKeyDown}
+                    placeholder={
+                      isCompacting
+                        ? t('chat.placeholderCompacting')
+                        : isStreaming
+                          ? t('chat.placeholderStreaming')
+                          : nodeRef
+                            ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
+                            : effectivePlaceholder
+                    }
+                    className={`w-full resize-none outline-none text-sm placeholder-gray-400 ${
+                      isStreaming ? 'text-gray-400 cursor-not-allowed' : 'text-gray-900'
+                    } ${!compact ? 'bg-transparent' : ''}`}
+                    style={{ minHeight: '24px', maxHeight: compact ? '96px' : '200px' }}
+                    disabled={sending || isStreaming}
+                    rows={1}
+                  />
+                </div>
               </div>
-            </div>
             </div>
             <button
               onClick={handleSend}
-              disabled={sending || isStreaming || !input.trim()}
+              disabled={!canSend}
               className={`flex-shrink-0 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 text-sm transition-colors ${
                 compact ? 'px-3 py-2 h-[40px]' : 'px-6 py-3 h-[52px] rounded-xl shadow-md hover:shadow-lg'
               }`}
+              title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
             >
-              {sending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             </button>
             {isStreaming && (
               <button

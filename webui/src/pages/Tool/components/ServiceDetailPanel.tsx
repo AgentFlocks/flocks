@@ -616,6 +616,8 @@ export function APIServiceDetailPanel({
   onToggleEnabled,
   onDelete,
   builtin,
+  verifySsl,
+  onToggleVerifySsl,
 }: {
   serviceName: string;
   serviceTools: Tool[];
@@ -628,6 +630,8 @@ export function APIServiceDetailPanel({
   onToggleEnabled?: (enabled: boolean) => Promise<void> | void;
   onDelete?: () => Promise<void> | void;
   builtin?: boolean;
+  verifySsl?: boolean;
+  onToggleVerifySsl?: (verifySsl: boolean) => Promise<void> | void;
 }) {
   const { t, i18n } = useTranslation('tool');
   const [detailTab, setDetailTab] = useState<'overview' | 'tools'>('overview');
@@ -881,6 +885,23 @@ export function APIServiceDetailPanel({
                 </div>
               )}
               <KvRow label={t('serviceInfo.toolCount')} value={String(serviceTools.length)} />
+              <div className="flex justify-between items-center py-2.5 px-4 gap-4">
+                <div>
+                  <span className="text-sm text-gray-500 shrink-0">{t('serviceInfo.sslVerify', { defaultValue: 'SSL 验证' })}</span>
+                  <p className="text-xs text-gray-400 mt-0.5">{t('serviceInfo.sslVerifyDesc', { defaultValue: '关闭可访问内网 IP 部署的服务' })}</p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={!!verifySsl}
+                  onClick={() => onToggleVerifySsl?.(!verifySsl)}
+                  className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer items-center rounded-full transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-1 ${verifySsl ? 'bg-purple-600' : 'bg-gray-300'}`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform duration-200 ${verifySsl ? 'translate-x-4' : 'translate-x-1'}`}
+                  />
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-col gap-2">

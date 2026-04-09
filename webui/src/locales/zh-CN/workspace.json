@@ -6,6 +6,7 @@
   },
   "files": {
     "back": "返回上级",
+    "refresh": "刷新当前目录",
     "newDir": "新建目录",
     "upload": "上传文件",
     "dirNamePlaceholder": "目录名称",

@@ -134,9 +134,6 @@ class StreamChunk(BaseModel):
     tool_input: Optional[Dict[str, Any]] = None  # Incremental tool input
     metadata: Optional[Dict[str, Any]] = None  # Provider-specific metadata
     usage: Optional[Dict[str, int]] = None  # Token usage from provider (prompt_tokens, completion_tokens, total_tokens)
-    
-    # Token usage (if available)
-    usage: Optional[Dict[str, int]] = None
 
 
 class Provider:

@@ -7,9 +7,12 @@
 
 ## 工具说明
 
+- **工具加载规则**：`agent.yaml` 中 `tools:` 里的已启用工具会作为本 agent 每轮的基础 callable schema。
+- **扩展工具规则**：如确需使用基础列表之外的其他已启用工具，先调用 `tool_search` 发现，再只使用当前 callable schema 中已出现的工具。
+
 - **`ssh_run_script`** — 执行批量采集脚本（一次 SSH 连接）
 - **`ssh_host_cmd`** — 针对可疑项执行单条交互式追查命令
-- 威胁情报工具 (`threatbook_*`, `virustotal_*`, `urlhaus_*`) — 实时查询可疑 IoC
+- 威胁情报工具 (`threatbook_mcp_*`, `threatbook_io_*`, `threatbook_cn_*`, `virustotal_*`) — 实时查询可疑 IoC
 
 ## 脚本文件
 
@@ -92,11 +95,11 @@ sha256sum <file_path>
 > **重要**：不要等到调查结束再批量查询，遇到 IoC 立即查询，结果会指引后续调查方向。
 
 触发规则：
-- **外部 IP** → `threatbook_ip_query` + `virustotal_ip_query`
-- **域名** → `threatbook_domain_query` + `virustotal_domain_query`
-- **可疑文件** → `sha256sum` 取哈希 → `threatbook_file_report` + `virustotal_file_query`
-- **URL** → `threatbook_url_reputation`
-- **未在情报库中的样本** → `threatbook_file_sandbox_submit` 沙箱提交
+- **外部 IP** → `threatbook_mcp_ip_query` + `virustotal_ip_query`
+- **域名** → `threatbook_mcp_domain_query` + `virustotal_domain_query`
+- **可疑文件** → `sha256sum` 取哈希 → `threatbook_mcp_hash_query` + `virustotal_file_query`
+- **URL** → `threatbook_io_url_query`
+- **未在情报库中的样本** → `threatbook_cn_file_upload` 沙箱提交
 
 ---
 

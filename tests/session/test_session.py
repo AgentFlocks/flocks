@@ -3,9 +3,12 @@ Tests for session module
 """
 
 import asyncio
+from unittest.mock import AsyncMock
+
 import pytest
-from flocks.session.session import Session, SessionInfo
+from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole, MessageInfo
+from flocks.session.callable_state import add_session_callable_tools, get_session_callable_tools
 from flocks.agent.registry import Agent
 from flocks.storage.storage import Storage
 
@@ -24,6 +27,42 @@ async def test_session_create():
     assert session.directory == "/test/dir"
     assert session.title == "Test Session"
     assert session.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_session_create_initializes_callable_tools_from_declared_agent_tools(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    initialize_mock = AsyncMock()
+    monkeypatch.setattr(
+        "flocks.session.callable_state.initialize_session_callable_tools",
+        initialize_mock,
+    )
+    monkeypatch.setattr(
+        "flocks.tool.catalog.get_always_load_tool_names",
+        lambda: {"question", "tool_search"},
+    )
+
+    class _AgentInfo:
+        tools = []
+
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=_AgentInfo()),
+    )
+
+    session = await Session.create(
+        project_id="test_project_callable_tools",
+        directory="/test/dir",
+        title="Callable Tool Init",
+        agent="rex",
+    )
+
+    initialize_mock.assert_awaited_once_with(
+        session.id,
+        [],
+        always_load_tool_names={"question", "tool_search"},
+    )
 
 
 @pytest.mark.asyncio
@@ -150,6 +189,26 @@ async def test_session_delete():
     # Verify it's marked as deleted (get returns None for deleted sessions)
     retrieved = await Session.get("test_project_4", session.id)
     assert retrieved is None
+
+
+@pytest.mark.asyncio
+async def test_session_delete_clears_callable_tool_state():
+    """Deleting a session should remove persisted callable tool state."""
+    session = await Session.create(
+        project_id="test_project_callable_cleanup",
+        directory="/test/dir",
+    )
+    await add_session_callable_tools(session.id, ["websearch"])
+
+    callable_tools = await get_session_callable_tools(session.id)
+    assert "websearch" in callable_tools
+    assert len(callable_tools) > 0
+
+    deleted = await Session.delete("test_project_callable_cleanup", session.id)
+
+    assert deleted is True
+    assert await get_session_callable_tools(session.id) == set()
+    assert await Storage.get(f"session_callable_tools:{session.id}") is None
 
 
 @pytest.mark.asyncio

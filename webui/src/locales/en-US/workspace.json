@@ -6,6 +6,7 @@
   },
   "files": {
     "back": "Go up",
+    "refresh": "Refresh current folder",
     "newDir": "New folder",
     "upload": "Upload file",
     "dirNamePlaceholder": "Folder name",
