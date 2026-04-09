@@ -97,7 +97,6 @@ function Invoke-WorkspaceInstaller {
 function Get-ArchiveCandidateUrls {
     return @(
         "https://gitee.com/$RepoSlug/repository/archive/$Version.zip",
-        "https://gitee.com/$RepoSlug/archive/refs/heads/$Version.zip",
         "https://gitee.com/$RepoSlug/archive/refs/tags/$Version.zip"
     )
 }
@@ -110,7 +109,10 @@ function Download-Archive {
     foreach ($url in Get-ArchiveCandidateUrls) {
         Write-Info "尝试下载源码压缩包: $url"
         try {
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $ArchivePath
+            $headers = @{
+                "User-Agent" = "curl/8.0.0"
+            }
+            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $ArchivePath -Headers $headers
             return $url
         }
         catch {

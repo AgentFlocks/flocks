@@ -91,7 +91,6 @@ ensure_dependencies() {
 
 build_candidate_urls() {
   printf 'https://gitee.com/%s/repository/archive/%s.zip\n' "$REPO_SLUG" "$VERSION"
-  printf 'https://gitee.com/%s/archive/refs/heads/%s.zip\n' "$REPO_SLUG" "$VERSION"
   printf 'https://gitee.com/%s/archive/refs/tags/%s.zip\n' "$REPO_SLUG" "$VERSION"
 }
 
