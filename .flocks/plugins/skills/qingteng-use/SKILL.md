@@ -1,6 +1,7 @@
 ---
 name: qingteng-use
-description: 用于处理青藤云安全平台相关任务，适合通过API或者结合浏览器进行以下任务：主机资产盘点、进程与账号排查、端口和服务查询、网站与数据库资产分析、可疑操作检测、暴力破解分析、异常登录排查、WebShell 与后门调查、蜜罐结果分析、补丁与漏洞风险检查、弱密码排查、基线任务查看、合规检查、授权管理、系统审计和快速风险体检场景。只要用户提到青藤、青藤云安全、青藤主机安全的相关操作时，必须先加载本 skill。本 skill 是 青藤 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `qingteng_*` tool。
+description: "Handles tasks for the Qingteng cloud security platform through API or browser workflows when needed, including host asset inventory, process and account investigation, port and service queries, website and database asset analysis, suspicious activity detection, brute-force analysis, abnormal login investigation, WebShell and backdoor investigation, honeypot result analysis, patch and vulnerability risk checks, weak password review, baseline task review, compliance checks, authorization management, system auditing, and quick risk assessments. Whenever the user mentions operations related to Qingteng, Qingteng Cloud Security, or Qingteng Host Security, you must load this skill first. This skill is the only decision entry for Qingteng platform operations: do not call any `qingteng_*` tool before reading this skill and determining the mode."
+description_cn: "用于处理青藤云安全平台相关任务，适合通过 API 或结合浏览器完成主机资产盘点、进程与账号排查、端口和服务查询、网站与数据库资产分析、可疑操作检测、暴力破解分析、异常登录排查、WebShell 与后门调查、蜜罐结果分析、补丁与漏洞风险检查、弱密码排查、基线任务查看、合规检查、授权管理、系统审计和快速风险体检等场景。只要用户提到青藤、青藤云安全或青藤主机安全相关操作时，必须先加载本 skill。本 skill 是青藤平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `qingteng_*` tool。"
 ---
 
 # Qingteng Use

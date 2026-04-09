@@ -1,7 +1,8 @@
 ---
 name: onboarding
 category: system
-description: Guide new users through the complete Flocks setup process via conversation — covering ThreatBook MCP/API, security tool APIs, IM channels, and scenario demos. Also runs system health inspection for returning users. Trigger when the user sends "请启动新手引导流程", "start onboarding", or any similar request to begin setup/configuration.
+description: "Guide new users through the complete Flocks setup process via conversation, covering ThreatBook MCP/API, security tool APIs, IM channels, and scenario demos. It also runs a system health inspection for returning users. Trigger when the user sends \"请启动新手引导流程\", \"start onboarding\", or a similar request to begin setup or configuration."
+description_cn: "通过对话引导新用户完成 Flocks 全量初始化配置，覆盖 ThreatBook MCP/API、安全工具 API、IM 渠道和场景演示；对回访用户还会执行系统健康检查。当用户发送“请启动新手引导流程”“start onboarding”或类似开始配置/初始化的请求时触发。"
 ---
 
 # Onboarding — New User Setup Guide

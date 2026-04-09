@@ -61,6 +61,7 @@ class SkillInfo(BaseModel):
     """Skill information"""
     name: str = Field(..., description="Skill name")
     description: str = Field(..., description="Skill description")
+    description_cn: Optional[str] = Field(default=None, description="Localized Chinese skill description")
     location: str = Field(..., description="Path to SKILL.md file")
     source: Optional[str] = Field(default=None, description="Discovery source")
     category: Optional[str] = Field(default=None, description="Skill category (e.g. 'system')")
@@ -125,9 +126,12 @@ class Skill:
 
             name = (data.get("name") or "").strip()
             description = (data.get("description") or "").strip()
+            description_cn = (data.get("description_cn") or data.get("descriptionCn") or "").strip() or None
             category = (data.get("category") or "").strip().lower() or None
 
             if not cls._is_valid_name(name) or not cls._is_valid_description(description):
+                return None
+            if description_cn and not cls._is_valid_description(description_cn):
                 return None
 
             # Parse extended metadata — try metadata.flocks first, then metadata.openclaw
@@ -156,6 +160,7 @@ class Skill:
             return SkillInfo(
                 name=name,
                 description=description,
+                description_cn=description_cn,
                 location=filepath,
                 source=source,
                 category=category,

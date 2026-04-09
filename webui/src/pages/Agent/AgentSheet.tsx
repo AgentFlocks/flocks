@@ -19,6 +19,7 @@ import PillGroup from '@/components/common/PillGroup';
 import { providerAPI, defaultModelAPI } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
+import { getLocalizedSkillDescription } from '@/pages/Skill/skillDisplay';
 
 interface AvailableModel {
   providerID: string;
@@ -294,7 +295,7 @@ function AgentFormContent({
   skillsLoading = false,
   isPrimary,
 }: AgentFormContentProps) {
-  const { t } = useTranslation('agent');
+  const { t, i18n } = useTranslation('agent');
   const { openRex } = useEntitySheet();
   const update = (fields: Partial<AgentFormData>) => onChange({ ...formData, ...fields });
 
@@ -601,6 +602,7 @@ function AgentFormContent({
               </label>
               {allSkills.map((skill) => {
                 const checked = formData.skills.includes(skill.name);
+                const localizedDescription = getLocalizedSkillDescription(skill, i18n.language);
                 return (
                   <label
                     key={skill.name}
@@ -619,9 +621,9 @@ function AgentFormContent({
                     />
                     <div className="min-w-0">
                       <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-800'}`}>{skill.name}</span>
-                      {skill.description && (
+                      {localizedDescription && (
                         <p className={`text-xs mt-0.5 leading-snug line-clamp-2 ${nativeReadOnly ? 'text-gray-400' : 'text-gray-500'}`}>
-                          {skill.description}
+                          {localizedDescription}
                         </p>
                       )}
                     </div>

@@ -90,6 +90,29 @@ Additional content here.
         assert skill_info.description == "Skill with frontmatter"
 
 
+def test_parse_skill_with_localized_description():
+    """description_cn in frontmatter should be parsed and exposed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        skill_dir = Path(tmpdir) / "localized-skill"
+        skill_dir.mkdir()
+
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("""---
+name: localized-skill
+description: "English description"
+description_cn: "中文描述"
+---
+
+# Localized Skill
+""")
+
+        skill_info = Skill._parse_skill_md(str(skill_file))
+
+        assert skill_info is not None
+        assert skill_info.description == "English description"
+        assert skill_info.description_cn == "中文描述"
+
+
 @pytest.mark.asyncio
 async def test_discover_skills():
     """Test skill discovery"""
@@ -173,6 +196,7 @@ async def test_skill_info_model():
     assert info.name == "test-skill"
     assert info.description == "A test skill"
     assert info.location == "/path/to/skill.md"
+    assert info.description_cn is None
     
     # Test serialization
     data = info.model_dump()
@@ -559,3 +583,67 @@ async def test_create_skill_writes_to_plugins_path(tmp_path, monkeypatch):
     assert "/skills/write-path-test/SKILL.md" in data["location"]
     # Canonical path check: must NOT be directly under .flocks/skills/
     assert "/.flocks/skills/" not in data["location"].replace("plugins/skills", "")
+
+
+@pytest.mark.asyncio
+async def test_create_skill_preserves_description_cn(tmp_path, monkeypatch):
+    """POST /skills should persist and return description_cn when provided."""
+    from httpx import AsyncClient, ASGITransport
+    from flocks.server.app import app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p.replace("~", str(tmp_path)))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/skills", json={
+            "name": "localized-create-test",
+            "description": "English description",
+            "description_cn": "中文描述",
+            "content": "# Test\n\nContent here.",
+        })
+
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["description"] == "English description"
+    assert data["description_cn"] == "中文描述"
+
+    skill_path = tmp_path / ".flocks" / "plugins" / "skills" / "localized-create-test" / "SKILL.md"
+    content = skill_path.read_text(encoding="utf-8")
+    assert "description: English description" in content
+    assert "description_cn: 中文描述" in content
+
+
+@pytest.mark.asyncio
+async def test_update_skill_preserves_description_cn(tmp_path, monkeypatch):
+    """PUT /skills/{name} should keep localized descriptions instead of dropping them."""
+    from httpx import AsyncClient, ASGITransport
+    from flocks.server.app import app
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p.replace("~", str(tmp_path)))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        create_resp = await client.post("/api/skills", json={
+            "name": "localized-update-test",
+            "description": "Original English",
+            "description_cn": "原始中文",
+            "content": "# Original\n\nBody",
+        })
+        assert create_resp.status_code == 201
+
+        update_resp = await client.put("/api/skills/localized-update-test", json={
+            "name": "localized-update-test",
+            "description": "Updated English",
+            "description_cn": "更新后的中文",
+            "content": "# Updated\n\nBody",
+        })
+
+    assert update_resp.status_code == 200
+    data = update_resp.json()
+    assert data["description"] == "Updated English"
+    assert data["description_cn"] == "更新后的中文"
+
+    skill_path = tmp_path / ".flocks" / "plugins" / "skills" / "localized-update-test" / "SKILL.md"
+    content = skill_path.read_text(encoding="utf-8")
+    assert "description: Updated English" in content
+    assert "description_cn: 更新后的中文" in content

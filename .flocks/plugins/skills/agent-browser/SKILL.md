@@ -1,7 +1,8 @@
 ---
 name: agent-browser
 category: system
-description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction.
+description: "Browser automation CLI for AI agents. Use it when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to open a website, fill out a form, click a button, take a screenshot, scrape page data, test a web app, log in to a site, or automate browser actions."
+description_cn: "为智能代理提供浏览器自动化命令行能力。当用户需要与网站交互时使用，包括页面导航、表单填写、按钮点击、截图、数据提取、网页应用测试或任意浏览器自动化任务。典型触发场景包括打开网站、填写表单、点击按钮、截图、抓取页面数据、测试网页应用、登录站点或自动化浏览器操作。"
 ---
 
 # Browser Automation with agent-browser

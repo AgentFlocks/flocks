@@ -19,6 +19,7 @@ export interface SkillInstallSpec {
 export interface Skill {
   name: string;
   description: string;
+  description_cn?: string;
   location: string;
   source?: string;
   content?: string;
@@ -83,6 +84,7 @@ export const skillAPI = {
   create: (data: {
     name: string;
     description: string;
+    description_cn?: string;
     content: string;
   }) =>
     client.post<Skill>('/api/skills', data),
@@ -90,6 +92,7 @@ export const skillAPI = {
   update: (name: string, data: {
     name: string;
     description: string;
+    description_cn?: string;
     content: string;
   }) =>
     client.put<Skill>(`/api/skills/${name}`, data),

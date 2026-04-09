@@ -65,6 +65,7 @@ class SkillResponse(BaseModel):
     """Skill response"""
     name: str = Field(..., description="Skill name")
     description: str = Field(..., description="Skill description")
+    description_cn: Optional[str] = Field(None, description="Localized Chinese skill description")
     location: str = Field(..., description="Path to SKILL.md")
     source: Optional[str] = Field(None, description="Discovery source")
     content: Optional[str] = Field(None, description="Full SKILL.md content")
@@ -82,6 +83,7 @@ class SkillCreateRequest(BaseModel):
     """Request to create a new skill"""
     name: str = Field(..., description="Skill name")
     description: str = Field(..., description="Skill description")
+    description_cn: Optional[str] = Field(None, description="Localized Chinese skill description")
     content: str = Field(..., description="Skill content (markdown)")
 
 
@@ -184,6 +186,7 @@ def _skill_to_response(skill: SkillInfo, include_content: bool = False) -> Skill
     return SkillResponse(
         name=skill.name,
         description=skill.description,
+        description_cn=skill.description_cn,
         location=skill.location,
         source=skill.source,
         content=content,
@@ -193,6 +196,19 @@ def _skill_to_response(skill: SkillInfo, include_content: bool = False) -> Skill
         requires=requires_resp,
         install_specs=install_specs_resp,
     )
+
+
+def _build_skill_frontmatter(req: SkillCreateRequest) -> str:
+    lines = [
+        "---",
+        f"name: {req.name}",
+        f"description: {req.description}",
+    ]
+    if req.description_cn:
+        lines.append(f"description_cn: {req.description_cn}")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines)
 
 
 # =============================================================================
@@ -358,7 +374,7 @@ async def create_skill(req: SkillCreateRequest):
 
         skill_path = skill_dir / "SKILL.md"
 
-        frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
+        frontmatter = _build_skill_frontmatter(req)
         full_content = frontmatter + req.content
 
         skill_path.write_text(full_content, encoding="utf-8")
@@ -370,6 +386,7 @@ async def create_skill(req: SkillCreateRequest):
         return SkillResponse(
             name=req.name,
             description=req.description,
+            description_cn=req.description_cn,
             location=str(skill_path),
             source="user",
             content=full_content,
@@ -395,7 +412,7 @@ async def update_skill(name: str, req: SkillCreateRequest):
         if not skill:
             raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
 
-        frontmatter = f"---\nname: {req.name}\ndescription: {req.description}\n---\n\n"
+        frontmatter = _build_skill_frontmatter(req)
         full_content = frontmatter + req.content
         is_rename = req.name != name
 
@@ -434,6 +451,7 @@ async def update_skill(name: str, req: SkillCreateRequest):
         return SkillResponse(
             name=req.name,
             description=req.description,
+            description_cn=req.description_cn,
             location=location,
             source=skill.source,
             content=full_content,

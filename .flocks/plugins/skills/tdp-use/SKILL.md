@@ -1,6 +1,7 @@
 ---
 name: tdp-use
-description: 用于处理 TDP 威胁检测平台相关任务，适合通过API或者结合浏览器进行以下任务：安全态势查看、告警检索、告警获取、威胁事件调查、受害主机排查、资产风险查询、等场景。只要用户提到需要 打开/操作/获取/浏览 TDP、微步 NDR等需求时，必须先加载本 skill。本 skill 是 TDP 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `tdp_*` tool。
+description: "Handles tasks for the TDP threat detection platform through API or browser workflows when needed, including security posture review, alert search and retrieval, threat event investigation, victim host analysis, and asset risk queries. Whenever the user needs to open, operate, retrieve, or browse TDP or ThreatBook NDR, you must load this skill first. This skill is the only decision entry for TDP platform operations: do not call any `tdp_*` tool before reading this skill and determining the mode."
+description_cn: "用于处理 TDP 威胁检测平台相关任务，适合通过 API 或结合浏览器完成安全态势查看、告警检索、告警获取、威胁事件调查、受害主机排查和资产风险查询等场景。只要用户提到需要打开、操作、获取或浏览 TDP、微步 NDR 等需求时，必须先加载本 skill。本 skill 是 TDP 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `tdp_*` tool。"
 ---
 
 # TDP Use

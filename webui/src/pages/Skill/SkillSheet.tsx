@@ -14,10 +14,12 @@ import ReactMarkdown from 'react-markdown';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
+import { getLocalizedSkillDescription } from './skillDisplay';
 
 interface SkillFormData {
   name: string;
   description: string;
+  descriptionCn: string;
   content: string;
 }
 
@@ -51,6 +53,7 @@ function buildRexContext(isEdit: boolean, formData: SkillFormData): string {
 **当前 Skill 信息：**
 - 名称：${formData.name}
 - 描述：${formData.description || '（无描述）'}
+- 中文描述：${formData.descriptionCn || '（无中文描述）'}
 - 内容预览：${formData.content.slice(0, 200)}${formData.content.length > 200 ? '...' : ''}
 
 请根据用户的需求帮助他们改进技能内容和描述。`;
@@ -87,12 +90,13 @@ interface SkillSheetProps {
 }
 
 export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: SkillSheetProps) {
-  const { t } = useTranslation('skill');
+  const { t, i18n } = useTranslation('skill');
   const toast = useToast();
   const isEdit = !!skill;
   // Custom skills (source !== 'project') are editable and deletable
   const isUserSkill = isEdit && skill.source !== 'project';
   const isReadonly = isEdit && !isUserSkill;
+  const localizedDescription = getLocalizedSkillDescription(skill, i18n.language);
 
   // Strip YAML front matter — name/description are already shown as separate fields
   const stripFrontMatter = (raw: string) => raw.replace(/^---[\s\S]*?---\n?/, '').trim();
@@ -100,6 +104,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
   const [formData, setFormData] = useState<SkillFormData>({
     name: skill?.name ?? '',
     description: skill?.description ?? '',
+    descriptionCn: skill?.description_cn ?? '',
     content: stripFrontMatter(skill?.content ?? ''),
   });
   const [loading, setLoading] = useState(false);
@@ -115,9 +120,19 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
     try {
       setLoading(true);
       if (isEdit) {
-        await skillAPI.update(skill!.name, formData);
+        await skillAPI.update(skill!.name, {
+          name: formData.name,
+          description: formData.description,
+          description_cn: formData.descriptionCn || undefined,
+          content: formData.content,
+        });
       } else {
-        await skillAPI.create(formData);
+        await skillAPI.create({
+          name: formData.name,
+          description: formData.description,
+          description_cn: formData.descriptionCn || undefined,
+          content: formData.content,
+        });
       }
       onSaved();
     } catch (err: unknown) {
@@ -145,7 +160,12 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
     if (!isEdit || !skill) return;
     try {
       setSaving(true);
-      await skillAPI.update(skill.name, formData);
+      await skillAPI.update(skill.name, {
+        name: formData.name,
+        description: formData.description,
+        description_cn: formData.descriptionCn || undefined,
+        content: formData.content,
+      });
       setContentEditing(false);
       onSaved();
     } catch (err: unknown) {
@@ -241,7 +261,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
           </label>
           {isReadonly ? (
             <div className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-600 leading-relaxed whitespace-pre-wrap">
-              {formData.description || t('sheet.noDescription')}
+              {localizedDescription || t('sheet.noDescription')}
             </div>
           ) : (
             <textarea
@@ -253,6 +273,22 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
             />
           )}
         </div>
+
+        {/* Chinese Description */}
+        {!isReadonly && (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {t('sheet.descriptionCn')}
+            </label>
+            <textarea
+              value={formData.descriptionCn}
+              onChange={(e) => setFormData({ ...formData, descriptionCn: e.target.value })}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm resize-none leading-relaxed"
+              placeholder={t('sheet.descriptionCnPlaceholder')}
+              rows={3}
+            />
+          </div>
+        )}
 
         {/* Path (edit/view mode, shown above content) */}
         {isEdit && relativePath && (

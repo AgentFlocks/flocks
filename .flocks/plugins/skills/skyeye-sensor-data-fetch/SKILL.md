@@ -1,6 +1,7 @@
 ---
 name: skyeye-sensor-data-fetch
-description: 使用天眼 SkyEye Sensor 传感器侧精简 CLI 查询告警列表和告警统计。适用于用户提到"SkyEye Sensor""天眼流量传感器告警"场景。
+description: "Uses the lightweight SkyEye Sensor CLI to query alert lists and alert statistics on the sensor side. Use it when the user mentions \"SkyEye Sensor\" or Tianyan/SkyEye traffic-sensor alert scenarios."
+description_cn: "使用天眼 SkyEye Sensor 传感器侧精简 CLI 查询告警列表和告警统计。适用于用户提到“SkyEye Sensor”或天眼流量传感器告警相关场景。"
 ---
 
 # SkyEye Sensor 数据查询

@@ -1,6 +1,7 @@
 ---
 name: skyeye-use
-description: 用于处理 SkyEye/天眼/网神分析平台相关任务，适合通过API或者结合浏览器进行以下任务：告警列表查询、威胁级别筛选、攻击阶段分析、攻击结果排查、看板统计查看、趋势分析、系统状态查看、告警报告导出、PCAP 下载和样本文件获取等场景。只要用户提到 SkyEye、天眼、网神分析平台的相关操作时，必须先加载本 skill。本 skill 是 天眼 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `skyeye_*` tool。
+description: "Handles tasks for the SkyEye / Tianyan / NSFOCUS analysis platform through API or browser workflows when needed, including alert list queries, threat-level filtering, attack-stage analysis, attack-result investigation, dashboard and trend analysis, system status checks, alert report export, PCAP download, and sample file retrieval. Whenever the user mentions operations related to SkyEye, Tianyan, or the NSFOCUS analysis platform, you must load this skill first. This skill is the only decision entry for SkyEye platform operations: do not call any `skyeye_*` tool before reading this skill and determining the mode."
+description_cn: "用于处理 SkyEye/天眼/网神分析平台相关任务，适合通过 API 或结合浏览器完成告警列表查询、威胁级别筛选、攻击阶段分析、攻击结果排查、看板和趋势分析、系统状态查看、告警报告导出、PCAP 下载和样本文件获取等场景。只要用户提到 SkyEye、天眼或网神分析平台相关操作时，必须先加载本 skill。本 skill 是天眼平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `skyeye_*` tool。"
 ---
 
 # SkyEye Use

@@ -1,7 +1,8 @@
 ---
 name: workflow-builder
 category: system
-description: 根据自然语言描述生成 flocks 内置工作流（workflow.md, workflow.json）。当用户提出创建/设计/生成/搭建工作流或任何多步骤流程（如告警调查、事件响应、SOP/Runbook 自动化）时使用本 skill。
+description: "Generates built-in Flocks workflows (`workflow.md`, `workflow.json`) from natural-language requirements. Use this skill when the user asks to create, design, generate, or assemble a workflow, or any multi-step process such as alert investigation, incident response, or SOP/runbook automation."
+description_cn: "根据自然语言描述生成 Flocks 内置工作流（`workflow.md`、`workflow.json`）。当用户提出创建、设计、生成、搭建工作流，或任何多步骤流程需求时使用本 skill，例如告警调查、事件响应或 SOP/Runbook 自动化。"
 ---
 
 # Workflow Builder

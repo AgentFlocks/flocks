@@ -8,9 +8,10 @@ import { useToast } from '@/components/common/Toast';
 import { skillAPI, Skill } from '@/api/skill';
 import SkillSheet from './SkillSheet';
 import SkillInstallDialog from './SkillInstallDialog';
+import { getLocalizedSkillDescription } from './skillDisplay';
 
 export default function SkillPage() {
-  const { t } = useTranslation('skill');
+  const { t, i18n } = useTranslation('skill');
   const [skills, setSkills] = useState<Skill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +53,8 @@ export default function SkillPage() {
     () => skills.filter(skill =>
       skill.category !== 'system' && (
         skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (skill.description || '').toLowerCase().includes(searchQuery.toLowerCase())
+        (skill.description || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (skill.description_cn || '').toLowerCase().includes(searchQuery.toLowerCase())
       )
     ),
     [skills, searchQuery],
@@ -243,6 +245,7 @@ export default function SkillPage() {
                     <SkillCard
                       key={skill.name}
                       skill={skill}
+                      language={i18n.language}
                       isSelected={sheetSkill?.name === skill.name}
                       installingDeps={installingDeps[skill.name] ?? false}
                       onClick={() => handleSelectSkill(skill)}
@@ -269,6 +272,7 @@ export default function SkillPage() {
                     <SkillCard
                       key={skill.name}
                       skill={skill}
+                      language={i18n.language}
                       isSelected={sheetSkill?.name === skill.name}
                       installingDeps={installingDeps[skill.name] ?? false}
                       onClick={() => handleSelectSkill(skill)}
@@ -323,6 +327,7 @@ function isUserManaged(skill: Skill): boolean {
 
 interface SkillCardProps {
   skill: Skill;
+  language: string;
   isSelected: boolean;
   installingDeps: boolean;
   onClick: () => void;
@@ -349,12 +354,13 @@ function hashIndex(str: string, len: number) {
   return h % len;
 }
 
-function SkillCard({ skill, isSelected, installingDeps, onClick, onInstallDeps, onDelete }: SkillCardProps) {
+function SkillCard({ skill, language, isSelected, installingDeps, onClick, onInstallDeps, onDelete }: SkillCardProps) {
   const { t } = useTranslation('skill');
   const isUserSkill = isUserManaged(skill) && skill.source !== 'project';
   const palette = isUserManaged(skill)
     ? PROJECT_PALETTE
     : BUILTIN_PALETTES[hashIndex(skill.name, BUILTIN_PALETTES.length)];
+  const localizedDescription = getLocalizedSkillDescription(skill, language);
 
   const hasMissingDeps = skill.eligible === false && (skill.install_specs?.length ?? 0) > 0;
 
@@ -409,7 +415,7 @@ function SkillCard({ skill, isSelected, installingDeps, onClick, onInstallDeps, 
 
       {/* 描述 */}
       <p className="flex-1 px-4 min-h-0 text-xs text-gray-600 leading-relaxed line-clamp-3">
-        {skill.description || t('common:empty.noDescription')}
+        {localizedDescription || t('common:empty.noDescription')}
       </p>
 
       {/* 底部：eligibility badge */}

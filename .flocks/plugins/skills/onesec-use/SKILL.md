@@ -1,6 +1,7 @@
 ---
 name: onesec-use
-description: 用于处理 OneSEC 终端安全平台相关任务，适合通过API或者结合浏览器进行以下任务: 终端安全调查、威胁事件分析、终端告警检索、行为日志排查、IOC 查询、恶意文件分析、DNS 威胁排查、软件与终端资产查询、任务进度查看、审计日志分析、病毒扫描和常见终端处置场景。只要用户提到 OneSEC、微步 EDR等相关操纵需求时，必须先加载本 skill。本 skill 是 OneSEC 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesec_*` tool。
+description: "Handles tasks for the OneSEC endpoint security platform through API or browser workflows when needed, including endpoint security investigation, threat event analysis, endpoint alert search, behavior log investigation, IOC lookup, malicious file analysis, DNS threat investigation, software and endpoint asset queries, task progress tracking, audit log analysis, virus scanning, and common endpoint response scenarios. Whenever the user mentions operations related to OneSEC or ThreatBook EDR, you must load this skill first. This skill is the only decision entry for OneSEC platform operations: do not call any `onesec_*` tool before reading this skill and determining the mode."
+description_cn: "用于处理 OneSEC 终端安全平台相关任务，适合通过 API 或结合浏览器完成终端安全调查、威胁事件分析、终端告警检索、行为日志排查、IOC 查询、恶意文件分析、DNS 威胁排查、软件与终端资产查询、任务进度查看、审计日志分析、病毒扫描和常见终端处置等场景。只要用户提到 OneSEC、微步 EDR 等相关操作需求时，必须先加载本 skill。本 skill 是 OneSEC 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesec_*` tool。"
 ---
 
 # OneSEC Use

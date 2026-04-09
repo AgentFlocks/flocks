@@ -1,6 +1,7 @@
 ---
 name: ndr-alert-analysis
-description: 用于 NDR（网络检测与响应）告警的自动化研判分析，按照标准流程进行情报查询、资产关联、漏洞分析、payload 解析和综合研判。
+description: "Automates investigation and analysis for NDR (Network Detection and Response) alerts, following a standard workflow for threat intelligence lookup, asset correlation, vulnerability analysis, payload parsing, and overall judgment."
+description_cn: "用于 NDR（网络检测与响应）告警的自动化研判分析，按照标准流程进行情报查询、资产关联、漏洞分析、payload 解析和综合研判。"
 ---
 
 ## 描述
