@@ -230,6 +230,31 @@ async def _validate_windows_restart_runtime(
     return f"Windows restart runtime validation failed: {last_error}"
 
 
+def _build_uv_sync_env() -> dict[str, str] | None:
+    """Build supplementary env vars for ``uv sync``.
+
+    On Linux/macOS under systemd or other minimal-PATH environments, the
+    inherited PATH may not include directories where ``uv`` or managed
+    Python interpreters live.  We augment PATH with well-known locations
+    so that ``uv sync`` can reliably locate its own toolchain.
+    """
+    if sys.platform == "win32":
+        return None
+
+    home = str(Path.home())
+    extra_dirs = [
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".cargo", "bin"),
+        "/usr/local/bin",
+    ]
+    current_path = os.environ.get("PATH", "")
+    current_entries = set(current_path.split(os.pathsep))
+    missing = [d for d in extra_dirs if d not in current_entries]
+    if not missing:
+        return None
+    return {"PATH": os.pathsep.join([current_path] + missing)}
+
+
 # ------------------------------------------------------------------ #
 # Async subprocess helpers
 # ------------------------------------------------------------------ #
@@ -1919,7 +1944,7 @@ async def perform_update(
     yield UpdateProgress(stage="syncing", message="Syncing dependencies...")
 
     uv_path = _find_executable("uv")
-    if sys.platform == "win32" and not uv_path:
+    if not uv_path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if backup_path is not None:
             await asyncio.to_thread(
@@ -1928,28 +1953,32 @@ async def perform_update(
                 install_root,
                 current_version,
             )
-        yield UpdateProgress(
-            stage="error",
-            message="Dependency sync failed: uv is required to refresh the Windows project runtime.",
-            success=False,
+        hint = (
+            "Dependency sync failed: uv is required but was not found. "
+            "Please install uv (https://docs.astral.sh/uv/) and ensure it "
+            "is in PATH (e.g. add ~/.local/bin to PATH for systemd services)."
         )
+        if sys.platform == "win32":
+            hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
+        yield UpdateProgress(stage="error", message=hint, success=False)
         return
 
-    if uv_path:
-        log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
-        uv_cmd = [uv_path, "sync"]
-        if profile.uv_default_index:
-            uv_cmd.extend(["--default-index", profile.uv_default_index])
-        code, _, err = await _run_async(uv_cmd, cwd=install_root, timeout=120)
-    else:
-        log.warning("updater.dependencies.sync_fallback", {"tool": "pip"})
-        pip_env = {"PIP_INDEX_URL": profile.pip_index_url} if profile.pip_index_url else None
+    log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
+    uv_cmd = [uv_path, "sync"]
+    if profile.uv_default_index:
+        uv_cmd.extend(["--default-index", profile.uv_default_index])
+
+    sync_env = _build_uv_sync_env()
+    code, _, err = await _run_async(
+        uv_cmd, cwd=install_root, timeout=180, env=sync_env,
+    )
+    if code != 0:
+        log.warning("updater.dependencies.sync_retry", {"first_error": err})
+        await asyncio.sleep(3)
         code, _, err = await _run_async(
-            [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-            cwd=install_root,
-            timeout=120,
-            env=pip_env,
+            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
         )
+
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if backup_path is not None:
@@ -2201,4 +2230,28 @@ def _find_executable(name: str) -> str | None:
     for candidate in venv_candidates:
         if candidate.exists():
             return str(candidate)
+
+    # When running inside a uv-tool-managed environment (e.g. systemd service
+    # where PATH is minimal), shutil.which may miss uv.  Probe well-known
+    # user-level and system-level locations so the updater can still call
+    # ``uv sync`` instead of falling back to pip (which doesn't exist in uv
+    # tool venvs).
+    if name == "uv" and sys.platform != "win32":
+        extra_paths: list[Path] = []
+        home = Path.home()
+        extra_paths.append(home / ".local" / "bin" / "uv")
+        extra_paths.append(home / ".cargo" / "bin" / "uv")
+        # If the running interpreter lives inside a uv tools tree, the uv
+        # binary that created it is usually in ~/.local/bin.  Also try the
+        # bin dir adjacent to the tools dir.
+        exe = Path(sys.executable).resolve()
+        uv_tools_marker = os.sep + os.path.join(".local", "share", "uv", "tools") + os.sep
+        if uv_tools_marker in str(exe):
+            uv_share = str(exe).split(uv_tools_marker)[0]
+            extra_paths.append(Path(uv_share) / ".local" / "bin" / "uv")
+        extra_paths.append(Path("/usr/local/bin/uv"))
+        for p in extra_paths:
+            if p.is_file() and os.access(p, os.X_OK):
+                return str(p)
+
     return None

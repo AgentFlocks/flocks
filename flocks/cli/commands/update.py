@@ -92,6 +92,17 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
     total_steps = 6
     seen_stages: set[str] = set()
     step = 0
+    active_stage: str | None = None
+
+    def _finish_active(success: bool = True) -> None:
+        """Mark the currently displayed line as done or failed."""
+        nonlocal active_stage
+        if active_stage is not None:
+            if success:
+                console.print("[green]✓[/green]")
+            else:
+                console.print("[red]✗[/red]")
+            active_stage = None
 
     async for progress in perform_update(
         version_to_apply,
@@ -101,21 +112,24 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         region=region,
     ):
         if progress.stage == "error":
+            _finish_active(success=False)
             console.print(f"\n[red]✗ 升级失败：{progress.message}[/red]")
             raise typer.Exit(1)
 
         if progress.stage == "done":
+            _finish_active(success=True)
             step += 1
             console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
             console.print("[green]✓[/green]")
             continue
 
         if progress.stage not in seen_stages:
+            _finish_active(success=True)
             seen_stages.add(progress.stage)
             step += 1
             label = stage_labels.get(progress.stage, progress.stage)
             console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
-            console.print("[green]✓[/green]")
+            active_stage = progress.stage
 
     console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
     console.print("[dim]如有后台服务正在运行，请执行 [bold]flocks restart[/bold] 重启服务[/dim]")

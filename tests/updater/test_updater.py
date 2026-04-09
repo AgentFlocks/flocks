@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -150,6 +151,108 @@ def test_find_executable_ignores_wsl_mnt_paths(
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
 
     assert updater._find_executable("uv") == str(uv_bin)
+
+
+def test_find_executable_probes_user_local_bin_for_uv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When shutil.which fails (e.g. systemd with minimal PATH) and the
+    interpreter is inside a uv-tool venv, _find_executable should still
+    locate uv in ~/.local/bin/."""
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    uv_bin = local_bin / "uv"
+    uv_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert updater._find_executable("uv") == str(uv_bin)
+
+
+def test_find_executable_probes_cargo_bin_for_uv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """uv installed via cargo should be found at ~/.cargo/bin/uv."""
+    cargo_bin = tmp_path / ".cargo" / "bin"
+    cargo_bin.mkdir(parents=True)
+    uv_bin = cargo_bin / "uv"
+    uv_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    uv_bin.chmod(0o755)
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert updater._find_executable("uv") == str(uv_bin)
+
+
+def test_find_executable_does_not_probe_extra_paths_for_non_uv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The extra path probing should only apply to the 'uv' name."""
+    local_bin = tmp_path / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    npm_bin = local_bin / "npm"
+    npm_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    npm_bin.chmod(0o755)
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert updater._find_executable("npm") is None
+
+
+def test_build_uv_sync_env_augments_path_with_missing_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    result = updater._build_uv_sync_env()
+
+    assert result is not None
+    parts = result["PATH"].split(os.pathsep)
+    assert "/usr/bin" in parts
+    assert str(tmp_path / ".local" / "bin") in parts
+    assert str(tmp_path / ".cargo" / "bin") in parts
+    assert "/usr/local/bin" in parts
+
+
+def test_build_uv_sync_env_returns_none_when_all_dirs_present(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    home = str(tmp_path)
+    full_path = os.pathsep.join([
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".cargo", "bin"),
+        "/usr/local/bin",
+        "/usr/bin",
+    ])
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("PATH", full_path)
+
+    assert updater._build_uv_sync_env() is None
+
+
+def test_build_uv_sync_env_returns_none_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    assert updater._build_uv_sync_env() is None
 
 
 def test_upgrade_page_html_contains_marker_and_version() -> None:
@@ -1119,6 +1222,7 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
         "_find_executable",
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
 
@@ -1150,10 +1254,12 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
 
 
 @pytest.mark.asyncio
-async def test_perform_update_uses_cn_pip_index_when_uv_is_unavailable(
+async def test_perform_update_errors_when_uv_not_found(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """When uv is not found, the updater should fail immediately with a clear
+    message telling the user to install uv."""
     archive_path = tmp_path / "flocks.tar.gz"
     archive_path.write_text("archive", encoding="utf-8")
     staged_root = tmp_path / "staged"
@@ -1161,7 +1267,7 @@ async def test_perform_update_uses_cn_pip_index_when_uv_is_unavailable(
     async def fake_get_updater_config():
         return SimpleNamespace(
             archive_format="tar.gz",
-            sources=["github", "gitee"],
+            sources=["github"],
             repo="AgentFlocks/Flocks",
             token=None,
             gitee_token=None,
@@ -1170,42 +1276,150 @@ async def test_perform_update_uses_cn_pip_index_when_uv_is_unavailable(
             gitee_repo=None,
         )
 
-    captured: list[tuple[list[str], dict[str, str] | None]] = []
-
-    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        captured.append((list(cmd), env))
-        return 0, "", ""
-
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+
     async def fake_download_with_fallback(**_kwargs):
         return archive_path
 
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
-    monkeypatch.setattr(updater, "_run_async", fake_run_async)
     monkeypatch.setattr(updater, "_find_executable", lambda _name: None)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
 
     progresses = [
         step
-        async for step in updater.perform_update(
-            "2026.4.1",
-            restart=False,
-            region="cn",
+        async for step in updater.perform_update("2026.4.1", restart=False)
+    ]
+
+    error_events = [p for p in progresses if p.stage == "error"]
+    assert len(error_events) == 1
+    assert "uv is required but was not found" in error_events[0].message
+    assert "PATH" in error_events[0].message
+
+
+@pytest.mark.asyncio
+async def test_perform_update_retries_uv_sync_on_first_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """uv sync should retry once after a transient failure."""
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+
+    call_count = 0
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
         )
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        nonlocal call_count
+        if "sync" in cmd:
+            call_count += 1
+            if call_count == 1:
+                return 1, "", "network timeout"
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_download(**_kw):
+        return archive_path
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_a, **_kw: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    async def fake_sleep(_s):
+        pass
+
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_a, **_kw: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+
+    progresses = [
+        step async for step in updater.perform_update("2026.4.1", restart=False)
     ]
 
     assert progresses[-1].stage == "done"
-    assert captured == [
-        (
-            [sys.executable, "-m", "pip", "install", "-e", ".", "--quiet"],
-            {"PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple"},
-        ),
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_perform_update_fails_after_uv_sync_retry_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """When uv sync fails twice, the updater should give up and rollback."""
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    rolled_back = False
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        if "sync" in cmd:
+            return 1, "", "resolution failed"
+        return 0, "", ""
+
+    async def fake_download(**_kw):
+        return archive_path
+
+    def fake_restore(*_args):
+        nonlocal rolled_back
+        rolled_back = True
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_a, **_kw: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    async def fake_sleep(_s):
+        pass
+
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_a, **_kw: None)
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", fake_restore)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+
+    progresses = [
+        step async for step in updater.perform_update("2026.4.1", restart=False)
     ]
+
+    error_events = [p for p in progresses if p.stage == "error"]
+    assert len(error_events) == 1
+    assert "resolution failed" in error_events[0].message
+    assert rolled_back
 
 
 @pytest.mark.asyncio
@@ -1583,7 +1797,8 @@ async def test_perform_update_yields_error_when_build_restart_argv_fails(
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
-    monkeypatch.setattr(updater, "_find_executable", lambda _name: None)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: "/usr/bin/uv")
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: events.append("marker"))
     monkeypatch.setattr(
