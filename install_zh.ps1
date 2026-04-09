@@ -96,6 +96,7 @@ function Invoke-WorkspaceInstaller {
 
 function Get-ArchiveCandidateUrls {
     return @(
+        "https://gitee.com/$RepoSlug/repository/archive/$Version.zip",
         "https://gitee.com/$RepoSlug/archive/refs/heads/$Version.zip",
         "https://gitee.com/$RepoSlug/archive/refs/tags/$Version.zip"
     )

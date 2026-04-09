@@ -15,7 +15,7 @@ RAW_INSTALL_ZH_SH_URL="${FLOCKS_RAW_INSTALL_ZH_SH_URL:-https://gitee.com/flocks/
 RAW_INSTALL_ZH_PS1_URL="${FLOCKS_RAW_INSTALL_ZH_PS1_URL:-https://gitee.com/flocks/flocks/raw/main/install_zh.ps1}"
 
 info() {
-  printf '[flocks-bootstrap-zh] %s\n' "$1"
+  printf '[flocks-bootstrap-zh] %s\n' "$1" >&2
 }
 
 fail() {
@@ -90,6 +90,7 @@ ensure_dependencies() {
 }
 
 build_candidate_urls() {
+  printf 'https://gitee.com/%s/repository/archive/%s.zip\n' "$REPO_SLUG" "$VERSION"
   printf 'https://gitee.com/%s/archive/refs/heads/%s.zip\n' "$REPO_SLUG" "$VERSION"
   printf 'https://gitee.com/%s/archive/refs/tags/%s.zip\n' "$REPO_SLUG" "$VERSION"
 }
