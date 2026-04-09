@@ -611,8 +611,10 @@ function Invoke-NativeCommand {
         if ($StreamOutput) {
             $outputLines = [System.Collections.Generic.List[string]]::new()
             $savedLocation = Get-Location
+            $savedErrorAction = $ErrorActionPreference
             Set-Location $WorkingDirectory
             try {
+                $ErrorActionPreference = "Continue"
                 & $resolvedFilePath @resolvedArgs 2>&1 | ForEach-Object {
                     $lineText = "$_"
                     Write-Host $lineText
@@ -620,6 +622,7 @@ function Invoke-NativeCommand {
                 }
             }
             finally {
+                $ErrorActionPreference = $savedErrorAction
                 Set-Location $savedLocation
             }
             $streamExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
