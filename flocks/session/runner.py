@@ -105,6 +105,7 @@ class StepResult:
     content: str = ""
     tool_calls: List[ToolCall] = field(default_factory=list)
     error: Optional[str] = None
+    usage: Optional[Dict[str, int]] = None
 
 
 @dataclass
@@ -929,6 +930,7 @@ Please address this message and continue with your tasks.
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
+                await self._record_usage_if_available(result.usage)
                 
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
@@ -1005,6 +1007,93 @@ Please address this message and continue with your tasks.
         
         # Aborted
         return StepResult(action="stop", error="Aborted")
+
+    @staticmethod
+    def _build_tokens_update(stream_usage: Optional[Dict[str, int]]) -> Optional[Dict[str, Any]]:
+        """Normalize runner token updates from provider usage."""
+        if not stream_usage:
+            return None
+        return {
+            "input": stream_usage.get("prompt_tokens", 0),
+            "output": stream_usage.get("completion_tokens", 0),
+            "reasoning": stream_usage.get("reasoning_tokens", 0),
+            "cache": {
+                "read": stream_usage.get("cache_read_input_tokens", 0),
+                "write": stream_usage.get("cache_creation_input_tokens", 0),
+            },
+        }
+
+    def _resolve_usage_pricing(self) -> Optional[Any]:
+        """Resolve pricing config for the current provider/model pair."""
+        from flocks.provider.types import PriceConfig
+
+        model_info = None
+        provider = Provider.get(self.provider_id)
+        if provider:
+            for candidate in getattr(provider, "_config_models", []):
+                if candidate.id == self.model_id:
+                    model_info = candidate
+                    break
+
+        if model_info is None:
+            model_info = Provider.get_model(self.model_id)
+
+        pricing = getattr(model_info, "pricing", None) if model_info else None
+        if pricing is None:
+            return None
+
+        if isinstance(pricing, PriceConfig):
+            return pricing
+
+        if hasattr(pricing, "input") and hasattr(pricing, "output"):
+            return PriceConfig(
+                input=getattr(pricing, "input", 0.0),
+                output=getattr(pricing, "output", 0.0),
+                unit=getattr(pricing, "unit", 1_000_000),
+                currency=getattr(pricing, "currency", "USD"),
+                cache_read=getattr(pricing, "cache_read", None),
+                cache_write=getattr(pricing, "cache_write", None),
+            )
+
+        if isinstance(pricing, dict):
+            return PriceConfig(
+                input=pricing.get("input", 0.0),
+                output=pricing.get("output", 0.0),
+                unit=pricing.get("unit", 1_000_000),
+                currency=pricing.get("currency", "USD"),
+                cache_read=pricing.get("cache_read"),
+                cache_write=pricing.get("cache_write"),
+            )
+
+        return None
+
+    async def _record_usage_if_available(self, usage: Optional[Dict[str, int]]) -> None:
+        """Persist usage records without blocking successful session steps."""
+        if not usage:
+            return
+
+        from flocks.server.routes.usage import RecordUsageRequest, record_usage
+
+        try:
+            await record_usage(
+                RecordUsageRequest(
+                    provider_id=self.provider_id,
+                    model_id=self.model_id,
+                    session_id=self.session.id,
+                    input_tokens=usage.get("prompt_tokens", 0),
+                    output_tokens=usage.get("completion_tokens", 0),
+                    cached_tokens=usage.get("cache_read_input_tokens", 0),
+                    reasoning_tokens=usage.get("reasoning_tokens", 0),
+                    pricing=self._resolve_usage_pricing(),
+                )
+            )
+        except Exception as exc:
+            log.warn("runner.usage_record_failed", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "error": str(exc),
+            })
     
     async def _build_system_prompts(self, agent: AgentInfo) -> List[str]:
         """Build system prompts."""
@@ -1930,16 +2019,8 @@ Please address this message and continue with your tasks.
         reasoning = processor.get_reasoning_content()
         
         # Update message tokens if provider reported usage
-        if stream_usage:
-            tokens_update = {
-                "input": stream_usage.get("prompt_tokens", 0),
-                "output": stream_usage.get("completion_tokens", 0),
-                "reasoning": 0,
-                "cache": {
-                    "read": stream_usage.get("cache_read_input_tokens", 0),
-                    "write": stream_usage.get("cache_creation_input_tokens", 0),
-                },
-            }
+        tokens_update = self._build_tokens_update(stream_usage)
+        if tokens_update:
             try:
                 await Message.update(
                     self.session.id,
@@ -2007,6 +2088,7 @@ Please address this message and continue with your tasks.
                 action="continue",
                 content=content,
                 tool_calls=tool_calls_for_result,
+                usage=stream_usage,
             )
         
         self._end_observability(
@@ -2028,7 +2110,7 @@ Please address this message and continue with your tasks.
                 "finish_reason": processor.get_finish_reason(),
             },
         )
-        return StepResult(action="stop", content=content)
+        return StepResult(action="stop", content=content, usage=stream_usage)
     
     @staticmethod
     def _end_observability(

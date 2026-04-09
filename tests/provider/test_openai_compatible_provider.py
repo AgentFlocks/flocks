@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -39,6 +40,11 @@ def _chat_response(content: str, model: str = "MiniMax-M2.5") -> ChatResponse:
 async def _empty_stream():
     if False:
         yield None
+
+
+async def _stream_from_chunks(*chunks):
+    for chunk in chunks:
+        yield chunk
 
 
 class TestOpenAICompatibleProviderTemperature:
@@ -167,3 +173,75 @@ class TestOpenAICompatibleProviderMiniMaxFallback:
 
         assert [chunk.delta for chunk in chunks] == ["Recovered generic fallback"]
         sleep_mock.assert_not_awaited()
+
+
+class TestOpenAICompatibleProviderStreamingUsage:
+    @pytest.mark.asyncio
+    async def test_chat_stream_includes_usage_in_terminal_chunk(self):
+        provider, create = _build_provider_with_client()
+        create.return_value = _stream_from_chunks(
+            SimpleNamespace(
+                choices=[],
+                usage=SimpleNamespace(prompt_tokens=13, completion_tokens=8, total_tokens=21),
+            ),
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="hello", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            ),
+        )
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.5",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert create.await_args.kwargs["stream_options"] == {"include_usage": True}
+        assert chunks[-1].finish_reason == "stop"
+        assert chunks[-1].usage == {
+            "prompt_tokens": 13,
+            "completion_tokens": 8,
+            "total_tokens": 21,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_retries_without_stream_options_when_unsupported(self):
+        provider, create = _build_provider_with_client()
+        create.side_effect = [
+            ValueError("unsupported parameter: include_usage"),
+            _stream_from_chunks(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="hello", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2, total_tokens=7),
+                )
+            ),
+        ]
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.5",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert create.await_count == 2
+        assert "stream_options" in create.await_args_list[0].kwargs
+        assert "stream_options" not in create.await_args_list[1].kwargs
+        assert chunks[-1].usage == {
+            "prompt_tokens": 5,
+            "completion_tokens": 2,
+            "total_tokens": 7,
+        }
