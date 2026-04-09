@@ -661,8 +661,7 @@ export function APIServiceDetailPanel({
     schema.forEach((field) => {
       const dynamicValue = nextCredentials?.fields?.[field.key];
       const value = dynamicValue ?? getLegacyCredentialValue(nextCredentials, field.key) ?? '';
-      const effectiveDefault = field.default_value || (field.key === 'base_url' ? nextMetadata?.base_url : undefined);
-      nextValues[field.key] = (effectiveDefault && value === effectiveDefault) ? '' : (value || '');
+      nextValues[field.key] = value || '';
     });
 
     setFormValues(nextValues);

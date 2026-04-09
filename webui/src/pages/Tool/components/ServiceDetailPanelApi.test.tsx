@@ -66,6 +66,7 @@ vi.mock('react-i18next', () => ({
         'serviceInfo.enterBaseUrl': '输入 API 地址',
         'serviceInfo.enterSecret': '输入密钥',
         'serviceInfo.enterUsername': '输入用户名',
+        'serviceInfo.enterPassword': '输入密码',
         'detail.hide': '隐藏',
         'detail.show': '显示',
         'alert.unknownError': '未知错误',
@@ -197,6 +198,45 @@ describe('APIServiceDetailPanel', () => {
         },
       }));
     });
+  });
+
+  it('shows saved base url even when it matches the default value', async () => {
+    providerAPI.getMetadata.mockResolvedValueOnce({
+      data: {
+        name: 'ThreatBook IO',
+        description: 'ThreatBook global API service',
+        credential_schema: [
+          { key: 'api_key', label: 'API Key', storage: 'secret', sensitive: true, required: true, input_type: 'password', config_key: 'apiKey', secret_id: 'threatbook_io_api_key' },
+          { key: 'base_url', label: 'Base URL', storage: 'config', sensitive: false, required: false, input_type: 'url', config_key: 'base_url', default_value: 'https://api.threatbook.io' },
+        ],
+        base_url: 'https://api.threatbook.io',
+      },
+    });
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({
+      data: {
+        api_key: 'tb-key',
+        base_url: 'https://api.threatbook.io',
+        fields: {
+          api_key: 'tb-key',
+          base_url: 'https://api.threatbook.io',
+        },
+        has_credential: true,
+      },
+    });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="threatbook-io"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+        onToggleEnabled={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const baseUrlInput = await screen.findByPlaceholderText('输入 API 地址');
+    expect((baseUrlInput as HTMLInputElement).value).toBe('https://api.threatbook.io');
   });
 
   it('saves api key, base url and secret for tdp service', async () => {
