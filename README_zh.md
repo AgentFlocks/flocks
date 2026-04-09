@@ -113,7 +113,7 @@ flocks stop
 ## 方案 2：Docker 安装
 
 > [!NOTE]
-> docker 模式下暂时 agent-browser headed 模式不可用
+> docker 版本暂时 agent-browser headed 模式不可用
 
 ### 拉取镜像
 

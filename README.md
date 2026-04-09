@@ -46,7 +46,8 @@ If automatic `npm` installation fails during setup, please install `npm` manuall
 
 ### Install with one command
 
-> **Users in mainland China**: If GitHub or `raw.githubusercontent.com` is slow or unreachable, clone from a Gitee mirror and follow the Source install instructions below.
+> [!NOTE]
+> **Users in mainland China**: Please follow the installation instructions in the [简体中文](README_zh.md), which provides a mirror-accelerated installation method specifically optimized for users in China.
 
 The recommended host installation entrypoint is the GitHub bootstrap installer. It downloads the repository source archive to a temporary directory, copies it into a `flocks/` subdirectory under your current working directory by default, then installs backend and WebUI dependencies and exposes the `flocks` CLI on your PATH. You can still override the destination with `FLOCKS_INSTALL_DIR`.
 
@@ -119,7 +120,7 @@ Flocks cli useage:  `flocks --help`
 ## Option 2: Docker Installation
 
 > [!NOTE]
-> docker 模式下暂时 agent-browser headed 模式不可用
+> In the Docker installation, the agent-browser headed mode is currently unavailable.
 
 ### Pull image
 
