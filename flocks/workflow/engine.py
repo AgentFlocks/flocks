@@ -180,14 +180,28 @@ class WorkflowEngine:
         if step_timeout_s is not None:
             timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
         try:
+            def _build_execution_context() -> Dict[str, Any]:
+                return {
+                    "run_id": rid,
+                    "steps": step_count,
+                    "last_node_id": last_node_id,
+                    "history": history,
+                }
+
             while q:
                 if cancel is not None and cancel():
-                    raise RunCancelledError(rid)
+                    err = RunCancelledError(rid)
+                    err.execution_context = _build_execution_context()
+                    raise err
                 if timeout_s is not None and timeout_s > 0:
                     if (time.perf_counter() - run_t0) > float(timeout_s):
-                        raise RunTimeoutError(rid, float(timeout_s))
+                        err = RunTimeoutError(rid, float(timeout_s))
+                        err.execution_context = _build_execution_context()
+                        raise err
                 if step_count >= self.max_steps:
-                    raise MaxStepsExceededError(self.max_steps)
+                    err = MaxStepsExceededError(self.max_steps)
+                    err.execution_context = _build_execution_context()
+                    raise err
 
                 # ── Phase 1: drain queue, apply join / dedup ──────────────
                 ready: List[Tuple[str, Node, Dict[str, Any], Optional[str]]] = []

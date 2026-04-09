@@ -13,20 +13,19 @@ tags: [security]
 color: "#E74C3C"
 temperature: 0.3
 
-permission:
-  "*": deny
-  read: allow
-  grep: allow
-  glob: allow
-  codesearch: allow
-  virustotal_ip_query: allow
-  virustotal_domain_query: allow
-  virustotal_url_query: allow
-  virustotal_file_query: allow
-  threatbook_ip_query: allow
-  threatbook_domain_query: allow
-  threatbook_url_reputation: allow
-  threatbook_file_report: allow
+tools:
+  - tool_search
+  - read
+  - grep
+  - glob
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_url_query
+  - virustotal_file_query
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_hash_query
+  - threatbook_io_url_query
 
 prompt_metadata:
   category: security

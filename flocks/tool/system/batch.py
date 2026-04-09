@@ -6,7 +6,7 @@ Limited to 25 concurrent calls.
 """
 
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 from flocks.tool.registry import (
@@ -38,7 +38,8 @@ Limitations:
 - External tools (MCP) cannot be batched
 
 Format:
-- tool_calls: Array of {tool: "tool_name", parameters: {...}}"""
+- tool_calls: Array of {tool: "tool_name", parameters: {...}}
+- commands: Legacy alias for tool_calls using {tool: "tool_name", args: {...}}"""
 
 
 @ToolRegistry.register_function(
@@ -50,13 +51,20 @@ Format:
             name="tool_calls",
             type=ParameterType.ARRAY,
             description="Array of tool calls to execute in parallel",
-            required=True
+            required=False
+        ),
+        ToolParameter(
+            name="commands",
+            type=ParameterType.ARRAY,
+            description="Legacy alias for tool_calls; each item may use args instead of parameters",
+            required=False
         ),
     ]
 )
 async def batch_tool(
     ctx: ToolContext,
-    tool_calls: List[Dict[str, Any]],
+    tool_calls: Optional[List[Dict[str, Any]]] = None,
+    commands: Optional[List[Dict[str, Any]]] = None,
 ) -> ToolResult:
     """
     Execute multiple tools in parallel
@@ -68,15 +76,21 @@ async def batch_tool(
     Returns:
         ToolResult with combined results
     """
-    if not tool_calls:
+    normalized_calls = tool_calls or commands or []
+    if commands and not tool_calls:
+        normalized_calls = [{**call, "parameters": call.get("parameters", call.get("args", {}))} for call in commands]
+    elif tool_calls:
+        normalized_calls = [{**call, "parameters": call.get("parameters", call.get("args", {}))} for call in tool_calls]
+
+    if not normalized_calls:
         return ToolResult(
             success=False,
             error="At least one tool call is required"
         )
     
     # Limit to MAX_BATCH_SIZE
-    limited_calls = tool_calls[:MAX_BATCH_SIZE]
-    discarded_calls = tool_calls[MAX_BATCH_SIZE:]
+    limited_calls = normalized_calls[:MAX_BATCH_SIZE]
+    discarded_calls = normalized_calls[MAX_BATCH_SIZE:]
     
     async def execute_call(call: Dict[str, Any], index: int) -> Dict[str, Any]:
         """Execute a single tool call"""
@@ -166,7 +180,7 @@ async def batch_tool(
             "totalCalls": len(results),
             "successful": successful_calls,
             "failed": failed_calls,
-            "tools": [call.get("tool", "") for call in tool_calls],
+            "tools": [call.get("tool", "") for call in normalized_calls],
             "details": [{"tool": r["tool"], "success": r["success"]} for r in results]
         }
     )

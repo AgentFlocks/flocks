@@ -110,8 +110,14 @@ describe('OnboardingModal', () => {
     catalogAPI.list.mockResolvedValue({
       data: {
         providers: [
-          makeProvider('threatbook-cn-llm', 'ThreatBook CN', [{ id: 'minimax-m2.7', name: 'MiniMax M2.7' }]),
-          makeProvider('threatbook-io-llm', 'ThreatBook Global', [{ id: 'minimax-m2.7', name: 'MiniMax M2.7' }]),
+          makeProvider('threatbook-cn-llm', 'ThreatBook CN', [
+            { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
+            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+          ]),
+          makeProvider('threatbook-io-llm', 'ThreatBook Global', [
+            { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
+            { id: 'qwen3.6-plus', name: 'Qwen 3.6 Plus' },
+          ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
           makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
         ],
@@ -167,7 +173,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'minimax-m2.7',
+        model_id: 'qwen3.6-plus',
       },
     });
 
@@ -189,7 +195,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'minimax-m2.7',
+        model_id: 'qwen3.6-plus',
       },
     });
 
@@ -254,5 +260,51 @@ describe('OnboardingModal', () => {
     expect(screen.queryByText('未填写 ThreatBook key，已跳过该资源配置。')).not.toBeInTheDocument();
     expect(providerAPI.getServiceCredentials).not.toHaveBeenCalled();
     expect(mcpAPI.getCredentials).not.toHaveBeenCalled();
+  });
+
+  it('uses the backend returned default ThreatBook model after saving', async () => {
+    const user = userEvent.setup();
+
+    onboardingAPI.validate.mockResolvedValue({
+      data: {
+        success: true,
+        can_apply: true,
+        threatbook_enabled: true,
+        threatbook_key_valid: true,
+        threatbook_region_match: true,
+        suggested_region: null,
+        error_code: null,
+        message: '验证成功',
+        threatbook_resources: ['threatbook_llm', 'threatbook_api', 'threatbook_mcp'],
+        third_party_llm_valid: null,
+        resource_results: {},
+      },
+    });
+    onboardingAPI.apply.mockResolvedValue({
+      data: {
+        success: true,
+        message: '配置成功',
+        region: 'cn',
+        threatbook_enabled: true,
+        configured: ['threatbook_llm', 'threatbook_api', 'threatbook_mcp', 'default_llm'],
+        skipped: [],
+        default_model: {
+          provider_id: 'threatbook-cn-llm',
+          model_id: 'qwen3.6-plus',
+        },
+      },
+    });
+
+    renderOnboarding();
+
+    await screen.findByRole('button', { name: 'onboarding.bootstrap.savePrimary' });
+    await user.type(screen.getByPlaceholderText('onboarding.bootstrap.tbPlaceholder'), 'tb-key');
+    await user.click(screen.getByRole('button', { name: 'onboarding.bootstrap.savePrimary' }));
+
+    await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
+    await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
+
+    expect(screen.getByText('Qwen 3.6 Plus')).toBeInTheDocument();
+    expect(screen.queryByText('MiniMax M2.7')).not.toBeInTheDocument();
   });
 });

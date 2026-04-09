@@ -207,16 +207,12 @@ def _get_all_tool_names() -> List[str]:
     return [t.name for t in ToolRegistry.list_tools()]
 
 
-def _compute_native_agent_tools(permission: Any, all_tool_names: List[str]) -> List[str]:
-    """
-    Evaluate each tool name against the agent's permission ruleset and return
-    the subset that is explicitly allowed (level == 'allow').
-    """
-    from flocks.permission.next import PermissionNext
-    return [
-        name for name in all_tool_names
-        if PermissionNext.evaluate(name, "*", permission) == "allow"
-    ]
+def _compute_native_agent_tools(agent: AgentInfoModel, all_tool_names: List[str]) -> List[str]:
+    """Return the concrete tools explicitly declared for the agent."""
+    tools = list(agent.tools or [])
+    if tools:
+        return [name for name in tools if name in all_tool_names]
+    return []
 
 
 async def _build_single_agent_response(
@@ -226,7 +222,7 @@ async def _build_single_agent_response(
 ) -> AgentResponse:
     """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
     if agent.native:
-        tools = _compute_native_agent_tools(agent.permission, all_tool_names)
+        tools = _compute_native_agent_tools(agent, all_tool_names)
         skills: List[str] = []
     else:
         skills, tools = await _load_custom_agent_extras(agent.name)

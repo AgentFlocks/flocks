@@ -5,51 +5,63 @@ Based on @openrouter/ai-sdk-provider from Flocks's bundled providers
 Multi-model routing provider
 """
 
-from typing import List, AsyncIterator, Optional
-import os
+from typing import List
 
 from flocks.provider.provider import (
-    BaseProvider,
     ModelInfo,
     ModelCapabilities,
-    ChatMessage,
-    ChatResponse,
-    StreamChunk,
 )
+from flocks.provider.sdk.openai_base import OpenAIBaseProvider
 
 
-class OpenRouterProvider(BaseProvider):
+class OpenRouterProvider(OpenAIBaseProvider):
     """OpenRouter provider - multi-model routing"""
-    
+
+    DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    ENV_API_KEY = ["OPENROUTER_API_KEY"]
+    ENV_BASE_URL = "OPENROUTER_BASE_URL"
+
     def __init__(self):
         super().__init__(provider_id="openrouter", name="OpenRouter")
-        self._api_key = os.getenv("OPENROUTER_API_KEY")
-        self._base_url = "https://openrouter.ai/api/v1"
-        self._client = None
-    
+
     def _get_client(self):
-        """Get or create OpenRouter client (OpenAI compatible)"""
+        """Get or create AsyncOpenAI client with OpenRouter-specific headers."""
         if self._client is None:
-            try:
-                from openai import AsyncOpenAI
-                api_key = self._config.api_key if self._config else self._api_key
-                if not api_key:
-                    raise ValueError("OpenRouter API key not configured. Set OPENROUTER_API_KEY environment variable.")
-                
-                self._client = AsyncOpenAI(
-                    api_key=api_key,
-                    base_url=self._base_url,
-                    default_headers={
-                        "HTTP-Referer": "https://opencode.ai/",
-                        "X-Title": "opencode",
-                    }
+            from openai import AsyncOpenAI
+
+            api_key = self._config.api_key if self._config else self._api_key
+            if not api_key:
+                env_hint = self.ENV_API_KEY[0] if self.ENV_API_KEY else "API_KEY"
+                raise ValueError(
+                    f"{self.name} API key not configured. Set {env_hint}."
                 )
-            except ImportError:
-                raise ImportError("openai package not installed. Install with: pip install openai")
+
+            base_url = (
+                self._config.base_url
+                if self._config and self._config.base_url
+                else self._base_url
+            )
+
+            self._client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                default_headers={
+                    "HTTP-Referer": "https://opencode.ai/",
+                    "X-Title": "opencode",
+                },
+            )
         return self._client
     
     def get_models(self) -> List[ModelInfo]:
-        """Get list of popular OpenRouter models"""
+        """Return user-configured models from flocks.json when available.
+
+        Falls back to a set of popular OpenRouter models so the provider
+        works out-of-the-box without any flocks.json configuration.
+        """
+        config_models = list(getattr(self, "_config_models", []))
+        if config_models:
+            return config_models
+
         return [
             ModelInfo(
                 id="anthropic/claude-3.5-sonnet",
@@ -112,68 +124,3 @@ class OpenRouterProvider(BaseProvider):
                 ),
             ),
         ]
-    
-    async def chat(
-        self,
-        model_id: str,
-        messages: List[ChatMessage],
-        **kwargs
-    ) -> ChatResponse:
-        """Send chat completion request to OpenRouter"""
-        client = self._get_client()
-        
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-        
-        response = await client.chat.completions.create(
-            model=model_id,
-            messages=formatted_messages,
-            temperature=kwargs.get("temperature", 0.7),
-            max_tokens=kwargs.get("max_tokens"),
-        )
-        
-        choice = response.choices[0]
-        return ChatResponse(
-            id=response.id,
-            model=response.model,
-            content=choice.message.content or "",
-            finish_reason=choice.finish_reason,
-            usage={
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            }
-        )
-    
-    async def chat_stream(
-        self,
-        model_id: str,
-        messages: List[ChatMessage],
-        **kwargs
-    ) -> AsyncIterator[StreamChunk]:
-        """Send streaming chat completion request to OpenRouter"""
-        client = self._get_client()
-        
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-        
-        stream = await client.chat.completions.create(
-            model=model_id,
-            messages=formatted_messages,
-            temperature=kwargs.get("temperature", 0.7),
-            max_tokens=kwargs.get("max_tokens"),
-            stream=True,
-        )
-        
-        async for chunk in stream:
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.delta.content:
-                    yield StreamChunk(
-                        delta=choice.delta.content,
-                        finish_reason=choice.finish_reason,
-                    )

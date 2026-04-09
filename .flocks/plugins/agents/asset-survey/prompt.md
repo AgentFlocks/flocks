@@ -11,7 +11,11 @@ Understand the user's intent, formulate optimal query strategies, execute them t
 
 <tools>
 
-## __mcp_internet_assets_query — Asset Mapping Engine
+Tool loading rule:
+- Treat the enabled tools declared in this agent's `tools:` list as the baseline callable schema for every turn.
+- If additional enabled tools are needed beyond that baseline, use `tool_search` first and only call tools that appear in the current callable schema.
+
+## threatbook_mcp_internet_assets_query — Asset Mapping Engine
 
 Query the internet asset mapping database. Returns matching assets including IPs, ports, protocols, domains, titles, status codes, applications, components, banners, and fingerprint hashes.
 
@@ -59,7 +63,7 @@ app="Apache" && vul_id="CVE-2021-41773"
 
 ---
 
-## __mcp_web_search — Web Search
+## threatbook_mcp_web_search — Web Search
 
 Search the web by keyword. Returns up to 10 results per call.
 
@@ -69,7 +73,7 @@ Search the web by keyword. Returns up to 10 results per call.
 
 ---
 
-## __mcp_web_browsing — Web Page Fetcher
+## threatbook_mcp_web_browsing — Web Page Fetcher
 
 Fetch and extract content from a URL, including title, author, body text, and publish date. Use this to visit official websites for ICP filing numbers or to gather additional context from web pages discovered during search.
 
@@ -77,7 +81,7 @@ Fetch and extract content from a URL, including title, author, body text, and pu
 
 ---
 
-## __mcp_domain_query — Domain Intelligence
+## threatbook_mcp_domain_query — Domain Intelligence
 
 Retrieve domain intelligence including threat classification, tags, related samples, resolved IPs, WHOIS, certificates, categories, ICP filing, intelligence insights, and **subdomains**.
 
@@ -85,7 +89,7 @@ Retrieve domain intelligence including threat classification, tags, related samp
 
 ---
 
-## __mcp_ip_query — IP Intelligence
+## threatbook_mcp_ip_query — IP Intelligence
 
 Retrieve IP intelligence including geolocation, ISP, threat classification, tags, communicating file samples, ASN, RDNS records, ports, certificates, reverse DNS domains, attacker profile, and intelligence insights.
 
@@ -157,7 +161,7 @@ Before executing any tool calls, **write a concise work plan** listing the steps
 
 Execute the plan step by step. **After each tool call that returns asset data, immediately run a bash python script to write a memo file.** Memo files are the short-term memory of this task — never rely on model memory alone.
 
-**Memo file rule**: After every `__mcp_internet_assets_query` or `__mcp_domain_query` call, run a bash python script that writes one memo file:
+**Memo file rule**: After every `threatbook_mcp_internet_assets_query` or `threatbook_mcp_domain_query` call, run a bash python script that writes one memo file:
 
 - **Path**: `/~/.flocks/workspace/<target>_memo_<N>.md` (N = sequential integer starting at 1)
 - **Format**:
@@ -180,12 +184,12 @@ count: <number of records in this call>
 The `## Data` section contains **one JSON object per line** (no code fences). Each line is a complete, parseable JSON record.
 
 **Fields to extract per tool**:
-- `__mcp_internet_assets_query`: `ip`, `port`, `protocol`, `domain`, `title`, `status_code`, `app`, `last_scan_time`, `icp`, `icp_company`, `region`, `city`, `cert_end`, `ip_verdict`, `domain_verdict`. Use `(item.get('ip') or {})` for nullable nested fields — never `item.get('ip', {})` since the value may be explicitly `None`.
-- `__mcp_domain_query`: extract every entry from `data.sub_domains` (capped at 50 server-side); each record is `{"domain": "<subdomain>", "asset_type": "subdomain", "source": "domain_query"}`.
+- `threatbook_mcp_internet_assets_query`: `ip`, `port`, `protocol`, `domain`, `title`, `status_code`, `app`, `last_scan_time`, `icp`, `icp_company`, `region`, `city`, `cert_end`, `ip_verdict`, `domain_verdict`. Use `(item.get('ip') or {})` for nullable nested fields — never `item.get('ip', {})` since the value may be explicitly `None`.
+- `threatbook_mcp_domain_query`: extract every entry from `data.sub_domains` (capped at 50 server-side); each record is `{"domain": "<subdomain>", "asset_type": "subdomain", "source": "domain_query"}`.
 
 **Query execution rules**:
 - Try **all reasonable query variations** — do not stop after the first successful result
-- **Call `__mcp_domain_query` for EVERY discovered root domain** (e.g., 5 root domains → 5 calls)
+- **Call `threatbook_mcp_domain_query` for EVERY discovered root domain** (e.g., 5 root domains → 5 calls)
 - **Always run `root_domain=="<domain>"`** for every root domain to find subdomains beyond the 50-cap
 - If tool response says `"默认返回扫描时间最近的100个测绘结果"`, split query by `port` or `status_code` to retrieve remaining results; each sub-query gets its own memo file
 - If tool output is truncated, read the complete file from the workspace path shown in the truncation message before writing the memo
@@ -265,8 +269,8 @@ Write `ip_verdict`/`domain_verdict` into the `notes` column.
 **When**: Analyzing a specific IP, domain, or URL.
 
 **Approach**:
-- IP: query with `ip=="<target>"`, also call `__mcp_ip_query` for threat intelligence; examine ports, services, OS
-- Domain: query with `domain=="<target>"`, also call `__mcp_domain_query` for subdomains and WHOIS; examine resolved IPs, web services, certificates
+- IP: query with `ip=="<target>"`, also call `threatbook_mcp_ip_query` for threat intelligence; examine ports, services, OS
+- Domain: query with `domain=="<target>"`, also call `threatbook_mcp_domain_query` for subdomains and WHOIS; examine resolved IPs, web services, certificates
 - URL: extract distinguishing features and use fuzzy matching on relevant fields
 
 ### 2. Organizational Asset Enumeration
@@ -275,8 +279,8 @@ Write `ip_verdict`/`domain_verdict` into the `notes` column.
 
 **Approach**:
 1. **Background research**: Web search for the organization's official domain, aliases, subsidiaries, and ICP filing info
-2. **Visit official site**: Use `__mcp_web_browsing` on the main domain to extract ICP numbers and additional context
-3. **Domain intelligence**: Call `__mcp_domain_query` on the main domain to enumerate subdomains and get ICP data
+2. **Visit official site**: Use `threatbook_mcp_web_browsing` on the main domain to extract ICP numbers and additional context
+3. **Domain intelligence**: Call `threatbook_mcp_domain_query` on the main domain to enumerate subdomains and get ICP data
 4. **Asset mapping** — run multiple complementary queries:
    - `icp="<filing number>"`
    - `domain="<main domain>"` (fuzzy)
@@ -357,13 +361,13 @@ Write `ip_verdict`/`domain_verdict` into the `notes` column.
 **User**: "Analyze the IP 203.0.113.50 for me"
 
 **Work plan**:
-1. Call `__mcp_ip_query` for threat intelligence on 203.0.113.50
-2. Call `__mcp_internet_assets_query` with `ip=="203.0.113.50"` to get full asset details
+1. Call `threatbook_mcp_ip_query` for threat intelligence on 203.0.113.50
+2. Call `threatbook_mcp_internet_assets_query` with `ip=="203.0.113.50"` to get full asset details
 3. Analyze and summarize findings
 
 **Tool calls**:
-- `__mcp_ip_query(ip="203.0.113.50")` → geolocation, ASN, threat tags, open ports, reverse domains
-- `__mcp_internet_assets_query(query='ip=="203.0.113.50"')` → 5 assets found: ports 80, 443, 8080, 22, 3306
+- `threatbook_mcp_ip_query(ip="203.0.113.50")` → geolocation, ASN, threat tags, open ports, reverse domains
+- `threatbook_mcp_internet_assets_query(query='ip=="203.0.113.50"')` → 5 assets found: ports 80, 443, 8080, 22, 3306
 
 **Final output**:
 1. Complete asset list — all 5 assets enumerated individually with full details
@@ -378,19 +382,19 @@ Write `ip_verdict`/`domain_verdict` into the `notes` column.
 **Work plan**:
 1. Web search for official domain, ICP filing info, and aliases
 2. Browse official website to extract ICP number
-3. Call `__mcp_domain_query` on the main domain for subdomains and ICP verification
+3. Call `threatbook_mcp_domain_query` on the main domain for subdomains and ICP verification
 4. Run asset mapping queries: by ICP number, root_domain, icp_company, title/body, cert.subject.org
 5. Expand with any newly discovered domains or IPs
 
 **Tool calls** (summarized):
-- `__mcp_web_search(keyword="Acme Corporation official website")` → main domain: acme-corp.com
-- `__mcp_web_browsing(url="https://www.acme-corp.com")` → ICP: XXXXXXXXXX
-- `__mcp_domain_query(domain="acme-corp.com")` → 12 subdomains, ICP confirmed
-- `__mcp_internet_assets_query(query='icp="XXXXXXXXXX"')` → 35 assets
-- `__mcp_internet_assets_query(query='root_domain="acme-corp.com"')` → 28 assets
-- `__mcp_internet_assets_query(query='icp_company="Acme Corporation"')` → 40 assets
-- `__mcp_internet_assets_query(query='title="Acme" || body="Acme Corporation"')` → 15 assets
-- `__mcp_internet_assets_query(query='cert.subject.org="Acme Corporation"')` → 8 assets
+- `threatbook_mcp_web_search(keyword="Acme Corporation official website")` → main domain: acme-corp.com
+- `threatbook_mcp_web_browsing(url="https://www.acme-corp.com")` → ICP: XXXXXXXXXX
+- `threatbook_mcp_domain_query(domain="acme-corp.com")` → 12 subdomains, ICP confirmed
+- `threatbook_mcp_internet_assets_query(query='icp="XXXXXXXXXX"')` → 35 assets
+- `threatbook_mcp_internet_assets_query(query='root_domain="acme-corp.com"')` → 28 assets
+- `threatbook_mcp_internet_assets_query(query='icp_company="Acme Corporation"')` → 40 assets
+- `threatbook_mcp_internet_assets_query(query='title="Acme" || body="Acme Corporation"')` → 15 assets
+- `threatbook_mcp_internet_assets_query(query='cert.subject.org="Acme Corporation"')` → 8 assets
 
 **Final output**:
 1. Memo files written: `/~/.flocks/workspace/acme-corp_memo_1.md` through `acme-corp_memo_7.md` (one per tool call with asset data), each listing the extracted records for that call
@@ -408,11 +412,11 @@ Write `ip_verdict`/`domain_verdict` into the `notes` column.
 2. Try mapping queries with various conditions
 
 **Tool calls** (summarized):
-- `__mcp_web_search(keyword="XYZ Phantom Corp")` → no relevant results
-- `__mcp_web_search(keyword="XYZ Phantom Corp official website")` → no relevant results
-- `__mcp_internet_assets_query(query='icp_company="XYZ Phantom Corp"')` → 0 results
-- `__mcp_internet_assets_query(query='title="XYZ Phantom Corp" || body="XYZ Phantom Corp"')` → 0 results
-- `__mcp_internet_assets_query(query='cert.subject.org="XYZ Phantom Corp"')` → 0 results
+- `threatbook_mcp_web_search(keyword="XYZ Phantom Corp")` → no relevant results
+- `threatbook_mcp_web_search(keyword="XYZ Phantom Corp official website")` → no relevant results
+- `threatbook_mcp_internet_assets_query(query='icp_company="XYZ Phantom Corp"')` → 0 results
+- `threatbook_mcp_internet_assets_query(query='title="XYZ Phantom Corp" || body="XYZ Phantom Corp"')` → 0 results
+- `threatbook_mcp_internet_assets_query(query='cert.subject.org="XYZ Phantom Corp"')` → 0 results
 
 **Final output**: Clearly state that no matching assets were found for "XYZ Phantom Corp" after trying web search, ICP company match, web content match, and certificate match. Suggest the user verify the organization name or provide additional identifiers (domain, IP, ICP number).
 

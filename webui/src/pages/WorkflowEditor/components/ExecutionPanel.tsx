@@ -1,15 +1,23 @@
 import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { X, Play, CheckCircle, XCircle, Clock, Code, FileText } from 'lucide-react';
+import { X, Play, CheckCircle, XCircle, Clock, Code, FileText, StopCircle } from 'lucide-react';
 import { WorkflowExecution } from '@/api/workflow';
 
 interface ExecutionPanelProps {
   execution: WorkflowExecution | null;
   onClose: () => void;
   onRunAgain?: () => void;
+  onStop?: () => void;
+  stopping?: boolean;
 }
 
-export default function ExecutionPanel({ execution, onClose, onRunAgain }: ExecutionPanelProps) {
+export default function ExecutionPanel({
+  execution,
+  onClose,
+  onRunAgain,
+  onStop,
+  stopping = false,
+}: ExecutionPanelProps) {
   const { t } = useTranslation('workflow');
   const [activeTab, setActiveTab] = useState<'result' | 'log'>('result');
 
@@ -46,6 +54,13 @@ export default function ExecutionPanel({ execution, onClose, onRunAgain }: Execu
       border: 'border-yellow-500',
       label: t('editor.execution.statusTimeout'),
     },
+    cancelled: {
+      icon: StopCircle,
+      color: 'text-gray-600',
+      bg: 'bg-gray-100',
+      border: 'border-gray-400',
+      label: t('editor.execution.statusCancelled'),
+    },
   };
 
   const config = statusConfig[execution.status];
@@ -72,6 +87,16 @@ export default function ExecutionPanel({ execution, onClose, onRunAgain }: Execu
         </div>
 
         <div className="flex items-center gap-2">
+          {execution.status === 'running' && onStop && (
+            <button
+              onClick={onStop}
+              disabled={stopping}
+              className="flex items-center gap-2 px-3 py-1 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+              <StopCircle className="w-4 h-4" />
+              {stopping ? t('detail.run.stopping') : t('editor.execution.stop')}
+            </button>
+          )}
           {onRunAgain && (
             <button
               onClick={onRunAgain}
@@ -148,6 +173,15 @@ export default function ExecutionPanel({ execution, onClose, onRunAgain }: Execu
                   <p className="text-sm text-red-800 font-mono whitespace-pre-wrap">
                     {execution.errorMessage}
                   </p>
+                </div>
+              </div>
+            )}
+
+            {execution.status === 'cancelled' && (
+              <div>
+                <h3 className="text-sm font-semibold text-gray-700 mb-2">{t('editor.execution.statusCancelled')}</h3>
+                <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
+                  <p className="text-sm text-gray-700">{t('editor.execution.cancelledMessage')}</p>
                 </div>
               </div>
             )}

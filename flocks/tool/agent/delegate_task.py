@@ -139,6 +139,7 @@ async def _find_completed_delegate(
 
 
 async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
+    skill_names = [str(name).strip() for name in (skill_names or []) if str(name).strip()]
     if len(skill_names) == 0:
         return {"content": None, "error": None}
     resolved: List[str] = []
@@ -160,11 +161,36 @@ async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
     return {"content": "\n\n".join(resolved), "error": None}
 
 
+def _derive_task_description(
+    description: Optional[str],
+    prompt: str,
+    subagent_type: Optional[str] = None,
+    category: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    normalized = " ".join((description or "").split())
+    if normalized:
+        return normalized
+
+    prompt_line = " ".join((prompt or "").split())
+    if prompt_line:
+        return prompt_line[:57].rstrip() + "..." if len(prompt_line) > 60 else prompt_line
+
+    if subagent_type:
+        return f"delegate to {subagent_type}"
+    if category:
+        return f"delegate {category} task"
+    if session_id:
+        return f"continue task {session_id}"
+    return "delegate task"
+
 @ToolRegistry.register_function(
     name="delegate_task",
     description=(
         "Spawn agent task with category-based or direct agent selection. "
-        "REQUIRED: load_skills ([] if none), description, prompt. "
+        "REQUIRED: prompt. "
+        "load_skills is optional and defaults to []. "
+        "description is optional and will be auto-derived when omitted. "
         "run_in_background defaults to false (sync). "
         "Use EITHER subagent_type OR category — NEVER both simultaneously."
     ),
@@ -173,14 +199,15 @@ async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
         ToolParameter(
             name="load_skills",
             type=ParameterType.ARRAY,
-            description="REQUIRED. Skill names to inject into the agent. Pass [] if no skills needed.",
-            required=True,
+            description="Optional. Skill names to inject into the agent. Defaults to []. Omit for direct subagent delegation unless specific skills are clearly needed.",
+            required=False,
+            default=[],
         ),
         ToolParameter(
             name="description",
             type=ParameterType.STRING,
-            description="REQUIRED. Short task description (3-5 words), e.g. 'query CVE details'.",
-            required=True,
+            description="Optional. Short task description (3-5 words). If omitted, one will be derived from the prompt.",
+            required=False,
         ),
         ToolParameter(
             name="prompt",
@@ -222,9 +249,9 @@ async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
 )
 async def delegate_task_tool(
     ctx: ToolContext,
-    load_skills: List[str],
-    description: str,
     prompt: str,
+    load_skills: Optional[List[str]] = None,
+    description: Optional[str] = None,
     run_in_background: Optional[bool] = False,
     category: Optional[str] = None,
     subagent_type: Optional[str] = None,
@@ -233,8 +260,8 @@ async def delegate_task_tool(
 ) -> ToolResult:
     if run_in_background is None:
         run_in_background = False
-    if load_skills is None:
-        return ToolResult(success=False, error="load_skills is required")
+    load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
+    description = _derive_task_description(description, prompt, subagent_type, category, session_id)
     if category and subagent_type:
         return ToolResult(success=False, error="Provide EITHER category OR subagent_type, not both.")
     if not category and not subagent_type and not session_id:

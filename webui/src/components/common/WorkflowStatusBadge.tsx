@@ -20,6 +20,7 @@ const STATUS_STYLE_MAP: Record<string, StatusConfig> = {
   error:      { className: 'bg-red-100 text-red-700',      dot: 'bg-red-500' },
   FAILED:     { className: 'bg-red-100 text-red-700',      dot: 'bg-red-500' },
   timeout:    { className: 'bg-orange-100 text-orange-700', dot: 'bg-orange-500' },
+  cancelled:  { className: 'bg-gray-100 text-gray-600',    dot: 'bg-gray-500' },
   stopped:    { className: 'bg-gray-100 text-gray-500',    dot: 'bg-gray-400' },
 };
 

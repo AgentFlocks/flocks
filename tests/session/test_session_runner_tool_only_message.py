@@ -79,7 +79,8 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     async def fake_build_system_prompts(self, agent):  # noqa: ANN001
         return []
 
-    async def fake_build_tools(self, agent):  # noqa: ANN001
+    async def fake_build_callable_tool_schema(self, agent, messages=None):  # noqa: ANN001
+        del agent, messages
         return list(sentinel_tools)
 
     async def fake_to_chat_messages(self, _messages, _system_prompts):  # noqa: ANN001
@@ -93,7 +94,7 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     monkeypatch.setattr(Provider, "apply_config", fake_apply_config)
     monkeypatch.setattr(Agent, "get", fake_agent_get)
     monkeypatch.setattr(SessionRunner, "_build_system_prompts", fake_build_system_prompts)
-    monkeypatch.setattr(SessionRunner, "_build_tools", fake_build_tools)
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", fake_build_callable_tool_schema)
     monkeypatch.setattr(SessionRunner, "_to_chat_messages", fake_to_chat_messages)
     monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
 

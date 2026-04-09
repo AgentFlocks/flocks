@@ -3,7 +3,7 @@ Agent Factory 测试
 
 覆盖 flocks.agent.agent_factory 的核心逻辑：
 1. YAML 加载（load_agent / scan_and_load）
-2. 权限规则生成（tools list → deny-all + allow listed）
+2. tools / legacy permission 兼容展开
 3. Prompt 解析（prompt.md / prompt_builder.py）
 4. 动态 Prompt 注入（inject_dynamic_prompts）
 5. Plugin YAML CRUD（read / update / delete）
@@ -25,7 +25,6 @@ from flocks.agent.agent_factory import (
     inject_dynamic_prompts,
     yaml_to_agent_info,
     delete_yaml_agent,
-    _tools_to_permission,
     _parse_prompt_metadata,
 )
 from flocks.agent.agent import AgentInfo, AgentModel, AgentPromptMetadata
@@ -43,42 +42,6 @@ def _write_agent_dir(tmp_path: Path, yaml_text: str, prompt_text: str | None = N
     if prompt_text is not None:
         (agent_dir / "prompt.md").write_text(textwrap.dedent(prompt_text), encoding="utf-8")
     return agent_dir
-
-
-# ===========================================================================
-# _tools_to_permission
-# ===========================================================================
-
-def _rules_dict(ruleset) -> dict:
-    """Convert ruleset to {permission_pattern: level_value} dict for easy assertions."""
-    return {r.permission: r.level.value for r in ruleset}
-
-
-class TestToolsToPermission:
-
-    def test_deny_all_wildcard_present(self):
-        ruleset = _tools_to_permission(["read", "write"])
-        rules = _rules_dict(ruleset)
-        assert rules.get("*") == "deny"
-
-    def test_listed_tools_allowed(self):
-        ruleset = _tools_to_permission(["read", "bash", "grep"])
-        rules = _rules_dict(ruleset)
-        assert rules.get("read") == "allow"
-        assert rules.get("bash") == "allow"
-        assert rules.get("grep") == "allow"
-
-    def test_unlisted_tool_not_in_allow_list(self):
-        ruleset = _tools_to_permission(["read"])
-        rules = _rules_dict(ruleset)
-        assert "write" not in rules
-
-    def test_empty_tools_list(self):
-        """Empty tools → deny-all only."""
-        ruleset = _tools_to_permission([])
-        rules = _rules_dict(ruleset)
-        assert rules.get("*") == "deny"
-        assert len(rules) == 1
 
 
 # ===========================================================================
@@ -211,7 +174,7 @@ class TestLoadAgent:
         assert agent.prompt == "Static prompt"
         assert agent.prompt_builder is None
 
-    def test_tools_list_generates_deny_all_permission(self, tmp_path):
+    def test_tools_list_is_loaded_as_concrete_tools(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
             name: restricted
             tools:
@@ -220,17 +183,13 @@ class TestLoadAgent:
         """)
         agent = load_agent(agent_dir)
         assert agent is not None
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "deny"
-        assert rules.get("read") == "allow"
-        assert rules.get("grep") == "allow"
+        assert agent.tools == ["read", "grep"]
 
-    def test_no_tools_gives_allow_all(self, tmp_path):
+    def test_no_tools_defaults_to_empty_declared_toolset(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, "name: open_agent\n")
         agent = load_agent(agent_dir)
         assert agent is not None
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "allow"
+        assert agent.tools == []
 
     def test_loads_model(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
@@ -280,7 +239,7 @@ class TestLoadAgent:
         assert agent.prompt_metadata.category == "security"
 
     def test_permission_dict_deny_all_with_allowlist(self, tmp_path):
-        """load_agent() should parse old-style permission dict (e.g. deny-all + allow list)."""
+        """load_agent() should expand old-style permission dict to concrete tools."""
         agent_dir = _write_agent_dir(tmp_path, """
             name: perm_dict_agent
             permission:
@@ -290,13 +249,11 @@ class TestLoadAgent:
         """)
         agent = load_agent(agent_dir)
         assert agent is not None
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "deny"
-        assert rules.get("read") == "allow"
-        assert rules.get("bash") == "allow"
+        assert "read" in (agent.tools or [])
+        assert "bash" in (agent.tools or [])
 
     def test_permission_dict_allow_all_with_exceptions(self, tmp_path):
-        """load_agent() should parse allow-all permission dict with specific denies."""
+        """load_agent() should exclude explicitly denied tools after expansion."""
         agent_dir = _write_agent_dir(tmp_path, """
             name: allow_all_agent
             permission:
@@ -305,9 +262,7 @@ class TestLoadAgent:
         """)
         agent = load_agent(agent_dir)
         assert agent is not None
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "allow"
-        assert rules.get("delegate_task") == "deny"
+        assert "delegate_task" not in (agent.tools or [])
 
     def test_tools_list_takes_priority_over_permission_dict(self, tmp_path):
         """When both tools list and permission dict exist, tools list wins."""
@@ -320,10 +275,7 @@ class TestLoadAgent:
         """)
         agent = load_agent(agent_dir)
         assert agent is not None
-        rules = _rules_dict(agent.permission)
-        # tools list generates deny-all + allow listed
-        assert rules.get("*") == "deny"
-        assert rules.get("read") == "allow"
+        assert agent.tools == ["read"]
 
 
 # ===========================================================================
@@ -543,18 +495,19 @@ class TestYamlToAgentInfo:
         yaml_path = self._make_yaml_path(tmp_path)
         raw = {"name": "restricted", "tools": ["read", "grep"]}
         agent = yaml_to_agent_info(raw, yaml_path)
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "deny"
-        assert rules.get("read") == "allow"
+        assert agent.tools == ["read", "grep"]
 
     def test_old_permission_dict_fallback(self, tmp_path):
         """Plugin agents with permission dict (not tools list) are handled."""
         yaml_path = self._make_yaml_path(tmp_path)
         raw = {"name": "old_perm", "permission": {"*": "allow", "bash": "deny"}}
         agent = yaml_to_agent_info(raw, yaml_path)
-        rules = _rules_dict(agent.permission)
-        assert rules.get("*") == "allow"
-        assert rules.get("bash") == "deny"
+        assert "bash" not in (agent.tools or [])
+
+    def test_missing_tools_defaults_to_empty_declared_toolset(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        agent = yaml_to_agent_info({"name": "no_tools"}, yaml_path)
+        assert agent.tools == []
 
     def test_model_parsed(self, tmp_path):
         yaml_path = self._make_yaml_path(tmp_path)

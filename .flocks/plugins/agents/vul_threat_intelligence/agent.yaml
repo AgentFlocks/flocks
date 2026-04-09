@@ -17,7 +17,26 @@ tags:
   - security
   - vulnerability
 tools:
-  - __mcp_vulnlist_query
-  - __mcp_vuln_query
-  - __mcp_vuln_vendors_products_match
-  - __mcp_web_search
+  - tool_search
+  - threatbook_mcp_vulnlist_query
+  - threatbook_mcp_vuln_query
+  - threatbook_mcp_vuln_vendors_products_match
+  - threatbook_mcp_web_search
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_ip_attribution
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_domain_attribution
+  - threatbook_mcp_hash_query
+  - threatbook_mcp_threat_actor_query
+  - threatbook_mcp_threat_actor_list_query
+  - threatbook_mcp_hrti_query
+  - websearch
+  - webfetch
+  - read
+  - grep
+  - glob
+  - codesearch
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_url_query
+  - virustotal_file_query

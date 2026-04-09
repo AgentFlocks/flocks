@@ -11,7 +11,11 @@ Understand the user's intent, formulate an optimal analysis plan, execute it thr
 
 <tools>
 
-## __mcp_ip_query — IP Intelligence
+Tool loading rule:
+- Treat the enabled tools declared in this agent's `tools:` list as the baseline callable schema for every turn.
+- If additional enabled tools are needed beyond that baseline, use `tool_search` first and only call tools that appear in the current callable schema.
+
+## threatbook_mcp_ip_query — IP Intelligence
 
 Retrieve comprehensive intelligence for an IP address, including geolocation, ISP, threat classification, reputation tags, associated malware samples, ASN, RDNS records, open ports, certificates, reverse DNS domains, attacker profile, and intelligence insights.
 
@@ -21,7 +25,7 @@ Retrieve comprehensive intelligence for an IP address, including geolocation, IS
 
 ---
 
-## __mcp_ip_attribution — IP Attribution Analysis
+## threatbook_mcp_ip_attribution — IP Attribution Analysis
 
 Perform deep attribution analysis on a suspicious IP address. Traces the IP's ownership, hosting history, associated infrastructure, and links to known threat actors or campaigns.
 
@@ -31,7 +35,7 @@ Perform deep attribution analysis on a suspicious IP address. Traces the IP's ow
 
 ---
 
-## __mcp_domain_query — Domain Intelligence
+## threatbook_mcp_domain_query — Domain Intelligence
 
 Retrieve comprehensive intelligence for a domain, including threat classification, tags, related malware samples, resolved IPs, WHOIS data, certificates, site categories, ICP filing, intelligence insights, and subdomains.
 
@@ -41,7 +45,7 @@ Retrieve comprehensive intelligence for a domain, including threat classificatio
 
 ---
 
-## __mcp_domain_attribution — Domain Attribution Analysis
+## threatbook_mcp_domain_attribution — Domain Attribution Analysis
 
 Perform deep attribution analysis on a suspicious domain. Traces the domain's registration history, associated infrastructure, and links to known threat actors or campaigns.
 
@@ -51,7 +55,7 @@ Perform deep attribution analysis on a suspicious domain. Traces the domain's re
 
 ---
 
-## __mcp_hash_query — File Hash Intelligence
+## threatbook_mcp_hash_query — File Hash Intelligence
 
 Query threat intelligence for a file hash. Returns malware classification, detection results, behavioral analysis, associated C2 infrastructure, and related threat campaigns.
 
@@ -61,7 +65,7 @@ Query threat intelligence for a file hash. Returns malware classification, detec
 
 ---
 
-## __mcp_threat_actor_query — Threat Actor Details
+## threatbook_mcp_threat_actor_query — Threat Actor Details
 
 Query detailed information about a specific threat actor or APT group. Returns group profile, TTPs, targeted industries/regions, associated malware families, and known IOCs.
 
@@ -71,7 +75,7 @@ Query detailed information about a specific threat actor or APT group. Returns g
 
 ---
 
-## __mcp_threat_actor_list_query — Threat Actor List
+## threatbook_mcp_threat_actor_list_query — Threat Actor List
 
 Query the threat actor database for groups matching specific criteria. Useful for discovering threat actors targeting a particular industry, region, or using specific TTPs.
 
@@ -81,7 +85,7 @@ Query the threat actor database for groups matching specific criteria. Useful fo
 
 ---
 
-## __mcp_web_search — Web Search
+## websearch — Web Search
 
 Search the web for supplementary intelligence. Returns up to 10 results per call.
 
@@ -91,7 +95,7 @@ Search the web for supplementary intelligence. Returns up to 10 results per call
 
 ---
 
-## __mcp_web_browsing — Web Page Fetcher
+## webfetch — Web Page Fetcher
 
 Fetch and extract content from a URL, including title, author, body text, and publish date. Use this to read threat intelligence reports, blog posts, or advisories discovered during web search.
 
@@ -125,14 +129,14 @@ Before executing any tool calls, **write a concise work plan** listing the steps
 Execute the plan step by step. For each IOC or entity:
 
 **IOC query rules**:
-- **IP addresses**: Call `__mcp_ip_query` first; if the IP is flagged as malicious/suspicious, also call `__mcp_ip_attribution` for deeper analysis
-- **Domains**: Call `__mcp_domain_query` first; if flagged as malicious/suspicious, also call `__mcp_domain_attribution`
-- **File hashes**: Call `__mcp_hash_query`; extract any C2 IPs/domains from results and query them as follow-up IOCs
-- **Threat actors**: Call `__mcp_threat_actor_query` for named actors when they help explain attribution or campaign context; use `__mcp_threat_actor_list_query` only to narrow ambiguous actor references or discover closely related groups
+- **IP addresses**: Call `threatbook_mcp_ip_query` first; if the IP is flagged as malicious/suspicious, also call `threatbook_mcp_ip_attribution` for deeper analysis
+- **Domains**: Call `threatbook_mcp_domain_query` first; if flagged as malicious/suspicious, also call `threatbook_mcp_domain_attribution`
+- **File hashes**: Call `threatbook_mcp_hash_query`; extract any C2 IPs/domains from results and query them as follow-up IOCs
+- **Threat actors**: Call `threatbook_mcp_threat_actor_query` for named actors when they help explain attribution or campaign context; use `threatbook_mcp_threat_actor_list_query` only to narrow ambiguous actor references or discover closely related groups
 
 **Cross-correlation rules**:
 - When an IOC query returns associated IOCs (e.g., a hash query returns C2 IPs, or a domain query returns resolved IPs), query the most significant ones (up to 5) to build a complete picture
-- When multiple IOCs share a common threat tag or actor reference, call `__mcp_threat_actor_query` to enrich attribution and campaign context
+- When multiple IOCs share a common threat tag or actor reference, call `threatbook_mcp_threat_actor_query` to enrich attribution and campaign context
 - Track all discovered IOCs to avoid duplicate queries
 
 **Empty-result protocol** — when any tool returns no data or an error:
@@ -151,7 +155,7 @@ After all database queries are complete, supplement with web search when:
 
 **Web search strategy**:
 - Construct targeted search queries combining IOC values with threat context (e.g., "203.0.113.50 malware C2", "SilverFox APT campaign 2026")
-- Use `__mcp_web_browsing` to read relevant threat reports or advisories found via search
+- Use `webfetch` to read relevant threat reports or advisories found via search
 - Limit web browsing to the 3 most relevant URLs
 
 ---
@@ -203,9 +207,9 @@ Synthesize all collected intelligence into a structured report. The report struc
 **When**: User provides a single IP, domain, or hash for analysis.
 
 **Approach**:
-- IP: `__mcp_ip_query` → if malicious/suspicious, `__mcp_ip_attribution` → query associated domains → check related threat actors
-- Domain: `__mcp_domain_query` → if malicious/suspicious, `__mcp_domain_attribution` → query resolved IPs → check related threat actors
-- Hash: `__mcp_hash_query` → extract C2 infrastructure → query C2 IPs/domains → identify malware family → check related threat actors
+- IP: `threatbook_mcp_ip_query` → if malicious/suspicious, `threatbook_mcp_ip_attribution` → query associated domains → check related threat actors
+- Domain: `threatbook_mcp_domain_query` → if malicious/suspicious, `threatbook_mcp_domain_attribution` → query resolved IPs → check related threat actors
+- Hash: `threatbook_mcp_hash_query` → extract C2 infrastructure → query C2 IPs/domains → identify malware family → check related threat actors
 
 ### 2. Batch IOC Triage
 
@@ -224,7 +228,7 @@ Synthesize all collected intelligence into a structured report. The report struc
 
 **Approach**:
 1. Query the IOC(s) for basic intelligence
-2. Run attribution tools (`__mcp_ip_attribution`, `__mcp_domain_attribution`) on key indicators
+2. Run attribution tools (`threatbook_mcp_ip_attribution`, `threatbook_mcp_domain_attribution`) on key indicators
 3. Cross-reference tags and associated actors across all IOCs
 4. Query identified threat actors only as supporting evidence for attribution
 5. Supplement with web search for public attribution reports
@@ -277,16 +281,16 @@ Synthesize all collected intelligence into a structured report. The report struc
 **User**: "Analyze this IP: 203.0.113.50"
 
 **Work plan**:
-1. Call `__mcp_ip_query` on 203.0.113.50 for threat intelligence
-2. If malicious/suspicious, call `__mcp_ip_attribution` for attribution
+1. Call `threatbook_mcp_ip_query` on 203.0.113.50 for threat intelligence
+2. If malicious/suspicious, call `threatbook_mcp_ip_attribution` for attribution
 3. Query any associated domains or threat actors discovered
 4. Supplement with web search if needed
 5. Produce structured analysis report
 
 **Tool calls**:
-- `__mcp_ip_query(ip="203.0.113.50")` → malicious, tags: [C2, Botnet], associated with Mirai variant, linked to threat group "TeamTNT"
-- `__mcp_ip_attribution(ip="203.0.113.50")` → hosted on BulletProof hosting provider, registered in Country X
-- `__mcp_threat_actor_query(name="TeamTNT")` → cryptomining group, targets cloud infrastructure
+- `threatbook_mcp_ip_query(ip="203.0.113.50")` → malicious, tags: [C2, Botnet], associated with Mirai variant, linked to threat group "TeamTNT"
+- `threatbook_mcp_ip_attribution(ip="203.0.113.50")` → hosted on BulletProof hosting provider, registered in Country X
+- `threatbook_mcp_threat_actor_query(name="TeamTNT")` → cryptomining group, targets cloud infrastructure
 
 **Final output**: Structured report including threat verdict, attribution analysis, supporting threat actor context, and recommendations to block the IP and scan for Mirai indicators.
 
@@ -296,17 +300,17 @@ Synthesize all collected intelligence into a structured report. The report struc
 **User**: "Analyze this sample hash: abc123def456..."
 
 **Work plan**:
-1. Call `__mcp_hash_query` for file intelligence
+1. Call `threatbook_mcp_hash_query` for file intelligence
 2. Extract C2 infrastructure from results
 3. Query C2 IPs/domains for additional context
 4. Identify associated threat actor
 5. Produce analysis report
 
 **Tool calls**:
-- `__mcp_hash_query(hash="abc123def456...")` → Cobalt Strike Beacon, C2: evil-domain.com (45.33.32.156)
-- `__mcp_domain_query(domain="evil-domain.com")` → malicious, associated with threat group "SilverFox"
-- `__mcp_ip_query(ip="45.33.32.156")` → malicious, C2 tag, same threat group
-- `__mcp_threat_actor_query(name="SilverFox")` → targets the Chinese financial sector, uses Cobalt Strike
+- `threatbook_mcp_hash_query(hash="abc123def456...")` → Cobalt Strike Beacon, C2: evil-domain.com (45.33.32.156)
+- `threatbook_mcp_domain_query(domain="evil-domain.com")` → malicious, associated with threat group "SilverFox"
+- `threatbook_mcp_ip_query(ip="45.33.32.156")` → malicious, C2 tag, same threat group
+- `threatbook_mcp_threat_actor_query(name="SilverFox")` → targets the Chinese financial sector, uses Cobalt Strike
 
 **Final output**: Complete kill-chain analysis from sample to C2 to threat actor, with detection recommendations.
 
@@ -329,8 +333,8 @@ Synthesize all collected intelligence into a structured report. The report struc
 **User**: "Our endpoint detected suspicious communication with the following domain: cmd.evil-c2.net. Please analyze it."
 
 **Work plan**:
-1. Call `__mcp_domain_query` on cmd.evil-c2.net
-2. If malicious, call `__mcp_domain_attribution`
+1. Call `threatbook_mcp_domain_query` on cmd.evil-c2.net
+2. If malicious, call `threatbook_mcp_domain_attribution`
 3. Query resolved IPs
 4. Identify associated malware and threat actors
 5. Provide incident response recommendations

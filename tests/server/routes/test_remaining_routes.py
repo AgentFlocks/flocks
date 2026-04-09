@@ -4,9 +4,13 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
+
 import pytest
 from fastapi import status
 from httpx import AsyncClient
+from unittest.mock import AsyncMock
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +34,64 @@ _WORKFLOW_PAYLOAD = {
     "description": "A test workflow",
     "workflowJson": _WORKFLOW_JSON,
 }
+
+
+async def _wait_for_execution_terminal_state(
+    client: AsyncClient,
+    workflow_id: str,
+    exec_id: str,
+    *,
+    timeout_s: float = 3.0,
+) -> dict:
+    """Poll execution details until the workflow leaves the running state."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        resp = await client.get(f"/api/workflow/{workflow_id}/history/{exec_id}")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        if data["status"] != "running":
+            return data
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"Execution {exec_id} did not finish within {timeout_s} seconds")
+        await asyncio.sleep(0.05)
+@pytest.fixture(autouse=True)
+def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect workflow route filesystem writes into a per-test temp dir."""
+    from flocks.server.routes import workflow as workflow_routes
+
+    workspace_root = tmp_path / "workspace"
+    project_root = workspace_root / ".flocks" / "plugins" / "workflows"
+    global_root = tmp_path / "home" / ".flocks" / "plugins" / "workflows"
+    legacy_project_plugin = workspace_root / ".flocks" / "plugins" / "workflow"
+    legacy_project_main = workspace_root / ".flocks" / "workflow"
+    legacy_global_plugin = tmp_path / "home" / ".flocks" / "plugins" / "workflow"
+    legacy_global_main = tmp_path / "home" / ".flocks" / "workflow"
+
+    for root in [
+        workspace_root / ".flocks",
+        project_root,
+        global_root,
+        legacy_project_plugin,
+        legacy_project_main,
+        legacy_global_plugin,
+        legacy_global_main,
+    ]:
+        root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
+    monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
+    monkeypatch.setattr(
+        workflow_routes,
+        "resolve_project_workflow_roots",
+        lambda workspace: [legacy_project_main, legacy_project_plugin, project_root],
+    )
+    monkeypatch.setattr(
+        workflow_routes,
+        "resolve_global_workflow_roots",
+        lambda: [legacy_global_main, legacy_global_plugin, global_root],
+    )
+
+    yield
 
 
 # ===========================================================================
@@ -116,6 +178,77 @@ class TestWorkflowRoutes:
         resp = await client.get(f"/api/workflow/{wf_id}/history")
         assert resp.status_code == status.HTTP_200_OK
         assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_returns_running_execution(self, client: AsyncClient):
+        """POST /api/workflow/{id}/run should return immediately with a running execution."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {"topic": "demo"}})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        data = resp.json()
+        assert data["workflowId"] == wf_id
+        assert data["status"] == "running"
+        assert data["id"]
+        assert data["inputParams"] == {"topic": "demo"}
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_workflow_execution(self, client: AsyncClient):
+        """Cancelling a running workflow should eventually mark it as cancelled."""
+        payload = {
+            "name": "slow-workflow",
+            "description": "workflow that can be cancelled",
+            "workflowJson": {
+                "start": "step1",
+                "nodes": [
+                    {
+                        "id": "step1",
+                        "type": "python",
+                        "code": "import time\ntime.sleep(0.2)\noutputs['value'] = 1",
+                    },
+                    {
+                        "id": "step2",
+                        "type": "python",
+                        "code": "outputs['value'] = inputs['value'] + 1",
+                    },
+                ],
+                "edges": [
+                    {"from": "step1", "to": "step2"},
+                ],
+            },
+        }
+        create_resp = await client.post("/api/workflow", json=payload)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "accepted"
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "cancelled"
+        assert len(final["executionLog"]) == 1
+        assert final["executionLog"][0]["node_id"] == "step1"
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_workflow_execution_is_ignored(self, client: AsyncClient):
+        """Cancelling an already-finished workflow should return an ignored response."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        exec_id = run_resp.json()["id"]
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "success"
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "ignored"
 
 
 # ===========================================================================
@@ -248,6 +381,39 @@ class TestPermissionRoutes:
             json={},
         )
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    @pytest.mark.asyncio
+    async def test_permission_routes_preserve_request_created_time(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        """List/detail routes should expose the stored permission request timestamp."""
+        from flocks.permission.next import PermissionRequestInfo
+
+        info = PermissionRequestInfo(
+            id="perm_time_test",
+            sessionID="ses_time_test",
+            permission="bash",
+            patterns=["*"],
+            metadata={"messageID": "msg_time_test"},
+            always=["*"],
+            tool={"name": "bash"},
+            time={"created": 1234567890},
+        )
+
+        monkeypatch.setattr(
+            "flocks.server.routes.permission.PermissionNext.list_pending_infos",
+            AsyncMock(return_value=[info]),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.permission.PermissionNext.get_pending_info",
+            AsyncMock(return_value=info),
+        )
+
+        list_resp = await client.get("/permission")
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert list_resp.json()[0]["time"]["created"] == 1234567890
+
+        detail_resp = await client.get("/permission/perm_time_test")
+        assert detail_resp.status_code == status.HTTP_200_OK
+        assert detail_resp.json()["time"]["created"] == 1234567890
 
     @pytest.mark.asyncio
     async def test_api_prefix_permission_endpoint(self, client: AsyncClient):

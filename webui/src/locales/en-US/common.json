@@ -62,6 +62,7 @@
     "error": "Error",
     "FAILED": "Failed",
     "timeout": "Timeout",
+    "cancelled": "Cancelled",
     "stopped": "Stopped"
   },
   "delegate": {

@@ -160,6 +160,7 @@ function TestSection({ workflow }: { workflow: Workflow }) {
   const [inputs, setInputs] = useState(() => buildMockInputs(workflow.workflowJson));
   const [inputError, setInputError] = useState('');
   const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [result, setResult] = useState<WorkflowExecution | null>(null);
   const [outputExpanded, setOutputExpanded] = useState(true);
   const [logExpanded, setLogExpanded] = useState(false);
@@ -174,6 +175,46 @@ function TestSection({ workflow }: { workflow: Workflow }) {
     }).catch(() => {/* ignore – fall back to mock inputs */});
   }, [workflow.id]);
 
+  useEffect(() => {
+    if (!result || result.status !== 'running') {
+      setRunning(false);
+      setStopping(false);
+      return;
+    }
+
+    setRunning(true);
+    let cancelled = false;
+    let timerId: number | undefined;
+
+    const pollExecution = async () => {
+      try {
+        const response = await workflowAPI.getExecution(workflow.id, result.id);
+        if (cancelled) return;
+        setResult(response.data);
+        if (response.data.status === 'running') {
+          timerId = window.setTimeout(pollExecution, 1000);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setRunning(false);
+        setStopping(false);
+        setResult(prev => prev ? {
+          ...prev,
+          status: 'error',
+          errorMessage: extractErrorMessage(error, t('detail.run.runFailed')),
+        } : prev);
+      }
+    };
+
+    timerId = window.setTimeout(pollExecution, 1000);
+    return () => {
+      cancelled = true;
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [result?.id, result?.status, t, workflow.id]);
+
   const handleRun = async () => {
     setInputError('');
     let parsed: Record<string, any> = {};
@@ -184,11 +225,13 @@ function TestSection({ workflow }: { workflow: Workflow }) {
       return;
     }
     setRunning(true);
+    setStopping(false);
     setResult(null);
     try {
       const res = await workflowAPI.run(workflow.id, { inputs: parsed });
       setResult(res.data);
     } catch (err: any) {
+      setRunning(false);
       const msg = err?.response?.data?.detail || err?.message || t('detail.run.runFailed');
       setResult({
         id: '',
@@ -199,8 +242,20 @@ function TestSection({ workflow }: { workflow: Workflow }) {
         executionLog: [],
         errorMessage: msg,
       });
-    } finally {
-      setRunning(false);
+    }
+  };
+
+  const handleStop = async () => {
+    if (!result?.id || !running) return;
+    try {
+      setStopping(true);
+      await workflowAPI.cancelExecution(workflow.id, result.id);
+    } catch (error) {
+      setStopping(false);
+      setResult(prev => prev ? {
+        ...prev,
+        errorMessage: extractErrorMessage(error, t('detail.run.stopFailed')),
+      } : prev);
     }
   };
 
@@ -224,12 +279,16 @@ function TestSection({ workflow }: { workflow: Workflow }) {
             {inputError && <p className="text-xs text-red-500 mt-1">{inputError}</p>}
           </div>
           <button
-            onClick={handleRun}
-            disabled={running}
+            onClick={running ? handleStop : handleRun}
+            disabled={stopping}
             className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
-            {running ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FlaskConical className="w-3.5 h-3.5" />}
-            {running ? t('detail.run.running') : t('detail.run.testRun')}
+            {stopping
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : running
+                ? <StopCircle className="w-3.5 h-3.5" />
+                : <FlaskConical className="w-3.5 h-3.5" />}
+            {stopping ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
           {result && (

@@ -31,7 +31,8 @@ import {
   CheckCircle,
   Trash2,
 } from 'lucide-react';
-import { workflowAPI, Workflow, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { extractErrorMessage } from '@/utils/error';
 
 // 自定义节点组件
 import PythonNode from './nodes/PythonNode';
@@ -234,8 +235,9 @@ export default function WorkflowEditor() {
   const [showPropertyPanel, setShowPropertyPanel] = useState(false);
   const [showNodeToolbar, setShowNodeToolbar] = useState(true);
   const [showExecuteDialog, setShowExecuteDialog] = useState(false);
-  const [currentExecution, setCurrentExecution] = useState<any>(null);
+  const [currentExecution, setCurrentExecution] = useState<WorkflowExecution | null>(null);
   const [showExecutionPanel, setShowExecutionPanel] = useState(false);
+  const [executionStopping, setExecutionStopping] = useState(false);
 
   // 加载工作流数据
   useEffect(() => {
@@ -243,6 +245,44 @@ export default function WorkflowEditor() {
       loadWorkflow();
     }
   }, [id]);
+
+  useEffect(() => {
+    if (!currentExecution || currentExecution.status !== 'running') {
+      setExecutionStopping(false);
+    }
+  }, [currentExecution]);
+
+  useEffect(() => {
+    if (!id || !showExecutionPanel || !currentExecution?.id || currentExecution.status !== 'running') {
+      return;
+    }
+
+    let cancelled = false;
+    let timerId: number | undefined;
+
+    const pollExecution = async () => {
+      try {
+        const response = await workflowAPI.getExecution(id, currentExecution.id);
+        if (cancelled) return;
+        setCurrentExecution(response.data);
+        if (response.data.status === 'running') {
+          timerId = window.setTimeout(pollExecution, 1000);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        console.error('Failed to poll workflow execution:', error);
+        timerId = window.setTimeout(pollExecution, 1500);
+      }
+    };
+
+    timerId = window.setTimeout(pollExecution, 1000);
+    return () => {
+      cancelled = true;
+      if (timerId) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [id, showExecutionPanel, currentExecution?.id, currentExecution?.status]);
 
   const loadWorkflow = async () => {
     try {
@@ -426,13 +466,25 @@ export default function WorkflowEditor() {
       });
       
       setCurrentExecution(response.data);
+      setExecutionStopping(false);
       setShowExecutionPanel(true);
-      
-      // 如果执行状态不是 running，说明已完成，不需要轮询
-      // 实际项目中可能需要轮询检查执行状态
     } catch (error: any) {
       console.error('Failed to run workflow:', error);
       alert(t('editor.runFailed', { error: error.message || t('editor.unknownError') }));
+    }
+  };
+
+  const handleStopExecution = async () => {
+    if (!id || !currentExecution?.id || currentExecution.status !== 'running') {
+      return;
+    }
+
+    try {
+      setExecutionStopping(true);
+      await workflowAPI.cancelExecution(id, currentExecution.id);
+    } catch (error) {
+      setExecutionStopping(false);
+      alert(extractErrorMessage(error, t('detail.run.stopFailed')));
     }
   };
 
@@ -593,11 +645,15 @@ export default function WorkflowEditor() {
             onClose={() => {
               setShowExecutionPanel(false);
               setCurrentExecution(null);
+              setExecutionStopping(false);
             }}
             onRunAgain={() => {
               setShowExecutionPanel(false);
+              setExecutionStopping(false);
               setShowExecuteDialog(true);
             }}
+            onStop={handleStopExecution}
+            stopping={executionStopping}
           />
         )}
 

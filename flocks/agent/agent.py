@@ -133,12 +133,11 @@ class AgentInfo(BaseModel):
     temperature: Optional[float] = None
     color: Optional[str] = None
 
-    # Derived from ``tools`` list in agent.yaml.
-    # deny-all + allow listed tools for native agents.
-    # allow-all for plugin agents that haven't declared a tools list.
+    # Legacy compatibility only.
+    # Runtime tool exposure is driven by `tools` and session callable tools.
     permission: Ruleset = Field(default_factory=list)
 
-    # Raw tools list from agent.yaml (None → allow-all fallback).
+    # Concrete callable tool names resolved from agent.yaml.
     tools: Optional[List[str]] = Field(default=None)
 
     model: Optional[AgentModel] = None
