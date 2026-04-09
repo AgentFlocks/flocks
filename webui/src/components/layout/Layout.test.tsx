@@ -165,7 +165,7 @@ describe('Layout onboarding entry', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3-max',
+        model_id: 'minimax-m2.7',
       },
     });
 

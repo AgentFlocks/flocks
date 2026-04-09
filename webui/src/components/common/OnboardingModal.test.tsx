@@ -173,7 +173,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3-max',
+        model_id: 'minimax-m2.7',
       },
     });
 
@@ -195,7 +195,7 @@ describe('OnboardingModal', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3-max',
+        model_id: 'minimax-m2.7',
       },
     });
 
@@ -290,7 +290,7 @@ describe('OnboardingModal', () => {
         skipped: [],
         default_model: {
           provider_id: 'threatbook-cn-llm',
-          model_id: 'qwen3-max',
+          model_id: 'minimax-m2.7',
         },
       },
     });
@@ -304,7 +304,7 @@ describe('OnboardingModal', () => {
     await screen.findByText('onboarding.bootstrap.primaryConfiguredSummary');
     await user.click(screen.getByText('onboarding.bootstrap.primaryTitle'));
 
-    expect(screen.getByText('Qwen 3 Max')).toBeInTheDocument();
-    expect(screen.queryByText('MiniMax M2.7')).not.toBeInTheDocument();
+    expect(screen.getByText('MiniMax M2.7')).toBeInTheDocument();
+    expect(screen.queryByText('Qwen 3 Max')).not.toBeInTheDocument();
   });
 });
