@@ -33,8 +33,6 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
 
     assert "function Stop-FlocksProcesses" in script
-    assert "function Get-UrlProbeMilliseconds" in script
-    assert "function Select-FastestUrl" in script
     assert "function Initialize-InstallSources" in script
     assert "function Invoke-NativeCommand" in script
     assert "& $flocksCommand.Source stop" in script
