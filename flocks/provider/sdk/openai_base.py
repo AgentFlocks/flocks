@@ -28,16 +28,10 @@ def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
     if not raw_usage:
         return None
 
-    prompt_tokens = (
-        getattr(raw_usage, "prompt_tokens", None)
-        if getattr(raw_usage, "prompt_tokens", None) is not None
-        else getattr(raw_usage, "input_tokens", 0)
-    ) or 0
-    completion_tokens = (
-        getattr(raw_usage, "completion_tokens", None)
-        if getattr(raw_usage, "completion_tokens", None) is not None
-        else getattr(raw_usage, "output_tokens", 0)
-    ) or 0
+    _pt = getattr(raw_usage, "prompt_tokens", None)
+    prompt_tokens = (_pt if _pt is not None else getattr(raw_usage, "input_tokens", 0)) or 0
+    _ct = getattr(raw_usage, "completion_tokens", None)
+    completion_tokens = (_ct if _ct is not None else getattr(raw_usage, "output_tokens", 0)) or 0
     reasoning_tokens = getattr(raw_usage, "reasoning_tokens", 0) or 0
     total_tokens = getattr(raw_usage, "total_tokens", 0) or (
         prompt_tokens + completion_tokens + reasoning_tokens

@@ -287,7 +287,7 @@ class OpenAICompatibleProvider(BaseProvider):
             if chunk.choices:
                 choice = chunk.choices[0]
                 delta = choice.delta
-                emitted_terminal_chunk = False
+                yielded_finish_for_this_chunk = False
 
                 if delta is not None:
                     if not _first_delta_logged:
@@ -336,11 +336,8 @@ class OpenAICompatibleProvider(BaseProvider):
                                     emitted_substantive_chunk = True
                                 yield StreamChunk(
                                     delta=seg_text,
-                                    finish_reason=choice.finish_reason,
-                                    usage=stream_usage if choice.finish_reason else None,
+                                    finish_reason=None,
                                 )
-                                if choice.finish_reason:
-                                    emitted_terminal_chunk = True
 
                 # Flush think extractor on finish (before tool-call chunks; matches prior behavior)
                 if choice.finish_reason:
@@ -392,9 +389,9 @@ class OpenAICompatibleProvider(BaseProvider):
                                 tool_calls=tool_calls,
                                 usage=stream_usage,
                             )
-                            emitted_terminal_chunk = True
+                            yielded_finish_for_this_chunk = True
 
-                if choice.finish_reason and not emitted_terminal_chunk:
+                if choice.finish_reason and not yielded_finish_for_this_chunk:
                     yield StreamChunk(
                         delta="",
                         finish_reason=choice.finish_reason,

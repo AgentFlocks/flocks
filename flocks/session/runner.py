@@ -877,6 +877,10 @@ Please address this message and continue with your tasks.
                         and not result.content and not result.tool_calls):
                     empty_attempt += 1
                     if empty_attempt <= MAX_EMPTY_RETRIES:
+                        # Record usage for this empty attempt even though we are
+                        # about to retry – the provider may have already charged
+                        # for the tokens returned in this response.
+                        await self._record_usage_if_available(result.usage)
                         delay_ms = SessionRetry.delay(empty_attempt)
                         next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
                         log.warn("runner.step.empty_response_retry", {
@@ -1043,9 +1047,14 @@ Please address this message and continue with your tasks.
             return None
 
         if isinstance(pricing, PriceConfig):
+            # Already the correct type – returned as-is.
             return pricing
 
         if hasattr(pricing, "input") and hasattr(pricing, "output"):
+            # Defensive branch: handles any duck-typed object with input/output
+            # attributes (e.g. legacy dataclass or proxy object). In practice
+            # ModelInfo.pricing is typed as Optional[Dict[str, Any]], so this
+            # branch is unlikely to be hit at runtime.
             return PriceConfig(
                 input=getattr(pricing, "input", 0.0),
                 output=getattr(pricing, "output", 0.0),
@@ -1056,6 +1065,7 @@ Please address this message and continue with your tasks.
             )
 
         if isinstance(pricing, dict):
+            # Standard runtime path: ModelInfo.pricing is a plain dict from JSON.
             return PriceConfig(
                 input=pricing.get("input", 0.0),
                 output=pricing.get("output", 0.0),
@@ -1068,13 +1078,24 @@ Please address this message and continue with your tasks.
         return None
 
     async def _record_usage_if_available(self, usage: Optional[Dict[str, int]]) -> None:
-        """Persist usage records without blocking successful session steps."""
+        """Persist usage records without blocking successful session steps.
+
+        All exceptions – including ImportError when server routes are absent
+        in CLI-only environments – are caught here so that a usage-recording
+        failure can never corrupt an already-successful step result.
+
+        Note: This imports from flocks.server.routes.usage, creating a
+        core→server-routes dependency.
+        TODO: Move record_usage logic to a provider-layer service
+        (e.g. flocks.provider.usage_service) to remove the architectural
+        inversion.
+        """
         if not usage:
             return
 
-        from flocks.server.routes.usage import RecordUsageRequest, record_usage
-
         try:
+            from flocks.server.routes.usage import RecordUsageRequest, record_usage
+
             await record_usage(
                 RecordUsageRequest(
                     provider_id=self.provider_id,

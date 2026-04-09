@@ -771,7 +771,9 @@ async def test_process_step_records_usage_after_success(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_process_step_empty_retry_records_usage_only_once(monkeypatch):
+async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
+    """Each empty-response attempt records its own usage so that provider
+    charges are not lost when the model returns tokens but no content."""
     runner = _make_runner("ses_runner_usage_retry")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
 
@@ -823,4 +825,36 @@ async def test_process_step_empty_retry_records_usage_only_once(monkeypatch):
 
     assert result.content == "recovered"
     sleep_mock.assert_awaited_once()
-    record_mock.assert_awaited_once_with(second_usage)
+    # Both the empty attempt and the successful attempt must be recorded so
+    # that provider charges are not silently dropped during retries.
+    assert record_mock.await_count == 2
+    record_mock.assert_any_await(first_usage)
+    record_mock.assert_any_await(second_usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_import_error():
+    """ImportError from the server-routes import must not propagate out of
+    _record_usage_if_available so that a CLI-only environment (where fastapi /
+    server deps may be absent) never turns a successful step into an error."""
+    runner = _make_runner("ses_runner_import_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    with patch.dict("sys.modules", {"flocks.server.routes.usage": None}):
+        # Should complete without raising, even though the import will fail.
+        await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_runtime_error():
+    """Any exception raised by record_usage() itself must also be silently
+    swallowed so that usage-recording failures never corrupt step results."""
+    runner = _make_runner("ses_runner_record_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    fake_module = SimpleNamespace(
+        RecordUsageRequest=MagicMock(return_value=SimpleNamespace()),
+        record_usage=AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+    with patch.dict("sys.modules", {"flocks.server.routes.usage": fake_module}):
+        await runner._record_usage_if_available(usage)
