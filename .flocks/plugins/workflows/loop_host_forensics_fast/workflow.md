@@ -21,7 +21,7 @@
 
 若两者都未提供有效主机，工作流跳过巡检循环，仅输出无主机的轻量结果。
 
-若 `hosts` 中某项已含 `@`（如 `flocks@web01.example.internal`），则不再与 `ssh_user` 拼接，该项按原样作为 SSH 目标。
+若 `hosts` 中某项已含 `@`（如 `user@target-host`），则不再与 `ssh_user` 拼接，该项按原样作为 SSH 目标。
 
 ## 流程步骤
 
@@ -98,8 +98,8 @@
 
 ```json
 {
-  "hosts": ["web01.example.internal", "db01.example.internal"],
-  "ssh_user": "flocks"
+  "hosts": ["<host-1>", "<host-2>"],
+  "ssh_user": "<ssh-user>"
 }
 ```
 
@@ -107,7 +107,7 @@
 
 ```json
 {
-  "hosts": ["app01.example.internal"]
+  "hosts": ["<host-1>"]
 }
 ```
 
@@ -116,6 +116,6 @@
 ```json
 {
   "hosts_file": "/path/to/hosts.txt",
-  "hosts": ["svc-a.example.internal", "svc-b.example.internal"]
+  "hosts": ["<host-1>", "<host-2>"]
 }
 ```

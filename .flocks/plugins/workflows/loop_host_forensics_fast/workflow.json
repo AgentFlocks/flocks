@@ -72,10 +72,10 @@
   "metadata": {
     "sampleInputs": {
       "hosts": [
-        "web01.example.internal",
-        "db01.example.internal"
+        "<host-1>",
+        "<host-2>"
       ],
-      "ssh_user": "flocks"
+      "ssh_user": "<ssh-user>"
     }
   }
 }
