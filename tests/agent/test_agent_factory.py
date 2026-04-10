@@ -437,12 +437,12 @@ class TestInjectDynamicPrompts:
     async def test_plugin_agent_has_prompt_if_installed(self):
         """Plugin agents installed in ~/.flocks/plugins/agents/ should load their prompt."""
         from flocks.agent.registry import Agent
-        # host-forensics is a plugin agent (native=False); skip if not installed locally
-        agent = await Agent.get("host-forensics")
-        if agent is None:
-            pytest.skip("host-forensics plugin not installed in this environment")
-        assert agent.prompt is not None, "host-forensics should have a prompt.md"
-        assert len(agent.prompt) > 20
+        for name in ["host-forensics", "host-forensics-fast"]:
+            agent = await Agent.get(name)
+            if agent is None:
+                pytest.skip(f"{name} plugin not installed in this environment")
+            assert agent.prompt is not None, f"{name} should have a prompt.md"
+            assert len(agent.prompt) > 20
 
     @pytest.mark.asyncio
     async def test_plan_agent_has_no_prompt(self):

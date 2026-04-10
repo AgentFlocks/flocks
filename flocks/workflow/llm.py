@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import time
 from typing import Any, Dict, Optional
 
 from flocks.config.config import Config
@@ -266,6 +267,9 @@ class LLMClient:
         *,
         model: Optional[str] = None,
         provider_id: Optional[str] = None,
+        timeout_s: Optional[float] = None,
+        max_retries: int = 0,
+        retry_delay_s: float = 1.0,
     ) -> str:
         if model is not None or provider_id is not None:
             return LLMClient(
@@ -273,11 +277,19 @@ class LLMClient:
                 base_url=self.base_url,
                 model=model if model is not None else self.model,
                 provider_id=provider_id if provider_id is not None else self.provider_id,
-            ).ask(prompt, temperature=temperature)
+            ).ask(
+                prompt,
+                temperature=temperature,
+                timeout_s=timeout_s,
+                max_retries=max_retries,
+                retry_delay_s=retry_delay_s,
+            )
 
         targets = self._build_candidate_targets()
         preflight_errors: list[tuple[_ResolvedTarget, str]] = []
         runtime_errors: list[tuple[_ResolvedTarget, Exception]] = []
+        retry_count = max(0, int(max_retries))
+        delay_s = max(0.0, float(retry_delay_s))
 
         for target in targets:
             validation_error = self._validate_target(target)
@@ -288,21 +300,36 @@ class LLMClient:
             provider = self._prepare_provider(target.provider_id)
 
             async def _call():
-                return await provider.chat(
+                coro = provider.chat(
                     model_id=target.model_id,
                     messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
                     temperature=temperature,
                 )
+                if timeout_s is not None and float(timeout_s) > 0:
+                    return await asyncio.wait_for(coro, timeout=float(timeout_s))
+                return await coro
 
-            try:
-                response = _run_coro_sync(_call())
-            except Exception as exc:
-                runtime_errors.append((target, exc))
-                continue
+            last_exc: Optional[Exception] = None
+            for attempt in range(retry_count + 1):
+                try:
+                    response = _run_coro_sync(_call())
+                    self.provider_id = target.provider_id
+                    self.model = target.model_id
+                    return str(getattr(response, "content", "") or "")
+                except asyncio.TimeoutError as exc:
+                    total_attempts = retry_count + 1
+                    last_exc = TimeoutError(
+                        f"LLM call timed out after {timeout_s}s "
+                        f"(attempt {attempt + 1}/{total_attempts})"
+                    )
+                except Exception as exc:
+                    last_exc = exc
 
-            self.provider_id = target.provider_id
-            self.model = target.model_id
-            return str(getattr(response, "content", "") or "")
+                if attempt < retry_count and delay_s > 0:
+                    time.sleep(delay_s)
+
+            if last_exc is not None:
+                runtime_errors.append((target, last_exc))
 
         self._raise_resolution_error(
             targets=targets,
@@ -336,10 +363,16 @@ class LazyLLM:
         *,
         model: Optional[str] = None,
         provider_id: Optional[str] = None,
+        timeout_s: Optional[float] = None,
+        max_retries: int = 0,
+        retry_delay_s: float = 1.0,
     ) -> str:
         return get_llm_client(model=model, provider_id=provider_id).ask(
             prompt,
             temperature=temperature,
+            timeout_s=timeout_s,
+            max_retries=max_retries,
+            retry_delay_s=retry_delay_s,
         )
 
 

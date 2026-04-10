@@ -1,16 +1,24 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Loader2, ChevronDown, ChevronRight, Globe, StopCircle,
   Check, Clock, CheckCircle, XCircle, AlertCircle, Wifi, FlaskConical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { workflowAPI, Workflow, WorkflowExecution, WorkflowService, WorkflowJSON } from '@/api/workflow';
+import {
+  workflowAPI,
+  Workflow,
+  WorkflowExecution,
+  WorkflowService,
+  WorkflowJSON,
+} from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
 import { extractErrorMessage } from '@/utils/error';
 
 interface RunTabProps {
   workflow: Workflow;
+  latestExecution: WorkflowExecution | null;
+  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
 }
 
 function SectionHeader({
@@ -151,32 +159,80 @@ function buildNestedMock(code: string, varName: string): Record<string, unknown>
   return Object.keys(obj).length > 0 ? obj : {};
 }
 
+type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 // ─────────────────────────────────────────────
 // 区块1：测试运行
 // ─────────────────────────────────────────────
-function TestSection({ workflow }: { workflow: Workflow }) {
+function TestSection({
+  workflow,
+  execution,
+  onExecutionChange,
+}: {
+  workflow: Workflow;
+  execution: WorkflowExecution | null;
+  onExecutionChange?: (execution: WorkflowExecution | null) => void;
+}) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
   const [inputs, setInputs] = useState(() => buildMockInputs(workflow.workflowJson));
   const [inputError, setInputError] = useState('');
   const [running, setRunning] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [result, setResult] = useState<WorkflowExecution | null>(null);
+  const [sampleSaveState, setSampleSaveState] = useState<SaveState>('idle');
+  const [sampleSaveError, setSampleSaveError] = useState('');
   const [outputExpanded, setOutputExpanded] = useState(true);
   const [logExpanded, setLogExpanded] = useState(false);
+  const lastSavedInputsRef = useRef(inputs);
+  const saveTimerRef = useRef<number | null>(null);
+  const saveFeedbackTimerRef = useRef<number | null>(null);
 
-  // On mount, try to load persisted sample inputs (saved by Rex during creation)
   useEffect(() => {
     workflowAPI.getSampleInputs(workflow.id).then(res => {
       const sample = res.data?.sampleInputs;
       if (sample && Object.keys(sample).length > 0) {
-        setInputs(JSON.stringify(sample, null, 2));
+        const raw = JSON.stringify(sample, null, 2);
+        lastSavedInputsRef.current = raw;
+        setInputs(raw);
+      } else {
+        lastSavedInputsRef.current = buildMockInputs(workflow.workflowJson);
       }
-    }).catch(() => {/* ignore – fall back to mock inputs */});
-  }, [workflow.id]);
+    }).catch(() => {
+      lastSavedInputsRef.current = buildMockInputs(workflow.workflowJson);
+    });
+  }, [workflow.id, workflow.workflowJson]);
+
+  useEffect(() => () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+    if (saveFeedbackTimerRef.current) window.clearTimeout(saveFeedbackTimerRef.current);
+  }, []);
+
+  const persistSampleInputs = useCallback(async (parsed: Record<string, any>, raw: string): Promise<boolean> => {
+    if (raw === lastSavedInputsRef.current) {
+      return true;
+    }
+    try {
+      setSampleSaveState('saving');
+      setSampleSaveError('');
+      await workflowAPI.saveSampleInputs(workflow.id, parsed);
+      lastSavedInputsRef.current = raw;
+      setSampleSaveState('saved');
+      if (saveFeedbackTimerRef.current) window.clearTimeout(saveFeedbackTimerRef.current);
+      saveFeedbackTimerRef.current = window.setTimeout(() => setSampleSaveState('idle'), 1800);
+      return true;
+    } catch (error) {
+      setSampleSaveState('error');
+      setSampleSaveError(extractErrorMessage(error, t('detail.run.sampleInputsSaveFailed')));
+      return false;
+    }
+  }, [t, workflow.id]);
 
   useEffect(() => {
-    if (!result || result.status !== 'running') {
+    if (!execution || execution.status !== 'running') {
       setRunning(false);
       setStopping(false);
       return;
@@ -188,9 +244,9 @@ function TestSection({ workflow }: { workflow: Workflow }) {
 
     const pollExecution = async () => {
       try {
-        const response = await workflowAPI.getExecution(workflow.id, result.id);
+        const response = await workflowAPI.getExecution(workflow.id, execution.id);
         if (cancelled) return;
-        setResult(response.data);
+        onExecutionChange?.(response.data);
         if (response.data.status === 'running') {
           timerId = window.setTimeout(pollExecution, 1000);
         }
@@ -198,11 +254,11 @@ function TestSection({ workflow }: { workflow: Workflow }) {
         if (cancelled) return;
         setRunning(false);
         setStopping(false);
-        setResult(prev => prev ? {
-          ...prev,
+        onExecutionChange?.(execution ? {
+          ...execution,
           status: 'error',
           errorMessage: extractErrorMessage(error, t('detail.run.runFailed')),
-        } : prev);
+        } : null);
       }
     };
 
@@ -213,27 +269,74 @@ function TestSection({ workflow }: { workflow: Workflow }) {
         window.clearTimeout(timerId);
       }
     };
-  }, [result?.id, result?.status, t, workflow.id]);
+  }, [execution, onExecutionChange, t, workflow.id]);
+
+  const scheduleSampleSave = useCallback((raw: string, parsed: Record<string, any>) => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      void persistSampleInputs(parsed, raw);
+      saveTimerRef.current = null;
+    }, 700);
+  }, [persistSampleInputs]);
+
+  const handleInputChange = (raw: string) => {
+    setInputs(raw);
+    setSampleSaveError('');
+    if (!raw.trim()) {
+      setInputError(t('detail.run.jsonFormatError'));
+      setSampleSaveState('idle');
+      return;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!isPlainObject(parsed)) {
+        setInputError(t('detail.run.rootObjectRequired'));
+        setSampleSaveState('idle');
+        return;
+      }
+      setInputError('');
+      scheduleSampleSave(raw, parsed);
+    } catch {
+      setInputError(t('detail.run.jsonFormatError'));
+      setSampleSaveState('idle');
+    }
+  };
+
+  const flushSampleInputs = useCallback(async (raw: string, parsed: Record<string, any>) => {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    return persistSampleInputs(parsed, raw);
+  }, [persistSampleInputs]);
 
   const handleRun = async () => {
     setInputError('');
     let parsed: Record<string, any> = {};
     try {
-      parsed = JSON.parse(inputs);
+      const parsedRaw = JSON.parse(inputs);
+      if (!isPlainObject(parsedRaw)) {
+        setInputError(t('detail.run.rootObjectRequired'));
+        return;
+      }
+      parsed = parsedRaw;
     } catch {
       setInputError(t('detail.run.jsonFormatError'));
       return;
     }
+
+    await flushSampleInputs(inputs, parsed);
     setRunning(true);
     setStopping(false);
-    setResult(null);
     try {
       const res = await workflowAPI.run(workflow.id, { inputs: parsed });
-      setResult(res.data);
+      onExecutionChange?.(res.data);
     } catch (err: any) {
       setRunning(false);
       const msg = err?.response?.data?.detail || err?.message || t('detail.run.runFailed');
-      setResult({
+      onExecutionChange?.({
         id: '',
         workflowId: workflow.id,
         inputParams: parsed,
@@ -246,18 +349,20 @@ function TestSection({ workflow }: { workflow: Workflow }) {
   };
 
   const handleStop = async () => {
-    if (!result?.id || !running) return;
+    if (!execution?.id || !running) return;
     try {
       setStopping(true);
-      await workflowAPI.cancelExecution(workflow.id, result.id);
+      await workflowAPI.cancelExecution(workflow.id, execution.id);
     } catch (error) {
       setStopping(false);
-      setResult(prev => prev ? {
-        ...prev,
+      onExecutionChange?.(execution ? {
+        ...execution,
         errorMessage: extractErrorMessage(error, t('detail.run.stopFailed')),
-      } : prev);
+      } : null);
     }
   };
+
+  const showSampleSaveHint = sampleSaveState === 'saving' || sampleSaveState === 'saved';
 
   return (
     <div className="border-b border-gray-100">
@@ -265,10 +370,17 @@ function TestSection({ workflow }: { workflow: Workflow }) {
       {expanded && (
         <div className="p-4 space-y-3">
           <div>
-            <label className="block text-xs text-gray-500 mb-1">{t('detail.run.inputParams')}</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="block text-xs text-gray-500">{t('detail.run.inputParams')}</label>
+              {showSampleSaveHint && (
+                <span className="text-[11px] text-gray-400">
+                  {sampleSaveState === 'saving' ? t('detail.run.savingSampleInputs') : t('detail.run.sampleInputsSaved')}
+                </span>
+              )}
+            </div>
             <textarea
               value={inputs}
-              onChange={e => setInputs(e.target.value)}
+              onChange={e => handleInputChange(e.target.value)}
               rows={5}
               className={`w-full text-xs font-mono border rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-red-500 ${
                 inputError ? 'border-red-300' : 'border-gray-200'
@@ -277,6 +389,7 @@ function TestSection({ workflow }: { workflow: Workflow }) {
               spellCheck={false}
             />
             {inputError && <p className="text-xs text-red-500 mt-1">{inputError}</p>}
+            {!inputError && sampleSaveError && <p className="text-xs text-red-500 mt-1">{sampleSaveError}</p>}
           </div>
           <button
             onClick={running ? handleStop : handleRun}
@@ -291,26 +404,25 @@ function TestSection({ workflow }: { workflow: Workflow }) {
             {stopping ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
-          {result && (
+          {execution && (
             <div className="border border-gray-200 rounded-lg overflow-hidden">
-              {/* Result header */}
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
-                <WorkflowStatusBadge status={result.status} />
-                {result.duration != null && (
+                <WorkflowStatusBadge status={execution.status} />
+                {execution.duration != null && (
                   <span className="text-xs text-gray-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
-                    {result.duration.toFixed(2)}s
+                    {execution.duration.toFixed(2)}s
                   </span>
                 )}
               </div>
 
-              {result.errorMessage && (
+              {execution.errorMessage && (
                 <div className="px-3 py-2 bg-red-50 border-b border-red-100">
-                  <p className="text-xs text-red-600">{result.errorMessage}</p>
+                  <p className="text-xs text-red-600">{execution.errorMessage}</p>
                 </div>
               )}
 
-              {result.outputResults && (
+              {execution.outputResults && (
                 <div>
                   <button
                     onClick={() => setOutputExpanded(v => !v)}
@@ -322,31 +434,31 @@ function TestSection({ workflow }: { workflow: Workflow }) {
                   {outputExpanded && (
                     <div className="bg-gray-900 px-3 py-2 max-h-48 overflow-y-auto">
                       <pre className="text-xs text-green-300 font-mono whitespace-pre-wrap">
-                        {JSON.stringify(result.outputResults, null, 2)}
+                        {JSON.stringify(execution.outputResults, null, 2)}
                       </pre>
                     </div>
                   )}
                 </div>
               )}
 
-              {result.executionLog && result.executionLog.length > 0 && (
+              {execution.executionLog && execution.executionLog.length > 0 && (
                 <div>
                   <button
                     onClick={() => setLogExpanded(v => !v)}
                     className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 transition-colors border-t border-gray-100"
                   >
                     <span className="text-xs font-medium text-gray-600">
-                      {t('detail.run.executionLog', { count: result.executionLog.length })}
+                      {t('detail.run.executionLog', { count: execution.executionLog.length })}
                     </span>
                     {logExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
                   </button>
                   {logExpanded && (
                     <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
-                      {result.executionLog.map((step: any, i: number) => {
+                      {execution.executionLog.map((step, i: number) => {
                         const hasInputs = step.inputs && Object.keys(step.inputs).length > 0;
                         const hasOutputs = step.outputs && Object.keys(step.outputs).length > 0;
                         return (
-                          <StepDetail key={i} step={step} index={i} hasInputs={hasInputs} hasOutputs={hasOutputs} />
+                          <StepDetail key={`${step.node_id}-${i}`} step={step} index={i} hasInputs={hasInputs} hasOutputs={hasOutputs} />
                         );
                       })}
                     </div>
@@ -783,7 +895,15 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
 // ─────────────────────────────────────────────
 // 区块4：执行历史
 // ─────────────────────────────────────────────
-function HistorySection({ workflowId }: { workflowId: string }) {
+function HistorySection({
+  workflowId,
+  latestExecutionId,
+  onLatestExecutionChange,
+}: {
+  workflowId: string;
+  latestExecutionId?: string;
+  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+}) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
   const [history, setHistory] = useState<WorkflowExecution[]>([]);
@@ -794,6 +914,18 @@ function HistorySection({ workflowId }: { workflowId: string }) {
     try {
       const res = await workflowAPI.getHistory(workflowId, { limit: 10 });
       setHistory(res.data);
+      if (res.data.length > 0) {
+        const matchingExecution = latestExecutionId
+          ? res.data.find((item: WorkflowExecution) => item.id === latestExecutionId)
+          : res.data[0];
+        if (matchingExecution) {
+          onLatestExecutionChange?.(matchingExecution);
+        } else if (!latestExecutionId) {
+          onLatestExecutionChange?.(res.data[0]);
+        }
+      } else if (!latestExecutionId) {
+        onLatestExecutionChange?.(null);
+      }
       setSelectedExec(prev => {
         if (!prev) return null;
         const updated = res.data.find((e: WorkflowExecution) => e.id === prev.id);
@@ -804,7 +936,7 @@ function HistorySection({ workflowId }: { workflowId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [workflowId]);
+  }, [latestExecutionId, onLatestExecutionChange, workflowId]);
 
   const hasRunning = history.some(e => e.status === 'running');
 
@@ -879,13 +1011,25 @@ function HistorySection({ workflowId }: { workflowId: string }) {
 // ─────────────────────────────────────────────
 // 主组件
 // ─────────────────────────────────────────────
-export default function RunTab({ workflow }: RunTabProps) {
+export default function RunTab({
+  workflow,
+  latestExecution,
+  onLatestExecutionChange,
+}: RunTabProps) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-      <TestSection workflow={workflow} />
+      <TestSection
+        workflow={workflow}
+        execution={latestExecution}
+        onExecutionChange={onLatestExecutionChange}
+      />
       <PublishSection workflowId={workflow.id} />
       <KafkaSection workflowId={workflow.id} />
-      <HistorySection workflowId={workflow.id} />
+      <HistorySection
+        workflowId={workflow.id}
+        latestExecutionId={latestExecution?.id}
+        onLatestExecutionChange={onLatestExecutionChange}
+      />
     </div>
   );
 }

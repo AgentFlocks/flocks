@@ -1,12 +1,14 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import RunTab from './RunTab';
+import type { WorkflowExecution } from '@/api/workflow';
 
 const { workflowAPI } = vi.hoisted(() => ({
   workflowAPI: {
     getSampleInputs: vi.fn(),
+    saveSampleInputs: vi.fn(),
     run: vi.fn(),
     getExecution: vi.fn(),
     cancelExecution: vi.fn(),
@@ -37,11 +39,15 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         'detail.run.testSection': '测试',
         'detail.run.inputParams': '输入参数（JSON）',
+        'detail.run.rootObjectRequired': '输入参数必须是 JSON 对象',
         'detail.run.running': '运行中...',
         'detail.run.testRun': '测试运行',
         'detail.run.stopRun': '停止运行',
         'detail.run.stopping': '停止中...',
         'detail.run.outputResults': '输出结果',
+        'detail.run.savingSampleInputs': '正在保存输入',
+        'detail.run.sampleInputsSaved': '输入已保存',
+        'detail.run.sampleInputsSaveFailed': '保存输入参数失败',
         'detail.run.executionLog': `执行日志 (${params?.count ?? 0})`,
         'detail.run.jsonFormatError': 'JSON 格式错误，请检查输入',
         'detail.run.runFailed': '运行失败',
@@ -76,10 +82,48 @@ vi.mock('react-i18next', () => ({
   }),
 }));
 
+const baseWorkflow = {
+  id: 'wf-1',
+  name: 'Demo Workflow',
+  category: 'default',
+  workflowJson: { start: 'step1', nodes: [], edges: [] },
+  status: 'draft' as const,
+  createdAt: Date.now(),
+  updatedAt: Date.now(),
+  stats: {
+    callCount: 0,
+    successCount: 0,
+    errorCount: 0,
+    totalRuntime: 0,
+    avgRuntime: 0,
+    thumbsUp: 0,
+    thumbsDown: 0,
+  },
+};
+
+function ControlledRunTab({
+  initialExecution = null,
+  workflow = baseWorkflow,
+}: {
+  initialExecution?: WorkflowExecution | null;
+  workflow?: typeof baseWorkflow;
+}) {
+  const [latestExecution, setLatestExecution] = React.useState<WorkflowExecution | null>(initialExecution);
+
+  return (
+    <RunTab
+      workflow={workflow}
+      latestExecution={latestExecution}
+      onLatestExecutionChange={setLatestExecution}
+    />
+  );
+}
+
 describe('RunTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     workflowAPI.getSampleInputs.mockResolvedValue({ data: { sampleInputs: {} } });
+    workflowAPI.saveSampleInputs.mockResolvedValue({ data: { ok: true } });
     workflowAPI.getService.mockResolvedValue({ data: null });
     workflowAPI.getKafkaConfig.mockResolvedValue({ data: null });
     workflowAPI.getHistory.mockResolvedValue({ data: [] });
@@ -104,39 +148,60 @@ describe('RunTab', () => {
 
   it('switches the main action to stop while a test run is active', async () => {
     const user = userEvent.setup();
+    const runningExecution = {
+      id: 'exec-1',
+      workflowId: 'wf-1',
+      inputParams: { topic: 'demo' },
+      status: 'running' as const,
+      startedAt: Date.now(),
+      executionLog: [],
+    };
+    workflowAPI.getHistory.mockResolvedValue({ data: [runningExecution] });
 
     render(
-      <RunTab
-        workflow={{
-          id: 'wf-1',
-          name: 'Demo Workflow',
-          category: 'default',
-          workflowJson: { start: 'step1', nodes: [], edges: [] },
-          status: 'draft',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          stats: {
-            callCount: 0,
-            successCount: 0,
-            errorCount: 0,
-            totalRuntime: 0,
-            avgRuntime: 0,
-            thumbsUp: 0,
-            thumbsDown: 0,
-          },
-        }}
+      <ControlledRunTab
+        initialExecution={runningExecution}
       />
     );
-
-    await user.click(screen.getByRole('button', { name: '测试运行' }));
-
-    await waitFor(() => {
-      expect(workflowAPI.run).toHaveBeenCalledTimes(1);
-    });
 
     const stopButton = await screen.findByRole('button', { name: '停止运行' });
     await user.click(stopButton);
 
-    expect(workflowAPI.cancelExecution).toHaveBeenCalledWith('wf-1', 'exec-1');
+    await waitFor(() => {
+      expect(workflowAPI.cancelExecution).toHaveBeenCalledWith('wf-1', 'exec-1');
+    });
   });
+
+  it('keeps the running execution visible when history is temporarily empty', async () => {
+    const runningExecution = {
+      id: 'exec-keep',
+      workflowId: 'wf-1',
+      inputParams: { topic: 'demo' },
+      status: 'running' as const,
+      startedAt: Date.now(),
+      executionLog: [],
+    };
+    workflowAPI.getHistory.mockResolvedValue({ data: [] });
+
+    render(<ControlledRunTab initialExecution={runningExecution} />);
+
+    expect(await screen.findByRole('button', { name: '停止运行' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '测试运行' })).not.toBeInTheDocument();
+  });
+
+  it('saves sample inputs before running', async () => {
+    const user = userEvent.setup();
+
+    render(<ControlledRunTab />);
+
+    const textarea = screen.getAllByRole('textbox')[0];
+    fireEvent.change(textarea, { target: { value: '{"topic":"saved"}' } });
+    await user.click(screen.getByRole('button', { name: '测试运行' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.saveSampleInputs).toHaveBeenCalledWith('wf-1', { topic: 'saved' });
+      expect(workflowAPI.run).toHaveBeenCalledWith('wf-1', { inputs: { topic: 'saved' } });
+    });
+  });
+
 });
