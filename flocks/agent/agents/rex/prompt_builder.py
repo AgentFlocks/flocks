@@ -649,6 +649,10 @@ def _build_security_priority_section(available_agents: List["AvailableAgent"]) -
             "intent": "网络流量日志 / NDR 告警分析",
             "signals": '"流量日志", "NDR", "告警分析", "网络攻击", "攻击是否成功", "network traffic", "alert analysis"',
         },
+        "host-forensics-fast": {
+            "intent": "Linux 主机快速排查 / 首轮研判",
+            "signals": '"快速排查", "首轮排查", "快速研判", "快速看一下主机", "先看主机是否异常", "host triage", "quick triage"',
+        },
         "host-forensics": {
             "intent": "Linux 主机入侵检测 / 取证",
             "signals": '"主机入侵", "挖矿", "后门", "webshell", "主机异常", "主机安全检查", "host compromise", "forensics"',

@@ -216,6 +216,23 @@ find /tmp -name ".*"
             violations = _scan_script_safety(content)
             assert violations == [], "deep_scan.sh has safety violations:\n" + "\n".join(violations)
 
+    def test_fast_triage_script_passes(self):
+        """The bundled triage_fast.sh must pass safety checks."""
+        from pathlib import Path
+        fast_triage_path = (
+            Path(__file__).parents[2]
+            / ".flocks"
+            / "plugins"
+            / "agents"
+            / "host-forensics-fast"
+            / "scripts"
+            / "triage_fast.sh"
+        )
+        if fast_triage_path.exists():
+            content = fast_triage_path.read_text()
+            violations = _scan_script_safety(content)
+            assert violations == [], "triage_fast.sh has safety violations:\n" + "\n".join(violations)
+
 
 # ---------------------------------------------------------------------------
 # _extract_sections

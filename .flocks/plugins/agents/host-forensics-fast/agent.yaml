@@ -1,0 +1,46 @@
+name: host-forensics-fast
+description: >-
+  Fast Linux host compromise triage subagent for first-pass investigation. Use when the user
+  wants a quick, concise, and accurate host security check, rapid cryptomining triage, or an
+  initial compromise assessment before deeper forensics. Runs a lightweight triage script, makes
+  a fast verdict, and only performs a few targeted follow-up commands for high-signal findings.
+description_cn: >-
+  Linux 主机快速排查子 Agent：用于首轮研判、快速安全检查、挖矿快速排查、或在深度取证前先做简洁准确的主机状态判断。
+  默认执行轻量 triage 脚本，尽快给出结论；仅在发现高置信可疑项时补充少量定点命令，不进入重型深度取证流程。
+mode: subagent
+delegatable: true
+hidden: false
+tags:
+  - security
+  - host-forensics
+  - fast-triage
+color: "#F39C12"
+
+temperature: 0.2
+
+tools:
+  - tool_search
+  - ssh_run_script
+  - ssh_host_cmd
+  - threatbook_mcp_ip_query
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_hash_query
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_file_query
+  - bash
+  - read
+
+prompt_metadata:
+  category: security
+  cost: low
+  triggers:
+    - domain: security
+      trigger: "Linux host quick triage, first-pass compromise assessment, rapid mining check, host quick check"
+  use_when:
+    - User asks for a quick Linux host compromise check
+    - User wants first-pass triage before deep forensics
+    - User asks for concise and fast host anomaly investigation
+  avoid_when:
+    - Full-scope forensic collection is explicitly required
+    - The user already asked for deep evidence preservation or exhaustive investigation

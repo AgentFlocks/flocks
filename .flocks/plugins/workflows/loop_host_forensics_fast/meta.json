@@ -1,0 +1,10 @@
+{
+  "name": "loop_host_forensics_fast",
+  "description": "从文件或 inputs 读取主机列表，循环调用 host-forensics-fast 子 Agent；每台主机结果立即落盘为独立文件，末步仅生成轻量索引与清单，避免全量 summary 超时",
+  "category": "default",
+  "status": "active",
+  "createdBy": null,
+  "createdAt": 1775787114059,
+  "updatedAt": 1775817769342,
+  "id": "loop_host_forensics_fast"
+}

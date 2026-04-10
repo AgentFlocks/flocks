@@ -380,13 +380,25 @@ class _ToolProxy:
         return _rpc_call({{"kind": "tool_safe", "name": name, "kwargs": kwargs}})
 
 class _LLMProxy:
-    def ask(self, prompt, temperature=0.2, model=None, provider_id=None):
+    def ask(
+        self,
+        prompt,
+        temperature=0.2,
+        model=None,
+        provider_id=None,
+        timeout_s=None,
+        max_retries=0,
+        retry_delay_s=1.0,
+    ):
         return _rpc_call({{
             "kind": "llm",
             "prompt": prompt,
             "temperature": temperature,
             "model": model,
             "provider_id": provider_id,
+            "timeout_s": timeout_s,
+            "max_retries": max_retries,
+            "retry_delay_s": retry_delay_s,
         }})
 
 def get_path(path, data=None):
@@ -509,15 +521,35 @@ sys.stdout.flush()
                     temperature = 0.2
                 model = rpc.get("model")
                 provider_id = rpc.get("provider_id")
+                timeout_raw = rpc.get("timeout_s")
+                max_retries_raw = rpc.get("max_retries", 0)
+                retry_delay_raw = rpc.get("retry_delay_s", 1.0)
                 if model is not None and not isinstance(model, str):
                     raise RuntimeError("LLM model must be a string when provided")
                 if provider_id is not None and not isinstance(provider_id, str):
                     raise RuntimeError("LLM provider_id must be a string when provided")
+                timeout_s = None
+                if timeout_raw is not None:
+                    try:
+                        timeout_s = float(timeout_raw)
+                    except Exception as exc:
+                        raise RuntimeError("LLM timeout_s must be a number when provided") from exc
+                try:
+                    max_retries = int(max_retries_raw)
+                except Exception as exc:
+                    raise RuntimeError("LLM max_retries must be an integer when provided") from exc
+                try:
+                    retry_delay_s = float(retry_delay_raw)
+                except Exception as exc:
+                    raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
                 output = get_lazy_llm().ask(
                     prompt,
                     temperature=temperature,
                     model=model,
                     provider_id=provider_id,
+                    timeout_s=timeout_s,
+                    max_retries=max_retries,
+                    retry_delay_s=retry_delay_s,
                 )
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 

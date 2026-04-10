@@ -1,7 +1,7 @@
 import { useState, Component, type ReactNode, type ErrorInfo } from 'react';
 import { Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Workflow, WorkflowNode } from '@/api/workflow';
+import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
 import ChatTab from './tabs/ChatTab';
@@ -63,8 +63,10 @@ type TabId = 'chat' | 'overview' | 'run';
 
 interface RightPanelProps {
   workflow: Workflow;
+  latestExecution?: WorkflowExecution | null;
   open: boolean;
   width?: number;
+  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
   /** Currently selected node — passed to ChatTab to show reference chip in input */
@@ -74,7 +76,8 @@ interface RightPanelProps {
 }
 
 export default function RightPanel({
-  workflow, open, width = 320,
+  workflow, latestExecution, open, width = 320,
+  onLatestExecutionChange,
   onWorkflowUpdated,
   onFirstMessageSent,
   selectedNode, onDeselectNode,
@@ -144,7 +147,11 @@ export default function RightPanel({
         {activeTab === 'overview' && <OverviewTab workflow={workflow} />}
         {activeTab === 'run' && (
           <TabErrorBoundary>
-            <RunTab workflow={workflow} />
+            <RunTab
+              workflow={workflow}
+              latestExecution={latestExecution ?? null}
+              onLatestExecutionChange={onLatestExecutionChange}
+            />
           </TabErrorBoundary>
         )}
       </div>

@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
 import { X, GitBranch, FileText, Code2, Layout, Download, FileJson } from 'lucide-react';
-import { workflowAPI, Workflow, WorkflowNode } from '@/api/workflow';
+import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
@@ -42,6 +42,7 @@ export default function WorkflowDetail() {
   const [panelWidth, setPanelWidth] = useState(getInitialPanelWidth);
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
+  const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
   const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
   const [showMdHint, setShowMdHint] = useState(false);
@@ -95,6 +96,7 @@ export default function WorkflowDetail() {
       setError(null);
       const res = await workflowAPI.get(id!);
       setWorkflow(res.data);
+      setLatestExecution(null);
     } catch (err: unknown) {
       setError(extractErrorMessage(err, t('detail.loadFailed')));
     } finally {
@@ -346,6 +348,7 @@ export default function WorkflowDetail() {
             <NodeInfoPanel
               node={drawerNode}
               workflow={workflow}
+              latestExecution={latestExecution}
               width={264}
               onClose={() => setDrawerNode(null)}
               onSaved={(updated) => setWorkflow(updated)}
@@ -367,8 +370,10 @@ export default function WorkflowDetail() {
         {/* 右侧面板（对话 + 概览），节点引用 chip 在对话输入框上方 */}
         <RightPanel
           workflow={workflow}
+          latestExecution={latestExecution}
           open={panelOpen}
           width={panelWidth}
+          onLatestExecutionChange={setLatestExecution}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
           selectedNode={drawerNode}

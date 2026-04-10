@@ -205,7 +205,7 @@ def run_workflow(
     workflow: WorkflowSource,
     inputs: Optional[Dict[str, Any]] = None,
     timeout_s: Optional[float] = None,
-    node_timeout_s: Optional[float] = 120.0,
+    node_timeout_s: Optional[float] = 300.0,
     trace: bool = False,
     use_llm: Optional[bool] = None,
     tool_registry: Optional[Any] = None,

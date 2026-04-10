@@ -18,7 +18,7 @@ from flocks.session.prompt_strings import PROMPT_COMPACTION, PROMPT_TITLE, PROMP
 BUILTIN_AGENTS = [
     "rex", "hephaestus", "plan", "explore",
     "oracle", "librarian", "metis", "momus", "multimodal-looker",
-    "self-enhance", "rex-junior", "host-forensics",
+    "self-enhance", "rex-junior", "host-forensics", "host-forensics-fast",
 ]
 
 
@@ -102,7 +102,7 @@ class TestSubagents:
 
     @pytest.mark.asyncio
     async def test_security_agents(self):
-        for name in ["host-forensics"]:
+        for name in ["host-forensics", "host-forensics-fast"]:
             agent = await Agent.get(name)
             assert agent is not None
             assert agent.mode == "subagent"

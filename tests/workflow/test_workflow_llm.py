@@ -21,7 +21,7 @@ class _FakeProvider:
     def __init__(
         self,
         provider_id: str,
-        behavior: str,
+        behavior: str | list[str],
         *,
         configured: bool = True,
         models: list[str] | None = None,
@@ -45,8 +45,17 @@ class _FakeProvider:
 
     async def chat(self, model_id: str, messages, **kwargs):
         self.calls += 1
-        if self._behavior == "error":
+        behavior = self._behavior
+        if isinstance(behavior, list):
+            current = behavior.pop(0) if behavior else "ok"
+        else:
+            current = behavior
+
+        if current == "error":
             raise RuntimeError("simulated failure")
+        if current == "timeout":
+            await asyncio.sleep(0.05)
+            return _FakeResponse("late")
         return _FakeResponse(f"{self.id}:{model_id}")
 
 
@@ -188,6 +197,28 @@ def test_llm_falls_back_to_default_when_requested_call_fails(monkeypatch):
     assert out == "fallback:fallback-model"
     assert requested.calls == 1
     assert fallback.calls == 1
+
+
+def test_llm_retries_then_succeeds(monkeypatch):
+    provider = _FakeProvider("demo", ["error", "error", "ok"], models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    out = client.ask("hello", max_retries=2, retry_delay_s=0)
+
+    assert out == "demo:m"
+    assert provider.calls == 3
+
+
+def test_llm_timeout_retries_then_raises(monkeypatch):
+    provider = _FakeProvider("demo", "timeout", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError, match="timed out after 0.01s"):
+        client.ask("hello", timeout_s=0.01, max_retries=2, retry_delay_s=0)
+
+    assert provider.calls == 3
 
 
 def test_llm_raises_clear_error_when_default_is_unavailable(monkeypatch):
