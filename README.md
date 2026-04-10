@@ -57,9 +57,6 @@ The recommended host installation entrypoint is the GitHub bootstrap installer. 
 # One-click install backend + WebUI
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
 # Creates ./flocks under the current directory
-
-# Optional: also install TUI dependencies
-curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash -s -- --with-tui
 ```
 
 #### Windows PowerShell (Administrator)
@@ -67,9 +64,6 @@ curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh 
 ```powershell
 # One-click install backend + WebUI
 powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1 | iex"
-
-# Optional: also install TUI dependencies
-powershell -c "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1))) -InstallTui"
 ```
 
 ### Install from source code
@@ -78,9 +72,6 @@ If you prefer to inspect the repository before installation, clone it locally an
 
 ```bash
 git clone https://github.com/AgentFlocks/Flocks.git flocks
-
-# Alternative for users in China (Gitee mirror)
-# git clone https://gitee.com/flocks/flocks.git flocks
 
 cd flocks
 ```

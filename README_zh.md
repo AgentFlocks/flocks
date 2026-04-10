@@ -54,9 +54,6 @@ Flocks 支持两种部署方式：
 # 一键安装后端 + WebUI
 curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash
 # 默认会在当前目录下创建 ./flocks
-
-# 可选：同时安装 TUI 依赖
-curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash -s -- --with-tui
 ```
 
 #### Windows PowerShell (Administrator)
@@ -64,9 +61,6 @@ curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash -s -- -
 ```powershell
 # 一键安装后端 + WebUI
 powershell -c "irm https://gitee.com/flocks/flocks/raw/main/install_zh.ps1 | iex"
-
-# 可选：同时安装 TUI 依赖
-powershell -c "& ([scriptblock]::Create((irm https://gitee.com/flocks/flocks/raw/main/install_zh.ps1))) -InstallTui"
 ```
 
 ### github源码安装
