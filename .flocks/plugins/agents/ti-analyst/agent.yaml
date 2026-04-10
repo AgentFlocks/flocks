@@ -18,6 +18,15 @@ tags:
   - threat-intelligence
   - ioc-analysis
 tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
   - tool_search
   - threatbook_mcp_ip_query
   - threatbook_mcp_ip_attribution
@@ -29,12 +38,10 @@ tools:
   - threatbook_mcp_vuln_query
   - threatbook_mcp_vuln_vendors_products_match
   - threatbook_mcp_hrti_query
-  - websearch
-  - webfetch
-  - read
-  - grep
-  - glob
   - virustotal_ip_query
   - virustotal_domain_query
   - virustotal_url_query
   - virustotal_file_query
+  - file_search
+  - websearch
+  - webfetch

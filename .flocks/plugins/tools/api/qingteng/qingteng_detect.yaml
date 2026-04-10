@@ -45,6 +45,16 @@ inputSchema:
           常用: `page`、`size`、`severity`、`status`、`hostId`、`groups`、`file_path`、`hostIds`
           风险提示: 下载动作通常依赖已有下载任务 ID；列表类专属字段误传会被拦截
           是否任务型: `scan` 为是
+        - bounceshell_list
+          用途: 查询反弹 Shell 检测结果
+          必填: 无（`os_type` 可选，不传默认 `linux`；传 `win` 查询 Windows）
+          常用: `page`、`size`、`sorts`、`groups`
+          是否任务型: 否
+        - localrights_list
+          用途: 查询本地提权检测结果（仅 Linux）
+          必填: 无
+          常用: `page`、`size`、`sorts`、`groups`
+          是否任务型: 否
         - backdoor_list / backdoor_scan / backdoor_scan_status
           用途: Linux/Windows 后门检测查询与扫描
           必填: `os_type`

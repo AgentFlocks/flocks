@@ -419,6 +419,10 @@ function Get-FlocksProcessIds {
 
         $isMatch = [Regex]::IsMatch($commandLine, "flocks\.server\.app")
         if (-not $isMatch -and $escapedProjectRoot) {
+            $escapedVenvDir = [Regex]::Escape((Join-Path $ProjectRoot ".venv"))
+            $isMatch = [Regex]::IsMatch($commandLine, $escapedVenvDir) -and [Regex]::IsMatch($commandLine, "flocks")
+        }
+        if (-not $isMatch -and $escapedProjectRoot) {
             $isMatch = [Regex]::IsMatch($commandLine, $escapedProjectRoot) -and [Regex]::IsMatch($commandLine, "(uv tool|uv sync|npm(\.cmd)? run preview|vite preview)")
         }
         if (-not $isMatch -and $escapedToolDir) {
@@ -744,25 +748,59 @@ function Invoke-InstallerCommandWithLockRetry {
 function Install-FlocksCli {
     Write-Info "Installing the global flocks CLI..."
 
-    Push-Location $RootDir
-    try {
-        Invoke-InstallerCommandWithLockRetry `
-            -Description "Global flocks CLI installation" `
-            -FilePath "uv" `
-            -ArgumentList @("tool", "install", "--editable", $RootDir, "--force", "--default-index", $script:UvDefaultIndex) `
-            -WorkingDirectory $RootDir `
-            -StreamOutput
+    $linkDir = Join-Path $HOME ".local\bin"
+
+    if (Test-Command "uv") {
+        $savedEA = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "SilentlyContinue"
+            $toolList = (& uv tool list 2>&1) | Where-Object { $_ -is [string] -or $_ -isnot [System.Management.Automation.ErrorRecord] }
+            if ("$toolList" -match 'flocks') {
+                Write-Info "Removing legacy uv tool installation..."
+                & uv tool uninstall flocks 2>&1 | Out-Null
+            }
+        }
+        catch {
+            Write-Warning "Could not clean up legacy uv tool install. Continuing anyway."
+        }
+        finally {
+            $ErrorActionPreference = $savedEA
+        }
     }
-    finally {
-        Pop-Location
+    $staleExe = Join-Path $linkDir "flocks.exe"
+    if (Test-Path $staleExe) {
+        Write-Info "Removing stale flocks.exe to avoid shadowing new wrapper..."
+        try {
+            Remove-Item -Force $staleExe -ErrorAction Stop
+        }
+        catch {
+            $backupExe = Join-Path $linkDir "flocks.exe.bak"
+            try {
+                Move-Item -Force $staleExe $backupExe -ErrorAction Stop
+                Write-Info "Could not delete flocks.exe (locked); renamed to flocks.exe.bak"
+            }
+            catch {
+                Write-Warning "Could not remove or rename flocks.exe — it may shadow the new flocks.cmd wrapper. Stop any running flocks process and re-run the installer."
+            }
+        }
     }
 
-    $toolBin = (& uv tool dir --bin 2>$null).Trim()
-    if (-not [string]::IsNullOrWhiteSpace($toolBin) -and (Test-Path $toolBin)) {
-        Ensure-UserPathEntry $toolBin
+    $venvPython = Join-Path $RootDir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPython)) {
+        Fail "Expected .venv runtime not found: $venvPython - run 'uv sync' first."
     }
 
+    if (-not (Test-Path $linkDir)) {
+        New-Item -ItemType Directory -Path $linkDir -Force | Out-Null
+    }
+
+    $wrapperPath = Join-Path $linkDir "flocks.cmd"
+    $wrapperContent = "@echo off`r`n`"$venvPython`" -m flocks.cli.main %*"
+    [System.IO.File]::WriteAllText($wrapperPath, $wrapperContent, [System.Text.Encoding]::Default)
+
+    Ensure-UserPathEntry $linkDir
     Refresh-Path
+
     if (-not (Test-Command "flocks")) {
         Fail "The flocks CLI finished installing, but it is still not available. Check PATH and retry."
     }

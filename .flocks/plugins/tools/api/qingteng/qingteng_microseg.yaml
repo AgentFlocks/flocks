@@ -1,0 +1,316 @@
+name: qingteng_microseg
+description: >
+  青藤微隔离工具。支持一键隔离策略管理、主机微隔离状态控制及黑名单策略管理。
+  适用于对受感染主机实施网络隔离、配置访问控制策略及管理黑名单流量规则。
+description_cn: >
+  青藤微隔离工具。通过 `action` 参数访问微隔离的全部接口，
+  包括隔离策略增删改查、主机状态管理和黑名单策略管理。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: qingteng
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        微隔离动作名，可选值：
+
+        【隔离策略】
+        - seg_list
+          用途: 查询一键隔离策略列表
+          常用: `page`、`size`、`groups`、`sorts`
+          是否任务型: 否
+        - seg_detail
+          用途: 查询某主机的隔离策略详情
+          必填: `agentId`
+          是否任务型: 否
+        - seg_create
+          用途: 为主机创建隔离策略
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`remark`、`direction`、`ipList`、`portList`
+          风险提示: 高风险，会阻断主机网络连接
+          是否任务型: 是
+        - seg_edit
+          用途: 修改隔离策略
+          必填: `agentIds`（或 `body`）
+          常用: 同 `seg_create`
+          风险提示: 高风险写操作
+          是否任务型: 否
+        - seg_delete
+          用途: 解除隔离（软删除）
+          必填: `agentIds`（或 `body`）
+          风险提示: 解除隔离后主机网络恢复
+          是否任务型: 是
+        - seg_real_delete
+          用途: 彻底删除隔离策略记录
+          必填: `agentIds`（或 `body`）
+          风险提示: 不可恢复
+          是否任务型: 否
+        - seg_retry
+          用途: 重试隔离策略下发
+          必填: `agentIds`（或 `body`）
+          是否任务型: 是
+
+        【主机管理】
+        - host_list
+          用途: 查询微隔离主机列表
+          常用: `page`、`size`、`groups`
+          是否任务型: 否
+        - host_ms_enable
+          用途: 修改主机微隔离开关
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`enabled`（0=关闭，1=开启）
+          风险提示: 写操作
+          是否任务型: 否
+        - host_access_control_mode
+          用途: 修改主机访问控制模式
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`accessControlModeSetting`
+          风险提示: 写操作
+          是否任务型: 否
+        - host_run_status
+          用途: 修改主机监控状态
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`runStatusSetting`（如 "monitor"）
+          风险提示: 写操作
+          是否任务型: 否
+        - host_protect_status
+          用途: 修改主机阻断状态
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`runStatusSetting`（如 "protect"）
+          风险提示: 高风险，会影响主机网络阻断行为
+          是否任务型: 否
+        - host_limit_out
+          用途: 修改主机出站限制开关
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`limitOutSetting`（0=关闭）
+          风险提示: 写操作
+          是否任务型: 否
+        - host_black_strategy_enable
+          用途: 修改主机黑名单策略开关
+          必填: `agentIds`（或 `body`）
+          常用: `agentIds`、`blackStrategyEnableSetting`（true/false）
+          风险提示: 写操作
+          是否任务型: 否
+
+        【黑名单策略】
+        - black_list
+          用途: 查询黑名单策略列表
+          常用: `page`、`size`、`groups`、`sorts`
+          是否任务型: 否
+        - black_create
+          用途: 创建黑名单策略
+          必填: `strategyName`（或 `body`）
+          常用: `strategyName`、`ports`、`protos`、`switchStatus`、`dstGroupIds`、`srcGroupIds`
+          风险提示: 写操作，会影响网络流量
+          是否任务型: 否
+        - black_update
+          用途: 修改黑名单策略
+          必填: `id`、`strategyName`（或 `body`）
+          风险提示: 写操作
+          是否任务型: 否
+        - black_update_switch
+          用途: 批量修改黑名单策略开关
+          必填: `ids`（或 `body`）
+          常用: `ids`、`switchStatus`（0=关闭，1=开启）
+          风险提示: 写操作
+          是否任务型: 否
+        - black_delete
+          用途: 删除黑名单策略
+          必填: `ids`（或 `body`）
+          风险提示: 不可恢复
+          是否任务型: 否
+        - black_host_list
+          用途: 查看某条黑名单策略的主机范围
+          常用: `strategyId`、`page`、`size`、`ip`、`msSwitchStatus`、`strategyHostType`
+          是否任务型: 否
+        - black_detail
+          用途: 查看黑名单策略详情
+          必填: `id`
+          是否任务型: 否
+      enum:
+        - seg_list
+        - seg_detail
+        - seg_create
+        - seg_edit
+        - seg_delete
+        - seg_real_delete
+        - seg_retry
+        - host_list
+        - host_ms_enable
+        - host_access_control_mode
+        - host_run_status
+        - host_protect_status
+        - host_limit_out
+        - host_black_strategy_enable
+        - black_list
+        - black_create
+        - black_update
+        - black_update_switch
+        - black_delete
+        - black_host_list
+        - black_detail
+    agentId:
+      type: string
+      description: 单个主机 Agent ID，适用于 `seg_detail`
+    agentIds:
+      type: array
+      items:
+        type: string
+      description: 主机 Agent ID 列表，适用于隔离策略写操作和主机管理写操作
+    id:
+      type: string
+      description: 黑名单策略 ID，适用于 `black_update`、`black_detail`
+    ids:
+      type: array
+      items:
+        type: string
+      description: 黑名单策略 ID 列表，适用于 `black_update_switch`、`black_delete`
+    remark:
+      type: string
+      description: 备注信息
+    direction:
+      type: string
+      description: 隔离方向，如 `"out"`（出站）
+    ipList:
+      type: array
+      items:
+        type: string
+      description: 白名单 IP 列表（隔离时允许访问的 IP）
+    portList:
+      type: array
+      items:
+        type: string
+      description: 白名单端口列表（隔离时允许访问的端口）
+    enabled:
+      type: integer
+      description: 微隔离开关，0=关闭，1=开启
+    accessControlModeSetting:
+      type: integer
+      description: 访问控制模式设置
+    runStatusSetting:
+      type: string
+      description: 监控/阻断状态设置，如 `"monitor"` 或 `"protect"`
+    limitOutSetting:
+      type: integer
+      description: 出站限制设置，0=关闭
+    blackStrategyEnableSetting:
+      type: boolean
+      description: 黑名单策略开关设置
+    strategyName:
+      type: string
+      description: 黑名单策略名称
+    ports:
+      type: array
+      items:
+        type: string
+      description: 端口列表，如 `["7788", "80"]`
+    protos:
+      type: array
+      items:
+        type: string
+      description: 协议列表，如 `["TCP", "UDP"]`
+    displayPort:
+      type: string
+      description: 展示用端口描述字符串
+    switchStatus:
+      type: integer
+      description: 策略开关状态，0=关闭，1=开启
+    dstTagIds:
+      type: array
+      items:
+        type: string
+      description: 目标主机标签 ID 列表
+    dstGroupIds:
+      type: array
+      items:
+        type: integer
+      description: 目标主机业务组 ID 列表
+    dstRealmType:
+      type: integer
+      description: 目标主机范围类型
+    dstIpList:
+      type: array
+      items:
+        type: object
+      description: 目标 IP 范围列表
+    srcTagIds:
+      type: array
+      items:
+        type: string
+      description: 源主机标签 ID 列表
+    srcGroupIds:
+      type: array
+      items:
+        type: integer
+      description: 源主机业务组 ID 列表
+    srcRealmType:
+      type: integer
+      description: 源主机范围类型
+    srcAgentIds:
+      type: array
+      items:
+        type: string
+      description: 源主机 Agent ID 列表
+    srcIpList:
+      type: array
+      items:
+        type: object
+      description: 源 IP 范围列表
+    strategyId:
+      type: string
+      description: 黑名单策略 ID，用于 `black_host_list` 过滤
+    strategyHostType:
+      type: integer
+      description: 策略主机类型过滤，0=全部
+    msSwitchStatus:
+      type: integer
+      description: 微隔离开关状态过滤
+    ip:
+      type: string
+      description: IP 模糊查询
+    groups:
+      type: string
+      description: 业务组 ID 过滤，逗号分隔
+    page:
+      type: integer
+      description: 页码，从 0 开始
+      default: 0
+    size:
+      type: integer
+      description: 每页数量
+      default: 20
+    sorts:
+      type: string
+      description: 排序字段
+    query:
+      type: object
+      description: 额外 GET 查询参数对象
+    body:
+      type: object
+      description: POST/DELETE 请求体对象，与对应字段参数合并
+  required:
+    - action
+
+handler:
+  type: script
+  script_file: qingteng_microseg.handler.py
+  function: microseg
+
+notes: |
+  调用流程:
+  1. 自动使用已配置的凭据登录青藤，获取 jwt/signKey/comId
+  2. 对请求参数进行 SHA1 签名
+  3. 调用对应 /external/api/ms-srv/api/... 接口
+
+  ⚠️ 高风险操作说明:
+  - `seg_create`/`seg_edit`: 会直接阻断主机网络连接，操作前请确认目标主机 agentId 正确
+  - `host_protect_status`: 开启阻断模式后主机将无法建立新的出站连接
+  - `black_create`/`black_update`: 黑名单策略一旦下发将立即生效
+
+  典型应急响应流程:
+  1. `host_list` 找到目标主机 agentId
+  2. `seg_create` 对目标主机实施网络隔离
+  3. 取证完成后 `seg_delete` 解除隔离

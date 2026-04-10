@@ -50,7 +50,7 @@ inputSchema:
         - delete_host
           用途: 批量卸载 Agent
           必填: `os_type`
-          常用: `hostIds`、`agentIds`、`reason`
+          常用: `hostIds`、`agentIds`、`reason`、`password`（MD5 加密的授权密码）、`allOffline`（true=卸载离线超7天主机）
           风险提示: 高风险写操作，会影响主机受管状态
           是否任务型: 是
         - batch_create_group
@@ -215,6 +215,12 @@ inputSchema:
     taskName:
       type: string
       description: 任务名称
+    password:
+      type: string
+      description: MD5 加密的授权密码，用于 `delete_host` 时的身份验证
+    allOffline:
+      type: boolean
+      description: 设为 true 时批量卸载离线超过 7 天的主机（`delete_host` 专用）
     hostInfoList:
       type: array
       items:

@@ -6,9 +6,9 @@
  * launchers and delegates to the real `flocks` CLI.
  *
  * Install preference order:
- *   1. uvx flocks     — uv is the recommended Python launcher
- *   2. pipx run flocks — pipx fallback
- *   3. flocks         — globally installed via pip
+ *   1. flocks         — globally installed (symlink / wrapper → .venv)
+ *   2. uvx flocks     — uv's tool runner (for PyPI-published packages)
+ *   3. pipx run flocks — pipx fallback
  *
  * Usage:
  *   npx @flocks-ai/flocks [command] [options]
@@ -37,33 +37,32 @@ function run(launcher, launcherArgs) {
   process.exit(result.status ?? 1)
 }
 
-// 1. Try uvx (uv's tool runner — zero-install, like npx but for Python)
-if (hasCommand("uvx")) {
-  run("uvx", ["flocks"])
-}
-
-// 2. Try pipx run
-if (hasCommand("pipx")) {
-  run("pipx", ["run", "flocks"])
-}
-
-// 3. Try globally installed flocks binary
+// 1. Try globally installed flocks (symlink / wrapper pointing to .venv)
 if (hasCommand("flocks")) {
   run("flocks", [])
 }
 
+// 2. Try uvx (uv's tool runner — for PyPI-published packages)
+if (hasCommand("uvx")) {
+  run("uvx", ["flocks"])
+}
+
+// 3. Try pipx run
+if (hasCommand("pipx")) {
+  run("pipx", ["run", "flocks"])
+}
+
 // 4. Nothing found — guide the user
 console.error(`
-  Error: Flocks requires Python (uv or pipx).
+  Error: Flocks requires Python.
 
   Quick install options:
-    • Install uv (recommended):
-        curl -LsSf https://astral.sh/uv/install.sh | sh
-      Then retry: npx @flocks-ai/flocks
+    • Run the install script (recommended):
+        curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh | bash
 
-    • Or install directly:
-        uv tool install flocks
-        pipx install flocks
+    • Or install uv and use npx:
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        npx @flocks-ai/flocks
 
   See: https://github.com/flocks-ai/flocks
 `)

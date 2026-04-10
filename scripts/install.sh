@@ -508,6 +508,9 @@ list_flocks_process_ids() {
       *flocks.server.app*|*uvicorn*flocks.server.app*)
         printf '%s\n' "$pid"
         ;;
+      *"$ROOT_DIR/.venv"*flocks*)
+        printf '%s\n' "$pid"
+        ;;
       *"$ROOT_DIR"*uv\ tool*|*"$ROOT_DIR"*preview*)
         printf '%s\n' "$pid"
         ;;
@@ -573,19 +576,24 @@ run_with_lock_retry() {
 }
 
 install_flocks_cli() {
-  local tool_bin
-
   info "Installing the global flocks CLI..."
-  (
-    cd "$ROOT_DIR"
-    run_with_lock_retry "Global flocks CLI installation" uv tool install --editable "$ROOT_DIR" --force --default-index "$UV_DEFAULT_INDEX"
-  )
 
-  tool_bin="$(uv tool dir --bin 2>/dev/null | tr -d '\r' || true)"
-  if [[ -n "$tool_bin" ]]; then
-    append_path "$tool_bin"
-    ensure_path_persisted "$tool_bin"
+  if has_cmd uv && uv tool list 2>/dev/null | grep -q '^flocks '; then
+    info "Removing legacy uv tool installation..."
+    uv tool uninstall flocks 2>/dev/null || true
   fi
+
+  local target="$ROOT_DIR/.venv/bin/flocks"
+  if [[ ! -x "$target" ]]; then
+    fail "Expected CLI entry point not found: $target — run 'uv sync' first."
+  fi
+
+  local link_dir="$HOME/.local/bin"
+  mkdir -p "$link_dir"
+  ln -sf "$target" "$link_dir/flocks"
+
+  append_path "$link_dir"
+  ensure_path_persisted "$link_dir"
 
   has_cmd flocks || fail "The flocks CLI finished installing, but it is still not available. Check PATH and retry."
 }

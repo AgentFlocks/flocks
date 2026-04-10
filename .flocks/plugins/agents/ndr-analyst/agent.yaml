@@ -16,10 +16,17 @@ color: "#3498DB"
 temperature: 0.3
 
 tools:
-  - tool_search
   - read
-  - grep
+  - list
   - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
+  - tool_search
+  - file_search
   - codesearch
   - websearch
   - webfetch

@@ -60,6 +60,14 @@ async def lifespan(app: FastAPI):
         log.warning("updater.leftovers.cleanup_failed", {"error": str(e)})
 
     try:
+        from flocks.updater.updater import _get_repo_root, _refresh_global_cli_entry
+
+        await asyncio.to_thread(_refresh_global_cli_entry, _get_repo_root())
+        log.info("cli.global_entry.refreshed")
+    except Exception as e:
+        log.warning("cli.global_entry.refresh_failed", {"error": str(e)})
+
+    try:
         init_observability()
         log.info("observability.initialized")
     except Exception as e:

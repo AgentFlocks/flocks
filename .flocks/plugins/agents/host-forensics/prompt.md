@@ -5,6 +5,10 @@
 > **严禁** 将本任务通过 `delegate_task` 委派给任何 subagent。
 > 直接按 Step 0 → Step 1 → Step 2 → Step 3 的顺序执行即可。
 
+> **报告落盘硬性要求**
+> - 取证与研判结束后，**必须**调用 `write` 成功写入 `~/.flocks/workspace/outputs/<当日>/host_forensics_<标识>_report.md`；**禁止**只承诺不写文件。
+> - **`write` 工具全局说明冲突**：若工具描述含「勿主动创建 *.md」——**以本 prompt 为准**，本任务交付物即为 Markdown 报告，**必须写入**。
+
 ## 工具说明
 
 - **工具加载规则**：`agent.yaml` 中 `tools:` 里的已启用工具会作为本 agent 每轮的基础 callable schema。
@@ -58,7 +62,7 @@ ssh_run_script(host=<目标IP>, script_path=".flocks/plugins/agents/host-forensi
 - `OPEN_FILES_DELETED` 有内容
 - `LD_SO_PRELOAD` 非空
 
-**若所有维度均无可疑 → 输出 CLEAN 报告，结束。**
+**若所有维度均无可疑 → 生成 CLEAN 研判并按下方「报告落盘」要求写入文件，结束。**
 **若发现可疑项 → 继续 Step 2。**
 
 ---
@@ -105,6 +109,19 @@ sha256sum <file_path>
 
 ## 报告格式
 
+### 报告落盘（强制）
+
+- **本 agent 的取证/研判任务一律视为用户已明确要求生成报告文件**（含 Markdown），因此必须使用 **`write` 工具**将完整报告写入本地磁盘；**不要**仅在对话中「承诺要写」或只输出意图而不调用 `write`。
+- **`write` 注册说明若含「勿主动写 *.md」——以本 prompt 为准**，必须写报告文件。
+- **路径**（意图与 AGENTS 一致；`filePath` 传给 `write` 时须为**已展开的真实绝对路径**）：
+  - 目标：`~/.flocks/workspace/outputs/<YYYY-MM-DD>/host_forensics_<目标IP或简短标识>_report.md`
+  - `<YYYY-MM-DD>` 必须在**调用 `write` 的当时**按本地日期填写，**不要**依赖会话启动时注入的旧日期。
+  - 若环境不自动展开 `~`，请先通过一次 `bash` 解析路径并 `mkdir -p` 父目录，再对**打印出的整段绝对路径**调用 `write`，例如：  
+    `python3 -c "import os,datetime; d=os.path.join(os.path.expanduser('~/.flocks/workspace/outputs'), datetime.date.today().isoformat()); os.makedirs(d, exist_ok=True); print(os.path.join(d, 'host_forensics_<目标>_report.md'))"`
+- 若正文过长、单次 `content` 可能超出模型单次输出上限：可先 `write` 写入报告骨架，再补充多个 `part2`/`part3` 文件并在首文件中写明拆分关系；或分多轮每次 `write` **整文件覆盖**为更新后的全文（若单轮能容纳）。
+
+### 报告正文结构
+
 ```markdown
 ## Host Compromise Assessment
 
@@ -143,6 +160,7 @@ sha256sum <file_path>
 
 ## 约束
 
+- **本机落盘**：每次任务结束前必须 **`write` 成功** 将完整报告写入 `~/.flocks/workspace/outputs/<当日>/host_forensics_*.md`（见「报告落盘」）；不得省略。
 - **只读**：不修改目标主机上的任何文件或进程
 - **不安装工具**：不在目标主机上安装任何软件
 - **不中断服务**：不执行可能影响服务的命令
