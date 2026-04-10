@@ -533,7 +533,7 @@ ASSET_ACTIONS: dict[str, ActionSpec] = {
     "delete_host": ActionSpec(
         "POST",
         lambda p: f"/external/api/assets/hostoperation/deletehost/{p['os_type']}",
-        body_builder=lambda p: _body_with_fields(p, "hostIds", "agentIds", "reason"),
+        body_builder=lambda p: _body_with_fields(p, "hostIds", "agentIds", "reason", "password", "allOffline"),
     ),
     "batch_create_group": ActionSpec(
         "POST",
@@ -671,7 +671,13 @@ RISK_ACTIONS: dict[str, ActionSpec] = {
         query_builder=_common_query,
     ),
     "poc_job_rule_list": ActionSpec(
-        "GET", lambda p: f"/external/api/vul/poc/job/{p['os_type']}/rule_list", query_builder=_common_query
+        "GET",
+        lambda p: (
+            f"/external/api/vul/poc/job/{p['os_type']}/rule_list"
+            if p.get("os_type") == "win"
+            else "/external/api/vul/poc/job/rule_list"
+        ),
+        query_builder=_common_query,
     ),
     "poc_job_add": ActionSpec(
         "POST",
@@ -744,7 +750,7 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "abnormallogin_list": ActionSpec(
         "GET", lambda p: f"/external/api/detect/abnormallogin/{p['os_type']}", query_builder=_abnormallogin_list_query
     ),
-    "bounceshell_list": ActionSpec("GET", "/external/api/detect/bounceshell/linux", query_builder=_common_query),
+    "bounceshell_list": ActionSpec("GET", lambda p: f"/external/api/detect/bounceshell/{p.get('os_type', 'linux')}", query_builder=_common_query),
     "localrights_list": ActionSpec("GET", "/external/api/detect/localrights/linux", query_builder=_common_query),
     "abnormallogin_rule_set": ActionSpec(
         "POST",
@@ -916,11 +922,232 @@ BASELINE_ACTIONS: dict[str, ActionSpec] = {
 }
 
 
+FASTJOB_ACTIONS: dict[str, ActionSpec] = {
+    "task_list": ActionSpec(
+        "GET",
+        "/external/api/fastjob/task/list",
+        query_builder=lambda p: _paged_query(p, "osType", "ids", "name", "categories", "updatedTimeRange"),
+    ),
+    "task_detail": ActionSpec(
+        "GET",
+        lambda p: f"/external/api/fastjob/task/{_quote_param(p, 'taskId')}",
+        query_builder=_common_query,
+    ),
+    "job_create": ActionSpec(
+        "POST",
+        "/external/api/fastjob/job",
+        body_builder=lambda p: _body_with_fields(
+            p, "name", "osType", "description", "realm", "realmName", "taskType", "taskId", "taskParams", "cron", "cronEnable"
+        ),
+    ),
+    "job_update": ActionSpec(
+        "PUT",
+        lambda p: f"/external/api/fastjob/job/{_quote_param(p, 'jobId')}",
+        body_builder=lambda p: _body_with_fields(
+            p, "name", "osType", "description", "realm", "realmName", "taskType", "taskId", "taskParams", "cron", "cronEnable"
+        ),
+    ),
+    "job_delete": ActionSpec(
+        "DELETE",
+        lambda p: f"/external/api/fastjob/job/{_quote_param(p, 'jobId')}",
+        body_builder=_common_body,
+    ),
+    "job_list": ActionSpec(
+        "GET",
+        "/external/api/fastjob/job",
+        query_builder=lambda p: _paged_query(p, "osType"),
+    ),
+    "job_execute": ActionSpec(
+        "POST",
+        lambda p: f"/external/api/fastjob/job/execute/{_quote_param(p, 'id')}",
+        body_builder=_common_body,
+    ),
+    "job_execute_list": ActionSpec(
+        "GET",
+        "/external/api/fastjob/job/execute",
+        query_builder=lambda p: _paged_query(p, "osType"),
+    ),
+    "task_result": ActionSpec(
+        "GET",
+        lambda p: f"/external/api/fastjob/job/task/result/{_quote_param(p, 'taskRecordId')}",
+        query_builder=_common_query,
+    ),
+    "task_error": ActionSpec(
+        "GET",
+        lambda p: f"/external/api/fastjob/job/task/error/{_quote_param(p, 'taskRecordId')}",
+        query_builder=_common_query,
+    ),
+}
+
+
+ASSETDISCOVERY_ACTIONS: dict[str, ActionSpec] = {
+    "discovered_host_list": ActionSpec(
+        "GET",
+        "/external/api/discoveredhost/list",
+        query_builder=_common_query,
+    ),
+    "job_create": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/create",
+        body_builder=lambda p: _body_with_fields(
+            p, "name", "kind", "values", "cronExpression", "osDetection", "ipList", "advanceConfigs"
+        ),
+    ),
+    "job_delete": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/delete",
+        body_builder=lambda p: _body_with_fields(p, "specId"),
+    ),
+    "job_find": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/find",
+        body_builder=lambda p: _body_with_fields(p, "specId"),
+    ),
+    "job_update": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/update",
+        body_builder=lambda p: _body_with_fields(
+            p, "specId", "name", "kind", "values", "osDetection", "ipList", "advanceConfigs"
+        ),
+    ),
+    "job_list": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/list",
+        body_builder=lambda p: _body_with_fields(p, "name", "scanType"),
+    ),
+    "job_execute": ActionSpec(
+        "POST",
+        "/external/api/assetdiscovery/job/execute",
+        body_builder=lambda p: _body_with_fields(p, "specId"),
+    ),
+}
+
+
+MICROSEG_ACTIONS: dict[str, ActionSpec] = {
+    "seg_list": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/segmentation/list",
+        query_builder=lambda p: _paged_query(p, "groups"),
+    ),
+    "seg_detail": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/segmentation/detail",
+        query_builder=lambda p: _query_with_fields(p, "agentId"),
+    ),
+    "seg_create": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/segmentation/create",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "remark", "direction", "ipList", "portList"),
+    ),
+    "seg_edit": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/segmentation/edit",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "remark", "direction", "ipList", "portList"),
+    ),
+    "seg_delete": ActionSpec(
+        "DELETE",
+        "/external/api/ms-srv/api/segmentation/del",
+        body_builder=lambda p: _body_with_fields(p, "agentIds"),
+    ),
+    "seg_real_delete": ActionSpec(
+        "DELETE",
+        "/external/api/ms-srv/api/segmentation/realDel",
+        body_builder=lambda p: _body_with_fields(p, "agentIds"),
+    ),
+    "seg_retry": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/segmentation/retry",
+        body_builder=lambda p: _body_with_fields(p, "agentIds"),
+    ),
+    "host_list": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/hosts/list",
+        query_builder=lambda p: _paged_query(p, "groups"),
+    ),
+    "host_ms_enable": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/ms-enable",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "enabled"),
+    ),
+    "host_access_control_mode": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/access-control-mode",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "accessControlModeSetting"),
+    ),
+    "host_run_status": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/run-status",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "runStatusSetting"),
+    ),
+    "host_protect_status": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/protect-status",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "runStatusSetting"),
+    ),
+    "host_limit_out": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/limit-out",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "limitOutSetting"),
+    ),
+    "host_black_strategy_enable": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/hosts/black-strategy-enable",
+        body_builder=lambda p: _body_with_fields(p, "agentIds", "blackStrategyEnableSetting"),
+    ),
+    "black_list": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/black-strategy/list",
+        query_builder=lambda p: _paged_query(p, "groups"),
+    ),
+    "black_create": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/black-strategy/create",
+        body_builder=lambda p: _body_with_fields(
+            p, "strategyName", "remark", "ports", "protos", "displayPort", "switchStatus",
+            "dstTagIds", "dstGroupIds", "dstRealmType", "dstIpList",
+            "srcTagIds", "srcGroupIds", "srcRealmType", "srcAgentIds", "srcIpList",
+        ),
+    ),
+    "black_update": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/black-strategy/update",
+        body_builder=lambda p: _body_with_fields(
+            p, "id", "strategyName", "remark", "ports", "protos", "displayPort", "switchStatus",
+            "dstTagIds", "dstGroupIds", "dstRealmType", "dstIpList",
+            "srcTagIds", "srcGroupIds", "srcRealmType", "srcAgentIds", "srcIpList",
+        ),
+    ),
+    "black_update_switch": ActionSpec(
+        "POST",
+        "/external/api/ms-srv/api/black-strategy/update-switch",
+        body_builder=lambda p: _body_with_fields(p, "ids", "switchStatus"),
+    ),
+    "black_delete": ActionSpec(
+        "DELETE",
+        "/external/api/ms-srv/api/black-strategy/delete",
+        body_builder=lambda p: _body_with_fields(p, "ids"),
+    ),
+    "black_host_list": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/black-strategy/strategy-host-list",
+        query_builder=lambda p: _paged_query(p, "ip", "msSwitchStatus", "strategyId", "strategyHostType"),
+    ),
+    "black_detail": ActionSpec(
+        "GET",
+        "/external/api/ms-srv/api/black-strategy/detail",
+        query_builder=lambda p: _query_with_fields(p, "id"),
+    ),
+}
+
+
 GROUP_ACTIONS = {
     "assets": ASSET_ACTIONS,
     "risk": RISK_ACTIONS,
     "detect": DETECT_ACTIONS,
     "baseline": BASELINE_ACTIONS,
+    "fastjob": FASTJOB_ACTIONS,
+    "assetdiscovery": ASSETDISCOVERY_ACTIONS,
+    "microseg": MICROSEG_ACTIONS,
 }
 
 
@@ -982,7 +1209,6 @@ def _validate_risk(action: str, params: dict[str, Any]) -> Optional[str]:
         "poc_scan_status",
         "poc_list",
         "poc_detail",
-        "poc_job_rule_list",
         "poc_job_add",
         "poc_job_fix",
         "poc_job_delete",
@@ -995,6 +1221,8 @@ def _validate_risk(action: str, params: dict[str, Any]) -> Optional[str]:
         "poc_job_result_detail",
     }:
         missing.extend(_require_fields(params, "os_type"))
+    if action == "poc_job_rule_list":
+        pass  # os_type 可选：win 时调用 /win/rule_list，否则调用通用 /rule_list（Linux）
     if action == "poc_detail":
         missing.extend(_require_fields(params, "recordId"))
     if action == "poc_job_delete":
@@ -1096,11 +1324,78 @@ def _validate_baseline(action: str, params: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _validate_fastjob(action: str, params: dict[str, Any]) -> Optional[str]:
+    missing: list[str] = []
+    if action == "task_detail":
+        missing.extend(_require_fields(params, "taskId"))
+    if action in {"job_update", "job_delete"}:
+        missing.extend(_require_fields(params, "jobId"))
+    if action == "job_execute":
+        missing.extend(_require_fields(params, "id"))
+    if action in {"task_result", "task_error"}:
+        missing.extend(_require_fields(params, "taskRecordId"))
+    if action == "job_create":
+        if not _has_value(params.get("name")) and not _has_value(_dict_param(params, "body")):
+            missing.append("name/body")
+    if missing:
+        return f"Missing required parameters for fastjob.{action}: {', '.join(dict.fromkeys(missing))}"
+    return None
+
+
+def _validate_assetdiscovery(action: str, params: dict[str, Any]) -> Optional[str]:
+    missing: list[str] = []
+    if action in {"job_delete", "job_find", "job_execute"}:
+        if not _has_value(params.get("specId")) and not _has_value(_dict_param(params, "body")):
+            missing.append("specId/body")
+    if action == "job_update":
+        if not _has_value(params.get("specId")) and not _has_value(_dict_param(params, "body")):
+            missing.append("specId/body")
+    if action == "job_create":
+        if not _has_value(params.get("name")) and not _has_value(_dict_param(params, "body")):
+            missing.append("name/body")
+    if missing:
+        return f"Missing required parameters for assetdiscovery.{action}: {', '.join(dict.fromkeys(missing))}"
+    return None
+
+
+def _validate_microseg(action: str, params: dict[str, Any]) -> Optional[str]:
+    missing: list[str] = []
+    seg_write_actions = {
+        "seg_create", "seg_edit", "seg_delete", "seg_real_delete", "seg_retry",
+        "host_ms_enable", "host_access_control_mode", "host_run_status",
+        "host_protect_status", "host_limit_out", "host_black_strategy_enable",
+    }
+    if action in seg_write_actions:
+        if not _has_value(params.get("agentIds")) and not _has_value(_dict_param(params, "body")):
+            missing.append("agentIds/body")
+    if action == "seg_detail":
+        if not _has_value(params.get("agentId")) and not _has_value(_dict_param(params, "query")):
+            missing.append("agentId/query")
+    if action == "black_detail":
+        if not _has_value(params.get("id")) and not _has_value(_dict_param(params, "query")):
+            missing.append("id/query")
+    if action in {"black_update_switch", "black_delete"}:
+        if not _has_value(params.get("ids")) and not _has_value(_dict_param(params, "body")):
+            missing.append("ids/body")
+    if action in {"black_create", "black_update"}:
+        if not _has_value(params.get("strategyName")) and not _has_value(_dict_param(params, "body")):
+            missing.append("strategyName/body")
+    if action == "black_update":
+        if not _has_value(params.get("id")) and not _has_value(_dict_param(params, "body")):
+            missing.append("id/body")
+    if missing:
+        return f"Missing required parameters for microseg.{action}: {', '.join(dict.fromkeys(missing))}"
+    return None
+
+
 VALIDATORS = {
     "assets": _validate_assets,
     "risk": _validate_risk,
     "detect": _validate_detect,
     "baseline": _validate_baseline,
+    "fastjob": _validate_fastjob,
+    "assetdiscovery": _validate_assetdiscovery,
+    "microseg": _validate_microseg,
 }
 
 
@@ -1174,3 +1469,15 @@ async def detect(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
 
 async def baseline(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     return await _dispatch_group(ctx, "baseline", action, **params)
+
+
+async def fastjob(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
+    return await _dispatch_group(ctx, "fastjob", action, **params)
+
+
+async def assetdiscovery(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
+    return await _dispatch_group(ctx, "assetdiscovery", action, **params)
+
+
+async def microseg(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
+    return await _dispatch_group(ctx, "microseg", action, **params)
