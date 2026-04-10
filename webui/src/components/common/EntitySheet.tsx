@@ -167,6 +167,7 @@ export default function EntitySheet({
     loading: sessionLoading,
     error: sessionError,
     create: createRexSession,
+    createAndSend: createAndSendRex,
     retry: retryRexSession,
     reset: resetRexSession,
   } = useSessionChat({
@@ -211,23 +212,13 @@ export default function EntitySheet({
     }
   }, [open, mode, defaultTestPrompt, resetRexSession, initialWidth, showTabs, hideRex, hideForm, initialTab]);
 
-  // ── Auto-create Rex session on mount when starting on the rex tab ─────────
-
-  useEffect(() => {
-    if (activeTab === 'rex') {
-      createRexSession().catch(() => {});
-    }
-    // Only run on mount; activeTab and createRexSession are stable at this point
-  }, []);
-
   // ── Tab handling ──────────────────────────────────────────────────────────
 
   const handleTabChange = useCallback(
     (tab: Tab) => {
       setActiveTab(tab);
-      if (tab === 'rex') createRexSession().catch(() => {});
     },
-    [createRexSession],
+    [],
   );
 
   // ── Drawer width resizing ───────────────────────────────────────────────
@@ -268,12 +259,11 @@ export default function EntitySheet({
         client.post(`/api/session/${sessionId}/prompt_async`, {
           parts: [{ type: 'text', text: msg }],
         });
-      } else {
-        if (msg) setRexInitialMessage(msg);
-        createRexSession().catch(() => {});
+      } else if (msg) {
+        createAndSendRex(msg).catch(() => {});
       }
     },
-    [sessionId, createRexSession],
+    [sessionId, createAndSendRex],
   );
 
   // ── openTest (exposed via context) ────────────────────────────────────────
@@ -479,12 +469,6 @@ export default function EntitySheet({
           {/* Rex Tab */}
           {activeTab === 'rex' && (
             <div className="h-full flex flex-col">
-              {sessionLoading && !sessionId && (
-                <div className="flex flex-col items-center justify-center flex-1 gap-3">
-                  <Loader2 className="w-6 h-6 text-red-500 animate-spin" />
-                  <p className="text-sm text-gray-500">{t('entity.startingRex')}</p>
-                </div>
-              )}
               {sessionError && (
                 <div className="flex flex-col items-center justify-center flex-1 gap-4 p-6 text-center">
                   <div className="flex items-center gap-2 text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-3 w-full">
@@ -499,14 +483,22 @@ export default function EntitySheet({
                   </button>
                 </div>
               )}
-              {sessionId && (
+              {!sessionError && (
                 <SessionChat
                   sessionId={sessionId}
-                  live
+                  live={!!sessionId}
                   placeholder={t('entity.rexInputPlaceholder')}
                   className="flex-1"
                   emptyText={t('entity.rexReady')}
                   initialMessage={rexInitialMessage}
+                  onCreateAndSend={!sessionId ? async (text: string) => { await createAndSendRex(text); } : undefined}
+                  welcomeContent={!sessionId ? (
+                    <div className="text-center max-w-md">
+                      <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />
+                      <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
+                      <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
+                    </div>
+                  ) : undefined}
                 />
               )}
             </div>

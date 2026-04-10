@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { X, Bot, Loader2, AlertCircle } from 'lucide-react';
+import { useEffect, useCallback } from 'react';
+import { X, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -48,7 +48,7 @@ interface CreateAgentChatProps {
 export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps) {
   const { t } = useTranslation(['agent', 'common']);
 
-  const { sessionId, loading, error, create, retry, reset } = useSessionChat({
+  const { sessionId, createAndSend, reset } = useSessionChat({
     title: t('agent:chat.createTitle'),
     category: 'agent',
     contextMessage: buildContext(),
@@ -56,9 +56,15 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
   });
 
   useEffect(() => {
-    if (open) create().catch(() => {});
-    else reset();
-  }, [open, create, reset]);
+    if (!open) reset();
+  }, [open, reset]);
+
+  const handleCreateAndSend = useCallback(
+    async (text: string) => {
+      await createAndSend(text);
+    },
+    [createAndSend],
+  );
 
   if (!open) return null;
 
@@ -88,35 +94,21 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
         </div>
 
         {/* Body */}
-        {loading ? (
-          <div className="flex-1 flex items-center justify-center bg-gray-50/50">
-            <div className="text-center">
-              <Loader2 className="w-8 h-8 text-purple-500 animate-spin mx-auto mb-3" />
-              <p className="text-sm text-gray-500">{t('agent:chat.preparing')}</p>
+        <SessionChat
+          sessionId={sessionId}
+          live={!!sessionId}
+          placeholder={t('agent:chat.placeholder')}
+          className="flex-1 min-h-0"
+          suggestions={SUGGESTIONS}
+          onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
+          welcomeContent={!sessionId ? (
+            <div className="text-center max-w-md">
+              <Bot className="w-10 h-10 text-purple-500 mx-auto mb-3" />
+              <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('agent:chat.createTitle')}</h3>
+              <p className="text-sm text-gray-500">{t('agent:chat.subtitle')}</p>
             </div>
-          </div>
-        ) : error ? (
-          <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 bg-gray-50/50">
-            <div className="flex items-center gap-2 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              {error}
-            </div>
-            <button
-              onClick={retry}
-              className="px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-700 transition-colors"
-            >
-              {t('common:button.retry')}
-            </button>
-          </div>
-        ) : sessionId ? (
-          <SessionChat
-            sessionId={sessionId}
-            live
-            placeholder={t('agent:chat.placeholder')}
-            className="flex-1 min-h-0"
-            suggestions={SUGGESTIONS}
-          />
-        ) : null}
+          ) : undefined}
+        />
       </div>
     </div>
   );
