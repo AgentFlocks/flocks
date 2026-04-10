@@ -17,15 +17,22 @@ tags:
   - security
   - threat-intelligence
 tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
   - tool_search
   - threatbook_mcp_hrti_list_query
   - threatbook_mcp_hrti_query
   - threatbook_mcp_web_search
+  - file_search
   - websearch
   - webfetch
-  - read
-  - grep
-  - glob
   - virustotal_ip_query
   - virustotal_domain_query
   - virustotal_url_query

@@ -17,6 +17,15 @@ tags:
   - security
   - vulnerability
 tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
   - tool_search
   - threatbook_mcp_vulnlist_query
   - threatbook_mcp_vuln_query
@@ -30,12 +39,9 @@ tools:
   - threatbook_mcp_threat_actor_query
   - threatbook_mcp_threat_actor_list_query
   - threatbook_mcp_hrti_query
+  - file_search
   - websearch
   - webfetch
-  - read
-  - grep
-  - glob
-  - codesearch
   - virustotal_ip_query
   - virustotal_domain_query
   - virustotal_url_query
