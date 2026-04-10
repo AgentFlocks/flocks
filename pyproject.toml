@@ -73,6 +73,7 @@ dependencies = [
     "olefile>=0.47",
     "defusedxml>=0.7.1",
     "markdown>=3.10.2",
+    "reportlab>=4.4.10",
 ]
 
 [dependency-groups]
