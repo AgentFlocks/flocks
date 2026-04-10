@@ -110,6 +110,12 @@ def _windows_command_candidates(name: str) -> list[str]:
     return [name, f"{name}.exe", f"{name}.cmd", f"{name}.bat"]
 
 
+def _running_from_legacy_uv_tool_install() -> bool:
+    """Return True when the current interpreter still comes from ``uv tool``."""
+    executable = (sys.executable or "").replace("\\", "/").lower()
+    return "/uv/tools/flocks/" in executable
+
+
 def _windows_paths_match(left: str, right: str) -> bool:
     """Return True when two Windows paths likely point to the same launcher/script."""
     if not left or not right:
@@ -1771,7 +1777,6 @@ async def perform_update(
     )
     install_root = _get_repo_root()
     current_version = get_current_version()
-    handover_prepared = False
 
     fmt = _choose_archive_format(ucfg.archive_format)
 
@@ -2141,6 +2146,13 @@ def _refresh_global_cli_entry(install_root: Path) -> None:
         link = link_dir / "flocks"
         link.unlink(missing_ok=True)
         link.symlink_to(target)
+
+    if _running_from_legacy_uv_tool_install():
+        log.info(
+            "updater.refresh_cli.defer_legacy_uninstall",
+            {"sys_executable": sys.executable},
+        )
+        return
 
     uv = shutil.which("uv")
     if uv:
