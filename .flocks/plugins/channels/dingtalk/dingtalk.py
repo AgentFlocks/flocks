@@ -165,7 +165,7 @@ class DingTalkChannel(ChannelPlugin):
     async def stop(self) -> None:
         if self._monitor_task and not self._monitor_task.done():
             self._monitor_task.cancel()
-        self._kill_process()
+        await self._kill_process_async()
         self.mark_disconnected()
 
     # ── Outbound messages ─────────────────────────────────────────────────────
@@ -207,21 +207,25 @@ class DingTalkChannel(ChannelPlugin):
         )
         log.info("dingtalk.process.started", {"pid": self._proc.pid})
 
-    def _kill_process(self) -> None:
-        """Terminate the subprocess."""
-        if self._proc and self._proc.poll() is None:
-            log.info("dingtalk.process.terminating", {"pid": self._proc.pid})
-            self._proc.terminate()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
-            log.info("dingtalk.process.stopped", {"pid": self._proc.pid})
+    async def _kill_process_async(self) -> None:
+        """Terminate the subprocess without blocking the asyncio event loop."""
+        proc = self._proc
         self._proc = None
+        if proc is None or proc.poll() is not None:
+            return
+        pid = proc.pid
+        log.info("dingtalk.process.terminating", {"pid": pid})
+        proc.terminate()
+        try:
+            await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=5.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await asyncio.to_thread(proc.wait)
+        log.info("dingtalk.process.stopped", {"pid": pid})
 
     async def _monitor(self, abort_event: Optional[asyncio.Event]) -> None:
-        """Monitor the subprocess; log errors on non-zero exit; stop when abort_event fires."""
+        """Monitor the subprocess; raise RuntimeError on non-zero exit; stop when abort_event fires."""
+        exit_code: Optional[int] = None
         try:
             while True:
                 if abort_event and abort_event.is_set():
@@ -230,19 +234,24 @@ class DingTalkChannel(ChannelPlugin):
 
                 # Non-blocking check whether the process has exited
                 if self._proc and self._proc.poll() is not None:
-                    rc = self._proc.returncode
-                    if rc != 0:
-                        log.error("dingtalk.process.exited_unexpectedly", {"returncode": rc})
-                        self.mark_disconnected(f"runner.ts exited unexpectedly, exit code={rc}")
+                    exit_code = self._proc.returncode
+                    if exit_code != 0:
+                        log.error("dingtalk.process.exited_unexpectedly", {"returncode": exit_code})
                     else:
-                        log.info("dingtalk.process.exited_normally", {"returncode": rc})
+                        log.info("dingtalk.process.exited_normally", {"returncode": exit_code})
                     break
 
                 await asyncio.sleep(2)
         except asyncio.CancelledError:
             pass
         finally:
-            self._kill_process()
+            # Non-blocking cleanup: must not block the event loop while waiting for
+            # the Node.js process to exit (can take up to 5s with SIGTERM).
+            await self._kill_process_async()
+
+        # Raise after cleanup so the gateway reconnect loop applies exponential backoff.
+        if exit_code is not None and exit_code != 0:
+            raise RuntimeError(f"runner.ts exited unexpectedly, exit code={exit_code}")
 
 
 # Discovered by flocks PluginLoader via this variable
