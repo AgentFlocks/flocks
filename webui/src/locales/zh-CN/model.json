@@ -12,7 +12,11 @@
     "connected": "已连接 Provider",
     "availableModels": "可用模型",
     "totalUsage": "总用量",
-    "noUsage": "暂无"
+    "totalTokens": "总 Tokens",
+    "totalCost": "总费用",
+    "noUsage": "暂无",
+    "noCost": "暂无费用",
+    "toggleCurrency": "点击切换人民币 / 美元"
   },
   "providerList": {
     "empty": "尚未添加模型供应商",

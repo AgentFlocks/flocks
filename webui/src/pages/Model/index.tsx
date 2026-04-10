@@ -21,6 +21,12 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import {
+  formatTokenMillions,
+  getConvertedTotalCost,
+  getDefaultDashboardCurrency,
+  toggleDashboardCurrency,
+} from './usageDisplay';
 import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
@@ -600,12 +606,21 @@ function DashboardStrip({
   defaultModel: { provider_id: string; model_id: string } | null;
   onEditDefault: () => void;
 }) {
-  const { t } = useTranslation('model');
-  const todayCost = usageStats?.summary?.total_cost ?? 0;
-  const currency = usageStats?.summary?.currency ?? 'USD';
+  const { t, i18n } = useTranslation('model');
+  const totalTokens = usageStats?.summary?.total_tokens ?? 0;
+  const defaultCurrency = getDefaultDashboardCurrency(i18n.language);
+  const [displayCurrency, setDisplayCurrency] = useState(defaultCurrency);
+  const totalCost = useMemo(
+    () => getConvertedTotalCost(usageStats, displayCurrency),
+    [displayCurrency, usageStats],
+  );
+
+  useEffect(() => {
+    setDisplayCurrency(getDefaultDashboardCurrency(i18n.language));
+  }, [i18n.language]);
 
   return (
-    <div className="grid grid-cols-4 gap-3 mb-4">
+    <div className="grid grid-cols-5 gap-3 mb-4">
       {/* Default Model Card */}
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
@@ -630,13 +645,32 @@ function DashboardStrip({
       </div>
       <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
       <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
-      <StatCard icon={<DollarSign className="w-5 h-5" />} label={t('dashboard.totalUsage')} value={todayCost > 0 ? `${currency === 'USD' ? '$' : '¥'}${todayCost.toFixed(4)}` : t('dashboard.noUsage')} color="amber" />
+      <StatCard
+        icon={<Brain className="w-5 h-5" />}
+        label={t('dashboard.totalTokens')}
+        value={totalTokens > 0 ? formatTokenMillions(totalTokens) : t('dashboard.noUsage')}
+        color="blue"
+      />
+      <StatCard
+        icon={<DollarSign className="w-5 h-5" />}
+        label={t('dashboard.totalCost')}
+        value={totalCost ?? t('dashboard.noCost')}
+        color="amber"
+        onClick={() => setDisplayCurrency(current => toggleDashboardCurrency(current))}
+        title={t('dashboard.toggleCurrency')}
+      />
     </div>
   );
 }
 
-function StatCard({ icon, label, value, color, small }: {
-  icon: React.ReactNode; label: string; value: string; color: string; small?: boolean;
+function StatCard({ icon, label, value, color, small, onClick, title }: {
+  icon: React.ReactNode;
+  label: string;
+  value: React.ReactNode;
+  color: string;
+  small?: boolean;
+  onClick?: () => void;
+  title?: string;
 }) {
   const colorMap: Record<string, string> = {
     green: 'bg-green-50 text-green-700 border-green-200',
@@ -645,7 +679,19 @@ function StatCard({ icon, label, value, color, small }: {
     amber: 'bg-amber-50 text-amber-700 border-amber-200',
   };
   return (
-    <div className={`rounded-lg border p-3 ${colorMap[color] || colorMap.blue}`}>
+    <div
+      className={`rounded-lg border p-3 ${colorMap[color] || colorMap.blue} ${onClick ? 'cursor-pointer transition-opacity hover:opacity-90' : ''}`}
+      onClick={onClick}
+      title={title}
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onKeyDown={onClick ? (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          onClick();
+        }
+      } : undefined}
+    >
       <div className="flex items-center gap-2 mb-1 opacity-70">
         {icon}
         <span className="text-xs font-medium">{label}</span>

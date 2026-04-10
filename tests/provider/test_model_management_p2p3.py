@@ -376,6 +376,31 @@ class TestCostCalculator:
         assert abs(cost.cache_cost - 0.0024) < 0.0001
         assert abs(cost.total_cost - 0.0234) < 0.0001
 
+    def test_with_cache_write(self):
+        from flocks.provider.cost_calculator import CostCalculator
+        pricing = PriceConfig(
+            input=3.0,
+            output=15.0,
+            cache_read=0.3,
+            cache_write=3.75,
+        )
+
+        cost = CostCalculator.calculate(
+            input_tokens=10000,
+            output_tokens=1000,
+            pricing=pricing,
+            cached_tokens=8000,
+            cache_write_tokens=2000,
+        )
+        # Billable input: 10000 - 8000 = 2000 => 0.006
+        # output: 1000 / 1M * 15.0 = 0.015
+        # cache read: 8000 / 1M * 0.3 = 0.0024
+        # cache write: 2000 / 1M * 3.75 = 0.0075
+        assert abs(cost.input_cost - 0.006) < 0.0001
+        assert abs(cost.output_cost - 0.015) < 0.0001
+        assert abs(cost.cache_cost - 0.0099) < 0.0001
+        assert abs(cost.total_cost - 0.0309) < 0.0001
+
     def test_zero_tokens(self):
         from flocks.provider.cost_calculator import CostCalculator
         pricing = PriceConfig(input=3.0, output=15.0)
@@ -420,12 +445,97 @@ class TestUsageTracking:
             input_tokens=10000,
             output_tokens=2000,
             cached_tokens=5000,
-            pricing=PriceConfig(input=3.0, output=15.0, cache_read=0.3),
+            cache_write_tokens=1000,
+            pricing=PriceConfig(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75),
         )
         record = run_async(record_usage(req))
         assert record.total_cost > 0
         assert record.input_cost > 0
         assert record.output_cost > 0
+        assert abs(record.total_cost - 0.05025) < 0.0001
+
+    def test_backfill_skips_existing_live_record_with_same_message_id(self, setup_storage, monkeypatch):
+        from flocks.provider import usage_service
+        from flocks.provider.usage_service import (
+            RecordUsageRequest,
+            backfill_usage_records,
+            get_usage_records,
+            record_usage,
+        )
+        from flocks.session.message import (
+            AssistantMessageInfo,
+            MessagePath,
+            MessageWithParts,
+            TokenCache,
+            TokenUsage,
+            UserMessageInfo,
+        )
+        from flocks.session.session import SessionInfo, SessionTime
+
+        usage_service._auto_backfill_complete = False
+
+        session = SessionInfo(
+            id="ses_backfill_live",
+            projectID="proj_backfill_live",
+            directory="/tmp/backfill-live",
+            title="Backfill Live Session",
+            time=SessionTime(created=1_000, updated=2_000),
+        )
+        user = UserMessageInfo(
+            id="msg_user_live",
+            sessionID=session.id,
+            role="user",
+            time={"created": 1_000},
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+        )
+        assistant = AssistantMessageInfo(
+            id="msg_assistant_live",
+            sessionID=session.id,
+            role="assistant",
+            time={"created": 1_100, "completed": 1_200},
+            parentID=user.id,
+            modelID="claude-sonnet",
+            providerID="anthropic",
+            mode="standard",
+            agent="rex",
+            path=MessagePath(cwd="/tmp/backfill-live", root="/tmp/backfill-live"),
+            tokens=TokenUsage(input=11, output=7, reasoning=3, cache=TokenCache(read=5, write=2)),
+            cost=1.25,
+        )
+        message = MessageWithParts(info=assistant, parts=[])
+
+        run_async(record_usage(RecordUsageRequest(
+            provider_id="anthropic",
+            model_id="claude-sonnet",
+            session_id=session.id,
+            message_id=assistant.id,
+            input_tokens=11,
+            output_tokens=7,
+            cached_tokens=5,
+            cache_write_tokens=2,
+            reasoning_tokens=3,
+            pricing=PriceConfig(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75),
+        )))
+
+        async def fake_list_all():
+            return [session]
+
+        async def fake_list_with_parts(session_id: str, include_archived: bool = False):
+            assert session_id == session.id
+            assert include_archived is False
+            return [MessageWithParts(info=user, parts=[]), message]
+
+        monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
+        monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+
+        result = run_async(backfill_usage_records())
+        records = run_async(get_usage_records(session_ids=[session.id]))
+
+        assert result.inserted_records == 0
+        assert result.skipped_existing == 1
+        assert len(records) == 1
+        assert records[0].source == "live"
 
     def test_record_multiple_and_query(self, setup_storage):
         from flocks.server.routes.usage import RecordUsageRequest, record_usage
@@ -481,3 +591,98 @@ class TestUsageTracking:
         assert stats.summary.total_requests == 1
         assert len(stats.by_provider) == 1
         assert stats.by_provider[0].provider_id == "anthropic"
+
+    def test_query_groups_costs_by_currency(self, setup_storage):
+        from flocks.server.routes.usage import RecordUsageRequest, record_usage, get_usage_stats
+
+        run_async(record_usage(RecordUsageRequest(
+            provider_id="anthropic",
+            model_id="m1",
+            input_tokens=1000,
+            output_tokens=500,
+            pricing=PriceConfig(input=3.0, output=15.0, currency="USD"),
+        )))
+        run_async(record_usage(RecordUsageRequest(
+            provider_id="threatbook",
+            model_id="m2",
+            input_tokens=1000,
+            output_tokens=500,
+            pricing=PriceConfig(input=2.1, output=8.4, currency="CNY"),
+        )))
+
+        stats = run_async(get_usage_stats())
+
+        assert stats.summary.currency == "MIXED"
+        assert stats.summary.total_cost == 0.0
+        assert {(item.currency, item.total_cost > 0) for item in stats.summary.cost_by_currency} == {
+            ("USD", True),
+            ("CNY", True),
+        }
+
+    def test_backfill_usage_records_is_idempotent(self, setup_storage, monkeypatch):
+        from flocks.provider import usage_service
+        from flocks.provider.usage_service import backfill_usage_records, get_usage_records
+        from flocks.session.message import (
+            AssistantMessageInfo,
+            MessagePath,
+            MessageWithParts,
+            TokenCache,
+            TokenUsage,
+            UserMessageInfo,
+        )
+        from flocks.session.session import SessionInfo, SessionTime
+
+        usage_service._auto_backfill_complete = False
+
+        session = SessionInfo(
+            id="ses_backfill",
+            projectID="proj_backfill",
+            directory="/tmp/backfill",
+            title="Backfill Session",
+            time=SessionTime(created=1_000, updated=2_000),
+        )
+        user = UserMessageInfo(
+            id="msg_user",
+            sessionID=session.id,
+            role="user",
+            time={"created": 1_000},
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+        )
+        assistant = AssistantMessageInfo(
+            id="msg_assistant",
+            sessionID=session.id,
+            role="assistant",
+            time={"created": 1_100, "completed": 1_200},
+            parentID=user.id,
+            modelID="claude-sonnet",
+            providerID="anthropic",
+            mode="standard",
+            agent="rex",
+            path=MessagePath(cwd="/tmp/backfill", root="/tmp/backfill"),
+            tokens=TokenUsage(input=11, output=7, reasoning=3, cache=TokenCache(read=5, write=2)),
+            cost=1.25,
+        )
+        message = MessageWithParts(info=assistant, parts=[])
+
+        async def fake_list_all():
+            return [session]
+
+        async def fake_list_with_parts(session_id: str, include_archived: bool = False):
+            assert session_id == session.id
+            assert include_archived is False
+            return [MessageWithParts(info=user, parts=[]), message]
+
+        monkeypatch.setattr(usage_service.Session, "list_all", fake_list_all)
+        monkeypatch.setattr(usage_service.Message, "list_with_parts", fake_list_with_parts)
+
+        first = run_async(backfill_usage_records())
+        second = run_async(backfill_usage_records())
+        records = run_async(get_usage_records(session_ids=[session.id]))
+
+        assert first.inserted_records == 1
+        assert second.skipped_existing == 1
+        assert len(records) == 1
+        assert records[0].message_id == assistant.id
+        assert records[0].cache_write_tokens == 2
+        assert records[0].source == "backfill"

@@ -310,9 +310,11 @@ class UsageRecord(BaseModel):
     model_id: str
     credential_id: Optional[str] = None
     session_id: Optional[str] = None
+    message_id: Optional[str] = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     total_tokens: int = 0
     input_cost: float = 0.0
@@ -320,7 +322,9 @@ class UsageRecord(BaseModel):
     total_cost: float = 0.0
     currency: str = "USD"
     latency_ms: Optional[int] = None
+    source: str = "live"
     created_at: datetime
+    backfilled_at: Optional[datetime] = None
 
 
 class UsageCost(BaseModel):
