@@ -59,25 +59,44 @@ TOOL_RESULT_MIN_CHAR_BUDGET = 12_000
 TOOL_RESULT_MIN_TURN_BUDGET = 6_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
-# Maximum seconds to wait for each chunk (including the first) from the LLM
-# stream.  If the model hangs without returning any data, the stream times out
-# and the session surfaces a clear error rather than hanging forever.
-LLM_STREAM_CHUNK_TIMEOUT_S = 60
+# Maximum seconds to wait for the *first* chunk from the LLM stream.
+# If the model never starts responding, the stream times out and the session
+# surfaces a clear error rather than hanging forever.
+LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
+
+# Once the stream has started (at least one chunk received), allow a much
+# longer gap between chunks.  Some models pause for extended periods between
+# reasoning and content generation phases; a tight inter-chunk timeout causes
+# spurious failures in those cases.
+LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
 
 
-async def _iter_with_chunk_timeout(aiter, timeout_s: float):
-    """Yield chunks from an async generator, raising TimeoutError if any
-    individual chunk (including the first) takes longer than *timeout_s*."""
+async def _iter_with_chunk_timeout(
+    aiter,
+    first_chunk_timeout_s: float,
+    ongoing_chunk_timeout_s: float,
+):
+    """Yield chunks from an async generator with adaptive timeouts.
+
+    *first_chunk_timeout_s* applies while waiting for the very first chunk
+    (guards against a completely unresponsive model).  After the first chunk
+    arrives, *ongoing_chunk_timeout_s* is used for subsequent chunks so that
+    models with long pauses mid-stream are not prematurely killed.
+    """
+    received_first = False
     try:
         while True:
+            timeout = ongoing_chunk_timeout_s if received_first else first_chunk_timeout_s
             try:
-                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout_s)
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+                received_first = True
                 yield chunk
             except StopAsyncIteration:
                 return
             except asyncio.TimeoutError:
+                phase = "mid-stream" if received_first else "waiting for first response"
                 raise asyncio.TimeoutError(
-                    f"LLM stream timed out after {timeout_s:.0f}s with no response. "
+                    f"LLM stream timed out after {timeout:.0f}s ({phase}). "
                     "The model may be overloaded or incompatible. Please try again or switch models."
                 )
     finally:
@@ -1904,7 +1923,8 @@ Please address this message and continue with your tasks.
                 tools=provider_tools,
                 **provider_options,
             ),
-            timeout_s=LLM_STREAM_CHUNK_TIMEOUT_S,
+            first_chunk_timeout_s=LLM_STREAM_FIRST_CHUNK_TIMEOUT_S,
+            ongoing_chunk_timeout_s=LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S,
         ):
             chunk_counts["total"] += 1
             
