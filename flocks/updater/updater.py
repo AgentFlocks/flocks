@@ -2120,13 +2120,20 @@ def _refresh_global_cli_entry(install_root: Path) -> None:
         if not venv_python.exists():
             return
         wrapper = link_dir / "flocks.cmd"
-        wrapper.write_text(
-            f'@echo off\r\n"{venv_python}" -m flocks.cli.main %*',
-            encoding="ascii",
-        )
+        content = f'@echo off\r\n"{venv_python}" -m flocks.cli.main %*'
+        try:
+            wrapper.write_text(content, encoding="oem")
+        except LookupError:
+            wrapper.write_text(content, encoding="utf-8")
         stale_exe = link_dir / "flocks.exe"
         if stale_exe.exists():
-            stale_exe.unlink(missing_ok=True)
+            try:
+                stale_exe.unlink(missing_ok=True)
+            except OSError:
+                try:
+                    stale_exe.rename(stale_exe.with_suffix(".exe.bak"))
+                except OSError:
+                    pass
     else:
         target = install_root / ".venv" / "bin" / "flocks"
         if not target.exists():

@@ -751,16 +751,38 @@ function Install-FlocksCli {
     $linkDir = Join-Path $HOME ".local\bin"
 
     if (Test-Command "uv") {
-        $toolList = & uv tool list 2>$null
-        if ($toolList -match '^flocks ') {
-            Write-Info "Removing legacy uv tool installation..."
-            & uv tool uninstall flocks 2>$null
+        $savedEA = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "SilentlyContinue"
+            $toolList = (& uv tool list 2>&1) | Where-Object { $_ -is [string] -or $_ -isnot [System.Management.Automation.ErrorRecord] }
+            if ("$toolList" -match 'flocks') {
+                Write-Info "Removing legacy uv tool installation..."
+                & uv tool uninstall flocks 2>&1 | Out-Null
+            }
+        }
+        catch {
+            Write-Warning "Could not clean up legacy uv tool install. Continuing anyway."
+        }
+        finally {
+            $ErrorActionPreference = $savedEA
         }
     }
     $staleExe = Join-Path $linkDir "flocks.exe"
     if (Test-Path $staleExe) {
         Write-Info "Removing stale flocks.exe to avoid shadowing new wrapper..."
-        Remove-Item -Force $staleExe -ErrorAction SilentlyContinue
+        try {
+            Remove-Item -Force $staleExe -ErrorAction Stop
+        }
+        catch {
+            $backupExe = Join-Path $linkDir "flocks.exe.bak"
+            try {
+                Move-Item -Force $staleExe $backupExe -ErrorAction Stop
+                Write-Info "Could not delete flocks.exe (locked); renamed to flocks.exe.bak"
+            }
+            catch {
+                Write-Warning "Could not remove or rename flocks.exe — it may shadow the new flocks.cmd wrapper. Stop any running flocks process and re-run the installer."
+            }
+        }
     }
 
     $venvPython = Join-Path $RootDir ".venv\Scripts\python.exe"
@@ -774,7 +796,7 @@ function Install-FlocksCli {
 
     $wrapperPath = Join-Path $linkDir "flocks.cmd"
     $wrapperContent = "@echo off`r`n`"$venvPython`" -m flocks.cli.main %*"
-    [System.IO.File]::WriteAllText($wrapperPath, $wrapperContent, [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText($wrapperPath, $wrapperContent, [System.Text.Encoding]::Default)
 
     Ensure-UserPathEntry $linkDir
     Refresh-Path
