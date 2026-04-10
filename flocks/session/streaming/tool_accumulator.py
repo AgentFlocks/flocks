@@ -20,10 +20,15 @@ from flocks.utils.json_repair import (
 from flocks.tool.registry import ToolRegistry
 from flocks.session.streaming.stream_events import (
     ToolInputStartEvent,
+    ToolInputDeltaEvent,
     ToolCallEvent,
 )
 
 log = Log.create(service="tool_accumulator")
+
+# Tools whose input should be streamed to the UI via ToolInputDeltaEvent
+# so users see progress while the model generates large arguments.
+_STREAM_INPUT_TOOLS = frozenset({"write", "edit"})
 
 
 class ToolCallAccumulator:
@@ -59,16 +64,25 @@ class ToolCallAccumulator:
         if tc_id in self._accumulator and self._accumulator[tc_id].get("completed"):
             return
 
-        if tc_id not in self._accumulator:
+        is_new_entry = tc_id not in self._accumulator
+        if is_new_entry:
             self._accumulator[tc_id] = {
                 "id": tc_id,
-                "name": tool_name,
+                "name": "",
                 "arguments_str": "",
                 "completed": False,
             }
 
         if tool_name:
+            prev_name = self._accumulator[tc_id]["name"]
             self._accumulator[tc_id]["name"] = tool_name
+            # Emit ToolInputStartEvent eagerly as soon as tool name is known,
+            # so the UI shows a pending tool card immediately.
+            if not prev_name and not self._accumulator[tc_id].get("input_started"):
+                await self._processor.process_event(
+                    ToolInputStartEvent(id=tc_id, tool_name=tool_name)
+                )
+                self._accumulator[tc_id]["input_started"] = True
 
         if args_str and not self._accumulator[tc_id].get("completed"):
             current_args = self._accumulator[tc_id]["arguments_str"]
@@ -76,6 +90,18 @@ class ToolCallAccumulator:
                 if not self._should_accumulate(tc_id, current_args):
                     return
             self._accumulator[tc_id]["arguments_str"] += args_str
+
+            # Stream input deltas for tools with large arguments (e.g. write)
+            final_name = self._accumulator[tc_id]["name"]
+            if final_name in _STREAM_INPUT_TOOLS:
+                if not self._accumulator[tc_id].get("input_started"):
+                    await self._processor.process_event(
+                        ToolInputStartEvent(id=tc_id, tool_name=final_name)
+                    )
+                    self._accumulator[tc_id]["input_started"] = True
+                await self._processor.process_event(
+                    ToolInputDeltaEvent(id=tc_id, delta=args_str)
+                )
 
         accumulated = self._accumulator[tc_id]["arguments_str"]
         final_name = self._accumulator[tc_id]["name"]

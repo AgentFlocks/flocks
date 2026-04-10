@@ -38,6 +38,7 @@ from flocks.session.streaming.stream_events import (
     TextDeltaEvent,
     TextEndEvent,
     ToolInputStartEvent,
+    ToolInputDeltaEvent,
 )
 from flocks.tool.registry import ToolRegistry, ToolContext, ToolResult
 from flocks.permission import PermissionNext
@@ -146,6 +147,14 @@ class StreamProcessor:
         self._text_event_throttle_ms: float = 50
         self.recent_tool_signatures: List[tuple[str, str]] = []
         
+        # Track accumulated tool input size for streaming progress display.
+        # Only stores length + trailing preview to avoid duplicating the full
+        # content already held by ToolCallAccumulator.
+        self._tool_input_size: Dict[str, int] = {}
+        self._tool_input_tail: Dict[str, str] = {}
+        self._last_tool_input_event_time: Dict[str, float] = {}
+        self._tool_input_throttle_ms: float = 100
+        
         # Finish state
         self.finish_reason: Optional[str] = None
         
@@ -187,7 +196,7 @@ class StreamProcessor:
             await self._handle_tool_input_start(event)
         
         elif event_type == "tool-input-delta":
-            pass  # Just track incremental input
+            await self._handle_tool_input_delta(event)
         
         elif event_type == "tool-input-end":
             pass  # Input is complete
@@ -414,6 +423,66 @@ class StreamProcessor:
         except Exception as e:
             log.error("stream.tool_input_start.store_part_failed", {"error": str(e)})
     
+    async def _handle_tool_input_delta(self, event: ToolInputDeltaEvent) -> None:
+        """Publish streaming progress for tool input accumulation.
+
+        For tools like ``write`` whose arguments contain large content,
+        this sends throttled SSE updates so the UI can show a live
+        progress indicator (e.g. accumulated byte count) instead of
+        appearing frozen while the model generates the content.
+        """
+        tc_id = event.id
+        self._tool_input_size[tc_id] = self._tool_input_size.get(tc_id, 0) + len(event.delta)
+        # Keep a rolling tail for the raw preview without storing the full content
+        prev_tail = self._tool_input_tail.get(tc_id, "")
+        self._tool_input_tail[tc_id] = (prev_tail + event.delta)[-500:]
+
+        if not self.event_publish_callback:
+            return
+
+        tc_state = self.tool_calls.get(tc_id)
+        if not tc_state:
+            return
+
+        current_time = _time.time() * 1000
+        last_time = self._last_tool_input_event_time.get(tc_id, 0)
+        accumulated_len = self._tool_input_size[tc_id]
+
+        should_publish = (
+            accumulated_len <= 100
+            or (current_time - last_time) >= self._tool_input_throttle_ms
+        )
+        if not should_publish:
+            return
+
+        self._last_tool_input_event_time[tc_id] = current_time
+
+        if accumulated_len < 1024:
+            size_str = f"{accumulated_len} B"
+        else:
+            size_str = f"{accumulated_len / 1024:.1f} KB"
+
+        await self.event_publish_callback("message.part.updated", {
+            "part": {
+                "id": tc_state.part_id,
+                "messageID": self.assistant_message.id,
+                "sessionID": self.session_id,
+                "type": "tool",
+                "callID": tc_id,
+                "tool": tc_state.name,
+                "state": {
+                    "status": "pending",
+                    "input": {},
+                    "raw": self._tool_input_tail[tc_id],
+                    "metadata": {
+                        "streaming": True,
+                        "accumulated_size": accumulated_len,
+                        "accumulated_size_display": size_str,
+                    },
+                },
+            }
+        })
+
     async def _handle_tool_call(self, event: ToolCallEvent) -> None:
         """
         Handle tool call - execute tool synchronously
