@@ -1,0 +1,4 @@
+.git/
+.claude/
+.env
+.gitignore
