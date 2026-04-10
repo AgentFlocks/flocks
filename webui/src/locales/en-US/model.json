@@ -12,7 +12,11 @@
     "connected": "Connected Provider",
     "availableModels": "Available Models",
     "totalUsage": "Total Usage",
-    "noUsage": "None"
+    "totalTokens": "Total Tokens",
+    "totalCost": "Total Cost",
+    "noUsage": "None",
+    "noCost": "No cost",
+    "toggleCurrency": "Click to switch between USD and CNY"
   },
   "providerList": {
     "empty": "No providers configured",

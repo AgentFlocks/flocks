@@ -880,7 +880,7 @@ Please address this message and continue with your tasks.
                         # Record usage for this empty attempt even though we are
                         # about to retry – the provider may have already charged
                         # for the tokens returned in this response.
-                        await self._record_usage_if_available(result.usage)
+                        await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
                         delay_ms = SessionRetry.delay(empty_attempt)
                         next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
                         log.warn("runner.step.empty_response_retry", {
@@ -934,7 +934,7 @@ Please address this message and continue with your tasks.
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
-                await self._record_usage_if_available(result.usage)
+                await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
                 
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
@@ -1029,81 +1029,41 @@ Please address this message and continue with your tasks.
 
     def _resolve_usage_pricing(self) -> Optional[Any]:
         """Resolve pricing config for the current provider/model pair."""
-        from flocks.provider.types import PriceConfig
+        from flocks.provider.usage_service import resolve_usage_pricing
 
-        model_info = None
-        provider = Provider.get(self.provider_id)
-        if provider:
-            for candidate in getattr(provider, "_config_models", []):
-                if candidate.id == self.model_id:
-                    model_info = candidate
-                    break
+        return resolve_usage_pricing(self.provider_id, self.model_id)
 
-        if model_info is None:
-            model_info = Provider.get_model(self.model_id)
-
-        pricing = getattr(model_info, "pricing", None) if model_info else None
-        if pricing is None:
-            return None
-
-        if isinstance(pricing, PriceConfig):
-            # Already the correct type – returned as-is.
-            return pricing
-
-        if hasattr(pricing, "input") and hasattr(pricing, "output"):
-            # Defensive branch: handles any duck-typed object with input/output
-            # attributes (e.g. legacy dataclass or proxy object). In practice
-            # ModelInfo.pricing is typed as Optional[Dict[str, Any]], so this
-            # branch is unlikely to be hit at runtime.
-            return PriceConfig(
-                input=getattr(pricing, "input", 0.0),
-                output=getattr(pricing, "output", 0.0),
-                unit=getattr(pricing, "unit", 1_000_000),
-                currency=getattr(pricing, "currency", "USD"),
-                cache_read=getattr(pricing, "cache_read", None),
-                cache_write=getattr(pricing, "cache_write", None),
-            )
-
-        if isinstance(pricing, dict):
-            # Standard runtime path: ModelInfo.pricing is a plain dict from JSON.
-            return PriceConfig(
-                input=pricing.get("input", 0.0),
-                output=pricing.get("output", 0.0),
-                unit=pricing.get("unit", 1_000_000),
-                currency=pricing.get("currency", "USD"),
-                cache_read=pricing.get("cache_read"),
-                cache_write=pricing.get("cache_write"),
-            )
-
-        return None
-
-    async def _record_usage_if_available(self, usage: Optional[Dict[str, int]]) -> None:
+    async def _record_usage_if_available(
+        self,
+        usage: Optional[Dict[str, int]],
+        *,
+        message_id: Optional[str] = None,
+    ) -> None:
         """Persist usage records without blocking successful session steps.
 
         All exceptions – including ImportError when server routes are absent
         in CLI-only environments – are caught here so that a usage-recording
         failure can never corrupt an already-successful step result.
 
-        Note: This imports from flocks.server.routes.usage, creating a
-        core→server-routes dependency.
-        TODO: Move record_usage logic to a provider-layer service
-        (e.g. flocks.provider.usage_service) to remove the architectural
-        inversion.
+        Uses the shared provider-layer usage service so that CLI and HTTP
+        callers rely on the same persistence and aggregation path.
         """
         if not usage:
             return
 
         try:
-            from flocks.server.routes.usage import RecordUsageRequest, record_usage
+            from flocks.provider.usage_service import RecordUsageRequest, record_usage
 
             await record_usage(
                 RecordUsageRequest(
                     provider_id=self.provider_id,
                     model_id=self.model_id,
                     session_id=self.session.id,
+                    message_id=message_id,
                     input_tokens=usage.get("prompt_tokens", 0),
                     output_tokens=usage.get("completion_tokens", 0),
                     cached_tokens=usage.get("cache_read_input_tokens", 0),
+                    cache_write_tokens=usage.get("cache_creation_input_tokens", 0),
                     reasoning_tokens=usage.get("reasoning_tokens", 0),
                     pricing=self._resolve_usage_pricing(),
                 )

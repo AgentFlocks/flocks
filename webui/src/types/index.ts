@@ -480,10 +480,33 @@ export interface UsageStats {
     total_cost: number;
     total_requests: number;
     currency: string;
+    cost_by_currency: { currency: string; total_cost: number }[];
   };
-  by_provider: { provider_id: string; total_tokens: number; total_cost: number; request_count: number }[];
-  by_model: { provider_id: string; model_id: string; total_tokens: number; total_cost: number; request_count: number }[];
-  daily: { date: string; total_tokens: number; total_cost: number; request_count: number }[];
+  by_provider: {
+    provider_id: string;
+    total_tokens: number;
+    total_cost: number;
+    request_count: number;
+    currency: string;
+    cost_by_currency: { currency: string; total_cost: number }[];
+  }[];
+  by_model: {
+    provider_id: string;
+    model_id: string;
+    total_tokens: number;
+    total_cost: number;
+    request_count: number;
+    currency: string;
+    cost_by_currency: { currency: string; total_cost: number }[];
+  }[];
+  daily: {
+    date: string;
+    total_tokens: number;
+    total_cost: number;
+    request_count: number;
+    currency: string;
+    cost_by_currency: { currency: string; total_cost: number }[];
+  }[];
 }
 
 /** Custom provider creation */

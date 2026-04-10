@@ -766,7 +766,7 @@ async def test_process_step_records_usage_after_success(monkeypatch):
     result = await runner._process_step([last_user], last_user)
 
     assert result.content == "done"
-    record_mock.assert_awaited_once_with(usage)
+    record_mock.assert_awaited_once_with(usage, message_id=assistant_msg.id)
     update_mock.assert_any_await(runner.session.id, assistant_msg.id, finish="stop")
 
 
@@ -828,21 +828,49 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     # Both the empty attempt and the successful attempt must be recorded so
     # that provider charges are not silently dropped during retries.
     assert record_mock.await_count == 2
-    record_mock.assert_any_await(first_usage)
-    record_mock.assert_any_await(second_usage)
+    record_mock.assert_any_await(first_usage, message_id=assistant_msg.id)
+    record_mock.assert_any_await(second_usage, message_id=assistant_msg.id)
 
 
 @pytest.mark.asyncio
 async def test_record_usage_if_available_swallows_import_error():
-    """ImportError from the server-routes import must not propagate out of
+    """ImportError from the usage service import must not propagate out of
     _record_usage_if_available so that a CLI-only environment (where fastapi /
     server deps may be absent) never turns a successful step into an error."""
     runner = _make_runner("ses_runner_import_error")
     usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
 
-    with patch.dict("sys.modules", {"flocks.server.routes.usage": None}):
+    with patch.dict("sys.modules", {"flocks.provider.usage_service": None}):
         # Should complete without raising, even though the import will fail.
         await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_passes_message_id():
+    runner = _make_runner("ses_runner_message_id")
+    usage = {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "cache_creation_input_tokens": 4,
+    }
+    request_cls = MagicMock(return_value=SimpleNamespace())
+    record_usage_mock = AsyncMock(return_value=None)
+    fake_module = SimpleNamespace(
+        RecordUsageRequest=request_cls,
+        record_usage=record_usage_mock,
+    )
+    runner._resolve_usage_pricing = MagicMock(return_value=None)
+
+    with patch.dict("sys.modules", {"flocks.provider.usage_service": fake_module}):
+        await runner._record_usage_if_available(usage, message_id="msg_assistant")
+
+    request_cls.assert_called_once()
+    kwargs = request_cls.call_args.kwargs
+    assert kwargs["session_id"] == runner.session.id
+    assert kwargs["message_id"] == "msg_assistant"
+    assert kwargs["cache_write_tokens"] == 4
+    record_usage_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -856,5 +884,5 @@ async def test_record_usage_if_available_swallows_runtime_error():
         RecordUsageRequest=MagicMock(return_value=SimpleNamespace()),
         record_usage=AsyncMock(side_effect=RuntimeError("db unavailable")),
     )
-    with patch.dict("sys.modules", {"flocks.server.routes.usage": fake_module}):
+    with patch.dict("sys.modules", {"flocks.provider.usage_service": fake_module}):
         await runner._record_usage_if_available(usage)
