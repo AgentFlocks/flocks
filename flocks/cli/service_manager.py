@@ -220,12 +220,22 @@ def _flocks_executable_from_venv(venv_root: Path) -> str | None:
 
 
 def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
-    """Resolve a command prefix that launches the ``flocks`` CLI reliably."""
+    """Resolve a command prefix that launches the ``flocks`` CLI reliably.
+
+    On Windows, always uses ``python.exe -m flocks.cli.main`` instead of
+    ``flocks.exe`` to avoid locking the console-script entry point, which
+    would prevent ``uv sync`` from replacing it during live upgrades.
+    """
     current_root = root or repo_root()
 
-    venv_flocks = _flocks_executable_from_venv(current_root / ".venv")
-    if venv_flocks:
-        return [venv_flocks]
+    if sys.platform == "win32":
+        venv_python = _python_executable_from_env_root(current_root / ".venv")
+        if venv_python:
+            return [venv_python, "-m", "flocks.cli.main"]
+    else:
+        venv_flocks = _flocks_executable_from_venv(current_root / ".venv")
+        if venv_flocks:
+            return [venv_flocks]
 
     launcher = which("flocks") or which("flocks.exe") or which("flocks.cmd")
     if launcher and not launcher.startswith("/mnt/"):

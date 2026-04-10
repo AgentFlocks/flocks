@@ -276,7 +276,8 @@ def test_resolve_python_subprocess_command_falls_back_to_module_env(
     assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(python_exe)]
 
 
-def test_resolve_flocks_cli_command_prefers_venv_entry_point(monkeypatch, tmp_path: Path) -> None:
+def test_resolve_flocks_cli_command_prefers_venv_entry_point_unix(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
     venv_flocks = tmp_path / ".venv" / "bin" / "flocks"
     venv_flocks.parent.mkdir(parents=True)
     venv_flocks.write_text("", encoding="utf-8")
@@ -284,6 +285,21 @@ def test_resolve_flocks_cli_command_prefers_venv_entry_point(monkeypatch, tmp_pa
     monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
 
     assert service_manager.resolve_flocks_cli_command(tmp_path) == [str(venv_flocks.resolve())]
+
+
+def test_resolve_flocks_cli_command_uses_python_module_on_windows(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(service_manager, "which", lambda name: r"C:\tools\flocks.exe" if name == "flocks" else None)
+
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == [
+        str(venv_python),
+        "-m",
+        "flocks.cli.main",
+    ]
 
 
 def test_resolve_flocks_cli_command_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
