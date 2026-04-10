@@ -135,6 +135,12 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     )
 
 
+def _is_hidden_from_session_manager(session: SessionModel) -> bool:
+    """Return whether a session should be excluded from manager listings."""
+    metadata = session.metadata if isinstance(session.metadata, dict) else {}
+    return bool(metadata.get("hideFromSessionManager"))
+
+
 # =============================================================================
 # Session CRUD Routes
 # =============================================================================
@@ -191,6 +197,8 @@ async def list_sessions(
     term = search.lower() if search else None
     
     for session in all_sessions:
+        if _is_hidden_from_session_manager(session):
+            continue
         if directory is not None and session.directory != directory:
             continue
         if roots and session.parent_id:
