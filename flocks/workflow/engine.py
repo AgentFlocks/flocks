@@ -108,7 +108,7 @@ class WorkflowEngine:
     trace: bool = False
     mutate_workflow: bool = False
     workflow_path: Optional[str] = None
-    node_timeout_s: Optional[float] = 120.0
+    node_timeout_s: Optional[float] = 300.0
     _depth: int = 0
     max_parallel_workers: int = 4
     workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
