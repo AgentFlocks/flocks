@@ -92,9 +92,22 @@ export function useSessionChat({
     setError(null);
   }, []);
 
+  const createAndSend = useCallback(
+    async (text: string, agent?: string): Promise<string> => {
+      const sid = await create();
+      const payload: Record<string, unknown> = {
+        parts: [{ type: 'text', text }],
+      };
+      if (agent) payload.agent = agent;
+      client.post(`/api/session/${sid}/prompt_async`, payload).catch(() => {});
+      return sid;
+    },
+    [create],
+  );
+
   useEffect(() => {
     if (autoCreate) create().catch(() => {});
   }, []);
 
-  return { sessionId, loading, error, create, retry, reset };
+  return { sessionId, loading, error, create, createAndSend, retry, reset };
 }
