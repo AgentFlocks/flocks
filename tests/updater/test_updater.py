@@ -1,7 +1,6 @@
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 from os import utime
 from pathlib import Path
@@ -542,6 +541,68 @@ def test_refresh_global_cli_entry_noop_when_venv_missing(
 
     link_dir = tmp_path / "home" / ".local" / "bin"
     assert not (link_dir / "flocks").exists()
+
+
+def test_refresh_global_cli_entry_defers_legacy_uv_tool_uninstall_for_running_tool_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.sys, "executable", "/Users/test/.local/share/uv/tools/flocks/bin/python")
+    monkeypatch.setattr(updater.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(updater.shutil, "which", lambda _name: "/usr/local/bin/uv")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="flocks 0.0.0\n", stderr="")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+
+    install_root = tmp_path / "project"
+    venv_flocks = install_root / ".venv" / "bin" / "flocks"
+    venv_flocks.parent.mkdir(parents=True)
+    venv_flocks.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+
+    updater._refresh_global_cli_entry(install_root)
+
+    link = tmp_path / "home" / ".local" / "bin" / "flocks"
+    assert link.is_symlink()
+    assert link.resolve() == venv_flocks.resolve()
+    assert calls == []
+
+
+def test_refresh_global_cli_entry_uninstalls_legacy_uv_tool_after_switching_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.sys, "executable", str(tmp_path / "project" / ".venv" / "bin" / "python"))
+    monkeypatch.setattr(updater.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(updater.shutil, "which", lambda _name: "/usr/local/bin/uv")
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd == ["/usr/local/bin/uv", "tool", "list"]:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="flocks 0.0.0\n", stderr="")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(updater.subprocess, "run", fake_run)
+
+    install_root = tmp_path / "project"
+    venv_flocks = install_root / ".venv" / "bin" / "flocks"
+    venv_flocks.parent.mkdir(parents=True)
+    venv_flocks.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+
+    updater._refresh_global_cli_entry(install_root)
+
+    assert calls == [
+        ["/usr/local/bin/uv", "tool", "list"],
+        ["/usr/local/bin/uv", "tool", "uninstall", "flocks"],
+    ]
 
 
 @pytest.mark.asyncio
