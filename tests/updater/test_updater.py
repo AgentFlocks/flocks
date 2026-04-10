@@ -469,26 +469,79 @@ def test_build_restart_argv_uses_windows_venv_python(
     ]
 
 
-def test_build_restart_argv_restores_module_mode_on_non_windows(
+def test_build_restart_argv_uses_venv_python_on_non_windows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    package_dir = tmp_path / "flocks"
-    package_dir.mkdir()
-    (package_dir / "__init__.py").write_text("", encoding="utf-8")
-    main_path = package_dir / "__main__.py"
-    main_path.write_text("", encoding="utf-8")
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
 
     monkeypatch.setattr(updater.sys, "platform", "darwin")
     monkeypatch.setattr(updater.sys, "executable", "/usr/bin/python3")
-    monkeypatch.setattr(updater.sys, "argv", [str(main_path), "start", "--reload"])
+    monkeypatch.setattr(updater.sys, "argv", ["/usr/local/bin/flocks", "start", "--reload"])
 
-    assert updater._build_restart_argv() == [
-        "/usr/bin/python3",
+    assert updater._build_restart_argv(tmp_path) == [
+        str(venv_python),
         "-m",
-        "flocks",
+        "flocks.cli.main",
         "start",
     ]
+
+
+def test_refresh_global_cli_entry_creates_symlink_on_unix(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(updater.shutil, "which", lambda _name: None)
+
+    install_root = tmp_path / "project"
+    venv_flocks = install_root / ".venv" / "bin" / "flocks"
+    venv_flocks.parent.mkdir(parents=True)
+    venv_flocks.write_text("#!/usr/bin/env python\n", encoding="utf-8")
+
+    updater._refresh_global_cli_entry(install_root)
+
+    link = tmp_path / "home" / ".local" / "bin" / "flocks"
+    assert link.is_symlink()
+    assert link.resolve() == venv_flocks.resolve()
+
+
+def test_refresh_global_cli_entry_creates_cmd_wrapper_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setattr(updater.shutil, "which", lambda _name: None)
+
+    install_root = tmp_path / "project"
+    venv_python = install_root / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    updater._refresh_global_cli_entry(install_root)
+
+    wrapper = tmp_path / "home" / ".local" / "bin" / "flocks.cmd"
+    assert wrapper.exists()
+    content = wrapper.read_text(encoding="ascii")
+    assert str(venv_python) in content
+    assert "-m flocks.cli.main %*" in content
+
+
+def test_refresh_global_cli_entry_noop_when_venv_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "darwin")
+    monkeypatch.setattr(updater.Path, "home", lambda: tmp_path / "home")
+
+    updater._refresh_global_cli_entry(tmp_path / "nonexistent")
+
+    link_dir = tmp_path / "home" / ".local" / "bin"
+    assert not (link_dir / "flocks").exists()
 
 
 @pytest.mark.asyncio
@@ -1155,6 +1208,8 @@ async def test_perform_update_builds_staged_frontend_before_handover(
         lambda *_args, **_kwargs: events.append("replace"),
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
     monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
     monkeypatch.setattr(updater, "rollback_upgrade_handover", lambda *_args: events.append("rollback_handover"))
@@ -1676,6 +1731,7 @@ async def test_perform_update_spawns_restart_process_on_windows(
     )
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
@@ -1801,6 +1857,7 @@ async def test_perform_update_yields_error_when_build_restart_argv_fails(
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: events.append("marker"))
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(
         updater,
         "_build_restart_argv",
@@ -1871,6 +1928,7 @@ async def test_perform_update_yields_error_when_windows_spawn_fails(
     )
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main"])
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate)
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))

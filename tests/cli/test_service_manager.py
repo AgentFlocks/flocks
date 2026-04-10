@@ -236,7 +236,29 @@ def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
     service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
 
 
-def test_resolve_python_subprocess_command_prefers_module_env(
+def test_resolve_python_subprocess_command_prefers_venv(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    tool_env = tmp_path / "tool-env"
+    tool_python = tool_env / "bin" / "python"
+    tool_python.parent.mkdir(parents=True)
+    tool_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service_manager,
+        "_python_env_root_from_module",
+        lambda module_name: tool_env if module_name == "uvicorn" else None,
+    )
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
+
+
+def test_resolve_python_subprocess_command_falls_back_to_module_env(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -254,26 +276,24 @@ def test_resolve_python_subprocess_command_prefers_module_env(
     assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(python_exe)]
 
 
-def test_resolve_python_subprocess_command_falls_back_to_repo_venv(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    venv_python = tmp_path / ".venv" / "bin" / "python"
-    venv_python.parent.mkdir(parents=True)
-    venv_python.write_text("", encoding="utf-8")
+def test_resolve_flocks_cli_command_prefers_venv_entry_point(monkeypatch, tmp_path: Path) -> None:
+    venv_flocks = tmp_path / ".venv" / "bin" / "flocks"
+    venv_flocks.parent.mkdir(parents=True)
+    venv_flocks.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(service_manager, "_python_env_root_from_module", lambda _module_name: None)
-
-    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
-
-
-def test_resolve_flocks_cli_command_prefers_launcher(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
 
-    assert service_manager.resolve_flocks_cli_command() == ["/usr/local/bin/flocks"]
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == [str(venv_flocks.resolve())]
+
+
+def test_resolve_flocks_cli_command_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
+
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == ["/usr/local/bin/flocks"]
 
 
 def test_resolve_flocks_cli_command_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "_flocks_executable_from_venv", lambda _venv_root: None)
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
     monkeypatch.setattr(service_manager.sys, "argv", ["python"])
     monkeypatch.setattr(service_manager, "resolve_python_subprocess_command", lambda root=None: ["/env/bin/python"])

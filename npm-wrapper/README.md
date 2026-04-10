@@ -2,7 +2,7 @@
 
 npm wrapper for [Flocks](https://github.com/flocks-ai/flocks) — AI-Native SecOps platform.
 
-Flocks is a Python package. This wrapper detects `uvx`, `pipx`, or a globally installed `flocks` binary and delegates to it.
+Flocks is a Python package. This wrapper detects a globally installed `flocks` binary, `uvx`, or `pipx` and delegates to it.
 
 ## Quick start
 
@@ -25,11 +25,10 @@ Install `uv` (recommended):
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Or install Flocks directly:
+Or install Flocks directly via the install script:
 
 ```bash
-uv tool install flocks    # recommended
-pipx install flocks       # alternative
+curl -fsSL https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh | bash
 ```
 
 ## Skill registry

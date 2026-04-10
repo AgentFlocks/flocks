@@ -2008,6 +2008,11 @@ async def perform_update(
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _write_version_marker(latest_tag.lstrip("v"))
 
+    try:
+        _refresh_global_cli_entry(install_root)
+    except Exception as exc:
+        log.warning("updater.refresh_cli.failed", {"error": str(exc)})
+
     # ------------------------------------------------------------------ #
     # Step 7 – restart in-place (skipped when restart=False, e.g. CLI)
     # Send the "restarting" event while the proxy is still alive, then
@@ -2101,15 +2106,60 @@ async def perform_update(
         return
 
 
-def _build_restart_argv(install_root: Path | None = None) -> list[str]:
-    """
-    Reconstruct the argv for os.execv so the process restarts correctly.
+def _refresh_global_cli_entry(install_root: Path) -> None:
+    """Ensure the global ``flocks`` command points to the project ``.venv``.
 
-    Handles two edge cases:
-    1. __main__.py path → reconstruct ``-m module`` form
-    2. --reload flags → strip them to avoid a second reloader
+    Handles migration from the legacy uv-tool-based global command to a
+    symlink (Unix) or .cmd wrapper (Windows).  Safe to call repeatedly.
     """
-    argv0 = sys.argv[0]
+    link_dir = Path.home() / ".local" / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        venv_python = install_root / ".venv" / "Scripts" / "python.exe"
+        if not venv_python.exists():
+            return
+        wrapper = link_dir / "flocks.cmd"
+        wrapper.write_text(
+            f'@echo off\r\n"{venv_python}" -m flocks.cli.main %*',
+            encoding="ascii",
+        )
+        stale_exe = link_dir / "flocks.exe"
+        if stale_exe.exists():
+            stale_exe.unlink(missing_ok=True)
+    else:
+        target = install_root / ".venv" / "bin" / "flocks"
+        if not target.exists():
+            return
+        link = link_dir / "flocks"
+        link.unlink(missing_ok=True)
+        link.symlink_to(target)
+
+    uv = shutil.which("uv")
+    if uv:
+        try:
+            result = subprocess.run(
+                [uv, "tool", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and re.search(r"^flocks ", result.stdout, re.MULTILINE):
+                subprocess.run(
+                    [uv, "tool", "uninstall", "flocks"],
+                    capture_output=True,
+                    timeout=30,
+                )
+        except Exception:
+            pass
+
+
+def _build_restart_argv(install_root: Path | None = None) -> list[str]:
+    """Reconstruct the argv for ``os.execv`` so the process restarts correctly.
+
+    Always uses the project ``.venv`` Python to ensure the restarted process
+    runs in the same environment that ``uv sync`` just updated.
+    """
     rest = sys.argv[1:]
 
     clean_rest: list[str] = []
@@ -2126,34 +2176,17 @@ def _build_restart_argv(install_root: Path | None = None) -> list[str]:
             continue
         clean_rest.append(arg)
 
+    repo_root = install_root or _get_repo_root()
     if sys.platform == "win32":
-        repo_root = install_root or _get_repo_root()
-        venv_python = _windows_upgrade_python_path(repo_root)
-        if not venv_python.exists():
-            raise FileNotFoundError(f"Windows restart runtime is missing: {venv_python}")
-        log.info("updater.restart.force_venv", {"python": str(venv_python)})
-        return [str(venv_python), "-m", "flocks.cli.main"] + clean_rest
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = repo_root / ".venv" / "bin" / "python"
 
-    if argv0.endswith("__main__.py"):
-        pkg_dir = Path(argv0).parent
-        parts: list[str] = []
-        current = pkg_dir
-        while (current / "__init__.py").exists():
-            parts.insert(0, current.name)
-            current = current.parent
+    if not venv_python.exists():
+        raise FileNotFoundError(f"Restart runtime is missing: {venv_python}")
 
-        if parts:
-            module = ".".join(parts)
-            log.info(
-                "updater.restart.module_mode",
-                {
-                    "module": module,
-                    "reload_stripped": len(rest) - len(clean_rest),
-                },
-            )
-            return [sys.executable, "-m", module] + clean_rest
-
-    return [sys.executable, argv0] + clean_rest
+    log.info("updater.restart.force_venv", {"python": str(venv_python)})
+    return [str(venv_python), "-m", "flocks.cli.main"] + clean_rest
 
 
 def _resolve_windows_restart_command(argv0: str, orig_argv: list[str]) -> list[str] | None:

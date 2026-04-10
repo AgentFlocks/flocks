@@ -186,10 +186,15 @@ def resolve_python_subprocess_command(
     """Resolve a Python executable for child processes.
 
     Priority:
-    1. Current runtime environment inferred from installed modules.
-    2. Project/install `.venv`.
-    3. Current `sys.executable`.
+    1. Project/install ``.venv``.
+    2. Current runtime environment inferred from installed modules.
+    3. Current ``sys.executable``.
     """
+    current_root = root or repo_root()
+    venv_python = _python_executable_from_env_root(current_root / ".venv")
+    if venv_python:
+        return [venv_python]
+
     for module_name in preferred_modules:
         env_root = _python_env_root_from_module(module_name)
         if env_root is None:
@@ -198,25 +203,33 @@ def resolve_python_subprocess_command(
         if resolved:
             return [resolved]
 
-    current_root = root or repo_root()
-    venv_python = _python_executable_from_env_root(current_root / ".venv")
-    if venv_python:
-        return [venv_python]
-
     return [sys.executable]
 
 
+def _flocks_executable_from_venv(venv_root: Path) -> str | None:
+    """Return the flocks CLI entry point inside a virtual environment."""
+    candidates = [
+        venv_root / "Scripts" / "flocks.exe",
+        venv_root / "Scripts" / "flocks.cmd",
+        venv_root / "bin" / "flocks",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return None
+
+
 def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
-    """Resolve a command prefix that launches the `flocks` CLI reliably."""
+    """Resolve a command prefix that launches the ``flocks`` CLI reliably."""
+    current_root = root or repo_root()
+
+    venv_flocks = _flocks_executable_from_venv(current_root / ".venv")
+    if venv_flocks:
+        return [venv_flocks]
+
     launcher = which("flocks") or which("flocks.exe") or which("flocks.cmd")
     if launcher and not launcher.startswith("/mnt/"):
         return [launcher]
-
-    argv0 = sys.argv[0]
-    if argv0:
-        argv0_path = Path(argv0)
-        if argv0_path.exists() and argv0_path.name.lower().startswith("flocks"):
-            return [str(argv0_path.resolve())]
 
     return resolve_python_subprocess_command(root) + ["-m", "flocks.cli.main"]
 
@@ -631,6 +644,8 @@ def start_backend(config: ServiceConfig, console) -> None:
 
     if runtime_record is not None:
         paths.backend_pid.unlink(missing_ok=True)
+
+    _run_legacy_task_migration(root, console)
 
     command = resolve_flocks_cli_command(root) + [
         "serve",
