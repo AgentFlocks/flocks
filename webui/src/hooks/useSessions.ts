@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, startTransition } from 'react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
-import type { Session, Message, MessagePart } from '@/types';
+import type { Session, Message } from '@/types';
 
 const VISIBLE_CATEGORIES = new Set(['user', 'workflow', 'entity-config']);
 
@@ -301,6 +301,33 @@ export function useSessionMessages(sessionId?: string) {
           setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
         });
       }
+    },
+    replaceMessageText: (messageId: string, partId: string, text: string) => {
+      setMessages(prev => prev.map((message) => {
+        if (message.id !== messageId) return message;
+
+        const parts = [...(message.parts || [])];
+        const targetPartIndex = parts.findIndex((part) => part.id === partId && part.type === 'text');
+        if (targetPartIndex < 0) {
+          return message;
+        }
+        parts[targetPartIndex] = {
+          ...parts[targetPartIndex],
+          text,
+        };
+
+        return {
+          ...message,
+          parts,
+        };
+      }));
+    },
+    truncateAfterMessage: (messageId: string, options?: { includeTarget?: boolean }) => {
+      setMessages(prev => {
+        const targetIndex = prev.findIndex((message) => message.id === messageId);
+        if (targetIndex < 0) return prev;
+        return prev.slice(0, options?.includeTarget ? targetIndex : targetIndex + 1);
+      });
     },
   };
 }

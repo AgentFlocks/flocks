@@ -64,7 +64,7 @@ async def find_text(
                         line=line_num,
                         content=content[:200],  # Truncate
                     ))
-            except:
+            except Exception:
                 continue
         
         return results
@@ -89,7 +89,7 @@ async def find_text(
                     ))
             
             return results
-        except:
+        except Exception:
             return []
     except Exception as e:
         log.warn("find.error", {"error": str(e)})
@@ -146,7 +146,7 @@ async def find_files(
             
             files = result.stdout.strip().splitlines() if result.stdout else []
             return files[:limit or 50]
-        except:
+        except Exception:
             return []
     except Exception as e:
         log.warn("find.file.error", {"error": str(e)})

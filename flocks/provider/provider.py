@@ -874,7 +874,7 @@ class BaseProvider:
                 return False
             # Check if it's the base implementation
             return method != BaseProvider.embed
-        except:
+        except Exception:
             return False
     
     def get_embedding_models(self) -> List[str]:

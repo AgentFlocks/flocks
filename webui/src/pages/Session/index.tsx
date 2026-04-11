@@ -4,17 +4,28 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
+  MoreHorizontal, PencilLine, Download,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
+
+function sanitizeSessionExportName(value: string) {
+  const trimmed = value.trim();
+  return trimmed
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'session';
+}
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
@@ -31,6 +42,13 @@ export default function SessionPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
+  const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
 
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
@@ -94,6 +112,31 @@ export default function SessionPage() {
     return () => document.removeEventListener('mousedown', handle);
   }, [showAgentOptions]);
 
+  useEffect(() => {
+    if (!openMenuSessionId) return;
+    const handle = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-session-actions]')) {
+        setOpenMenuSessionId(null);
+      }
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [openMenuSessionId]);
+
+  useEffect(() => {
+    if (!renamingSessionId) return;
+    renameInputRef.current?.focus();
+    renameInputRef.current?.select();
+  }, [renamingSessionId]);
+
+  useEffect(() => {
+    if (!selectMode) return;
+    setOpenMenuSessionId(null);
+    setRenamingSessionId(null);
+    setRenameValue('');
+  }, [selectMode]);
+
   const handleCreateSession = useCallback(async () => {
     if (creating) return;
     setCreating(true);
@@ -132,7 +175,7 @@ export default function SessionPage() {
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     if (!confirm(t('confirmDelete'))) return;
     try {
-      await client.delete(`/api/session/${sessionId}`);
+      await sessionApi.delete(sessionId);
       // Remove from local state first so auto-select won't pick the deleted session.
       // No need to refetchSessions — removeSession already keeps the list accurate.
       if (selectedSessionId === sessionId) setSelectedSessionId(null);
@@ -141,6 +184,74 @@ export default function SessionPage() {
       toast.error(t('deleteFailed'), err.message);
     }
   }, [selectedSessionId, removeSession, toast, t]);
+
+  const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
+    setOpenMenuSessionId(null);
+    setRenamingSessionId(sessionId);
+    setRenameValue(currentTitle);
+  }, []);
+
+  const handleCancelRename = useCallback(() => {
+    if (renameSubmitting) return;
+    renameSubmitInFlightRef.current = false;
+    setRenamingSessionId(null);
+    setRenameValue('');
+  }, [renameSubmitting]);
+
+  const handleSubmitRename = useCallback(async (sessionId: string) => {
+    if (renameSubmitInFlightRef.current) return;
+    const nextTitle = renameValue.trim();
+    if (!nextTitle) {
+      toast.error(t('renameFailed'), t('renameEmpty'));
+      return;
+    }
+    const currentSession = sessions.find(session => session.id === sessionId);
+    if (currentSession?.title === nextTitle) {
+      setRenamingSessionId(null);
+      setRenameValue('');
+      return;
+    }
+
+    renameSubmitInFlightRef.current = true;
+    setRenameSubmitting(true);
+    try {
+      const updatedSession = await sessionApi.update(sessionId, { title: nextTitle });
+      updateSessionTitle(sessionId, updatedSession.title ?? nextTitle);
+      setRenamingSessionId(null);
+      setRenameValue('');
+    } catch (err: any) {
+      toast.error(t('renameFailed'), err.message);
+    } finally {
+      renameSubmitInFlightRef.current = false;
+      setRenameSubmitting(false);
+    }
+  }, [renameValue, sessions, t, toast, updateSessionTitle]);
+
+  const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
+    setOpenMenuSessionId(null);
+    setDownloadingSessionId(sessionId);
+    try {
+      const [sessionInfo, messages] = await Promise.all([
+        sessionApi.get(sessionId),
+        sessionApi.getMessages(sessionId),
+      ]);
+      const exportPayload = {
+        info: sessionInfo,
+        messages,
+      };
+      const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `session-${sanitizeSessionExportName(title || sessionId)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast.error(t('downloadFailed'), err.message);
+    } finally {
+      setDownloadingSessionId(null);
+    }
+  }, [t, toast]);
 
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
@@ -308,7 +419,32 @@ export default function SessionPage() {
                           <Settings2 className="w-3 h-3 text-purple-400" />
                         </span>
                       )}
-                      <h3 className="font-semibold text-gray-900 truncate text-sm">{session.title}</h3>
+                      {renamingSessionId === session.id ? (
+                        <input
+                          ref={renameInputRef}
+                          value={renameValue}
+                          onChange={(e) => setRenameValue(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                          onBlur={() => void handleSubmitRename(session.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              void handleSubmitRename(session.id);
+                            }
+                            if (e.key === 'Escape') {
+                              e.preventDefault();
+                              handleCancelRename();
+                            }
+                          }}
+                          placeholder={t('renamePlaceholder')}
+                          disabled={renameSubmitting}
+                          className="w-full min-w-0 rounded-md border border-blue-300 bg-white px-2 py-1 text-sm font-semibold text-gray-900 outline-none ring-0 focus:border-blue-400"
+                          aria-label={t('rename')}
+                          data-session-rename-input
+                        />
+                      ) : (
+                        <h3 className="font-semibold text-gray-900 truncate text-sm">{session.title}</h3>
+                      )}
                     </div>
                     {session.time?.updated && (
                       <p className="text-xs text-gray-400 mt-1 truncate">
@@ -317,12 +453,59 @@ export default function SessionPage() {
                     )}
                   </div>
                   {!selectMode && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDeleteSession(session.id); }}
-                      className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
+                    <div className="relative flex-shrink-0" data-session-actions>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenMenuSessionId(prev => prev === session.id ? null : session.id);
+                        }}
+                        title={t('moreActions')}
+                        className={`p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all ${
+                          openMenuSessionId === session.id ? 'opacity-100 bg-slate-100 text-slate-700' : 'opacity-0 group-hover:opacity-100'
+                        }`}
+                        aria-label={t('moreActions')}
+                        aria-expanded={openMenuSessionId === session.id}
+                      >
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                      {openMenuSessionId === session.id && (
+                        <div className="absolute right-0 top-full z-20 mt-1.5 w-32 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-md">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleStartRename(session.id, session.title);
+                            }}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50"
+                          >
+                            <PencilLine className="w-3.5 h-3.5" />
+                            <span>{t('rename')}</span>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDownloadSession(session.id, session.title);
+                            }}
+                            disabled={downloadingSessionId === session.id}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>{t('downloadJson')}</span>
+                          </button>
+                          <div className="mx-2.5 my-1 border-t border-gray-100" />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenMenuSessionId(null);
+                              void handleDeleteSession(session.id);
+                            }}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>{t('deleteAction')}</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>
