@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCircle, X, RefreshCw } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCircle, X, RefreshCw, Pencil, Save } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -28,6 +28,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
+import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { workspaceAPI } from '@/api/workspace';
@@ -217,6 +218,11 @@ export default function SessionChat({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingPartId, setEditingPartId] = useState<string | null>(null);
+  const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
+  const [editingText, setEditingText] = useState('');
+  const [actionMessageId, setActionMessageId] = useState<string | null>(null);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -274,7 +280,16 @@ export default function SessionChat({
     });
   }, []);
 
-  const { messages, loading, refetch, addMessage, updateMessage, updateMessagePart } =
+  const {
+    messages,
+    loading,
+    refetch,
+    addMessage,
+    updateMessage,
+    updateMessagePart,
+    replaceMessageText,
+    truncateAfterMessage,
+  } =
     useSessionMessages(sessionId || undefined);
 
   // Keep a ref to latest messages so handleAbort can read it without stale closure
@@ -902,6 +917,127 @@ export default function SessionChat({
     navigator.clipboard.writeText(text).catch(() => {});
   }, []);
 
+  const resetEditingState = useCallback(() => {
+    setEditingMessageId(null);
+    setEditingPartId(null);
+    setEditingRole(null);
+    setEditingText('');
+    setActionMessageId(null);
+  }, []);
+
+  const reportActionError = useCallback((fallback: string, err: unknown) => {
+    const message = err instanceof Error ? err.message : fallback;
+    onError?.(message);
+    if (!onError) {
+      alert(message);
+    }
+  }, [onError]);
+
+  const beginMessageEdit = useCallback((
+    targetMessageId: string,
+    targetPartId: string,
+    role: Message['role'],
+    rawText: string,
+  ) => {
+    setEditingMessageId(targetMessageId);
+    setEditingPartId(targetPartId);
+    setEditingRole(role);
+    setEditingText(rawText);
+    setActionMessageId(null);
+  }, []);
+
+  const handleSaveEditedMessage = useCallback(async () => {
+    if (!sessionId || !editingMessageId || !editingPartId || !editingRole) return;
+    const text = editingText.trim();
+    if (!text) return;
+
+    setActionMessageId(editingMessageId);
+    try {
+      await sessionApi.updateMessagePart(sessionId, editingMessageId, editingPartId, {
+        id: editingPartId,
+        messageID: editingMessageId,
+        sessionID: sessionId,
+        type: 'text',
+        text,
+      });
+      replaceMessageText(editingMessageId, editingPartId, text);
+      resetEditingState();
+    } catch (err) {
+      reportActionError(t('chat.errors.saveFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [
+    editingMessageId,
+    editingPartId,
+    editingRole,
+    editingText,
+    replaceMessageText,
+    reportActionError,
+    resetEditingState,
+    sessionId,
+    t,
+  ]);
+
+  const handleSendEditedUserMessage = useCallback(async () => {
+    if (!sessionId || !editingMessageId || !editingPartId || editingRole !== 'user') return;
+    const text = editingText.trim();
+    if (!text) return;
+
+    abortingRef.current = false;
+    isAtBottomRef.current = true;
+    setActionMessageId(editingMessageId);
+    try {
+      await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
+      replaceMessageText(editingMessageId, editingPartId, text);
+      truncateAfterMessage(editingMessageId);
+      setIsStreaming(true);
+      resetEditingState();
+    } catch (err) {
+      reportActionError(t('chat.errors.resendFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [
+    editingMessageId,
+    editingPartId,
+    editingRole,
+    editingText,
+    replaceMessageText,
+    reportActionError,
+    resetEditingState,
+    sessionId,
+    t,
+    truncateAfterMessage,
+  ]);
+
+  const handleRegenerateMessage = useCallback(async (messageId: string) => {
+    if (!sessionId) return;
+
+    abortingRef.current = false;
+    isAtBottomRef.current = true;
+    setActionMessageId(messageId);
+    try {
+      await sessionApi.regenerateMessage(sessionId, messageId);
+      truncateAfterMessage(messageId, { includeTarget: true });
+      setIsStreaming(true);
+      if (editingMessageId === messageId) {
+        resetEditingState();
+      }
+    } catch (err) {
+      reportActionError(t('chat.errors.regenerateFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [editingMessageId, reportActionError, resetEditingState, sessionId, t, truncateAfterMessage]);
+
+  useEffect(() => {
+    if (!editingMessageId) return;
+    if (!messages.some((message) => message.id === editingMessageId)) {
+      resetEditingState();
+    }
+  }, [editingMessageId, messages, resetEditingState]);
+
   // ── Merged messages with compaction grouping ──
   // The compaction divider is rendered at the position of the FIRST
   // compacted message (not the summary), so it appears before the
@@ -1005,6 +1141,16 @@ export default function SessionChat({
                   showTimestamp={showTimestamp}
                   compact={compact}
                   onCopy={handleCopy}
+                  editingMessageId={editingMessageId}
+                  editingText={editingText}
+                  actionsDisabled={sending || isStreaming}
+                  actionMessageId={actionMessageId}
+                  onEditStart={beginMessageEdit}
+                  onEditChange={setEditingText}
+                  onEditCancel={resetEditingState}
+                  onEditSave={handleSaveEditedMessage}
+                  onEditSend={handleSendEditedUserMessage}
+                  onRegenerate={handleRegenerateMessage}
                   compactedMessages={compactedGroupMap.get(i)}
                 />
               );
@@ -1283,6 +1429,16 @@ export interface ChatMessageBubbleProps {
   showTimestamp?: boolean;
   compact?: boolean;
   onCopy?: (text: string) => void;
+  editingMessageId?: string | null;
+  editingText?: string;
+  actionsDisabled?: boolean;
+  actionMessageId?: string | null;
+  onEditStart?: (messageId: string, partId: string, role: Message['role'], rawText: string) => void;
+  onEditChange?: (text: string) => void;
+  onEditCancel?: () => void;
+  onEditSave?: () => Promise<void>;
+  onEditSend?: () => Promise<void>;
+  onRegenerate?: (messageId: string) => Promise<void>;
   /** Compacted messages that precede this summary message */
   compactedMessages?: MergedMessage[];
 }
@@ -1297,6 +1453,16 @@ function ChatMessageBubbleInner({
   showTimestamp = false,
   compact = true,
   onCopy,
+  editingMessageId,
+  editingText = '',
+  actionsDisabled = false,
+  actionMessageId,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onEditSend,
+  onRegenerate,
   compactedMessages,
 }: ChatMessageBubbleProps) {
   const { t } = useTranslation('session');
@@ -1317,6 +1483,16 @@ function ChatMessageBubbleInner({
                 showTimestamp={showTimestamp}
                 compact={compact}
                 onCopy={onCopy}
+                editingMessageId={editingMessageId}
+                editingText={editingText}
+                actionsDisabled={actionsDisabled}
+                actionMessageId={actionMessageId}
+                onEditStart={onEditStart}
+                onEditChange={onEditChange}
+                onEditCancel={onEditCancel}
+                onEditSave={onEditSave}
+                onEditSend={onEditSend}
+                onRegenerate={onRegenerate}
               />
             ))}
           </div>
@@ -1333,6 +1509,16 @@ function ChatMessageBubbleInner({
       .map((p) => p.text)
       .join('\n\n');
 
+  const editableTextParts = parts.filter((part): part is MessagePart & { text: string } =>
+    part.type === 'text' && typeof part.text === 'string',
+  );
+  const latestEditablePart = editableTextParts.length > 0 ? editableTextParts[editableTextParts.length - 1] : null;
+  const targetMessageId = String((latestEditablePart as any)?.messageID || message.id);
+  const targetPartId = latestEditablePart?.id || null;
+  const editableRawText = latestEditablePart?.text || '';
+  const isEditing = !!targetPartId && editingMessageId === targetMessageId;
+  const isActionPending = actionMessageId === targetMessageId;
+
   const bubbleClass = compact
     ? `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
         isUser
@@ -1344,10 +1530,19 @@ function ChatMessageBubbleInner({
           ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
           : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
       }`;
+  const actionBarClass = `absolute bottom-0 z-10 flex items-center gap-1.5 transition-all duration-150 ${
+    isUser ? 'right-3 translate-x-0.5 translate-y-1/2' : 'left-3 -translate-x-0.5 translate-y-1/2'
+  } ${
+    isEditing
+      ? 'opacity-100 pointer-events-auto'
+      : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
+  }`;
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/90 bg-white text-gray-500 shadow-[0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-sm transition-all duration-150 hover:-translate-y-px hover:border-gray-300 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed';
+  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'group w-full' : ''}`}>
-      <div className={bubbleClass} style={{ overflowWrap: 'anywhere' }}>
+    <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
+      <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
         {/* Role badge */}
         <div className={`text-xs font-medium mb-2 flex items-center ${compact ? 'gap-1.5' : 'gap-2'}`}>
           {isUser ? (
@@ -1380,89 +1575,100 @@ function ChatMessageBubbleInner({
         )}
 
         {/* Parts */}
-        {parts.map((part: MessagePart, i: number) => (
-          <div key={part.id || i}>
-            {/* Text */}
-            {part.type === 'text' && part.text && (() => {
-              const nodeRefMatch = isUser
-                ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-                : null;
-              const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
-              return (
-                <>
-                  {nodeRefMatch && (
-                    <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                      <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
-                      <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
-                    </div>
-                  )}
-                  <StreamingMarkdown
-                    content={displayText}
-                    isStreaming={isActive && !isUser}
-                  />
-                </>
-              );
-            })()}
-
-            {/* Tool call */}
-            {part.type === 'tool' && (
-              <ChatToolPart
-                part={part}
-                pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
-                onAnswer={onQuestionAnswer && part.callID
-                  ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
-                  : undefined}
-                onReject={onQuestionReject && part.callID
-                  ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
-                  : undefined}
-              />
-            )}
-
-            {/* Reasoning / thinking */}
-            {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
-              const thinkingText = part.text || part.thinking || '';
-              const partKey = part.id || `reasoning-${i}`;
-              const isExpanded = getPartExpanded(partKey);
-              const isThinking = !isReasoningDone;
-              const partLabel = isThinking
-                ? `💭 ${t('chat.thinking')}`
-                : `💭 ${thinkingText.slice(0, 60)}${thinkingText.length > 60 ? '...' : ''}`;
-              return (
-                <div className="mt-2">
-                  <button
-                    onClick={() => togglePart(partKey)}
-                    disabled={isThinking}
-                    className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-xs font-medium transition-colors w-full text-left
-                      ${isThinking
-                        ? 'bg-purple-50 border-purple-200 text-purple-700 cursor-default'
-                        : 'bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-900 cursor-pointer'
-                      }`}
-                  >
-                    {isThinking && (
-                      <span className="flex gap-0.5 mr-1">
-                        <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </span>
-                    )}
-                    {partLabel}
-                    {!isThinking && (
-                      <ChevronDown
-                        className={`w-3 h-3 ml-auto text-purple-600 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
-                      />
-                    )}
-                  </button>
-                  {isExpanded && (
-                    <div className="mt-1 p-2 bg-purple-50/50 rounded-md border border-purple-100 text-xs text-purple-800 whitespace-pre-wrap font-mono leading-relaxed">
-                      {thinkingText}
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
+        {isEditing ? (
+          <div className="space-y-3">
+            <textarea
+              value={editingText}
+              onChange={(event) => onEditChange?.(event.target.value)}
+              rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
+              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 shadow-sm focus:border-gray-400 focus:outline-none focus:ring-2 focus:ring-gray-100"
+            />
           </div>
-        ))}
+        ) : (
+          parts.map((part: MessagePart, i: number) => (
+            <div key={part.id || i}>
+              {/* Text */}
+              {part.type === 'text' && part.text && (() => {
+                const nodeRefMatch = isUser
+                  ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
+                  : null;
+                const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
+                return (
+                  <>
+                    {nodeRefMatch && (
+                      <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                        <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                        <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
+                      </div>
+                    )}
+                    <StreamingMarkdown
+                      content={displayText}
+                      isStreaming={isActive && !isUser}
+                    />
+                  </>
+                );
+              })()}
+
+              {/* Tool call */}
+              {part.type === 'tool' && (
+                <ChatToolPart
+                  part={part}
+                  pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
+                  onAnswer={onQuestionAnswer && part.callID
+                    ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
+                    : undefined}
+                  onReject={onQuestionReject && part.callID
+                    ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
+                    : undefined}
+                />
+              )}
+
+              {/* Reasoning / thinking */}
+              {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
+                const thinkingText = part.text || part.thinking || '';
+                const partKey = part.id || `reasoning-${i}`;
+                const isExpanded = getPartExpanded(partKey);
+                const isThinking = !isReasoningDone;
+                const partLabel = isThinking
+                  ? `💭 ${t('chat.thinking')}`
+                  : `💭 ${thinkingText.slice(0, 60)}${thinkingText.length > 60 ? '...' : ''}`;
+                return (
+                  <div className="mt-2">
+                    <button
+                      onClick={() => togglePart(partKey)}
+                      disabled={isThinking}
+                      className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-xs font-medium transition-colors w-full text-left
+                        ${isThinking
+                          ? 'bg-purple-50 border-purple-200 text-purple-700 cursor-default'
+                          : 'bg-purple-50 hover:bg-purple-100 border-purple-200 text-purple-900 cursor-pointer'
+                        }`}
+                    >
+                      {isThinking && (
+                        <span className="flex gap-0.5 mr-1">
+                          <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <span className="w-1 h-1 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </span>
+                      )}
+                      {partLabel}
+                      {!isThinking && (
+                        <ChevronDown
+                          className={`w-3 h-3 ml-auto text-purple-600 transition-transform ${isExpanded ? '' : '-rotate-90'}`}
+                        />
+                      )}
+                    </button>
+                    {isExpanded && (
+                      <div className="mt-1 p-2 bg-purple-50/50 rounded-md border border-purple-100 text-xs text-purple-800 whitespace-pre-wrap font-mono leading-relaxed">
+                        {thinkingText}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          ))
+        )}
 
         {/* Streaming indicator */}
         {isActive && !isUser && parts.length > 0 && (() => {
@@ -1483,24 +1689,83 @@ function ChatMessageBubbleInner({
           );
         })()}
 
-        {/* Actions (copy) — for assistant messages */}
-        {showActions && !isUser && parts.length > 0 && (
-          <div className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-100 opacity-0 group-hover:opacity-100 transition-opacity duration-200">
-            <button
-              onClick={() => onCopy?.(getTextContent())}
-              className="flex items-center gap-1 px-2 py-1 text-xs text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-md transition-colors"
-              title={t('chat.copyTitle')}
-            >
-              <Copy className="w-3.5 h-3.5" />
-              <span>{t('chat.copy')}</span>
-            </button>
-          </div>
-        )}
-
         {/* Timestamp */}
         {showTimestamp && message.timestamp && (
           <div className={`text-xs mt-2 ${isUser ? 'opacity-60' : 'opacity-40'}`}>
             {formatSmartTime(message.timestamp)}
+          </div>
+        )}
+
+        {/* Actions */}
+        {showActions && parts.length > 0 && (
+          <div className={actionBarClass}>
+            {isEditing ? (
+              <>
+                <button
+                  onClick={() => void onEditSave?.()}
+                  disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                  className={iconButtonClass}
+                  aria-label={t('chat.save')}
+                >
+                  <Save className="w-3 h-3" />
+                  <span className={tooltipClass}>{t('chat.save')}</span>
+                </button>
+                {isUser && (
+                  <button
+                    onClick={() => void onEditSend?.()}
+                    disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                    className={iconButtonClass}
+                    aria-label={t('chat.sendEdited')}
+                  >
+                    <Send className="w-3 h-3" />
+                    <span className={tooltipClass}>{t('chat.sendEdited')}</span>
+                  </button>
+                )}
+                <button
+                  onClick={onEditCancel}
+                  disabled={isActionPending}
+                  className={iconButtonClass}
+                  aria-label={t('chat.cancel')}
+                >
+                  <X className="w-3 h-3" />
+                  <span className={tooltipClass}>{t('chat.cancel')}</span>
+                </button>
+              </>
+            ) : (
+              <>
+                {targetPartId && editableRawText && (
+                  <button
+                    onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+                    disabled={actionsDisabled || isActionPending}
+                    className={iconButtonClass}
+                    aria-label={isUser ? t('chat.edit') : t('chat.editRawTitle')}
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span className={tooltipClass}>{isUser ? t('chat.edit') : t('chat.editRawTitle')}</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => onCopy?.(getTextContent())}
+                  disabled={isActionPending}
+                  className={iconButtonClass}
+                  aria-label={t('chat.copy')}
+                >
+                  <Copy className="w-3 h-3" />
+                  <span className={tooltipClass}>{t('chat.copy')}</span>
+                </button>
+                {!isUser && (
+                  <button
+                    onClick={() => void onRegenerate?.(targetMessageId)}
+                    disabled={actionsDisabled || isActionPending}
+                    className={iconButtonClass}
+                    aria-label={t('chat.regenerate')}
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+                    <span className={tooltipClass}>{t('chat.regenerate')}</span>
+                  </button>
+                )}
+              </>
+            )}
           </div>
         )}
       </div>
@@ -1636,6 +1901,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   if (prev.isActive !== next.isActive) return false;
   if (prev.showActions !== next.showActions) return false;
+  if (prev.editingMessageId !== next.editingMessageId) return false;
+  if (prev.editingText !== next.editingText) return false;
+  if (prev.actionsDisabled !== next.actionsDisabled) return false;
+  if (prev.actionMessageId !== next.actionMessageId) return false;
   if (prev.message.finish !== next.message.finish) return false;
   const prevParts = prev.message.parts as any[] | undefined;
   const nextParts = next.message.parts as any[] | undefined;

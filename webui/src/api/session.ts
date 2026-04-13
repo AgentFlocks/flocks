@@ -1,5 +1,18 @@
 import client from './client';
 
+export interface SessionMessagePartPayload {
+  id: string;
+  messageID: string;
+  sessionID: string;
+  type: string;
+  text?: string;
+  synthetic?: boolean;
+  tool?: string;
+  state?: Record<string, unknown>;
+  callID?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface SessionListParams {
   limit?: number;
   offset?: number;
@@ -85,6 +98,46 @@ export const sessionApi = {
     mockReply?: string;
   }) => {
     const response = await client.post(`/api/session/${sessionId}/message`, data, { timeout: 0 });
+    return response.data;
+  },
+
+  /**
+   * 更新消息 part
+   */
+  updateMessagePart: async (
+    sessionId: string,
+    messageId: string,
+    partId: string,
+    data: SessionMessagePartPayload,
+  ) => {
+    const response = await client.patch(
+      `/api/session/${sessionId}/message/${messageId}/part/${partId}`,
+      data,
+    );
+    return response.data;
+  },
+
+  /**
+   * 编辑用户消息后重新发送
+   */
+  resendMessage: async (sessionId: string, messageId: string, partId: string, text: string) => {
+    const response = await client.post(
+      `/api/session/${sessionId}/message/${messageId}/resend`,
+      { text, partID: partId },
+      { timeout: 0 },
+    );
+    return response.data;
+  },
+
+  /**
+   * 重新生成助手消息
+   */
+  regenerateMessage: async (sessionId: string, messageId: string) => {
+    const response = await client.post(
+      `/api/session/${sessionId}/message/${messageId}/regenerate`,
+      {},
+      { timeout: 0 },
+    );
     return response.data;
   },
 

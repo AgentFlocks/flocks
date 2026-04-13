@@ -203,4 +203,63 @@ describe('updateMessagePart scheduling', () => {
 
     expect(result.current.messages).toHaveLength(0);
   });
+
+  it('replaceMessageText updates the targeted text part by partId', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-edit',
+        role: 'user',
+        parts: [
+          { id: 'part-1', type: 'text', text: 'before-1' } as any,
+          { id: 'part-2', type: 'text', text: 'before-2' } as any,
+        ],
+      }));
+    });
+
+    await act(async () => {
+      result.current.replaceMessageText('msg-edit', 'part-2', 'after');
+    });
+
+    const msg = result.current.messages.find((item) => item.id === 'msg-edit');
+    expect(msg).toBeDefined();
+    expect((msg!.parts as any[])[0].text).toBe('before-1');
+    expect((msg!.parts as any[])[1].text).toBe('after');
+  });
+
+  it('truncateAfterMessage keeps the target by default', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({ id: 'msg-1', role: 'user' }));
+      result.current.addMessage(makeMsg({ id: 'msg-2', role: 'assistant' }));
+      result.current.addMessage(makeMsg({ id: 'msg-3', role: 'assistant' }));
+    });
+
+    await act(async () => {
+      result.current.truncateAfterMessage('msg-2');
+    });
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-1', 'msg-2']);
+  });
+
+  it('truncateAfterMessage can also remove the target message', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({ id: 'msg-1', role: 'user' }));
+      result.current.addMessage(makeMsg({ id: 'msg-2', role: 'assistant' }));
+      result.current.addMessage(makeMsg({ id: 'msg-3', role: 'assistant' }));
+    });
+
+    await act(async () => {
+      result.current.truncateAfterMessage('msg-2', { includeTarget: true });
+    });
+
+    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-1']);
+  });
 });
