@@ -1046,14 +1046,9 @@ function WeComPanel({ config, onChange }: WeComPanelProps) {
           />
         </FieldRow>
         <FieldRow label={t('wecom.groupTrigger')} hint={t('wecom.groupTriggerHint')}>
-          <Select
-            value={config.groupTrigger ?? 'mention'}
-            onChange={(v) => set('groupTrigger', v)}
-            options={[
-              { value: 'mention', label: t('wecom.triggerMention') },
-              { value: 'all', label: t('wecom.triggerAll') },
-            ]}
-          />
+          <span className="inline-block px-3 py-1.5 text-sm text-gray-500 border border-gray-200 rounded-md bg-gray-50">
+            {t('wecom.triggerMention')}
+          </span>
         </FieldRow>
         <FieldRow label={t('wecom.allowFrom')} hint={t('wecom.allowFromHint')}>
           <TagsInput
@@ -1578,7 +1573,11 @@ export default function ChannelPage() {
         if (ch.id === 'feishu') {
           configs[ch.id] = { ...defaultFeishuConfig(), ...saved };
         } else if (ch.id === 'wecom') {
-          configs[ch.id] = { ...defaultWeComConfig(), ...saved };
+          const wecomCfg = { ...defaultWeComConfig(), ...saved };
+          if (wecomCfg.groupTrigger && wecomCfg.groupTrigger !== 'mention') {
+            wecomCfg.groupTrigger = 'mention';
+          }
+          configs[ch.id] = wecomCfg;
         } else if (ch.id === 'dingtalk') {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {

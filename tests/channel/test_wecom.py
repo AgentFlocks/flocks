@@ -58,6 +58,18 @@ class TestWeComChannelMeta:
         err = self.ch.validate_config({"botId": "b", "secret": "s"})
         assert err is None
 
+    def test_validate_config_normalizes_group_trigger_all(self):
+        """Legacy groupTrigger 'all' should be normalized to 'mention'."""
+        config = {"botId": "b", "secret": "s", "groupTrigger": "all"}
+        err = self.ch.validate_config(config)
+        assert err is None
+        assert config["groupTrigger"] == "mention"
+
+    def test_validate_config_keeps_group_trigger_mention(self):
+        config = {"botId": "b", "secret": "s", "groupTrigger": "mention"}
+        self.ch.validate_config(config)
+        assert config["groupTrigger"] == "mention"
+
 
 # ------------------------------------------------------------------
 # send_text — via WSClient mock
