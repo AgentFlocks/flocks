@@ -402,11 +402,19 @@ async def read_tool(
     output += "\n".join(content_lines)
     
     if truncated_by_bytes:
-        output += f"\n\n(Output truncated at {MAX_BYTES} bytes. Use 'offset' parameter to read beyond line {last_read_line})"
+        remaining = total_lines - last_read_line
+        output += (
+            f"\n\n(Output truncated at {MAX_BYTES} bytes — showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
+            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
+        )
     elif has_more_lines:
-        output += f"\n\n(File has more lines. Use 'offset' parameter to read beyond line {last_read_line})"
+        remaining = total_lines - last_read_line
+        output += (
+            f"\n\n(Showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
+            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
+        )
     else:
-        output += f"\n\n(End of file - total {total_lines} lines)"
+        output += f"\n\n(End of file — total {total_lines} lines)"
     
     output += "\n</file>"
     
