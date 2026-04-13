@@ -113,12 +113,9 @@ export default function SessionPage() {
       const response = await client.post('/api/session', { title: 'New Session' });
       const newSessionId = response.data.id;
 
-      // Show the new session in the sidebar and switch to it immediately.
       addSession(response.data);
       setSelectedSessionId(newSessionId);
 
-      // Fire-and-forget: prompt_async returns 202 instantly; no need to await.
-      // The response streams in via SSE once the backend picks it up.
       const payload: Record<string, unknown> = { parts: [{ type: 'text', text }] };
       if (selectedAgent) payload.agent = selectedAgent;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {

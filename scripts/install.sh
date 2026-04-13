@@ -17,6 +17,7 @@ PATH_REFRESH_HINT_REQUIRED=0
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
+NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -319,11 +320,35 @@ node_version_satisfies_requirement() {
   [[ "$major" -ge "$MIN_NODE_MAJOR" ]]
 }
 
-install_nodejs_macos() {
-  has_cmd brew || fail "A compatible npm installation was not found. Homebrew is required to install or upgrade Node.js 22+ automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
+load_nvm() {
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  [[ -s "$NVM_DIR/nvm.sh" ]] || return 1
 
-  info "Trying to install or upgrade Node.js with Homebrew..."
-  brew install node
+  # shellcheck disable=SC1090
+  . "$NVM_DIR/nvm.sh"
+  command -v nvm >/dev/null 2>&1
+}
+
+install_nodejs_macos() {
+  if has_cmd brew; then
+    info "Trying to install or upgrade Node.js with Homebrew..."
+    brew install node
+    return
+  fi
+
+  has_cmd curl || fail "A compatible npm installation was not found. Homebrew is not installed, and curl is required to install nvm automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
+
+  if load_nvm; then
+    info "Homebrew was not found. Using the existing nvm installation..."
+  else
+    info "Homebrew was not found. Trying to install nvm..."
+    curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash
+    load_nvm || fail "nvm was installed, but it could not be loaded from $NVM_DIR/nvm.sh. Open a new shell and retry.$(nodejs_manual_download_hint)"
+  fi
+
+  info "Trying to install Node.js ${MIN_NODE_MAJOR} with nvm..."
+  nvm install "$MIN_NODE_MAJOR"
+  nvm use "$MIN_NODE_MAJOR" >/dev/null
 }
 
 install_nodejs_linux() {

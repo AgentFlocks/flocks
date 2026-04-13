@@ -49,20 +49,16 @@ If automatic `npm` installation fails during setup, please install `npm` manuall
 > [!NOTE]
 > **Users in mainland China**: Please follow the installation instructions in the [简体中文](README_zh.md), which provides a mirror-accelerated installation method specifically optimized for users in China.
 
-The recommended host installation entrypoint is the GitHub bootstrap installer. It downloads the repository source archive to a temporary directory, copies it into a `flocks/` subdirectory under your current working directory by default, then installs backend and WebUI dependencies and exposes the `flocks` CLI on your PATH. You can still override the destination with `FLOCKS_INSTALL_DIR`.
-
 #### macOS / Linux
 
 ```bash
-# One-click install backend + WebUI
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
-# Creates ./flocks under the current directory
 ```
+Creates ./flocks under the current directory
 
 #### Windows PowerShell (Administrator)
 
 ```powershell
-# One-click install backend + WebUI
 powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1 | iex"
 ```
 

@@ -1,3 +1,6 @@
+import re
+import subprocess
+import textwrap
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,6 +89,118 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
     assert "https://nodejs.org/en/download" in script
     assert "nodejs_manual_download_hint" in script
+    assert "FLOCKS_NVM_INSTALL_SCRIPT_URL" in script
+    assert "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh" in script
+    assert "load_nvm()" in script
+    assert 'curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash' in script
+    assert 'nvm install "$MIN_NODE_MAJOR"' in script
+    assert 'nvm use "$MIN_NODE_MAJOR" >/dev/null' in script
+    assert "Homebrew was not found. Trying to install nvm..." in script
+    assert "Homebrew was not found. Using the existing nvm installation..." in script
+
+
+def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        unset NVM_DIR
+        export TEST_LOG="$HOME/install-node.log"
+
+        info() {
+          printf '%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        has_cmd() {
+          case "$1" in
+            brew)
+              return 1
+              ;;
+            curl)
+              return 0
+              ;;
+            *)
+              command -v "$1" >/dev/null 2>&1
+              ;;
+          esac
+        }
+
+        curl() {
+          cat <<'EOF'
+        mkdir -p "$HOME/.nvm"
+        cat > "$HOME/.nvm/nvm.sh" <<'EOS'
+        nvm() {
+          printf '%s\n' "$*" >> "$HOME/nvm-commands.log"
+          if [[ "$1" == "install" ]]; then
+            mkdir -p "$HOME/.nvm/versions/node/v22.22.2/bin"
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/node" <<'EON'
+        #!/usr/bin/env bash
+        printf 'v22.22.2\n'
+        EON
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/npm" <<'EON'
+        #!/usr/bin/env bash
+        printf '10.9.7\n'
+        EON
+            chmod +x "$HOME/.nvm/versions/node/v22.22.2/bin/node" "$HOME/.nvm/versions/node/v22.22.2/bin/npm"
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          if [[ "$1" == "use" ]]; then
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          return 0
+        }
+        EOS
+        EOF
+        }
+
+        install_nodejs_macos
+
+        node_version="$(node -v)"
+        npm_version="$(npm -v)"
+        nvm_commands="$(<"$HOME/nvm-commands.log")"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ "$node_version" == "v22.22.2" ]] || {
+          printf 'unexpected node version: %s\n' "$node_version" >&2
+          exit 1
+        }
+        [[ "$npm_version" == "10.9.7" ]] || {
+          printf 'unexpected npm version: %s\n' "$npm_version" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"install 22"* ]] || {
+          printf 'nvm install was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"use 22"* ]] || {
+          printf 'nvm use was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"Trying to install nvm"* ]] || {
+          printf 'nvm install message missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
 
 
 def test_main_powershell_installer_uses_configured_default_sources_without_probing() -> None:
