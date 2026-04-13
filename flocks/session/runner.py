@@ -55,8 +55,8 @@ log = Log.create(service="session.runner")
 
 TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
 TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
-TOOL_RESULT_MIN_CHAR_BUDGET = 12_000
-TOOL_RESULT_MIN_TURN_BUDGET = 6_000
+TOOL_RESULT_MIN_CHAR_BUDGET = 8_000
+TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
@@ -1641,10 +1641,18 @@ Please address this message and continue with your tasks.
                                     except (TypeError, ValueError):
                                         tool_output_str = str(tool_output)
 
-                                from flocks.tool.truncation import truncate_tool_result_dynamic
-                                tool_output_str, was_dyn_truncated = truncate_tool_result_dynamic(
-                                    tool_output_str, ctx_window_tokens,
+                                from flocks.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
+                                already_truncated = (
+                                    isinstance(getattr(part.state, 'metadata', None), dict)
+                                    and part.state.metadata.get("truncated")
+                                    and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
                                 )
+                                if not already_truncated:
+                                    tool_output_str, was_dyn_truncated = truncate_tool_result_dynamic(
+                                        tool_output_str, ctx_window_tokens,
+                                    )
+                                else:
+                                    was_dyn_truncated = False
                                 if was_dyn_truncated:
                                     log.info("runner.tool_result_dynamic_truncated", {
                                         "tool_name": tool_name,

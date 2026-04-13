@@ -27,12 +27,12 @@ from flocks.workspace.manager import WorkspaceManager
 
 log = Log.create(service="tool.truncation")
 
-MAX_LINES = 2000
-MAX_BYTES = 50 * 1024  # 50 KB
+MAX_LINES = 200
+MAX_BYTES = 10 * 1024  # 10 KB
 
 MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3
-HARD_MAX_TOOL_RESULT_CHARS = 400_000
-MIN_KEEP_CHARS = 2_000
+HARD_MAX_TOOL_RESULT_CHARS = 10_000
+MIN_KEEP_CHARS = 1_000
 
 _OUTPUT_DIR: Optional[Path] = None
 
@@ -202,7 +202,11 @@ _IMPORTANT_TAIL_RE = re.compile(
 
 
 def _has_important_tail(text: str) -> bool:
-    """Check if the last ~2000 chars contain error/result patterns worth keeping."""
+    """Check if the tail contains error/result patterns worth keeping.
+
+    The detection window (2000 chars) matches the tail_budget cap in
+    truncate_tool_result_text so we only flag content we can actually retain.
+    """
     tail = text[-2000:]
     if _IMPORTANT_TAIL_RE.search(tail):
         return True
@@ -239,7 +243,7 @@ def truncate_tool_result_text(
     budget = max(min_keep_chars, max_chars - len(suffix))
 
     if _has_important_tail(text) and budget > min_keep_chars * 2:
-        tail_budget = min(int(budget * 0.3), 4_000)
+        tail_budget = min(int(budget * 0.3), 2_000)
         middle_marker = "\n\n[... middle content omitted - showing head and tail ...]\n\n"
         head_budget = budget - tail_budget - len(middle_marker)
 
