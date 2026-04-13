@@ -38,6 +38,19 @@ def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
     assert not pid_file.exists()
 
 
+def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_windows_pid_is_running", lambda pid: pid == 123)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("os.kill should not be used on Windows")
+
+    monkeypatch.setattr(service_manager.os, "kill", fail_if_called)
+
+    assert service_manager.pid_is_running(123) is True
+    assert service_manager.pid_is_running(456) is False
+
+
 def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
     pid_file = tmp_path / "backend.pid"
     pid_file.write_text("12345\n", encoding="utf-8")
