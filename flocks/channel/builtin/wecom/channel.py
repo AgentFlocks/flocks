@@ -57,6 +57,9 @@ class WeComChannel(ChannelPlugin):
         for key in ("botId", "secret"):
             if not config.get(key):
                 return f"Missing required config: {key}"
+        # WeCom only delivers @mentioned group messages; normalize legacy "all".
+        if config.get("groupTrigger") == "all":
+            config["groupTrigger"] = "mention"
         return None
 
     # ------------------------------------------------------------------
@@ -271,6 +274,8 @@ def _parse_frame(frame: dict, config: dict) -> Optional[InboundMessage]:
     if chat_type == ChatType.GROUP:
         text = re.sub(r"@\S+", "", text).strip()
 
+    # WeCom platform only delivers group messages when the bot is @mentioned,
+    # so every group message that reaches here is inherently a mention.
     return InboundMessage(
         channel_id="wecom",
         account_id=config.get("_account_id", "default"),
