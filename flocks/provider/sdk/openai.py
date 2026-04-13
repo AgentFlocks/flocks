@@ -16,7 +16,11 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
-from flocks.provider.sdk.openai_base import extract_reasoning_content, resolve_verify_ssl
+from flocks.provider.sdk.openai_base import (
+    _coerce_bool,
+    extract_reasoning_content,
+    resolve_verify_ssl,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai")
@@ -27,16 +31,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
 
 
 class OpenAIProvider(BaseProvider):
