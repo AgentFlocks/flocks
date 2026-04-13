@@ -567,6 +567,7 @@ class OpenAIBaseProvider(BaseProvider):
         tool_calls: Dict[int, Dict[str, Any]] = {}
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None
+        usage_emitted = False
 
         # Stateful extractor to separate <think>...</think> from content.
         think_extractor = ThinkTagExtractor()
@@ -670,18 +671,28 @@ class OpenAIBaseProvider(BaseProvider):
                     tool_calls.clear()
                     # Preserve real finish_reason (e.g. "length" when max_tokens
                     # hit) so the runner can detect truncated tool arguments.
-                    yield StreamChunk(
+                    terminal_chunk = StreamChunk(
                         delta="",
                         finish_reason=choice.finish_reason,
                         tool_calls=sorted_calls,
                         usage=stream_usage,
                     )
+                    yield terminal_chunk
+                    usage_emitted = usage_emitted or terminal_chunk.usage is not None
                 else:
-                    yield StreamChunk(
+                    terminal_chunk = StreamChunk(
                         delta="",
                         finish_reason=choice.finish_reason,
                         usage=stream_usage,
                     )
+                    yield terminal_chunk
+                    usage_emitted = usage_emitted or terminal_chunk.usage is not None
+
+        # OpenAI-compatible APIs may send the usage-only chunk after the
+        # terminal finish chunk. Surface that trailing usage so the runner can
+        # persist it into message metadata and usage_records.
+        if emitted_substantive_chunk and stream_usage and not usage_emitted:
+            yield StreamChunk(delta="", finish_reason=None, usage=stream_usage)
 
         if not emitted_substantive_chunk:
             log.warn("openai_base.stream.empty_response", {

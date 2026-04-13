@@ -289,6 +289,7 @@ class OpenAICompatibleProvider(BaseProvider):
         _first_delta_logged = False
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None
+        usage_emitted = False
 
         async for chunk in stream:
             normalized_usage = _normalize_stream_usage(getattr(chunk, "usage", None))
@@ -393,20 +394,29 @@ class OpenAICompatibleProvider(BaseProvider):
                             tool_calls.append(tc_dict)
 
                         if tool_calls:
-                            yield StreamChunk(
+                            terminal_chunk = StreamChunk(
                                 delta="",  # Empty string, not None
                                 finish_reason=choice.finish_reason,
                                 tool_calls=tool_calls,
                                 usage=stream_usage,
                             )
+                            yield terminal_chunk
+                            usage_emitted = usage_emitted or terminal_chunk.usage is not None
                             yielded_finish_for_this_chunk = True
 
                 if choice.finish_reason and not yielded_finish_for_this_chunk:
-                    yield StreamChunk(
+                    terminal_chunk = StreamChunk(
                         delta="",
                         finish_reason=choice.finish_reason,
                         usage=stream_usage,
                     )
+                    yield terminal_chunk
+                    usage_emitted = usage_emitted or terminal_chunk.usage is not None
+
+        # Some routers emit the OpenAI usage-only frame after the finish chunk.
+        # Re-emit that trailing usage so downstream stats persistence sees it.
+        if emitted_substantive_chunk and stream_usage and not usage_emitted:
+            yield StreamChunk(delta="", finish_reason=None, usage=stream_usage)
 
         if not emitted_substantive_chunk:
             self.log.warn("openai_compatible.stream.empty_response", {

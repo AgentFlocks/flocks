@@ -479,6 +479,47 @@ class TestOpenAIBaseProviderStreamingUsage:
         }
 
     @pytest.mark.asyncio
+    async def test_chat_stream_emits_trailing_usage_when_usage_only_chunk_arrives_after_finish(self):
+        provider, create = self._build_provider_with_stream()
+
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+        )
+        create.return_value = _stream_from_chunks(content_chunk, finish_chunk, usage_chunk)
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.5",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert any(chunk.finish_reason == "stop" for chunk in chunks)
+        assert chunks[-1].usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "total_tokens": 18,
+        }
+        assert chunks[-1].finish_reason is None
+
+    @pytest.mark.asyncio
     async def test_chat_stream_retries_without_stream_options_when_unsupported(self):
         provider, create = self._build_provider_with_stream()
 
