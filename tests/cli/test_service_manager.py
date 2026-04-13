@@ -38,6 +38,19 @@ def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
     assert not pid_file.exists()
 
 
+def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_windows_pid_is_running", lambda pid: pid == 123)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("os.kill should not be used on Windows")
+
+    monkeypatch.setattr(service_manager.os, "kill", fail_if_called)
+
+    assert service_manager.pid_is_running(123) is True
+    assert service_manager.pid_is_running(456) is False
+
+
 def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
     pid_file = tmp_path / "backend.pid"
     pid_file.write_text("12345\n", encoding="utf-8")
@@ -615,6 +628,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
     monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
     monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
+    monkeypatch.setenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", "preview.example.com")
 
     config = service_manager.ServiceConfig(
         backend_host="10.0.0.8",
@@ -626,6 +640,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
 
     assert build_calls[0]["command"] == ["/usr/bin/npm", "run", "build"]
     assert build_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert build_calls[0]["kwargs"]["env"]["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "preview.example.com"
     assert "VITE_API_BASE_URL" not in build_calls[0]["kwargs"]["env"]
 
     assert preview_calls[0]["command"] == [
@@ -639,6 +654,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
         "5174",
     ]
     assert preview_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert preview_calls[0]["kwargs"]["env"]["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "preview.example.com"
     assert "VITE_API_BASE_URL" not in preview_calls[0]["kwargs"]["env"]
     record = service_manager.read_runtime_record(paths.frontend_pid)
     assert record is not None

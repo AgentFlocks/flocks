@@ -5,6 +5,7 @@ Service lifecycle helpers for local Flocks daemon commands.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import datetime
 import importlib.util
 import json
@@ -408,10 +409,43 @@ def _unix_pid_is_zombie(pid: int | None) -> bool:
     return bool(stat and stat.startswith("Z"))
 
 
+def _windows_pid_is_running(pid: int) -> bool:
+    """Return True when a Windows process id is still alive."""
+    if sys.platform != "win32" or pid <= 0:
+        return False
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_exit_code_process = kernel32.GetExitCodeProcess
+    get_exit_code_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_exit_code_process.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 5
+
+    try:
+        exit_code = ctypes.c_uint32()
+        if not get_exit_code_process(handle, ctypes.byref(exit_code)):
+            return ctypes.get_last_error() == 5
+        return exit_code.value == still_active
+    finally:
+        close_handle(handle)
+
+
 def pid_is_running(pid: int | None) -> bool:
     """Return True if a pid exists and is still alive."""
-    if pid is None:
+    if pid is None or pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _windows_pid_is_running(pid)
 
     try:
         os.kill(pid, 0)
