@@ -26,6 +26,7 @@ from flocks.provider.sdk.openai_base import (
     _normalize_stream_usage,
     _supports_include_usage_fallback,
     extract_reasoning_content,
+    resolve_verify_ssl,
 )
 from flocks.utils.log import Log
 
@@ -52,6 +53,7 @@ class OpenAICompatibleProvider(BaseProvider):
         if self._client is None:
             try:
                 from openai import AsyncOpenAI
+                import httpx
                 
                 # Get API key (many local services don't need one)
                 api_key = self._config.api_key if self._config else self._api_key
@@ -67,13 +69,21 @@ class OpenAICompatibleProvider(BaseProvider):
                 
                 if not base_url:
                     raise ValueError("OpenAI Compatible base URL not configured. Set OPENAI_COMPATIBLE_BASE_URL environment variable.")
-                
+
+                custom_settings = getattr(self._config, "custom_settings", None) or {}
+                verify_ssl = resolve_verify_ssl(custom_settings, default=True)
+                http_client = httpx.AsyncClient(verify=verify_ssl, timeout=120.0)
+
                 # Create client
                 self._client = AsyncOpenAI(
                     api_key=api_key,
                     base_url=base_url,
+                    http_client=http_client,
                 )
-                self.log.info("openai_compatible.client.created", {"base_url": base_url})
+                self.log.info(
+                    "openai_compatible.client.created",
+                    {"base_url": base_url, "verify_ssl": verify_ssl},
+                )
                     
             except ImportError:
                 raise ImportError("openai package not installed. Install with: pip install openai")

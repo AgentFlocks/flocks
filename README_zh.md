@@ -53,7 +53,7 @@ Flocks 支持两种部署方式：
 ```bash
 curl -fsSL https://gitee.com/flocks/flocks/raw/main/install_zh.sh | bash
 ```
-# 默认会在当前目录下创建 ./flocks
+默认会在当前目录下创建 ./flocks
 
 #### Windows PowerShell (Administrator)
 

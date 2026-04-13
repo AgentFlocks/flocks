@@ -1,9 +1,10 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
 
 from flocks.provider.provider import ChatMessage, ChatResponse
+from flocks.provider.provider import ProviderConfig
 from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
 
 
@@ -25,6 +26,34 @@ def _mock_chat_response(content: str = "Paris"):
     choice.message = MagicMock(content=content)
     response.choices = [choice]
     return response
+
+
+class TestOpenAICompatibleProviderConfiguration:
+    @patch("httpx.AsyncClient")
+    @patch("openai.AsyncOpenAI")
+    def test_get_client_respects_verify_ssl_false(self, mock_async_openai, mock_http_client):
+        provider = OpenAICompatibleProvider()
+        provider.configure(
+            ProviderConfig(
+                provider_id=provider.id,
+                api_key="test-api-key",
+                base_url="https://gateway.internal/v1",
+                custom_settings={"verify_ssl": False},
+            )
+        )
+
+        http_client = MagicMock()
+        mock_http_client.return_value = http_client
+        mock_async_openai.return_value = MagicMock()
+
+        provider._get_client()
+
+        mock_http_client.assert_called_once_with(verify=False, timeout=120.0)
+        mock_async_openai.assert_called_once_with(
+            api_key="test-api-key",
+            base_url="https://gateway.internal/v1",
+            http_client=http_client,
+        )
 
 
 def _chat_response(content: str, model: str = "MiniMax-M2.5") -> ChatResponse:

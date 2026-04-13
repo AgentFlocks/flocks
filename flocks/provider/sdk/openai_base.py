@@ -23,6 +23,29 @@ from flocks.utils.log import Log
 log = Log.create(service="provider.openai_base")
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Coerce loosely-typed config values to bool."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def resolve_verify_ssl(custom_settings: Any, default: bool = True) -> bool:
+    """Resolve the SSL verification flag from provider custom settings."""
+    if not isinstance(custom_settings, dict):
+        return default
+
+    if "verify_ssl" in custom_settings:
+        return _coerce_bool(custom_settings.get("verify_ssl"), default)
+    if "ssl_verify" in custom_settings:
+        return _coerce_bool(custom_settings.get("ssl_verify"), default)
+    return default
+
+
 def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
     """Normalize provider usage objects to a shared stream usage schema."""
     if not raw_usage:
@@ -366,6 +389,7 @@ class OpenAIBaseProvider(BaseProvider):
         """Get or create AsyncOpenAI client."""
         if self._client is None:
             from openai import AsyncOpenAI
+            import httpx
 
             api_key = self._config.api_key if self._config else self._api_key
             if not api_key:
@@ -380,7 +404,15 @@ class OpenAIBaseProvider(BaseProvider):
                 else self._base_url
             )
 
-            self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            custom_settings = getattr(self._config, "custom_settings", None) or {}
+            verify_ssl = resolve_verify_ssl(custom_settings, default=True)
+            http_client = httpx.AsyncClient(verify=verify_ssl, timeout=120.0)
+
+            self._client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                http_client=http_client,
+            )
         return self._client
 
     # ==================== Catalog Integration ====================
