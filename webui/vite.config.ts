@@ -3,8 +3,10 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 import fs from 'fs'
 import { createApiProxy, getApiProxyTarget } from './src/config/apiProxy'
+import { getAdditionalAllowedHosts } from './src/config/viteHosts'
 
 const apiProxyTarget = getApiProxyTarget(process.env)
+const allowedHosts = getAdditionalAllowedHosts(process.env)
 
 // Windows 8.3 短路径名（如 THREAT~1）会导致 Vite build-html 插件
 // 内部 path.relative() 计算出错，需规范化为完整长路径
@@ -74,11 +76,13 @@ export default defineConfig({
   server: {
     port: 5173,
     host: '127.0.0.1',
+    ...(allowedHosts ? { allowedHosts } : {}),
     proxy: createApiProxy(apiProxyTarget),
   },
   preview: {
     port: 5173,
     host: '127.0.0.1',
+    ...(allowedHosts ? { allowedHosts } : {}),
     proxy: createApiProxy(apiProxyTarget),
   },
 })
