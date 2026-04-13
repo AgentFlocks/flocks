@@ -2051,17 +2051,27 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
         start = time.time()
         
         # test-credentials handles both LLM providers and API services.
-        # Try _llm_key first (LLM provider), then _api_key (API service fallback).
+        # Try _llm_key first (LLM provider), then all secret fields defined
+        # in the credential schema (api_key, password, token, etc.).
         secrets = get_secret_manager()
         secret_id = f"{provider_id}_llm_key"
         api_key = secrets.get(secret_id)
         if not api_key:
             raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
             secret_id = None
-            for candidate in _get_api_service_secret_candidates(provider_id, raw_service):
-                api_key = secrets.get(candidate)
+            metadata = _load_api_service_metadata_data(provider_id) or {}
+            secret_field_names = _get_api_service_secret_field_names(provider_id, metadata)
+            if not secret_field_names:
+                secret_field_names = ["api_key"]
+            for field_name in secret_field_names:
+                for candidate in _get_api_service_secret_candidates(
+                    provider_id, raw_service, field_name=field_name
+                ):
+                    api_key = secrets.get(candidate)
+                    if api_key:
+                        secret_id = candidate
+                        break
                 if api_key:
-                    secret_id = candidate
                     break
         if not api_key:
             api_key = _get_inline_provider_api_key(provider_id)
