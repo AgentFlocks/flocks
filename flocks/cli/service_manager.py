@@ -492,13 +492,18 @@ def process_group_is_running(pgid: int | None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        pass
     except OSError:
         return False
     members = _process_group_member_pids(pgid)
     if not members:
         return False
-    return any(pid_is_running(pid) for pid in members)
+    alive_members = [pid for pid in members if pid_is_running(pid)]
+    if alive_members:
+        return True
+    # macOS can raise EPERM for a defunct process-group leader even when no
+    # runnable members remain, so rely on member liveness as the source of truth.
+    return False
 
 
 def runtime_record_is_running(record: RuntimeRecord | None) -> bool:
