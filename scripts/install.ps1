@@ -953,12 +953,14 @@ function Install-ChromeForTesting {
     $browserDir = Get-ChromeForTestingDir
 
     if (-not (Test-Command "npx.cmd")) {
-        Fail "npx was not found. Install Node.js (including npm) and retry.$(Get-NodejsManualDownloadHint)"
+        Write-Warning (Get-LocalizedText -English "npx was not found, so browser installation was skipped. This does not block Flocks startup; you can reinstall it later." -Chinese "未找到 npx，跳过浏览器安装；这不影响 Flocks 启动，可稍后重新安装。")
+        return $null
     }
 
     New-Item -ItemType Directory -Path $browserDir -Force | Out-Null
     Write-Info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browserDir"
-    Write-Info (Get-LocalizedText -English "Downloading Chrome for Testing (~200MB). The download progress will be shown below..." -Chinese "正在下载 Chrome for Testing（约 200MB），下方将显示下载进度...")
+    Write-Info (Get-LocalizedText -English "Downloading Chrome for Testing." -Chinese "正在下载 Chrome for Testing。")
+    Write-Warning (Get-LocalizedText -English "If browser installation fails, Flocks can still start and you can reinstall it later." -Chinese "如浏览器安装失败，不影响 Flocks 启动，可稍后重新安装。")
 
     $npxPath = Get-CommandPath "npx.cmd"
     if ([string]::IsNullOrWhiteSpace($npxPath)) {
@@ -976,7 +978,8 @@ function Install-ChromeForTesting {
             -Wait `
             -PassThru
         if ($process.ExitCode -ne 0) {
-            Fail "Chrome for Testing installation failed."
+            Write-Warning (Get-LocalizedText -English "Chrome for Testing installation failed. This does not block Flocks startup; you can reinstall it later." -Chinese "Chrome for Testing 安装失败，不影响 Flocks 启动，可稍后重新安装。")
+            return $null
         }
     }
     finally {
@@ -990,7 +993,8 @@ function Install-ChromeForTesting {
 
     $browserPath = Resolve-ChromeForTestingPath -BrowserDir $browserDir
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
-        Fail "Chrome for Testing finished installing, but the browser executable could not be located under: $browserDir."
+        Write-Warning (Get-LocalizedText -English "Chrome for Testing finished installing, but the browser executable could not be located. This does not block Flocks startup; you can reinstall it later." -Chinese "Chrome for Testing 已安装，但未能在目录中找到浏览器可执行文件；这不影响 Flocks 启动，可稍后重新安装。")
+        return $null
     }
 
     return $browserPath
@@ -1000,8 +1004,19 @@ function Configure-AgentBrowserBrowser {
     $browserPath = Find-SystemBrowserPath
 
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
-        $browserPath = Install-ChromeForTesting
-        Write-Info "Installed Chrome for Testing. agent-browser will use: $browserPath"
+        $browserPath = Resolve-ChromeForTestingPath -BrowserDir (Get-ChromeForTestingDir)
+        if ([string]::IsNullOrWhiteSpace($browserPath)) {
+            $browserPath = Install-ChromeForTesting
+            if (-not [string]::IsNullOrWhiteSpace($browserPath)) {
+                Write-Info "Installed Chrome for Testing. agent-browser will use: $browserPath"
+            }
+            else {
+                return
+            }
+        }
+        else {
+            Write-Info "Found existing Chrome for Testing. agent-browser will use: $browserPath"
+        }
     }
     else {
         Write-Info "Detected system Chrome/Chromium. agent-browser will use: $browserPath"

@@ -12,12 +12,14 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
     assert "get_chrome_for_testing_dir()" in script
     assert "resolve_chrome_for_testing_path_from_dir()" in script
     assert 'npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
-    assert 'Downloading Chrome for Testing (~200MB). The download progress will be shown below...' in script
+    assert 'Downloading Chrome for Testing.' in script
+    assert 'If browser installation fails, Flocks can still start and you can reinstall it later.' in script
     assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2' in script
     assert '"$browser_dir"/**/"Google Chrome for Testing"' in script
     assert '"$browser_dir"/**/chrome.exe' in script
     assert '"$browser_dir"/**/chrome' in script
     assert '"$HOME/.flocks/browser"' in script
+    assert 'Found existing Chrome for Testing. agent-browser will use: $browser_path' in script
     assert 'npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1 | tee' not in script
     assert "agent-browser install" not in script
     assert 'require("@puppeteer/browsers")' not in script
@@ -37,11 +39,13 @@ def test_powershell_installer_prefers_explicit_browser_configuration() -> None:
     assert '$candidateNames = @("chrome.exe", "Google Chrome for Testing", "chrome")' in script
     assert 'Get-ChildItem -Path $BrowserDir -Recurse -File' in script
     assert 'Join-Path $HOME ".flocks\\browser"' in script
-    assert 'Downloading Chrome for Testing (~200MB). The download progress will be shown below...' in script
+    assert 'Downloading Chrome for Testing.' in script
+    assert 'If browser installation fails, Flocks can still start and you can reinstall it later.' in script
     assert '$process = Start-Process' in script
     assert '-NoNewWindow' in script
     assert '-Wait' in script
     assert '-PassThru' in script
     assert '$env:npm_config_registry = $script:NpmRegistry' in script
+    assert 'Found existing Chrome for Testing. agent-browser will use: $browserPath' in script
     assert "agent-browser install" not in script
     assert 'require("@puppeteer/browsers")' not in script

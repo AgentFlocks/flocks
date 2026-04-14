@@ -34,6 +34,14 @@ fail() {
   exit 1
 }
 
+warn() {
+  if is_zh_install; then
+    printf '[flocks] 警告: %s\n' "$1" >&2
+  else
+    printf '[flocks] warning: %s\n' "$1" >&2
+  fi
+}
+
 has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -804,15 +812,24 @@ resolve_chrome_for_testing_path_from_dir() {
 
 install_chrome_for_testing() {
   local browser_dir browser_path="" install_status
-  has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry.$(nodejs_manual_download_hint)"
+  if ! has_cmd npx; then
+    if is_zh_install; then
+      warn "未找到 npx，跳过浏览器安装；这不影响 Flocks 启动，可稍后重新安装。"
+    else
+      warn "npx was not found, so browser installation was skipped. This does not block Flocks startup; you can reinstall it later."
+    fi
+    return 1
+  fi
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 
   info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browser_dir" >&2
   if is_zh_install; then
-    info "正在下载 Chrome for Testing（约 200MB），下方将显示下载进度..." >&2
+    info "正在下载 Chrome for Testing。" >&2
+    warn "如浏览器安装失败，不影响 Flocks 启动，可稍后重新安装。" 
   else
-    info "Downloading Chrome for Testing (~200MB). The download progress will be shown below..." >&2
+    info "Downloading Chrome for Testing." >&2
+    warn "If browser installation fails, Flocks can still start and you can reinstall it later."
   fi
 
   set +e
@@ -821,23 +838,45 @@ install_chrome_for_testing() {
   set -e
 
   if [[ "$install_status" -ne 0 ]]; then
-    fail "Chrome for Testing installation failed."
+    if is_zh_install; then
+      warn "Chrome for Testing 安装失败，不影响 Flocks 启动，可稍后重新安装。"
+    else
+      warn "Chrome for Testing installation failed. This does not block Flocks startup; you can reinstall it later."
+    fi
+    return 1
   fi
 
   browser_path="$(resolve_chrome_for_testing_path_from_dir "$browser_dir" || true)"
-  [[ -n "$browser_path" ]] || fail "Chrome for Testing finished installing, but the browser executable could not be located under: $browser_dir."
+  if [[ -z "$browser_path" ]]; then
+    if is_zh_install; then
+      warn "Chrome for Testing 已安装，但未能在目录中找到浏览器可执行文件；这不影响 Flocks 启动，可稍后重新安装。"
+    else
+      warn "Chrome for Testing finished installing, but the browser executable could not be located. This does not block Flocks startup; you can reinstall it later."
+    fi
+    return 1
+  fi
   printf '%s' "$browser_path"
 }
 
 configure_agent_browser_browser() {
-  local browser_path=""
+  local browser_path="" browser_dir=""
 
   browser_path="$(detect_system_browser_path || true)"
   if [[ -n "$browser_path" ]]; then
     info "Detected system Chrome/Chromium. agent-browser will use: $browser_path"
   else
-    browser_path="$(install_chrome_for_testing)"
-    info "Installed Chrome for Testing. agent-browser will use: $browser_path"
+    browser_dir="$(get_chrome_for_testing_dir)"
+    browser_path="$(resolve_chrome_for_testing_path_from_dir "$browser_dir" || true)"
+    if [[ -n "$browser_path" ]]; then
+      info "Found existing Chrome for Testing. agent-browser will use: $browser_path"
+    else
+      browser_path="$(install_chrome_for_testing || true)"
+      if [[ -n "$browser_path" ]]; then
+        info "Installed Chrome for Testing. agent-browser will use: $browser_path"
+      else
+        return 0
+      fi
+    fi
   fi
 
   export AGENT_BROWSER_EXECUTABLE_PATH="$browser_path"
