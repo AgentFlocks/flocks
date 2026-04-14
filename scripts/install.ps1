@@ -1067,6 +1067,52 @@ function Configure-AgentBrowserBrowser {
     [Environment]::SetEnvironmentVariable("AGENT_BROWSER_EXECUTABLE_PATH", $browserPath, "User")
 }
 
+function Warmup-TiktokenCache {
+    $cacheDir = Join-Path $HOME ".flocks\data\tiktoken_cache"
+    $cacheKey = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+    $cachedFile = Join-Path $cacheDir $cacheKey
+
+    if (Test-Path $cachedFile) {
+        Write-Info (Get-LocalizedText -English "tiktoken encoding cache already exists. Skipping." -Chinese "tiktoken 编码缓存已存在，跳过。")
+        return
+    }
+
+    if (-not (Test-Path $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    }
+
+    $bundled = Join-Path $RootDir ".flocks\data\tiktoken\$cacheKey"
+    if (Test-Path $bundled) {
+        Copy-Item -Path $bundled -Destination $cachedFile -Force
+        Write-Info (Get-LocalizedText -English "tiktoken encoding cache installed from bundled assets." -Chinese "tiktoken 编码缓存已从本地 assets 安装。")
+        return
+    }
+
+    Write-Info (Get-LocalizedText -English "Pre-warming tiktoken encoding cache..." -Chinese "正在预热 tiktoken 编码缓存...")
+    $venvPython = Join-Path $RootDir ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPython)) {
+        return
+    }
+
+    $pyCode = @"
+import os
+os.environ['TIKTOKEN_CACHE_DIR'] = r'$cacheDir'
+import tiktoken
+tiktoken.get_encoding('cl100k_base')
+print('ok')
+"@
+
+    try {
+        $result = Invoke-NativeCommand -FilePath $venvPython -ArgumentList @("-c", $pyCode) -WorkingDirectory $RootDir
+        if ($result.ExitCode -ne 0) {
+            Write-Warning (Get-LocalizedText -English "tiktoken cache warm-up failed (network issue). This does not block installation; it can be retried later." -Chinese "tiktoken 缓存预热失败（网络问题），不影响安装，后续可重试。")
+        }
+    }
+    catch {
+        Write-Warning (Get-LocalizedText -English "tiktoken cache warm-up failed (network issue). This does not block installation; it can be retried later." -Chinese "tiktoken 缓存预热失败（网络问题），不影响安装，后续可重试。")
+    }
+}
+
 function Install-AgentBrowser {
     if (-not (Test-Command "agent-browser")) {
         Write-Info "Installing the agent-browser CLI..."
@@ -1198,6 +1244,7 @@ function Main {
         }
     }
 
+    Warmup-TiktokenCache
     Install-AgentBrowser
 
     Write-Host ""
