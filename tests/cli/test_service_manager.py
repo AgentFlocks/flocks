@@ -51,6 +51,31 @@ def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
     assert service_manager.pid_is_running(456) is False
 
 
+def test_process_group_is_running_ignores_permission_error_without_live_members(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [])
+
+    assert service_manager.process_group_is_running(222) is False
+
+
+def test_process_group_is_running_checks_members_after_permission_error(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [333, 444])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 444)
+
+    assert service_manager.process_group_is_running(222) is True
+
+
 def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
     pid_file = tmp_path / "backend.pid"
     pid_file.write_text("12345\n", encoding="utf-8")
