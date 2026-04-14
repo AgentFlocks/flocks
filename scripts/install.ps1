@@ -10,7 +10,9 @@ $RawInstallShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_SH_U
 $RawInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_PS1_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1" } else { $env:FLOCKS_RAW_INSTALL_PS1_URL }
 $RootDir = $null
 $MinNodeMajor = 22
+$script:InstallLanguage = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) { "en" } else { $env:FLOCKS_INSTALL_LANGUAGE }
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
+$script:UvInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_URL }
 $script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
 $script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
@@ -21,7 +23,12 @@ function Write-Info {
 
 function Fail {
     param([string]$Message)
-    Write-Host "[flocks] error: $Message" -ForegroundColor Red
+    if (Test-IsZhInstall) {
+        Write-Host "[flocks] 错误: $Message" -ForegroundColor Red
+    }
+    else {
+        Write-Host "[flocks] error: $Message" -ForegroundColor Red
+    }
     exit 1
 }
 
@@ -30,13 +37,58 @@ function Test-Command {
     return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
+function Test-IsZhInstall {
+    return $script:InstallLanguage -like "zh*" -or $script:InstallLanguage -like "cn*"
+}
+
+function Get-LocalizedText {
+    param(
+        [string]$English,
+        [string]$Chinese
+    )
+
+    if (Test-IsZhInstall) {
+        return $Chinese
+    }
+
+    return $English
+}
+
+function Test-IsWindowsPlatform {
+    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+}
+
+function Test-IsAdministrator {
+    if (-not (Test-IsWindowsPlatform)) {
+        return $true
+    }
+
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-Administrator {
+    if (Test-IsAdministrator) {
+        return
+    }
+
+    Fail (Get-LocalizedText -English "Administrator privileges are required. Reopen PowerShell as Administrator and rerun this installer." -Chinese "安装需要管理员权限。请使用“以管理员身份运行”重新打开 PowerShell 后再执行。")
+}
+
 function Get-NodejsManualDownloadHint {
     return " Manual download: $script:NodejsManualDownloadUrl"
 }
 
 function Initialize-InstallSources {
-    Write-Info "Using PyPI index: $script:UvDefaultIndex"
-    Write-Info "Using npm registry: $script:NpmRegistry"
+    Write-Info (Get-LocalizedText -English "Using PyPI index: $script:UvDefaultIndex" -Chinese "使用 PyPI 源: $script:UvDefaultIndex")
+    Write-Info (Get-LocalizedText -English "Using npm registry: $script:NpmRegistry" -Chinese "使用 npm 源: $script:NpmRegistry")
+    Write-Info (Get-LocalizedText -English "Using uv install script: $script:UvInstallPs1Url" -Chinese "使用 uv 安装脚本: $script:UvInstallPs1Url")
 }
 
 function Get-NodeMajorVersion {
@@ -146,18 +198,34 @@ function Resolve-RootDir {
 }
 
 function Show-CloneHintAndExit {
-    Write-Host "[flocks] Flocks repository source was not found in the current location."
-    Write-Host ""
-    Write-Host "To install from source, clone the repository first and then run:"
-    Write-Host ""
-    Write-Host "  git clone $RepoUrl"
-    Write-Host "  cd Flocks"
-    Write-Host "  .\scripts\install.ps1"
-    Write-Host ""
-    Write-Host "Or use the one-line GitHub bootstrap installer:"
-    Write-Host ""
-    Write-Host "  curl -fsSL $RawInstallShUrl | bash"
-    Write-Host "  iwr -useb $RawInstallPs1Url | iex"
+    if (Test-IsZhInstall) {
+        Write-Host "[flocks] 当前目录未找到 Flocks 仓库源码。"
+        Write-Host ""
+        Write-Host "如需从源码安装，请先克隆仓库后再执行："
+        Write-Host ""
+        Write-Host "  git clone $RepoUrl"
+        Write-Host "  cd Flocks"
+        Write-Host "  .\scripts\install_zh.ps1"
+        Write-Host ""
+        Write-Host "或者使用一键安装脚本："
+        Write-Host ""
+        Write-Host "  curl -fsSL $RawInstallShUrl | bash"
+        Write-Host "  iwr -useb $RawInstallPs1Url | iex"
+    }
+    else {
+        Write-Host "[flocks] Flocks repository source was not found in the current location."
+        Write-Host ""
+        Write-Host "To install from source, clone the repository first and then run:"
+        Write-Host ""
+        Write-Host "  git clone $RepoUrl"
+        Write-Host "  cd Flocks"
+        Write-Host "  .\scripts\install.ps1"
+        Write-Host ""
+        Write-Host "Or use the one-line GitHub bootstrap installer:"
+        Write-Host ""
+        Write-Host "  curl -fsSL $RawInstallShUrl | bash"
+        Write-Host "  iwr -useb $RawInstallPs1Url | iex"
+    }
     exit 1
 }
 
@@ -302,12 +370,12 @@ function Install-Uv {
         return
     }
 
-    Write-Info "uv was not found. Installing it automatically..."
-    powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://astral.sh/uv/install.ps1 | iex"
+    Write-Info (Get-LocalizedText -English "uv was not found. Installing it automatically..." -Chinese "未检测到 uv，正在自动安装...")
+    powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm $script:UvInstallPs1Url | iex"
     Refresh-Path
 
     if (-not (Test-Command "uv")) {
-        Fail "uv finished installing, but it is still not available. Check PATH and retry."
+        Fail (Get-LocalizedText -English "uv finished installing, but it is still not available. Check PATH and retry." -Chinese "uv 安装已完成，但当前仍无法找到 uv。请检查 PATH 后重试。")
     }
 }
 
@@ -957,11 +1025,11 @@ function Install-DingtalkChannelDeps {
 
     $nodeModulesDir = Join-Path $connectorDir "node_modules"
     if (Test-Path $nodeModulesDir) {
-        Write-Info "DingTalk channel dependencies already exist. Skipping installation."
+        Write-Info (Get-LocalizedText -English "DingTalk channel dependencies already exist. Skipping installation." -Chinese "钉钉频道依赖已存在，跳过安装。")
         return
     }
 
-    Write-Info "Detected DingTalk channel plugin. Installing npm dependencies..."
+    Write-Info (Get-LocalizedText -English "Detected DingTalk channel plugin. Installing npm dependencies..." -Chinese "检测到钉钉频道插件，正在安装 npm 依赖...")
 
     Push-Location $connectorDir
     try {
@@ -977,7 +1045,7 @@ function Install-DingtalkChannelDeps {
         Pop-Location
     }
 
-    Write-Info "DingTalk channel dependencies installed."
+    Write-Info (Get-LocalizedText -English "DingTalk channel dependencies installed." -Chinese "钉钉频道依赖安装完成。")
 }
 
 function Write-RunCommandHint {
@@ -993,18 +1061,20 @@ function Main {
         return
     }
 
+    Assert-Administrator
+
     Refresh-Path
 
     if (-not (Resolve-RootDir)) {
         Show-CloneHintAndExit
     }
 
-    Write-Info "Project directory: $RootDir"
+    Write-Info (Get-LocalizedText -English "Project directory: $RootDir" -Chinese "项目目录: $RootDir")
     Install-Uv
     Ensure-NpmInstalled
     Initialize-InstallSources
 
-    Write-Info "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..."
+    Write-Info (Get-LocalizedText -English "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..." -Chinese "正在使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint 工具）...")
     Push-Location $RootDir
     try {
         Invoke-InstallerCommandWithLockRetry `
@@ -1020,7 +1090,7 @@ function Main {
 
     Install-FlocksCli
 
-    Write-Info "Installing WebUI dependencies..."
+    Write-Info (Get-LocalizedText -English "Installing WebUI dependencies..." -Chinese "正在安装 WebUI 依赖...")
     Push-Location (Join-Path $RootDir "webui")
     try {
         $null = Invoke-NativeCommandOrFail `
@@ -1039,7 +1109,7 @@ function Main {
 
     if ($InstallTui) {
         Install-Bun
-        Write-Info "Installing TUI dependencies..."
+        Write-Info (Get-LocalizedText -English "Installing TUI dependencies..." -Chinese "正在安装 TUI 依赖...")
         Push-Location (Join-Path $RootDir "tui")
         try {
             $null = Invoke-NativeCommandOrFail `
@@ -1054,26 +1124,45 @@ function Main {
         }
     }
     else {
-        Write-Info "Skipping TUI dependency installation. Re-run .\scripts\install.ps1 -InstallTui to install them."
+        Write-Info (Get-LocalizedText -English "Skipping TUI dependency installation. Re-run .\scripts\install_zh.ps1 -InstallTui to install them." -Chinese "已跳过 TUI 依赖安装。如需安装，请重新执行 .\scripts\install.ps1 -InstallTui。")
     }
 
     Install-AgentBrowser
 
     Write-Host ""
-    Write-Host "[flocks] Installation complete."
-    Write-Host ""
-    Write-Host "Start a new terminal session to load the updated environment and enable the installed commands."
-    Write-Host ""
-    Write-Host "Next commands:"
-    Write-Host "  1. Start the backend and WebUI in daemon mode"
-    Write-Host "     flocks start"
-    Write-Host ""
-    Write-Host "  2. Show command help"
-    Write-Host "     flocks --help"
-    Write-Host ""
-    if ($InstallTui) {
-        Write-Host "  3. Launch the TUI"
-        Write-Host "     flocks tui"
+    if (Test-IsZhInstall) {
+        Write-Host "[flocks] 安装完成。"
+        Write-Host ""
+        Write-Host "请打开新的终端会话，以加载更新后的环境变量并启用新安装的命令。"
+        Write-Host ""
+        Write-Host "接下来可以执行："
+        Write-Host "  1. 以守护进程模式启动后端和 WebUI"
+        Write-Host "     flocks start"
+        Write-Host ""
+        Write-Host "  2. 查看命令帮助"
+        Write-Host "     flocks --help"
+        Write-Host ""
+        if ($InstallTui) {
+            Write-Host "  3. 启动 TUI"
+            Write-Host "     flocks tui"
+        }
+    }
+    else {
+        Write-Host "[flocks] Installation complete."
+        Write-Host ""
+        Write-Host "Start a new terminal session to load the updated environment and enable the installed commands."
+        Write-Host ""
+        Write-Host "Next commands:"
+        Write-Host "  1. Start the backend and WebUI in daemon mode"
+        Write-Host "     flocks start"
+        Write-Host ""
+        Write-Host "  2. Show command help"
+        Write-Host "     flocks --help"
+        Write-Host ""
+        if ($InstallTui) {
+            Write-Host "  3. Launch the TUI"
+            Write-Host "     flocks tui"
+        }
     }
 }
 

@@ -72,12 +72,12 @@ cd flocks
 
 Macos/Linux
 ```bash
-./scripts/install.sh # Macos/Linux
+./scripts/install_zh.sh # Macos/Linux
 ```
 
 Windows powershell (Administrator)
 ```bash
-powershell -ep Bypass -File .\scripts\install.ps1 # Windows powershell
+powershell -ep Bypass -File .\scripts\install_zh.ps1 # Windows powershell
 ```
 
 ### 启动服务

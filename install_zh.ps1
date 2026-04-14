@@ -17,6 +17,33 @@ $InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $Defa
 $RawInstallZhShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_SH_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.sh" } else { $env:FLOCKS_RAW_INSTALL_ZH_SH_URL }
 $RawInstallZhPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_PS1_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.ps1" } else { $env:FLOCKS_RAW_INSTALL_ZH_PS1_URL }
 
+function Test-IsWindowsPlatform {
+    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+}
+
+function Test-IsAdministrator {
+    if (-not (Test-IsWindowsPlatform)) {
+        return $true
+    }
+
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-Administrator {
+    if (Test-IsAdministrator) {
+        return
+    }
+
+    Fail "安装需要管理员权限。请使用“以管理员身份运行”重新打开 PowerShell 后再执行。"
+}
+
 function Write-Info {
     param([string]$Message)
     Write-Host "[flocks-bootstrap-zh] $Message"
@@ -38,6 +65,7 @@ function Show-Usage {
     Write-Host "Flocks 中国用户一键安装脚本。"
     Write-Host "该脚本会从 Gitee 下载仓库源码压缩包到临时目录，复制到持久化安装目录后，转交 scripts/install_zh.ps1。"
     Write-Host "默认会在当前目录下创建 'flocks' 子目录。"
+    Write-Host "请在“以管理员身份运行”的 PowerShell 窗口中执行此安装脚本。"
     Write-Host ""
     Write-Host "远程使用："
     Write-Host "  curl -fsSL $RawInstallZhShUrl | bash"
@@ -138,6 +166,24 @@ function Resolve-ProjectRoot {
 }
 
 function Set-CnInstallerEnvironment {
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) {
+        $env:FLOCKS_INSTALL_LANGUAGE = "zh-CN"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) {
+        $env:FLOCKS_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_URL = "https://astral.org.cn/uv/install.sh"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) {
+        $env:FLOCKS_UV_INSTALL_PS1_URL = "https://astral.org.cn/uv/install.ps1"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
+        $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) {
+        $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL = "https://nodejs.org/zh-cn/download"
+    }
     if ([string]::IsNullOrWhiteSpace($env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL)) {
         $env:PUPPETEER_CHROME_DOWNLOAD_BASE_URL = "https://cdn.npmmirror.com/binaries/chrome-for-testing"
     }
@@ -148,6 +194,8 @@ function Main {
         Show-Usage
         return
     }
+
+    Assert-Administrator
 
     $tempDir = New-TemporaryDirectory
     $archivePath = Join-Path $tempDir "flocks.zip"

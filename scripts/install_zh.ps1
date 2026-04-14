@@ -7,6 +7,33 @@ $ErrorActionPreference = "Stop"
 $RawInstallZhShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_SH_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.sh" } else { $env:FLOCKS_RAW_INSTALL_ZH_SH_URL }
 $RawInstallZhPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_PS1_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.ps1" } else { $env:FLOCKS_RAW_INSTALL_ZH_PS1_URL }
 
+function Test-IsWindowsPlatform {
+    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+}
+
+function Test-IsAdministrator {
+    if (-not (Test-IsWindowsPlatform)) {
+        return $true
+    }
+
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-Administrator {
+    if (Test-IsAdministrator) {
+        return
+    }
+
+    Fail "安装需要管理员权限。请使用“以管理员身份运行”重新打开 PowerShell 后再执行。"
+}
+
 function Show-Usage {
     Write-Host "用法: .\scripts\install_zh.ps1 [-InstallTui] [-Help]"
     Write-Host ""
@@ -16,6 +43,7 @@ function Show-Usage {
     Write-Host "默认软件源："
     Write-Host "  PyPI: https://mirrors.aliyun.com/pypi/simple"
     Write-Host "  npm : https://registry.npmmirror.com/"
+    Write-Host "  uv  : https://astral.org.cn/uv/install.ps1"
     Write-Host ""
     Write-Host "一键安装入口："
     Write-Host "  curl -fsSL $RawInstallZhShUrl | bash"
@@ -27,6 +55,9 @@ function Show-Usage {
 }
 
 function Set-CnInstallerEnvironment {
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) {
+        $env:FLOCKS_INSTALL_LANGUAGE = "zh-CN"
+    }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_REPO_URL)) {
         $env:FLOCKS_INSTALL_REPO_URL = "https://gitee.com/flocks/flocks.git"
     }
@@ -38,6 +69,12 @@ function Set-CnInstallerEnvironment {
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) {
         $env:FLOCKS_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_URL = "https://astral.org.cn/uv/install.sh"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) {
+        $env:FLOCKS_UV_INSTALL_PS1_URL = "https://astral.org.cn/uv/install.ps1"
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
         $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
@@ -56,6 +93,7 @@ function Main {
         return
     }
 
+    Assert-Administrator
     Set-CnInstallerEnvironment
 
     $installerPath = Join-Path $PSScriptRoot "install.ps1"

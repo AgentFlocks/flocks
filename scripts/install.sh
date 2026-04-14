@@ -14,7 +14,9 @@ PATH_UPDATE_REQUIRED=0
 PATH_UPDATE_FILES=""
 PATH_UPDATE_DIRS=""
 PATH_REFRESH_HINT_REQUIRED=0
+INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-en}"
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
+UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.sh/uv/install.sh}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
@@ -24,7 +26,11 @@ info() {
 }
 
 fail() {
-  printf '[flocks] error: %s\n' "$1" >&2
+  if is_zh_install; then
+    printf '[flocks] 错误: %s\n' "$1" >&2
+  else
+    printf '[flocks] error: %s\n' "$1" >&2
+  fi
   exit 1
 }
 
@@ -32,13 +38,24 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+is_zh_install() {
+  [[ "$INSTALL_LANGUAGE" == zh* || "$INSTALL_LANGUAGE" == cn* ]]
+}
+
 nodejs_manual_download_hint() {
   printf ' Manual download: %s' "$NODEJS_MANUAL_DOWNLOAD_URL"
 }
 
 select_install_sources() {
-  info "Using PyPI index: $UV_DEFAULT_INDEX"
-  info "Using npm registry: $NPM_REGISTRY"
+  if is_zh_install; then
+    info "使用 PyPI 源: $UV_DEFAULT_INDEX"
+    info "使用 npm 源: $NPM_REGISTRY"
+    info "使用 uv 安装脚本: $UV_INSTALL_SH_URL"
+  else
+    info "Using PyPI index: $UV_DEFAULT_INDEX"
+    info "Using npm registry: $NPM_REGISTRY"
+    info "Using uv install script: $UV_INSTALL_SH_URL"
+  fi
 }
 
 
@@ -206,7 +223,23 @@ resolve_root_dir() {
 }
 
 print_clone_hint_and_exit() {
-  cat <<EOF
+  if is_zh_install; then
+    cat <<EOF
+[flocks] 当前目录未找到 Flocks 仓库源码。
+
+如需从源码安装，请先克隆仓库后再执行：
+
+  git clone $REPO_URL
+  cd Flocks
+  ./scripts/install_zh.sh
+
+或者使用一键安装脚本：
+
+  curl -fsSL $RAW_INSTALL_SH_URL | bash
+  iwr -useb $RAW_INSTALL_PS1_URL | iex
+EOF
+  else
+    cat <<EOF
 [flocks] Flocks repository source was not found in the current location.
 
 To install from source, clone the repository first and then run:
@@ -220,6 +253,7 @@ Or use the one-line GitHub bootstrap installer:
   curl -fsSL $RAW_INSTALL_SH_URL | bash
   iwr -useb $RAW_INSTALL_PS1_URL | iex
 EOF
+  fi
   exit 1
 }
 
@@ -251,6 +285,22 @@ get_npm_prefix() {
   fi
 
   printf '%s' "$npm_prefix"
+}
+
+get_npm_global_write_check_dir() {
+  local npm_prefix="$1"
+  local candidate
+
+  [[ -n "$npm_prefix" ]] || return 1
+
+  for candidate in "$npm_prefix/lib/node_modules" "$npm_prefix/lib" "$npm_prefix"; do
+    if [[ -e "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  printf '%s' "$npm_prefix/lib/node_modules"
 }
 
 ensure_agent_browser_user_path_if_needed() {
@@ -445,10 +495,7 @@ ensure_npm_global_prefix_writable() {
     return
   fi
 
-  target_dir="$npm_prefix"
-  if [[ -d "$npm_prefix/lib" ]]; then
-    target_dir="$npm_prefix/lib"
-  fi
+  target_dir="$(get_npm_global_write_check_dir "$npm_prefix")"
 
   if [[ -w "$target_dir" ]]; then
     return
@@ -466,12 +513,21 @@ install_uv() {
     return
   fi
 
-  has_cmd curl || fail "curl is required to install uv automatically."
-  info "uv was not found. Installing it automatically..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  if is_zh_install; then
+    has_cmd curl || fail "自动安装 uv 需要 curl，请先安装 curl 后重试。"
+    info "未检测到 uv，正在自动安装..."
+  else
+    has_cmd curl || fail "curl is required to install uv automatically."
+    info "uv was not found. Installing it automatically..."
+  fi
+  curl -LsSf "$UV_INSTALL_SH_URL" | sh
   refresh_path
   ensure_path_persisted "$HOME/.local/bin"
-  has_cmd uv || fail "uv finished installing, but it is still not available. Check PATH and retry."
+  if is_zh_install; then
+    has_cmd uv || fail "uv 安装已完成，但当前仍无法找到 uv。请检查 PATH 后重试。"
+  else
+    has_cmd uv || fail "uv finished installing, but it is still not available. Check PATH and retry."
+  fi
 }
 
 is_lock_error_output() {
@@ -642,16 +698,28 @@ install_dingtalk_channel_deps() {
 
   local node_modules_dir="$connector_dir/node_modules"
   if [[ -d "$node_modules_dir" ]]; then
-    info "DingTalk channel dependencies already exist. Skipping installation."
+    if is_zh_install; then
+      info "钉钉频道依赖已存在，跳过安装。"
+    else
+      info "DingTalk channel dependencies already exist. Skipping installation."
+    fi
     return 0
   fi
 
-  info "Detected DingTalk channel plugin. Installing npm dependencies..."
+  if is_zh_install; then
+    info "检测到钉钉频道插件，正在安装 npm 依赖..."
+  else
+    info "Detected DingTalk channel plugin. Installing npm dependencies..."
+  fi
   (
     cd "$connector_dir"
     npm_config_registry="$NPM_REGISTRY" npm install
   )
-  info "DingTalk channel dependencies installed."
+  if is_zh_install; then
+    info "钉钉频道依赖安装完成。"
+  else
+    info "DingTalk channel dependencies installed."
+  fi
 }
 
 ensure_env_var_persisted() {
@@ -783,12 +851,20 @@ main() {
 
   resolve_root_dir || print_clone_hint_and_exit
 
-  info "Project directory: $ROOT_DIR"
+  if is_zh_install; then
+    info "项目目录: $ROOT_DIR"
+  else
+    info "Project directory: $ROOT_DIR"
+  fi
   install_uv
   ensure_npm_installed
   select_install_sources
 
-  info "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..."
+  if is_zh_install; then
+    info "正在使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint 工具）..."
+  else
+    info "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..."
+  fi
   (
     cd "$ROOT_DIR"
     run_with_lock_retry "Python backend dependency installation" uv sync --group dev --default-index "$UV_DEFAULT_INDEX"
@@ -796,7 +872,11 @@ main() {
 
   install_flocks_cli
 
-  info "Installing WebUI dependencies..."
+  if is_zh_install; then
+    info "正在安装 WebUI 依赖..."
+  else
+    info "Installing WebUI dependencies..."
+  fi
   (
     cd "$ROOT_DIR/webui"
     npm_config_registry="$NPM_REGISTRY" npm install
@@ -806,18 +886,41 @@ main() {
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun
-    info "Installing TUI dependencies..."
+    if is_zh_install; then
+      info "正在安装 TUI 依赖..."
+    else
+      info "Installing TUI dependencies..."
+    fi
     (
       cd "$ROOT_DIR/tui"
       bun install
     )
   else
-    info "Skipping TUI dependency installation. Re-run ./scripts/install.sh --with-tui to install them."
+    if is_zh_install; then
+      info "已跳过 TUI 依赖安装。如需安装，请重新执行 ./scripts/install_zh.sh --with-tui。"
+    else
+      info "Skipping TUI dependency installation. Re-run ./scripts/install.sh --with-tui to install them."
+    fi
   fi
 
   install_agent_browser
 
-  cat <<EOF
+  if is_zh_install; then
+    cat <<EOF
+
+[flocks] 安装完成。
+
+请打开新的终端会话，以加载更新后的环境变量并启用新安装的命令。
+
+接下来可以执行：
+  1. 以守护进程模式启动后端和 WebUI
+     flocks start
+
+  2. 查看命令帮助
+     flocks --help
+EOF
+  else
+    cat <<EOF
 
 [flocks] Installation complete.
 
@@ -830,12 +933,20 @@ Next commands:
   2. Show command help
      flocks --help
 EOF
+  fi
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
-    cat <<EOF
+    if is_zh_install; then
+      cat <<EOF
+  3. 启动 TUI
+     flocks tui
+EOF
+    else
+      cat <<EOF
   3. Launch the TUI
      flocks tui
 EOF
+    fi
   fi
 
   # show_path_update_hint
