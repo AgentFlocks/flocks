@@ -2,18 +2,23 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
+from flocks.task.executor import TaskExecutor
 from flocks.task.manager import TaskManager
 from flocks.task.models import (
     DeliveryStatus,
+    ExecutionMode,
     ExecutionTriggerType,
     SchedulerMode,
     SchedulerStatus,
+    TaskExecution,
     TaskPriority,
+    TaskScheduler,
     TaskStatus,
     TaskTrigger,
 )
@@ -127,6 +132,55 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
     assert total == 1
     assert executions[0].status == TaskStatus.QUEUED
     assert executions[0].trigger_type == ExecutionTriggerType.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.workflow import fs_store
+    from flocks.workflow import runner
+
+    workflow_json = {
+        "name": "Local Script Runner",
+        "start": "start",
+        "nodes": [],
+        "edges": [],
+    }
+    captured: dict[str, object] = {}
+
+    def fake_read_workflow_from_fs(workflow_id: str):
+        captured["workflow_id"] = workflow_id
+        return {"workflowJson": workflow_json}
+
+    def fake_run_workflow(*, workflow, inputs, **_kwargs):
+        captured["workflow"] = workflow
+        captured["inputs"] = inputs
+        return SimpleNamespace(error=None, outputs={"ok": True})
+
+    monkeypatch.setattr(fs_store, "read_workflow_from_fs", fake_read_workflow_from_fs)
+    monkeypatch.setattr(runner, "run_workflow", fake_run_workflow)
+
+    scheduler = TaskScheduler(
+        title="定时 workflow",
+        executionMode=ExecutionMode.WORKFLOW,
+        workflowID="local-script-runner",
+        context={"fallback": "scheduler"},
+    )
+    execution = TaskExecution(
+        schedulerID=scheduler.id,
+        title=scheduler.title,
+        executionMode=ExecutionMode.WORKFLOW,
+        workflowID="local-script-runner",
+        executionInputSnapshot={"context": {"source": "snapshot"}},
+    )
+
+    result = await TaskExecutor._trigger_workflow(execution, scheduler)
+
+    assert captured["workflow_id"] == "local-script-runner"
+    assert captured["workflow"] == workflow_json
+    assert captured["inputs"] == {"source": "snapshot"}
+    assert result == "{'ok': True}"
 
 
 @pytest.mark.asyncio

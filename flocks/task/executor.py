@@ -140,15 +140,19 @@ class TaskExecutor:
     async def _trigger_workflow(
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
+        from flocks.workflow.fs_store import read_workflow_from_fs
         from flocks.workflow.runner import run_workflow
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
+        workflow_data = read_workflow_from_fs(execution.workflow_id)
+        if workflow_data is None:
+            raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
         snapshot = execution.execution_input_snapshot or {}
         inputs = snapshot.get("context") or scheduler.context or {}
         result = await asyncio.to_thread(
             run_workflow,
-            workflow=execution.workflow_id,
+            workflow=workflow_data["workflowJson"],
             inputs=inputs,
         )
         if result.error:
