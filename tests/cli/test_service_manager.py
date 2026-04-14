@@ -1,6 +1,7 @@
 import contextlib
 import json
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,41 @@ def test_runtime_paths_follow_flocks_root_env(monkeypatch, tmp_path: Path) -> No
     assert paths.log_dir == tmp_path / "logs"
     assert paths.backend_pid == tmp_path / "run" / "backend.pid"
     assert paths.frontend_log == tmp_path / "logs" / "webui.log"
+
+
+def test_resolve_node_executable_prefers_flocks_node_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    home = tmp_path / "nh"
+    home.mkdir()
+    if sys.platform == "win32":
+        (home / "node.exe").write_bytes(b"")
+    else:
+        (home / "bin").mkdir()
+        (home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(home))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
+
+
+def test_resolve_node_executable_prefers_flocks_install_root_tools_node(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    root = tmp_path / "inst"
+    node_home = root / "tools" / "node"
+    node_home.mkdir(parents=True)
+    if sys.platform == "win32":
+        (node_home / "node.exe").write_bytes(b"")
+    else:
+        (node_home / "bin").mkdir(parents=True)
+        (node_home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_INSTALL_ROOT", str(root))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
 
 
 def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:

@@ -1,0 +1,40 @@
+name: Windows packaging (Tier B staging)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "packaging/windows/**"
+      - "scripts/install.ps1"
+      - "scripts/bootstrap-windows.ps1"
+      - "flocks/cli/service_manager.py"
+      - ".github/workflows/windows-packaging.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  staging:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build staging directory
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "flocks-staging"
+          & "${{ github.workspace }}/packaging/windows/build-staging.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
+          $zip = Join-Path $env:RUNNER_TEMP "flocks-windows-staging.zip"
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
+          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload staging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flocks-windows-staging
+          path: ${{ runner.temp }}/flocks-windows-staging.zip
+          if-no-files-found: error
+          # GitHub caps retention by plan; explicit max avoids surprises. For permanent
+          # downloads use a GitHub Release (see packaging/windows/DOWNLOAD-HOSTING.txt).
+          retention-days: 90

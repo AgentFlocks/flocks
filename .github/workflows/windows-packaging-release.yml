@@ -1,0 +1,38 @@
+# Build Tier-B staging zip and attach it to the GitHub Release for the pushed tag.
+# Long-term download: use Release assets (not Actions artifacts). Push tag v* after creating a Release, or let softprops create the release.
+
+name: Windows packaging — release asset
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-asset:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build staging zip
+        id: pack
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "flocks-staging"
+          & "${{ github.workspace }}/packaging/windows/build-staging.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
+          $name = "flocks-windows-staging-${{ github.ref_name }}.zip"
+          $zip = Join-Path $env:RUNNER_TEMP $name
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "zip_path=$zip" -Encoding utf8NoBOM
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pack.outputs.zip_path }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

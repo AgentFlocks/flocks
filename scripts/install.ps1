@@ -9,6 +9,7 @@ $RepoUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_REPO_URL)) { "ht
 $RawInstallShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_SH_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.sh" } else { $env:FLOCKS_RAW_INSTALL_SH_URL }
 $RawInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_PS1_URL)) { "https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1" } else { $env:FLOCKS_RAW_INSTALL_PS1_URL }
 $RootDir = $null
+$script:BundledInstallRoot = $null
 $MinNodeMajor = 22
 $script:InstallLanguage = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) { "en" } else { $env:FLOCKS_INSTALL_LANGUAGE }
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
@@ -93,6 +94,43 @@ function Initialize-InstallSources {
     if (Test-IsZhInstall) {
         Write-Info (Get-LocalizedText -English "Using uv fallback script: $script:UvInstallPs1FallbackUrl" -Chinese "使用 uv 备用安装脚本: $script:UvInstallPs1FallbackUrl")
     }
+}
+
+function Initialize-BundledToolchainIfPresent {
+    $installRoot = $env:FLOCKS_INSTALL_ROOT
+    if ([string]::IsNullOrWhiteSpace($installRoot)) {
+        return
+    }
+
+    $installRoot = $installRoot.TrimEnd('\', '/')
+    $uvExe = Join-Path $installRoot "tools\uv\uv.exe"
+    $nodeExe = Join-Path $installRoot "tools\node\node.exe"
+    if (-not (Test-Path $uvExe) -or -not (Test-Path $nodeExe)) {
+        return
+    }
+
+    $script:BundledInstallRoot = $installRoot
+    $uvBin = Split-Path -Parent $uvExe
+    $nodeBin = Split-Path -Parent $nodeExe
+    $npmPrefix = Join-Path $installRoot "tools\npm-global"
+    $npmBin = Join-Path $npmPrefix "node_modules\.bin"
+
+    Add-PathEntry $uvBin
+    Add-PathEntry $nodeBin
+    if (Test-Path $npmBin) {
+        Add-PathEntry $npmBin
+    }
+
+    $env:FLOCKS_NODE_HOME = $nodeBin
+    [Environment]::SetEnvironmentVariable("FLOCKS_NODE_HOME", $nodeBin, "Process")
+
+    $repoGuess = Join-Path $installRoot "flocks"
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_REPO_ROOT) -and (Test-Path (Join-Path $repoGuess "pyproject.toml"))) {
+        $env:FLOCKS_REPO_ROOT = $repoGuess
+        [Environment]::SetEnvironmentVariable("FLOCKS_REPO_ROOT", $repoGuess, "Process")
+    }
+
+    Write-Info "Using bundled toolchain under: $installRoot"
 }
 
 function Get-NodeMajorVersion {
@@ -857,7 +895,12 @@ function Invoke-InstallerCommandWithLockRetry {
 function Install-FlocksCli {
     Write-Info "Installing the global flocks CLI..."
 
-    $linkDir = Join-Path $HOME ".local\bin"
+    $linkDir = if ($script:BundledInstallRoot) {
+        Join-Path $script:BundledInstallRoot "bin"
+    }
+    else {
+        Join-Path $HOME ".local\bin"
+    }
 
     if (Test-Command "uv") {
         $savedEA = $ErrorActionPreference
@@ -935,6 +978,44 @@ function Get-CommandPath {
     $command = Get-Command $Name -ErrorAction SilentlyContinue
     if ($command) {
         return $command.Source
+    }
+
+    return $null
+}
+
+function Find-BundledChromePath {
+    if ([string]::IsNullOrWhiteSpace($script:BundledInstallRoot)) {
+        return $null
+    }
+
+    $hintFile = Join-Path $script:BundledInstallRoot "tools\chrome\flocks-bundled-chrome.exe.relative.txt"
+    if (Test-Path $hintFile) {
+        try {
+            $rel = (Get-Content -Path $hintFile -Raw -Encoding UTF8).Trim()
+        }
+        catch {
+            $rel = (Get-Content -Path $hintFile -Raw).Trim()
+        }
+        if (-not [string]::IsNullOrWhiteSpace($rel)) {
+            $candidate = Join-Path $script:BundledInstallRoot $rel
+            if (Test-Path $candidate) {
+                return $candidate
+            }
+        }
+    }
+
+    $chromeDir = Join-Path $script:BundledInstallRoot "tools\chrome"
+    if (Test-Path $chromeDir) {
+        $found = Get-ChildItem -Path $chromeDir -Recurse -Filter "chrome.exe" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'chrome-win' } |
+            Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
+        $found = Get-ChildItem -Path $chromeDir -Recurse -Filter "chrome.exe" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
     }
 
     return $null
@@ -1042,7 +1123,17 @@ function Install-ChromeForTesting {
 }
 
 function Configure-AgentBrowserBrowser {
-    $browserPath = Find-SystemBrowserPath
+    $browserPath = Find-BundledChromePath
+
+    if (-not [string]::IsNullOrWhiteSpace($browserPath)) {
+        Write-Info "Using bundled Chrome for Testing. agent-browser will use: $browserPath"
+    }
+    else {
+        $browserPath = Find-SystemBrowserPath
+        if (-not [string]::IsNullOrWhiteSpace($browserPath)) {
+            Write-Info "Detected system Chrome/Chromium. agent-browser will use: $browserPath"
+        }
+    }
 
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
         $browserPath = Resolve-ChromeForTestingPath -BrowserDir (Get-ChromeForTestingDir)
@@ -1059,9 +1150,6 @@ function Configure-AgentBrowserBrowser {
             Write-Info "Found existing Chrome for Testing. agent-browser will use: $browserPath"
         }
     }
-    else {
-        Write-Info "Detected system Chrome/Chromium. agent-browser will use: $browserPath"
-    }
 
     $env:AGENT_BROWSER_EXECUTABLE_PATH = $browserPath
     [Environment]::SetEnvironmentVariable("AGENT_BROWSER_EXECUTABLE_PATH", $browserPath, "User")
@@ -1070,12 +1158,29 @@ function Configure-AgentBrowserBrowser {
 function Install-AgentBrowser {
     if (-not (Test-Command "agent-browser")) {
         Write-Info "Installing the agent-browser CLI..."
-        $null = Invoke-NativeCommandOrFail `
-            -Description "agent-browser CLI installation" `
-            -FilePath "npm.cmd" `
-            -ArgumentList @("install", "--global", "agent-browser") `
-            -Environment @{ npm_config_registry = $script:NpmRegistry } `
-            -StreamOutput
+        if ($script:BundledInstallRoot) {
+            $npmPrefix = Join-Path $script:BundledInstallRoot "tools\npm-global"
+            New-Item -ItemType Directory -Path $npmPrefix -Force | Out-Null
+            $null = Invoke-NativeCommandOrFail `
+                -Description "agent-browser CLI installation (bundled prefix)" `
+                -FilePath "npm.cmd" `
+                -ArgumentList @("install", "--prefix", $npmPrefix, "agent-browser") `
+                -Environment @{ npm_config_registry = $script:NpmRegistry } `
+                -StreamOutput
+            $npmBin = Join-Path $npmPrefix "node_modules\.bin"
+            if (Test-Path $npmBin) {
+                Add-PathEntry $npmBin
+                Ensure-UserPathEntry $npmBin
+            }
+        }
+        else {
+            $null = Invoke-NativeCommandOrFail `
+                -Description "agent-browser CLI installation" `
+                -FilePath "npm.cmd" `
+                -ArgumentList @("install", "--global", "agent-browser") `
+                -Environment @{ npm_config_registry = $script:NpmRegistry } `
+                -StreamOutput
+        }
         Refresh-Path
 
         if (-not (Test-Command "agent-browser")) {
@@ -1138,14 +1243,35 @@ function Main {
     Assert-Administrator
 
     Refresh-Path
+    Initialize-BundledToolchainIfPresent
 
     if (-not (Resolve-RootDir)) {
         Show-CloneHintAndExit
     }
 
     Write-Info (Get-LocalizedText -English "Project directory: $RootDir" -Chinese "项目目录: $RootDir")
-    Install-Uv
-    Ensure-NpmInstalled
+    if (-not $script:BundledInstallRoot) {
+        Install-Uv
+    }
+    else {
+        Write-Info (Get-LocalizedText -English "Using bundled uv under FLOCKS_INSTALL_ROOT (skip remote uv installer)." -Chinese "使用 FLOCKS_INSTALL_ROOT 下的捆绑 uv（跳过远程 uv 安装脚本）。")
+        if (-not (Test-Command "uv")) {
+            Fail "Bundled uv.exe not found on PATH after initialization."
+        }
+    }
+
+    if (-not $script:BundledInstallRoot) {
+        Ensure-NpmInstalled
+    }
+    else {
+        Refresh-Path
+        if (-not (Test-Command "npm.cmd")) {
+            Fail "Bundled Node did not expose npm.cmd. Expected under tools\node."
+        }
+        if (-not (Test-NodeVersionRequirement)) {
+            Fail "Bundled Node.js does not meet the minimum major version $MinNodeMajor."
+        }
+    }
     Initialize-InstallSources
 
     Write-Info (Get-LocalizedText -English "Installing Python backend dependencies (including tests and lint tools) with uv sync --group dev..." -Chinese "正在使用 uv sync --group dev 安装 Python 后端依赖（含测试与 lint 工具）...")

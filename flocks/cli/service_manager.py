@@ -245,9 +245,62 @@ def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
     return resolve_python_subprocess_command(root) + ["-m", "flocks.cli.main"]
 
 
+def _bundled_node_install_dir() -> Path | None:
+    """Directory containing Windows node.exe / Unix bin/node when using bundled or installer layout."""
+    explicit = os.environ.get("FLOCKS_NODE_HOME")
+    if explicit:
+        p = Path(explicit).expanduser().resolve()
+        if sys.platform == "win32" and (p / "node.exe").is_file():
+            return p
+        if sys.platform != "win32":
+            if (p / "bin" / "node").is_file():
+                return p
+            if p.name == "bin" and (p / "node").is_file():
+                return p.parent
+
+    install_root = os.environ.get("FLOCKS_INSTALL_ROOT")
+    if install_root:
+        base = Path(install_root).expanduser().resolve() / "tools" / "node"
+        if sys.platform == "win32" and (base / "node.exe").is_file():
+            return base
+        if sys.platform != "win32" and (base / "bin" / "node").is_file():
+            return base
+    return None
+
+
+def resolve_node_executable() -> str | None:
+    """Prefer FLOCKS_NODE_HOME / FLOCKS_INSTALL_ROOT bundled Node, then PATH."""
+    parent = _bundled_node_install_dir()
+    if parent is not None:
+        if sys.platform == "win32":
+            exe = parent / "node.exe"
+        else:
+            exe = parent / "bin" / "node"
+            if not exe.is_file():
+                exe = parent / "node"
+        if exe.is_file():
+            return str(exe)
+    return which("node")
+
+
+def resolve_npm_executable() -> str | None:
+    """Prefer npm next to bundled node (Windows npm.cmd), then PATH."""
+    parent = _bundled_node_install_dir()
+    if parent is not None and sys.platform == "win32":
+        for name in ("npm.cmd", "npm"):
+            candidate = parent / name
+            if candidate.is_file():
+                return str(candidate)
+    if parent is not None and sys.platform != "win32":
+        npm = parent / "bin" / "npm"
+        if npm.is_file():
+            return str(npm)
+    return which("npm") or which("npm.cmd")
+
+
 def get_node_major_version() -> int | None:
     """Return the detected Node.js major version."""
-    node = which("node")
+    node = resolve_node_executable()
     if not node:
         return None
 
@@ -780,7 +833,7 @@ def start_frontend(config: ServiceConfig, console) -> None:
     if runtime_record is not None:
         paths.frontend_pid.unlink(missing_ok=True)
 
-    npm = which("npm") or which("npm.cmd")
+    npm = resolve_npm_executable()
     if not npm:
         raise ServiceError("未检测到 npm，请先安装 Node.js 22+（包含 npm）后重试。")
     if not node_version_satisfies_requirement():
