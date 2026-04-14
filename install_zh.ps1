@@ -178,6 +178,9 @@ function Set-CnInstallerEnvironment {
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) {
         $env:FLOCKS_UV_INSTALL_PS1_URL = "https://astral.org.cn/uv/install.ps1"
     }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL = "https://uv.agentsmirror.com/install-cn.ps1"
+    }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
         $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
     }
@@ -216,7 +219,7 @@ function Main {
         }
 
         $installParent = Split-Path -Parent $InstallDir
-        if (-not [string]::IsNullOrWhiteSpace($installParent)) {
+        if ((-not [string]::IsNullOrWhiteSpace($installParent)) -and -not (Test-Path -LiteralPath $installParent)) {
             New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         }
         if (Test-Path $InstallDir) {

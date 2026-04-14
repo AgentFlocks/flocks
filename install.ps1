@@ -193,7 +193,7 @@ function Main {
         }
 
         $installParent = Split-Path -Parent $InstallDir
-        if (-not [string]::IsNullOrWhiteSpace($installParent)) {
+        if ((-not [string]::IsNullOrWhiteSpace($installParent)) -and -not (Test-Path -LiteralPath $installParent)) {
             New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         }
         if (Test-Path $InstallDir) {
