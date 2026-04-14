@@ -20,6 +20,11 @@
     "installing": "Installing...",
     "copy": "Copy"
   },
+  "clipboard": {
+    "copySuccessTitle": "Copied to clipboard",
+    "copyFailedTitle": "Copy failed",
+    "copyFailedDescription": "Automatic copy is unavailable in this environment. Please select and copy manually."
+  },
   "status": {
     "loading": "Loading...",
     "healthy": "Healthy",
