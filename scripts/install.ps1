@@ -13,6 +13,7 @@ $MinNodeMajor = 22
 $script:InstallLanguage = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) { "en" } else { $env:FLOCKS_INSTALL_LANGUAGE }
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
 $script:UvInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_URL }
+$script:UvInstallPs1FallbackUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) { "https://uv.agentsmirror.com/install-cn.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL }
 $script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
 $script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
@@ -89,6 +90,9 @@ function Initialize-InstallSources {
     Write-Info (Get-LocalizedText -English "Using PyPI index: $script:UvDefaultIndex" -Chinese "使用 PyPI 源: $script:UvDefaultIndex")
     Write-Info (Get-LocalizedText -English "Using npm registry: $script:NpmRegistry" -Chinese "使用 npm 源: $script:NpmRegistry")
     Write-Info (Get-LocalizedText -English "Using uv install script: $script:UvInstallPs1Url" -Chinese "使用 uv 安装脚本: $script:UvInstallPs1Url")
+    if (Test-IsZhInstall) {
+        Write-Info (Get-LocalizedText -English "Using uv fallback script: $script:UvInstallPs1FallbackUrl" -Chinese "使用 uv 备用安装脚本: $script:UvInstallPs1FallbackUrl")
+    }
 }
 
 function Get-NodeMajorVersion {
@@ -371,8 +375,45 @@ function Install-Uv {
     }
 
     Write-Info (Get-LocalizedText -English "uv was not found. Installing it automatically..." -Chinese "未检测到 uv，正在自动安装...")
-    powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm $script:UvInstallPs1Url | iex"
+    $primaryInstallError = $null
+    try {
+        powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1Url' | iex"
+    }
+    catch {
+        $primaryInstallError = $_.Exception.Message
+    }
     Refresh-Path
+
+    if (Test-Command "uv") {
+        return
+    }
+
+    if (Test-IsZhInstall) {
+        if ($null -ne $primaryInstallError) {
+            Write-Info (Get-LocalizedText -English "Primary uv install script failed. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本失败，正在尝试中国大陆备用源...")
+            Write-Warning $primaryInstallError
+        }
+        else {
+            Write-Info (Get-LocalizedText -English "uv is still unavailable after the primary install script. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试中国大陆备用源...")
+        }
+
+        $fallbackInstallError = $null
+        try {
+            powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1FallbackUrl' | iex"
+        }
+        catch {
+            $fallbackInstallError = $_.Exception.Message
+        }
+        Refresh-Path
+
+        if (Test-Command "uv") {
+            return
+        }
+
+        if ($null -ne $fallbackInstallError) {
+            Fail (Get-LocalizedText -English "uv installation failed with both the primary script and the mainland China fallback script. Check network access or PATH and retry." -Chinese "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。")
+        }
+    }
 
     if (-not (Test-Command "uv")) {
         Fail (Get-LocalizedText -English "uv finished installing, but it is still not available. Check PATH and retry." -Chinese "uv 安装已完成，但当前仍无法找到 uv。请检查 PATH 后重试。")

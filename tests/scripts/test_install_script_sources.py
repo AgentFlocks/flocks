@@ -43,6 +43,8 @@ def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_
     assert 'https://astral.org.cn/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
+    assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
     assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
     assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
 
@@ -92,6 +94,8 @@ def test_install_zh_powershell_wrapper_sets_cn_sources_and_reuses_main_installer
     assert 'https://astral.org.cn/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
+    assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
     assert 'FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL' in script
@@ -134,11 +138,14 @@ def test_main_powershell_installer_uses_configured_default_sources_and_admin_pre
     assert 'FLOCKS_INSTALL_LANGUAGE' in script
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
     assert 'https://astral.sh/uv/install.ps1' in script
+    assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
     assert 'Using PyPI index: $script:UvDefaultIndex' in script
     assert 'Using npm registry: $script:NpmRegistry' in script
     assert 'Using uv install script: $script:UvInstallPs1Url' in script
-    assert 'irm $script:UvInstallPs1Url | iex' in script
+    assert "irm '$script:UvInstallPs1Url' | iex" in script
+    assert "irm '$script:UvInstallPs1FallbackUrl' | iex" in script
     assert 'function Assert-Administrator' in script
     assert 'Assert-Administrator' in script
 
@@ -153,6 +160,16 @@ def test_windows_powershell_installers_require_admin_before_install() -> None:
         script = path.read_text(encoding="utf-8-sig")
         assert 'function Test-IsAdministrator' in script
         assert 'function Assert-Administrator' in script
+
+
+def test_windows_bootstrap_installers_only_create_missing_parent_directories() -> None:
+    for path in (
+        REPO_ROOT / "install.ps1",
+        REPO_ROOT / "install_zh.ps1",
+    ):
+        script = path.read_text(encoding="utf-8-sig")
+        assert "Split-Path -Parent $InstallDir" in script
+        assert "Test-Path -LiteralPath $installParent" in script
 
 
 def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -> None:
