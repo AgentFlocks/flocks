@@ -355,13 +355,24 @@ async def task_list(
         )
 
     if query_schedulers:
+        if status is not None and status not in _SCHEDULER_STATUSES:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Invalid status '{status}' for type='scheduled'. "
+                    f"Valid scheduler statuses: {', '.join(sorted(_SCHEDULER_STATUSES))}. "
+                    "Use type='execution' to query execution statuses like "
+                    f"'{status}'."
+                ),
+            )
         scheduler_status = None
-        if status in ("active", "running"):
+        if status == "active":
             scheduler_status = SchedulerStatus.ACTIVE
         elif status in ("paused", "disabled"):
             scheduler_status = SchedulerStatus.DISABLED
         tasks, total = await TaskManager.list_schedulers(
             status=scheduler_status,
+            scheduled_only=True,
             limit=limit,
         )
         label = "Scheduled tasks"
