@@ -29,15 +29,18 @@ from flocks.workflow.center import (
     list_registry_entries,
     list_workflow_releases,
     publish_workflow,
-    resolve_global_workflow_roots,
-    resolve_project_workflow_roots,
     scan_skill_workflows,
     stop_workflow_service,
 )
 from flocks.session.recorder import Recorder
 from flocks.workflow.workflow_lint import lint_workflow
 from flocks.workflow.compiler import compile_workflow
-from flocks.workflow.fs_store import read_workflow_from_fs as shared_read_workflow_from_fs
+from flocks.workflow.fs_store import (
+    find_workspace_root as _find_workspace_root,
+    read_workflow_dir as _read_workflow_dir,
+    read_workflow_from_fs as shared_read_workflow_from_fs,
+    workflow_scan_dirs as _all_scan_dirs,
+)
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
@@ -162,26 +165,6 @@ class WorkflowStatsResponse(BaseModel):
 # Filesystem Helpers (Single Source of Truth)
 # =============================================================================
 
-_workspace_root: Optional[Path] = None
-
-
-def _find_workspace_root() -> Path:
-    """Walk up from cwd until a directory containing .flocks/ is found.
-
-    The result is cached for the lifetime of the process since the workspace
-    root does not change at runtime.
-    """
-    global _workspace_root
-    if _workspace_root is not None:
-        return _workspace_root
-    current = Path.cwd()
-    for candidate in [current, *current.parents]:
-        if (candidate / ".flocks").is_dir():
-            _workspace_root = candidate
-            return candidate
-    _workspace_root = current
-    return current
-
 
 def _workflow_dir(workflow_id: str) -> Path:
     """Return the project-level directory for a workflow."""
@@ -191,64 +174,6 @@ def _workflow_dir(workflow_id: str) -> Path:
 def _global_workflow_dir(workflow_id: str) -> Path:
     """Return the global-level directory for a workflow (~/.flocks/plugins/workflows/<id>/)."""
     return Path.home() / ".flocks" / "plugins" / "workflows" / workflow_id
-
-
-def _all_scan_dirs() -> List[tuple[Path, str]]:
-    """Return all workflow scan directories with their source labels.
-
-    Ordered from lowest to highest priority so that later entries
-    override earlier ones when the same workflow ID appears.
-    """
-    workspace = _find_workspace_root()
-    return [
-        (root, "global") for root in resolve_global_workflow_roots()
-    ] + [
-        (root, "project") for root in resolve_project_workflow_roots(workspace)
-    ]
-
-
-def _read_workflow_dir(wf_dir: Path, workflow_id: str, source: str) -> Optional[Dict[str, Any]]:
-    """Read a single workflow directory and return its data dict, or None."""
-    json_file = wf_dir / "workflow.json"
-    if not json_file.is_file():
-        return None
-
-    try:
-        with open(json_file, "r", encoding="utf-8") as f:
-            workflow_json = json.load(f)
-
-        meta_file = wf_dir / "meta.json"
-        if meta_file.is_file():
-            with open(meta_file, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-        else:
-            mtime_ms = int(json_file.stat().st_mtime * 1000)
-            meta = {
-                "name": workflow_json.get("name", workflow_id),
-                "description": workflow_json.get("description"),
-                "category": workflow_json.get("category", "default"),
-                "status": "active",
-                "createdBy": None,
-                "createdAt": mtime_ms,
-                "updatedAt": mtime_ms,
-            }
-
-        md_file = wf_dir / "workflow.md"
-        markdown_content: Optional[str] = None
-        if md_file.is_file():
-            with open(md_file, "r", encoding="utf-8") as f:
-                markdown_content = f.read()
-
-        return {
-            **meta,
-            "id": workflow_id,
-            "source": source,
-            "workflowJson": workflow_json,
-            "markdownContent": markdown_content,
-        }
-    except Exception as exc:
-        log.warning("workflow.fs.read.failed", {"id": workflow_id, "source": source, "error": str(exc)})
-        return None
 
 
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:

@@ -15,12 +15,22 @@ log = Log.create(service="workflow.fs-store")
 _workspace_root: Optional[Path] = None
 
 
+def _is_cached_workspace_root_valid(current: Path, cached_root: Path) -> bool:
+    """Return True when the cached root still applies to the current cwd."""
+    if not (cached_root / ".flocks").is_dir():
+        return False
+    return current == cached_root or cached_root in current.parents
+
+
 def find_workspace_root() -> Path:
     """Walk up from cwd until a directory containing `.flocks/` is found."""
     global _workspace_root
-    if _workspace_root is not None:
+    current = Path.cwd().resolve()
+    if (
+        _workspace_root is not None
+        and _is_cached_workspace_root_valid(current, _workspace_root)
+    ):
         return _workspace_root
-    current = Path.cwd()
     for candidate in [current, *current.parents]:
         if (candidate / ".flocks").is_dir():
             _workspace_root = candidate
