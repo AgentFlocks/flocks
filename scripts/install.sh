@@ -896,13 +896,27 @@ warmup_tiktoken_cache() {
     return 0
   fi
 
+  mkdir -p "$cache_dir"
+
+  # Prefer the bundled asset — no network needed.
+  local bundled="$ROOT_DIR/.flocks/data/tiktoken/$cache_key"
+  if [[ -f "$bundled" ]]; then
+    cp "$bundled" "$cache_dir/$cache_key"
+    if is_zh_install; then
+      info "tiktoken 编码缓存已从本地 assets 安装。"
+    else
+      info "tiktoken encoding cache installed from bundled assets."
+    fi
+    return 0
+  fi
+
+  # Fallback: download via Python/tiktoken.
   if is_zh_install; then
     info "正在预热 tiktoken 编码缓存..."
   else
     info "Pre-warming tiktoken encoding cache..."
   fi
 
-  mkdir -p "$cache_dir"
   (
     cd "$ROOT_DIR"
     set +e

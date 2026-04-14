@@ -68,13 +68,15 @@ logs/
 vectordb/
 # storage/
 data/
+!.flocks/data/
 temp/
 tmp/
 .cache/
 .tmp-flocks
 
 # Flocks runtime (but keep config files)
-.flocks/data/
+.flocks/data/*
+!.flocks/data/tiktoken/
 .flocks/logs/
 .flocks/*.db
 .flocks/*.sqlite*

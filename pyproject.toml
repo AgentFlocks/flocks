@@ -100,6 +100,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["flocks"]
 
+[tool.hatch.build]
+artifacts = [".flocks/data/tiktoken/*"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
