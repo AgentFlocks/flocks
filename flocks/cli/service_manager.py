@@ -846,6 +846,30 @@ def _tracked_processes_stopped(
     return not any(pid_is_running(pid) for pid in tracked_pids)
 
 
+def _runtime_record_pids(record: RuntimeRecord | None) -> list[int]:
+    """Collect the latest pids implied by a runtime record."""
+    if record is None:
+        return []
+
+    result: list[int] = []
+    if record.pid > 0:
+        result = append_unique_pids(result, collect_process_tree_pids(record.pid))
+    if record.pgid is not None and sys.platform != "win32":
+        result = append_unique_pids(result, _process_group_member_pids(record.pgid))
+    return result
+
+
+def _current_stop_targets(
+    port: int,
+    record: RuntimeRecord | None,
+    tracked_pids: Iterable[int],
+) -> list[int]:
+    """Refresh the pid list that stop_one() should verify or force kill."""
+    result = append_unique_pids([], tracked_pids)
+    result = append_unique_pids(result, _runtime_record_pids(record))
+    return append_unique_pids(result, port_owner_pids(port))
+
+
 def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
     """Signal an entire Unix process group when it exists."""
     if sys.platform == "win32" or pgid is None or pgid <= 0:
@@ -888,25 +912,34 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
         else:
             signal_pid_list(signal.SIGTERM, target_pids)
         for _ in range(10):
-            if _tracked_processes_stopped(port, runtime_record, target_pids):
+            current_targets = _current_stop_targets(port, runtime_record, target_pids)
+            if _tracked_processes_stopped(port, runtime_record, current_targets):
                 pid_file.unlink(missing_ok=True)
                 console.print(f"[flocks] {name} 已停止。")
                 return
             time.sleep(1)
 
         console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
+        force_targets = _current_stop_targets(port, runtime_record, target_pids)
         if runtime_record and runtime_record.pgid is not None:
             signal_process_group(signal.SIGKILL, runtime_record.pgid)
-        signal_pid_list(signal.SIGKILL, append_unique_pids(target_pids, port_owner_pids(port)))
+        signal_pid_list(signal.SIGKILL, force_targets)
 
     for _ in range(10):
-        if _tracked_processes_stopped(port, runtime_record, append_unique_pids(target_pids, port_owner_pids(port))):
+        force_targets = _current_stop_targets(port, runtime_record, target_pids)
+        if _tracked_processes_stopped(port, runtime_record, force_targets):
             pid_file.unlink(missing_ok=True)
             console.print(f"[flocks] {name} 已停止。")
             return
+        if sys.platform == "win32":
+            for pid in force_targets:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+        else:
+            if runtime_record and runtime_record.pgid is not None:
+                signal_process_group(signal.SIGKILL, runtime_record.pgid)
+            signal_pid_list(signal.SIGKILL, force_targets)
         time.sleep(1)
 
-    pid_file.unlink(missing_ok=True)
     raise ServiceError(f"{name} 未在预期时间内退出，请手动检查端口 {port}。")
 
 

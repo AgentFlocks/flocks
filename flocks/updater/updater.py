@@ -57,7 +57,6 @@ _PRESERVE_NAMES: set[str] = {
     ".env",
     "flocks.json",
     "__pycache__",
-    ".flocks",
 }
 
 log = Log.create(service="updater")

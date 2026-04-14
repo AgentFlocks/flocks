@@ -1204,6 +1204,37 @@ def test_replace_install_dir_preserves_webui_node_modules(
     assert locked_binary.read_text(encoding="utf-8") == "locked"
 
 
+def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
+    tmp_path: Path,
+) -> None:
+    """New release plugins under .flocks/plugins must be applied; removed plugins dropped."""
+    source_dir = tmp_path / "source"
+    install_root = tmp_path / "install"
+
+    src_plugins = source_dir / ".flocks" / "plugins" / "tools" / "api"
+    src_plugins.mkdir(parents=True)
+    (src_plugins / "fofa" / "_provider.yaml").parent.mkdir(parents=True)
+    (src_plugins / "fofa" / "_provider.yaml").write_text("version: new", encoding="utf-8")
+    (src_plugins / "new_release_plugin" / "tool.yaml").parent.mkdir(parents=True)
+    (src_plugins / "new_release_plugin" / "tool.yaml").write_text("name: new", encoding="utf-8")
+
+    inst_plugins = install_root / ".flocks" / "plugins" / "tools" / "api"
+    inst_plugins.mkdir(parents=True)
+    (inst_plugins / "fofa" / "_provider.yaml").parent.mkdir(parents=True)
+    (inst_plugins / "fofa" / "_provider.yaml").write_text("version: old", encoding="utf-8")
+    (inst_plugins / "obsolete_plugin" / "gone.yaml").parent.mkdir(parents=True)
+    (inst_plugins / "obsolete_plugin" / "gone.yaml").write_text("removed", encoding="utf-8")
+
+    (install_root / "flocks.json").write_text('{"keep": true}', encoding="utf-8")
+
+    updater._replace_install_dir(source_dir, install_root)
+
+    assert (inst_plugins / "fofa" / "_provider.yaml").read_text(encoding="utf-8") == "version: new"
+    assert (inst_plugins / "new_release_plugin" / "tool.yaml").read_text(encoding="utf-8") == "name: new"
+    assert not (inst_plugins / "obsolete_plugin").exists()
+    assert (install_root / "flocks.json").read_text(encoding="utf-8") == '{"keep": true}'
+
+
 @pytest.mark.asyncio
 async def test_perform_update_builds_staged_frontend_before_handover(
     monkeypatch: pytest.MonkeyPatch,

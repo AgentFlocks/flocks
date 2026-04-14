@@ -853,6 +853,69 @@ def test_stop_one_uses_taskkill_on_windows(monkeypatch, tmp_path: Path) -> None:
     ]
 
 
+def test_stop_one_force_kill_refreshes_process_group_members(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=111, pgid=222, port=8000),
+    )
+    console = DummyConsole()
+    pid_signals: list[tuple[signal.Signals, list[int]]] = []
+    group_signals: list[tuple[signal.Signals, int | None]] = []
+    alive_group_members = {333}
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111])
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda pgid: [333] if pgid == 222 and alive_group_members else [])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid in alive_group_members)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: bool(pgid == 222 and alive_group_members))
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    def fake_signal_group(sig, pgid):
+        group_signals.append((sig, pgid))
+
+    def fake_signal_pid_list(sig, pids):
+        pid_list = list(pids)
+        pid_signals.append((sig, pid_list))
+        if sig == signal.SIGKILL and 333 in pid_list:
+            alive_group_members.clear()
+
+    monkeypatch.setattr(service_manager, "signal_process_group", fake_signal_group)
+    monkeypatch.setattr(service_manager, "signal_pid_list", fake_signal_pid_list)
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert (signal.SIGTERM, 222) in group_signals
+    assert any(sig == signal.SIGKILL and 333 in pids for sig, pids in pid_signals)
+    assert not pid_file.exists()
+    assert console.messages[-1] == "[flocks] 后端 已停止。"
+
+
+def test_stop_one_keeps_runtime_record_when_force_kill_still_times_out(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=111, pgid=222, port=8000),
+    )
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111])
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda pgid: [333] if pgid == 222 else [])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: pgid == 222)
+    monkeypatch.setattr(service_manager, "signal_process_group", lambda *_args: None)
+    monkeypatch.setattr(service_manager, "signal_pid_list", lambda *_args: None)
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="未在预期时间内退出"):
+        service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert pid_file.exists()
+
+
 @contextlib.contextmanager
 def _record_call(call_order: list[str], name: str):
     call_order.append(name)

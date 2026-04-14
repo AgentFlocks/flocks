@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useToast } from './Toast';
+import { copyText } from '@/utils/clipboard';
 
 interface CopyButtonProps {
   text: string;
@@ -11,11 +13,19 @@ interface CopyButtonProps {
 export default function CopyButton({ text, size = 'w-3.5 h-3.5' }: CopyButtonProps) {
   const { t } = useTranslation('common');
   const [copied, setCopied] = useState(false);
+  const toast = useToast();
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await copyText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      toast.error(
+        t('clipboard.copyFailedTitle'),
+        error instanceof Error ? error.message : t('clipboard.copyFailedDescription'),
+      );
+    }
   };
 
   return (

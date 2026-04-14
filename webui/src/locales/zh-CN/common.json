@@ -20,6 +20,11 @@
     "installing": "安装中...",
     "copy": "复制"
   },
+  "clipboard": {
+    "copySuccessTitle": "已复制到剪贴板",
+    "copyFailedTitle": "复制失败",
+    "copyFailedDescription": "当前环境不支持自动复制，请手动选择后复制"
+  },
   "status": {
     "loading": "加载中...",
     "healthy": "运行正常",

@@ -21,6 +21,7 @@ import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCi
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
+import { useToast } from './Toast';
 import { QuestionTool } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
@@ -32,6 +33,7 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { workspaceAPI } from '@/api/workspace';
+import { copyText } from '@/utils/clipboard';
 import { formatSmartTime } from '@/utils/time';
 import type { Message, MessagePart, ToolState } from '@/types';
 
@@ -161,6 +163,34 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
   return result;
 }
 
+export function getMessageBubbleClassName({
+  compact,
+  isUser,
+  isEditing,
+}: {
+  compact: boolean;
+  isUser: boolean;
+  isEditing: boolean;
+}): string {
+  if (compact) {
+    return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
+      isUser
+        ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+        : 'bg-white border border-gray-200 shadow-sm'
+    }`;
+  }
+
+  const widthClass = isUser
+    ? (isEditing ? 'max-w-2xl w-full' : 'max-w-2xl w-auto')
+    : 'max-w-2xl w-full';
+
+  return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
+    isUser
+      ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+      : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
+  }`;
+}
+
 // ============================================================================
 // Main component
 // ============================================================================
@@ -206,6 +236,8 @@ export default function SessionChat({
   onInitialMessageConsumed,
 }: SessionChatProps) {
   const { t } = useTranslation('session');
+  const { t: tCommon } = useTranslation('common');
+  const toast = useToast();
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
@@ -913,9 +945,17 @@ export default function SessionChat({
   }, [isStreaming, sessionId, refetch]);
 
   // Copy text to clipboard
-  const handleCopy = useCallback((text: string) => {
-    navigator.clipboard.writeText(text).catch(() => {});
-  }, []);
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await copyText(text);
+      toast.success(tCommon('clipboard.copySuccessTitle'));
+    } catch (error) {
+      toast.error(
+        tCommon('clipboard.copyFailedTitle'),
+        error instanceof Error ? error.message : tCommon('clipboard.copyFailedDescription'),
+      );
+    }
+  }, [tCommon, toast]);
 
   const resetEditingState = useCallback(() => {
     setEditingMessageId(null);
@@ -1519,17 +1559,7 @@ function ChatMessageBubbleInner({
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
 
-  const bubbleClass = compact
-    ? `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
-        isUser
-          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-          : 'bg-white border border-gray-200 shadow-sm'
-      }`
-    : `${isUser ? 'max-w-2xl w-auto' : 'max-w-2xl w-full'} px-6 py-4 rounded-2xl text-sm break-words ${
-        isUser
-          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-          : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
-      }`;
+  const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
   const actionBarClass = `absolute bottom-0 z-10 flex items-center gap-1.5 transition-all duration-150 ${
     isUser ? 'right-3 translate-x-0.5 translate-y-1/2' : 'left-3 -translate-x-0.5 translate-y-1/2'
   } ${
