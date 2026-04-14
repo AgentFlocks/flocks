@@ -37,6 +37,7 @@ from flocks.workflow.center import (
 from flocks.session.recorder import Recorder
 from flocks.workflow.workflow_lint import lint_workflow
 from flocks.workflow.compiler import compile_workflow
+from flocks.workflow.fs_store import read_workflow_from_fs as shared_read_workflow_from_fs
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
@@ -257,16 +258,7 @@ def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     resolve_global_workflow_roots / resolve_project_workflow_roots; per-id dir
     is ``<root>/<id>/`` with ``workflow.json`` inside.
     """
-    candidates = [
-        (root / workflow_id, source)
-        for root, source in _all_scan_dirs()
-    ]
-    result = None
-    for wf_dir, source in candidates:
-        data = _read_workflow_dir(wf_dir, workflow_id, source)
-        if data is not None:
-            result = data
-    return result
+    return shared_read_workflow_from_fs(workflow_id)
 
 
 def _write_workflow_to_fs(
