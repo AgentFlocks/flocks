@@ -4,6 +4,17 @@ Flocks - Flocks Python Implementation
 AI-Native SecOps Platform
 """
 
+import os as _os
+from pathlib import Path as _Path
+
+# Point tiktoken at a persistent cache dir so the cl100k_base encoding
+# (downloaded from Azure Blob) survives OS tmp-dir cleanups.
+# The install script pre-warms this cache; at runtime we just set the env var.
+if "TIKTOKEN_CACHE_DIR" not in _os.environ:
+    _tiktoken_cache = _Path.home() / ".flocks" / "data" / "tiktoken_cache"
+    _tiktoken_cache.mkdir(parents=True, exist_ok=True)
+    _os.environ["TIKTOKEN_CACHE_DIR"] = str(_tiktoken_cache)
+
 from importlib.metadata import version, PackageNotFoundError
 
 try:

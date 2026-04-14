@@ -883,6 +883,48 @@ configure_agent_browser_browser() {
   ensure_env_var_persisted "AGENT_BROWSER_EXECUTABLE_PATH" "$browser_path"
 }
 
+warmup_tiktoken_cache() {
+  local cache_dir="$HOME/.flocks/data/tiktoken_cache"
+  local cache_key="9b5ad71b2ce5302211f9c61530b329a4922fc6a4"
+
+  if [[ -f "$cache_dir/$cache_key" ]]; then
+    if is_zh_install; then
+      info "tiktoken 编码缓存已存在，跳过。"
+    else
+      info "tiktoken encoding cache already exists. Skipping."
+    fi
+    return 0
+  fi
+
+  if is_zh_install; then
+    info "正在预热 tiktoken 编码缓存..."
+  else
+    info "Pre-warming tiktoken encoding cache..."
+  fi
+
+  mkdir -p "$cache_dir"
+  (
+    cd "$ROOT_DIR"
+    set +e
+    .venv/bin/python -c "
+import os
+os.environ['TIKTOKEN_CACHE_DIR'] = '$cache_dir'
+import tiktoken
+tiktoken.get_encoding('cl100k_base')
+print('ok')
+" 2>/dev/null
+    local status=$?
+    set -e
+    if [[ "$status" -ne 0 ]]; then
+      if is_zh_install; then
+        warn "tiktoken 缓存预热失败（网络问题），不影响安装，后续可重试。"
+      else
+        warn "tiktoken cache warm-up failed (network issue). This does not block installation; it can be retried later."
+      fi
+    fi
+  )
+}
+
 install_agent_browser() {
   ensure_agent_browser_user_path_if_needed
 
@@ -952,6 +994,7 @@ main() {
     )
   fi
 
+  warmup_tiktoken_cache
   install_agent_browser
 
   if is_zh_install; then
