@@ -645,7 +645,7 @@ export default function ToolPage() {
           }}
           onEnabledChange={(name, newEnabled) => {
             setSelectedTool((prev) => prev ? { ...prev, enabled: newEnabled } : prev);
-            handleRefresh();
+            refetch();
           }}
         />
       )}
@@ -3346,6 +3346,8 @@ function ToolDetailDrawer({
   const [deleting, setDeleting] = useState(false);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
 
+  useEffect(() => { setEnabled(tool.enabled); }, [tool.enabled]);
+
   const handleToggleEnabled = async () => {
     if (toggling) return;
     const next = !enabled;
@@ -3354,8 +3356,8 @@ function ToolDetailDrawer({
       await toolAPI.setEnabled(tool.name, next);
       setEnabled(next);
       onEnabledChange?.(tool.name, next);
-    } catch {
-      // revert on error
+    } catch (err: any) {
+      alert(err.response?.data?.message || err.response?.data?.detail || err.message);
     } finally {
       setToggling(false);
     }
