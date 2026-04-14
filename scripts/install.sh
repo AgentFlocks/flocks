@@ -778,38 +778,54 @@ get_chrome_for_testing_dir() {
   printf '%s' "$HOME/.flocks/browser"
 }
 
+resolve_chrome_for_testing_path_from_dir() {
+  local browser_dir="$1" candidate restore_globstar=0 restore_nullglob=0
+  [[ -d "$browser_dir" ]] || return 1
+
+  shopt -q globstar || restore_globstar=1
+  shopt -q nullglob || restore_nullglob=1
+  shopt -s globstar nullglob
+
+  for candidate in \
+    "$browser_dir"/**/"Google Chrome for Testing" \
+    "$browser_dir"/**/chrome.exe \
+    "$browser_dir"/**/chrome; do
+    [[ -f "$candidate" && -x "$candidate" ]] || continue
+    printf '%s' "$candidate"
+    [[ "$restore_globstar" -eq 1 ]] && shopt -u globstar
+    [[ "$restore_nullglob" -eq 1 ]] && shopt -u nullglob
+    return 0
+  done
+
+  [[ "$restore_globstar" -eq 1 ]] && shopt -u globstar
+  [[ "$restore_nullglob" -eq 1 ]] && shopt -u nullglob
+  return 1
+}
+
 install_chrome_for_testing() {
-  local browser_dir install_output browser_path="" line candidate tmpfile
+  local browser_dir browser_path="" install_status
   has_cmd npx || fail "npx was not found. Install Node.js (including npm) and retry.$(nodejs_manual_download_hint)"
   browser_dir="$(get_chrome_for_testing_dir)"
   mkdir -p "$browser_dir"
 
   info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browser_dir" >&2
+  if is_zh_install; then
+    info "正在下载 Chrome for Testing（约 200MB），下方将显示下载进度..." >&2
+  else
+    info "Downloading Chrome for Testing (~200MB). The download progress will be shown below..." >&2
+  fi
 
-  tmpfile="$(mktemp)"
   set +e
-  npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 2>&1 | tee "$tmpfile" >&2
-  local install_status=${PIPESTATUS[0]}
+  npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2
+  install_status=$?
   set -e
-  install_output="$(<"$tmpfile")"
-  rm -f "$tmpfile"
 
   if [[ "$install_status" -ne 0 ]]; then
     fail "Chrome for Testing installation failed."
   fi
 
-  while IFS= read -r line; do
-    case "$line" in
-      chrome@*' '*|chromium@*' '*)
-        candidate="${line#* }"
-        if [[ "$candidate" = /* && -x "$candidate" ]]; then
-          browser_path="$candidate"
-        fi
-        ;;
-    esac
-  done <<< "$install_output"
-
-  [[ -n "$browser_path" ]] || fail "Chrome for Testing finished installing, but the browser path could not be parsed from the installer output."
+  browser_path="$(resolve_chrome_for_testing_path_from_dir "$browser_dir" || true)"
+  [[ -n "$browser_path" ]] || fail "Chrome for Testing finished installing, but the browser executable could not be located under: $browser_dir."
   printf '%s' "$browser_path"
 }
 
@@ -895,12 +911,6 @@ main() {
       cd "$ROOT_DIR/tui"
       bun install
     )
-  else
-    if is_zh_install; then
-      info "已跳过 TUI 依赖安装。如需安装，请重新执行 ./scripts/install_zh.sh --with-tui。"
-    else
-      info "Skipping TUI dependency installation. Re-run ./scripts/install.sh --with-tui to install them."
-    fi
   fi
 
   install_agent_browser

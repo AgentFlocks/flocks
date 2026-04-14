@@ -42,7 +42,7 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert "-RedirectStandardOutput $stdoutPath" in script
     assert "-RedirectStandardError $stderrPath" in script
     assert "Invoke-InstallerCommandWithLockRetry" in script
-    assert "$result = Invoke-NativeCommandOrFail" in script
+    assert "$process = Start-Process" in script
     assert "$null = Invoke-NativeCommandOrFail" in script
     assert '-Description "Python backend dependency installation"' in script
     assert "flocks.cmd" in script

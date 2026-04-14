@@ -927,6 +927,28 @@ function Get-ChromeForTestingDir {
     return (Join-Path $HOME ".flocks\browser")
 }
 
+function Resolve-ChromeForTestingPath {
+    param([string]$BrowserDir)
+
+    if ([string]::IsNullOrWhiteSpace($BrowserDir) -or -not (Test-Path $BrowserDir)) {
+        return $null
+    }
+
+    $candidateNames = @("chrome.exe", "Google Chrome for Testing", "chrome")
+    $candidates = @(Get-ChildItem -Path $BrowserDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+        $candidateNames -contains $_.Name
+    })
+
+    foreach ($name in $candidateNames) {
+        $match = $candidates | Where-Object { $_.Name -eq $name } | Select-Object -First 1
+        if ($match) {
+            return $match.FullName
+        }
+    }
+
+    return $null
+}
+
 function Install-ChromeForTesting {
     $browserDir = Get-ChromeForTestingDir
 
@@ -936,46 +958,42 @@ function Install-ChromeForTesting {
 
     New-Item -ItemType Directory -Path $browserDir -Force | Out-Null
     Write-Info "System Chrome/Chromium was not found. Installing Chrome for Testing to: $browserDir"
+    Write-Info (Get-LocalizedText -English "Downloading Chrome for Testing (~200MB). The download progress will be shown below..." -Chinese "正在下载 Chrome for Testing（约 200MB），下方将显示下载进度...")
 
-    $result = Invoke-NativeCommandOrFail `
-        -Description "Chrome for Testing installation" `
-        -FilePath "npx.cmd" `
-        -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
-        -WorkingDirectory $browserDir `
-        -Environment @{ npm_config_registry = $script:NpmRegistry } `
-        -StreamOutput
+    $npxPath = Get-CommandPath "npx.cmd"
+    if ([string]::IsNullOrWhiteSpace($npxPath)) {
+        Fail "npx was not found. Install Node.js (including npm) and retry.$(Get-NodejsManualDownloadHint)"
+    }
 
-    $browserPath = Resolve-ChromeForTestingPath -InstallOutputText (@($result.StdOut, $result.StdErr) -join [Environment]::NewLine)
+    $previousRegistry = $env:npm_config_registry
+    $env:npm_config_registry = $script:NpmRegistry
+    try {
+        $process = Start-Process `
+            -FilePath $npxPath `
+            -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
+            -WorkingDirectory $browserDir `
+            -NoNewWindow `
+            -Wait `
+            -PassThru
+        if ($process.ExitCode -ne 0) {
+            Fail "Chrome for Testing installation failed."
+        }
+    }
+    finally {
+        if ($null -eq $previousRegistry) {
+            Remove-Item Env:npm_config_registry -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:npm_config_registry = $previousRegistry
+        }
+    }
+
+    $browserPath = Resolve-ChromeForTestingPath -BrowserDir $browserDir
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
-        Fail "Chrome for Testing finished installing, but the browser path could not be parsed from the installer output."
+        Fail "Chrome for Testing finished installing, but the browser executable could not be located under: $browserDir."
     }
 
     return $browserPath
-}
-
-function Resolve-ChromeForTestingPath {
-    param([string]$InstallOutputText)
-
-    foreach ($line in ($InstallOutputText -split "\r?\n")) {
-        $line = $line.Trim()
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            continue
-        }
-
-        if ($line -like "chrome@* *" -or $line -like "chromium@* *") {
-            $firstSpaceIndex = $line.IndexOf(' ')
-            if ($firstSpaceIndex -lt 0) {
-                continue
-            }
-
-            $candidate = $line.Substring($firstSpaceIndex + 1).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path $candidate)) {
-                return $candidate
-            }
-        }
-    }
-
-    return $null
 }
 
 function Configure-AgentBrowserBrowser {
@@ -1122,9 +1140,6 @@ function Main {
         finally {
             Pop-Location
         }
-    }
-    else {
-        Write-Info (Get-LocalizedText -English "Skipping TUI dependency installation. Re-run .\scripts\install_zh.ps1 -InstallTui to install them." -Chinese "已跳过 TUI 依赖安装。如需安装，请重新执行 .\scripts\install.ps1 -InstallTui。")
     }
 
     Install-AgentBrowser
