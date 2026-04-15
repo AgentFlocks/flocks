@@ -1045,15 +1045,42 @@ def _run_legacy_task_migration(root: Path, console) -> None:
             console.print("[flocks] 旧任务迁移失败，请检查日志。")
 
 
+def _resolve_stop_ports(
+    paths: RuntimePaths,
+    config: ServiceConfig | None = None,
+) -> tuple[int, int]:
+    """Resolve frontend/backend ports for stop flows.
+
+    When a runtime record is missing or uses the legacy pid-only format,
+    ``start`` and ``restart`` should fall back to the current CLI config
+    rather than the static default ports.
+    """
+    frontend_default = config.frontend_port if config is not None else ServiceConfig.frontend_port
+    backend_default = config.backend_port if config is not None else ServiceConfig.backend_port
+    return (
+        _effective_frontend_port(paths, frontend_default),
+        _recorded_port(paths.backend_pid, backend_default),
+    )
+
+
+def _stop_all_locked(
+    paths: RuntimePaths,
+    console,
+    *,
+    config: ServiceConfig | None = None,
+) -> None:
+    """Stop frontend then backend while reusing the caller's lock."""
+    fe_port, be_port = _resolve_stop_ports(paths, config)
+    _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
+    stop_one(fe_port, paths.frontend_pid, "WebUI", console)
+    stop_one(be_port, paths.backend_pid, "后端", console)
+
+
 def stop_all(console) -> None:
     """Stop frontend then backend using ports persisted in runtime records."""
     paths = ensure_runtime_dirs()
     with service_lock(paths):
-        fe_port = _effective_frontend_port(paths, ServiceConfig.frontend_port)
-        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
-        _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
-        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
-        stop_one(be_port, paths.backend_pid, "后端", console)
+        _stop_all_locked(paths, console)
 
 
 def _start_all_without_stop(config: ServiceConfig, console) -> None:
@@ -1070,11 +1097,7 @@ def start_all(config: ServiceConfig, console) -> None:
     """Ensure backend and frontend are restarted with a clean state."""
     paths = ensure_runtime_dirs()
     with service_lock(paths):
-        fe_port = _effective_frontend_port(paths, config.frontend_port)
-        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
-        _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
-        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
-        stop_one(be_port, paths.backend_pid, "后端", console)
+        _stop_all_locked(paths, console, config=config)
         _start_all_without_stop(config, console)
 
 
@@ -1082,11 +1105,7 @@ def restart_all(config: ServiceConfig, console) -> None:
     """Restart backend and frontend."""
     paths = ensure_runtime_dirs()
     with service_lock(paths):
-        fe_port = _effective_frontend_port(paths, config.frontend_port)
-        be_port = _recorded_port(paths.backend_pid, ServiceConfig.backend_port)
-        _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
-        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
-        stop_one(be_port, paths.backend_pid, "后端", console)
+        _stop_all_locked(paths, console, config=config)
         _start_all_without_stop(config, console)
 
 

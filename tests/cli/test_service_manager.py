@@ -479,6 +479,71 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
     ]
 
 
+def test_start_all_uses_config_backend_port_when_pid_record_missing(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    config = service_manager.ServiceConfig(frontend_port=5175, backend_port=9100)
+    calls: list[tuple[int, Path, str]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, pid_file, name, _console: calls.append((port, pid_file, name)),
+    )
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda *_args, **_kwargs: None)
+
+    service_manager.start_all(config, console=None)
+
+    assert calls == [
+        (5175, paths.frontend_pid, "WebUI"),
+        (9100, paths.backend_pid, "后端"),
+    ]
+
+
+def test_restart_all_uses_config_backend_port_with_legacy_pid_record(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.backend_pid.write_text("12345", encoding="utf-8")
+    config = service_manager.ServiceConfig(frontend_port=5176, backend_port=9200)
+    calls: list[tuple[int, Path, str]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, pid_file, name, _console: calls.append((port, pid_file, name)),
+    )
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda *_args, **_kwargs: None)
+
+    service_manager.restart_all(config, console=None)
+
+    assert calls == [
+        (5176, paths.frontend_pid, "WebUI"),
+        (9200, paths.backend_pid, "后端"),
+    ]
+
+
 def test_start_all_stops_on_failure_before_restart(monkeypatch) -> None:
     paths = service_manager.RuntimePaths(
         root=Path("/tmp"),
