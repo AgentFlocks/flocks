@@ -82,6 +82,43 @@ def _resolve_workflow_runtime_preference(tool_context: Optional[Any]) -> Literal
     return "host"  # type: ignore[return-value]
 
 
+def _resolve_workflow_node_timeout(
+    requested_timeout_s: Optional[float],
+    workflow_metadata: Optional[Dict[str, Any]],
+) -> Optional[float]:
+    """Resolve effective per-node timeout with workflow metadata fallback."""
+    if requested_timeout_s is None:
+        return None
+    if requested_timeout_s not in (300, 300.0):
+        return requested_timeout_s
+    if not isinstance(workflow_metadata, dict):
+        return requested_timeout_s
+
+    candidates = [
+        workflow_metadata.get("node_timeout_s"),
+        workflow_metadata.get("nodeTimeoutS"),
+    ]
+    runtime_defaults = workflow_metadata.get("runtime_defaults")
+    if isinstance(runtime_defaults, dict):
+        candidates.extend(
+            [
+                runtime_defaults.get("node_timeout_s"),
+                runtime_defaults.get("nodeTimeoutS"),
+            ]
+        )
+
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            resolved = float(value)
+        except (TypeError, ValueError):
+            continue
+        if resolved > 0:
+            return resolved
+    return requested_timeout_s
+
+
 def _resolve_sandbox_payload_from_config(tool_context: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Resolve sandbox payload directly from config for workflow sandbox default."""
     config_data = _load_config_data()
@@ -295,6 +332,11 @@ def run_workflow(
     except Exception:
         pass
 
+    effective_node_timeout_s = _resolve_workflow_node_timeout(
+        node_timeout_s,
+        wf.metadata,
+    )
+
     reqs = requirements_from_workflow_metadata(wf.metadata)
     if ensure_requirements:
         _logger.info("检查依赖包...")
@@ -330,14 +372,20 @@ def run_workflow(
             (requirements_installer or RequirementsInstaller(installer="auto")).ensure_installed(reqs)
         rt = PythonExecRuntime(tool_registry=registry)
     
-    _logger.info(f"创建执行引擎 (use_llm={effective_use_llm}, trace={trace}, node_timeout={node_timeout_s}s, parallel_workers={max_parallel_workers})")
+    _logger.info(
+        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s)",
+        effective_use_llm,
+        trace,
+        effective_node_timeout_s,
+        max_parallel_workers,
+    )
     engine = WorkflowEngine(
         wf,
         runtime=rt,
         use_llm=bool(effective_use_llm),
         trace=trace,
         workflow_path=workflow_path_for_engine,
-        node_timeout_s=node_timeout_s,
+        node_timeout_s=effective_node_timeout_s,
         max_parallel_workers=max_parallel_workers,
     )
     

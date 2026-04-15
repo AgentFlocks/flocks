@@ -31,7 +31,7 @@ def test_node_timeout_skips_node_and_records_error():
     engine = WorkflowEngine(
         workflow,
         runtime=rt,
-        node_timeout_s=0.3,
+        node_timeout_s=1.0,
         stop_on_error=False,
     )
     result = engine.run(initial_inputs={})
@@ -43,7 +43,7 @@ def test_node_timeout_skips_node_and_records_error():
     assert step_slow.node_id == "slow"
     assert step_slow.error is not None
     assert "节点执行超时" in step_slow.error
-    assert "0.3" in step_slow.error
+    assert "1.0" in step_slow.error
     assert step_slow.outputs == {}
 
     step_fast = result.history[1]
@@ -97,3 +97,57 @@ def test_run_workflow_node_timeout_param():
     assert len(result.history) == 1
     assert result.history[0].get("error") is not None
     assert "节点执行超时" in result.history[0]["error"]
+
+
+def test_run_workflow_uses_metadata_node_timeout_default():
+    """Workflow metadata can override the historical 300s default."""
+    workflow = {
+        "name": "metadata_timeout",
+        "start": "s",
+        "nodes": [
+            {
+                "id": "s",
+                "type": "python",
+                "code": "import time; time.sleep(0.2); outputs['ok'] = 1",
+                "description": "Slow-ish",
+            },
+        ],
+        "edges": [],
+        "metadata": {"node_timeout_s": 0.05},
+    }
+    result = run_workflow(
+        workflow=workflow,
+        inputs={},
+        ensure_requirements=False,
+    )
+    assert result.status == "SUCCEEDED"
+    assert len(result.history) == 1
+    assert "节点执行超时" in (result.history[0].get("error") or "")
+
+
+def test_run_workflow_explicit_node_timeout_overrides_metadata():
+    """Explicit caller timeout should win over workflow metadata."""
+    workflow = {
+        "name": "metadata_timeout_override",
+        "start": "s",
+        "nodes": [
+            {
+                "id": "s",
+                "type": "python",
+                "code": "import time; time.sleep(0.2); outputs['ok'] = 1",
+                "description": "Slow-ish",
+            },
+        ],
+        "edges": [],
+        "metadata": {"node_timeout_s": 0.05},
+    }
+    result = run_workflow(
+        workflow=workflow,
+        inputs={},
+        node_timeout_s=1.0,
+        ensure_requirements=False,
+    )
+    assert result.status == "SUCCEEDED"
+    assert len(result.history) == 1
+    assert result.history[0].get("error") is None
+    assert result.history[0]["outputs"]["ok"] == 1
