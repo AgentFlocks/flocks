@@ -2,7 +2,7 @@
  * NodeInfoPanel — 并列在对话左侧的节点信息/编辑面板
  * 当用户点击画布节点时展开，可关闭。
  */
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
@@ -140,6 +140,64 @@ function JsonField({ label, value, onChange, placeholder }: {
         spellCheck={false}
       />
       {err && <p className="mt-1 text-[11px] text-red-500 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{err}</p>}
+    </div>
+  );
+}
+
+function ExpandedCodeEditor({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const lineNumberTrackRef = useRef<HTMLDivElement | null>(null);
+  const lineNumbers = useMemo(() => {
+    const totalLines = Math.max(1, value.split('\n').length);
+    return Array.from({ length: totalLines }, (_, index) => index + 1);
+  }, [value]);
+
+  const syncLineNumberOffset = () => {
+    if (!lineNumberTrackRef.current) {
+      return;
+    }
+    const scrollTop = textareaRef.current?.scrollTop ?? 0;
+    lineNumberTrackRef.current.style.transform = `translateY(-${scrollTop}px)`;
+  };
+
+  useEffect(() => {
+    syncLineNumberOffset();
+  }, [lineNumbers.length]);
+
+  return (
+    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#30363d] bg-[#0d1117]">
+      <div
+        aria-hidden="true"
+        data-testid="expanded-code-line-numbers"
+        className="flex-shrink-0 overflow-hidden select-none border-r border-[#30363d] bg-[#0b0f14] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#6e7681]"
+      >
+        <div ref={lineNumberTrackRef}>
+          {lineNumbers.map((lineNumber) => (
+            <div key={lineNumber} data-line-number={lineNumber}>
+              {lineNumber}
+            </div>
+          ))}
+        </div>
+      </div>
+      <textarea
+        ref={textareaRef}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onScroll={syncLineNumberOffset}
+        rows={24}
+        wrap="off"
+        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#0d1117] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#e6edf3] focus:outline-none focus:ring-2 focus:ring-red-400"
+        placeholder={placeholder}
+        spellCheck={false}
+      />
     </div>
   );
 }
@@ -564,7 +622,9 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-3 pt-4 pb-3 space-y-4">
         <DataFlow node={node} edges={workflow.workflowJson.edges} />
-        <RuntimeSection nodeId={node.id} latestExecution={latestExecution} />
+        {!isCodeNode && (
+          <RuntimeSection nodeId={node.id} latestExecution={latestExecution} />
+        )}
 
         <div className="space-y-4">
           <div>
@@ -601,6 +661,10 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 spellCheck={false}
               />
             </div>
+          )}
+
+          {isCodeNode && (
+            <RuntimeSection nodeId={node.id} latestExecution={latestExecution} />
           )}
 
           {isCodeNode && (
@@ -720,7 +784,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
             role="dialog"
             aria-modal="true"
             aria-label={t('detail.nodeInfo.expandedCodeEditorTitle')}
-            className="flex h-[85vh] w-[min(96vw,960px)] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl"
+            className="flex h-[85vh] w-[min(96vw,960px)] min-h-0 min-w-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-2xl"
           >
             <div className="flex items-center justify-between gap-3 border-b border-gray-100 px-4 py-3">
               <div>
@@ -736,14 +800,11 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>
-            <div className="flex-1 bg-[#0d1117] p-4">
-              <textarea
+            <div className="flex-1 min-h-0 min-w-0 bg-[#0d1117] p-4">
+              <ExpandedCodeEditor
                 value={form.code ?? ''}
-                onChange={(e) => set('code', e.target.value)}
-                rows={24}
-                className="h-full w-full resize-none rounded-xl border border-[#30363d] bg-[#0d1117] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#e6edf3] focus:outline-none focus:ring-2 focus:ring-red-400"
+                onChange={(value) => set('code', value)}
                 placeholder={t('detail.nodeInfo.codePlaceholder')}
-                spellCheck={false}
               />
             </div>
           </div>

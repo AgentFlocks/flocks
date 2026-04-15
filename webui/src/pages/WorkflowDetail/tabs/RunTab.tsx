@@ -19,6 +19,7 @@ interface RunTabProps {
   workflow: Workflow;
   latestExecution: WorkflowExecution | null;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onExecutionSettled?: () => void;
 }
 
 function SectionHeader({
@@ -172,10 +173,12 @@ function TestSection({
   workflow,
   execution,
   onExecutionChange,
+  onExecutionSettled,
 }: {
   workflow: Workflow;
   execution: WorkflowExecution | null;
   onExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onExecutionSettled?: () => void;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -249,6 +252,8 @@ function TestSection({
         onExecutionChange?.(response.data);
         if (response.data.status === 'running') {
           timerId = window.setTimeout(pollExecution, 1000);
+        } else {
+          onExecutionSettled?.();
         }
       } catch (error) {
         if (cancelled) return;
@@ -269,7 +274,7 @@ function TestSection({
         window.clearTimeout(timerId);
       }
     };
-  }, [execution, onExecutionChange, t, workflow.id]);
+  }, [execution, onExecutionChange, onExecutionSettled, t, workflow.id]);
 
   const scheduleSampleSave = useCallback((raw: string, parsed: Record<string, any>) => {
     if (saveTimerRef.current) {
@@ -1015,6 +1020,7 @@ export default function RunTab({
   workflow,
   latestExecution,
   onLatestExecutionChange,
+  onExecutionSettled,
 }: RunTabProps) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
@@ -1022,6 +1028,7 @@ export default function RunTab({
         workflow={workflow}
         execution={latestExecution}
         onExecutionChange={onLatestExecutionChange}
+        onExecutionSettled={onExecutionSettled}
       />
       <PublishSection workflowId={workflow.id} />
       <KafkaSection workflowId={workflow.id} />

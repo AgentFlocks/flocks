@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import NodeInfoPanel from './NodeInfoPanel';
 
@@ -260,17 +260,22 @@ describe('NodeInfoPanel', () => {
 
     const expandedEditor = screen.getByRole('dialog', { name: '大编辑器' }).querySelector('textarea');
     expect(expandedEditor).not.toBeNull();
-    await user.clear(expandedEditor!);
-    await user.type(expandedEditor!, 'print("expanded")');
+    const lineNumbers = within(screen.getByTestId('expanded-code-line-numbers'));
+    expect(lineNumbers.getByText('1')).toBeInTheDocument();
 
-    expect(screen.getAllByDisplayValue('print("expanded")').length).toBeGreaterThanOrEqual(1);
+    await user.clear(expandedEditor!);
+    await user.type(expandedEditor!, 'print("expanded"){enter}print("next")');
+
+    expect(lineNumbers.getByText('2')).toBeInTheDocument();
+    expect((expandedEditor as HTMLTextAreaElement).value).toBe('print("expanded")\nprint("next")');
 
     await user.click(screen.getByRole('button', { name: '收起编辑' }));
     expect(screen.queryByRole('dialog', { name: '大编辑器' })).not.toBeInTheDocument();
-    expect(screen.getByDisplayValue('print("expanded")')).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/print\("expanded"\)/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/print\("next"\)/)).toBeInTheDocument();
   });
 
-  it('places run node section after the code editor for code nodes', () => {
+  it('places runtime section between the code editor and run node section for code nodes', () => {
     render(
       <NodeInfoPanel
         node={workflow.workflowJson.nodes[0]}
@@ -282,10 +287,14 @@ describe('NodeInfoPanel', () => {
     );
 
     const codeLabel = screen.getByText('代码');
+    const runtimeLabel = screen.getByText('最近一次运行');
     const runNodeLabel = screen.getByText('单节点执行');
 
     expect(
-      codeLabel.compareDocumentPosition(runNodeLabel) & Node.DOCUMENT_POSITION_FOLLOWING,
+      codeLabel.compareDocumentPosition(runtimeLabel) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      runtimeLabel.compareDocumentPosition(runNodeLabel) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 

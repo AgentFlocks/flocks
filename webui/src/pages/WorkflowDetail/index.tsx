@@ -85,24 +85,43 @@ export default function WorkflowDetail() {
     window.addEventListener('mouseup', onUp);
   }, [panelWidth]);
 
+  const loadWorkflow = useCallback(async (
+    options?: { preserveExecution?: boolean; silent?: boolean }
+  ) => {
+    if (!id) return;
+    const isSilent = options?.silent === true;
+    try {
+      if (!isSilent) {
+        setLoading(true);
+        setError(null);
+      }
+      const res = await workflowAPI.get(id);
+      setWorkflow(res.data);
+      if (!options?.preserveExecution) {
+        setLatestExecution(null);
+      }
+      if (!isSilent) {
+        setError(null);
+      }
+    } catch (err: unknown) {
+      if (!isSilent) {
+        setError(extractErrorMessage(err, t('detail.loadFailed')));
+      }
+    } finally {
+      if (!isSilent) {
+        setLoading(false);
+      }
+    }
+  }, [id, t]);
+
   useEffect(() => {
     if (!id) return;
-    loadWorkflow();
-  }, [id]);
+    void loadWorkflow();
+  }, [id, loadWorkflow]);
 
-  const loadWorkflow = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await workflowAPI.get(id!);
-      setWorkflow(res.data);
-      setLatestExecution(null);
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.loadFailed')));
-    } finally {
-      setLoading(false);
-    }
-  };
+  const refreshWorkflowStats = useCallback(() => {
+    void loadWorkflow({ preserveExecution: true, silent: true });
+  }, [loadWorkflow]);
 
   const showToast = useCallback((type: 'success' | 'error', text: string) => {
     setRunToast({ type, text });
@@ -195,7 +214,7 @@ export default function WorkflowDetail() {
         <p className="text-red-600 text-sm">{error || t('detail.notFound')}</p>
         <div className="flex gap-3">
           <button
-            onClick={loadWorkflow}
+            onClick={() => void loadWorkflow()}
             className="px-4 py-2 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700"
           >
             {t('common:button.retry')}
@@ -374,6 +393,7 @@ export default function WorkflowDetail() {
           open={panelOpen}
           width={panelWidth}
           onLatestExecutionChange={setLatestExecution}
+          onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
           selectedNode={drawerNode}

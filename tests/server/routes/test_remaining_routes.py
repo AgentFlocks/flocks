@@ -58,6 +58,7 @@ async def _wait_for_execution_terminal_state(
 def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Redirect workflow route filesystem writes into a per-test temp dir."""
     from flocks.server.routes import workflow as workflow_routes
+    from flocks.workflow import fs_store
 
     workspace_root = tmp_path / "workspace"
     project_root = workspace_root / ".flocks" / "plugins" / "workflows"
@@ -80,15 +81,19 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
+    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root, raising=False)
+    monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
     monkeypatch.setattr(
-        workflow_routes,
+        fs_store,
         "resolve_project_workflow_roots",
-        lambda workspace: [legacy_project_main, legacy_project_plugin, project_root],
+        lambda workspace=None: [legacy_project_main, legacy_project_plugin, project_root],
+        raising=False,
     )
     monkeypatch.setattr(
-        workflow_routes,
+        fs_store,
         "resolve_global_workflow_roots",
         lambda: [legacy_global_main, legacy_global_plugin, global_root],
+        raising=False,
     )
 
     yield
@@ -193,6 +198,67 @@ class TestWorkflowRoutes:
         assert data["status"] == "running"
         assert data["id"]
         assert data["inputParams"] == {"topic": "demo"}
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_marks_business_failure_as_error(self, client: AsyncClient):
+        """A workflow that reports workflow_success=false should count as a failed run."""
+        payload = {
+            "name": "business-failure-workflow",
+            "description": "workflow that reports business failure",
+            "workflowJson": {
+                "start": "node_1",
+                "nodes": [
+                    {
+                        "id": "node_1",
+                        "type": "python",
+                        "code": (
+                            "outputs['workflow_success'] = False\n"
+                            "outputs['reason'] = 'Script file not found'"
+                        ),
+                    }
+                ],
+                "edges": [],
+            },
+        }
+        create_resp = await client.post("/api/workflow", json=payload)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "error"
+        assert final["errorMessage"] == "Script file not found"
+        assert final["outputResults"]["workflow_success"] is False
+
+        workflow_resp = await client.get(f"/api/workflow/{wf_id}")
+        assert workflow_resp.status_code == status.HTTP_200_OK, workflow_resp.text
+        stats = workflow_resp.json()["stats"]
+        assert stats["callCount"] == 1
+        assert stats["successCount"] == 0
+        assert stats["errorCount"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_success_updates_success_stats(self, client: AsyncClient):
+        """A normal successful workflow should remain successful in execution and stats."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "success"
+        assert final.get("errorMessage") in (None, "")
+
+        workflow_resp = await client.get(f"/api/workflow/{wf_id}")
+        assert workflow_resp.status_code == status.HTTP_200_OK, workflow_resp.text
+        stats = workflow_resp.json()["stats"]
+        assert stats["callCount"] == 1
+        assert stats["successCount"] == 1
+        assert stats["errorCount"] == 0
 
     @pytest.mark.asyncio
     async def test_cancel_running_workflow_execution(self, client: AsyncClient):

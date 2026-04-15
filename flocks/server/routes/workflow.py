@@ -436,6 +436,34 @@ def _normalize_execution_status(status: str) -> str:
     return (status or "error").strip().lower() or "error"
 
 
+def _extract_business_failure_message(outputs: Dict[str, Any]) -> Optional[str]:
+    """Return a user-facing failure reason from workflow outputs."""
+    for key in ("reason", "error_message", "errorMessage", "message"):
+        value = outputs.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _resolve_execution_outcome(result: RunWorkflowResult) -> tuple[str, Optional[str]]:
+    """Resolve API execution status from runner status and workflow outputs."""
+    status_value = _normalize_execution_status(result.status)
+    error_message = result.error
+
+    if status_value != "success" or not isinstance(result.outputs, dict):
+        return status_value, error_message
+
+    if result.outputs.get("workflow_success") is False:
+        return (
+            "error",
+            error_message
+            or _extract_business_failure_message(result.outputs)
+            or "Workflow reported business failure.",
+        )
+
+    return status_value, error_message
+
+
 async def _record_execution_result(workflow_id: str, exec_id: str, exec_data: Dict[str, Any]) -> None:
     """Persist the final execution record and audit trail."""
     await Storage.write(_workflow_execution_key(exec_id), exec_data)
@@ -493,14 +521,14 @@ async def _run_workflow_execution_task(
 
         duration = time.time() - start_time
         current_data = await Storage.read(exec_key)
-        status_value = _normalize_execution_status(result.status)
+        status_value, error_message = _resolve_execution_outcome(result)
         current_data.update({
             "outputResults": result.outputs,
             "status": status_value,
             "finishedAt": int(time.time() * 1000),
             "duration": duration,
             "executionLog": result.history or list(step_history),
-            "errorMessage": result.error,
+            "errorMessage": error_message,
         })
 
         if status_value == "success":

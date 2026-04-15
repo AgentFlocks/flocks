@@ -67,6 +67,7 @@ interface RightPanelProps {
   open: boolean;
   width?: number;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  onExecutionSettled?: () => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
   /** Currently selected node — passed to ChatTab to show reference chip in input */
@@ -78,6 +79,7 @@ interface RightPanelProps {
 export default function RightPanel({
   workflow, latestExecution, open, width = 320,
   onLatestExecutionChange,
+  onExecutionSettled,
   onWorkflowUpdated,
   onFirstMessageSent,
   selectedNode, onDeselectNode,
@@ -151,6 +153,7 @@ export default function RightPanel({
               workflow={workflow}
               latestExecution={latestExecution ?? null}
               onLatestExecutionChange={onLatestExecutionChange}
+              onExecutionSettled={onExecutionSettled}
             />
           </TabErrorBoundary>
         )}
