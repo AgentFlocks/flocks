@@ -29,6 +29,46 @@ function Ensure-EmptyDir {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
 }
 
+function Resolve-CacheRoot {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return Join-Path $env:LOCALAPPDATA "flocks\cache"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:XDG_CACHE_HOME)) {
+        return Join-Path $env:XDG_CACHE_HOME "flocks"
+    }
+    return Join-Path $env:TEMP "flocks-cache"
+}
+
+function Get-OrDownloadFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$CachePath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $cacheDir = Split-Path -Parent $CachePath
+    if (-not (Test-Path $cacheDir)) {
+        New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+    }
+
+    if (Test-Path $CachePath) {
+        $existing = Get-Item -Path $CachePath
+        if ($existing.Length -gt 0) {
+            Write-Host "[build-staging] Reusing cached $Label: $CachePath"
+            return
+        }
+        Remove-Item -Path $CachePath -Force
+    }
+
+    Write-Host "[build-staging] Downloading $Label ..."
+    $tmpPath = "$CachePath.download"
+    if (Test-Path $tmpPath) {
+        Remove-Item -Path $tmpPath -Force
+    }
+    Invoke-WebRequest -Uri $Url -OutFile $tmpPath -UseBasicParsing
+    Move-Item -Path $tmpPath -Destination $CachePath -Force
+}
+
 Write-Host "[build-staging] RepoRoot: $RepoRoot"
 Write-Host "[build-staging] OutputDir: $OutputDir"
 
@@ -36,6 +76,7 @@ $manifest = Read-Manifest -Path $ManifestPath
 $uvVersion = $manifest.uv.version
 $nodeVersion = $manifest.nodejs.version
 $nodeSuffix = $manifest.nodejs.windows_zip_suffix
+$cacheRoot = Resolve-CacheRoot
 
 Ensure-EmptyDir -Path $OutputDir
 
@@ -51,25 +92,21 @@ New-Item -ItemType Directory -Path $toolsChrome -Force | Out-Null
 # uv (standalone zip from GitHub releases)
 $uvZipName = "uv-x86_64-pc-windows-msvc.zip"
 $uvUrl = "https://github.com/astral-sh/uv/releases/download/$uvVersion/$uvZipName"
-$uvZip = Join-Path $env:TEMP "uv-win-$uvVersion.zip"
-Write-Host "[build-staging] Downloading uv $uvVersion ..."
-Invoke-WebRequest -Uri $uvUrl -OutFile $uvZip -UseBasicParsing
+$uvZip = Join-Path $cacheRoot "downloads\uv-$uvVersion-$uvZipName"
+Get-OrDownloadFile -Url $uvUrl -CachePath $uvZip -Label "uv $uvVersion"
 Expand-Archive -Path $uvZip -DestinationPath $toolsUv -Force
-Remove-Item $uvZip -Force
 
 # Node.js official zip (portable)
 $nodeZipName = "node-v$nodeVersion-$nodeSuffix.zip"
 $nodeUrl = "https://nodejs.org/dist/v$nodeVersion/$nodeZipName"
-$nodeZip = Join-Path $env:TEMP $nodeZipName
-Write-Host "[build-staging] Downloading Node $nodeVersion ..."
-Invoke-WebRequest -Uri $nodeUrl -OutFile $nodeZip -UseBasicParsing
+$nodeZip = Join-Path $cacheRoot "downloads\$nodeZipName"
+Get-OrDownloadFile -Url $nodeUrl -CachePath $nodeZip -Label "Node $nodeVersion"
 $nodeExtract = Join-Path $env:TEMP "node-extract-$nodeVersion"
 if (Test-Path $nodeExtract) {
     Remove-Item $nodeExtract -Recurse -Force
 }
 New-Item -ItemType Directory -Path $nodeExtract -Force | Out-Null
 Expand-Archive -Path $nodeZip -DestinationPath $nodeExtract -Force
-Remove-Item $nodeZip -Force
 $inner = Get-ChildItem -Path $nodeExtract -Directory | Select-Object -First 1
 if (-not $inner) {
     throw "Unexpected Node zip layout"
