@@ -89,6 +89,9 @@ _ALLOWED_SUBCOMMANDS = frozenset(
 )
 _SUBCOMMAND_ENUM = ["find", "install", "status", "install-deps", "list", "remove"]
 
+# Read-only registry / discovery — no shell side effects; skip bash permission gate.
+_READ_ONLY_SUBCOMMANDS = frozenset({"find", "list", "status"})
+
 
 def _flocks_executable() -> Optional[str]:
     """Locate the `flocks` CLI on PATH."""
@@ -158,13 +161,19 @@ async def flocks_skills(
 
     log.info("flocks_skills.run", {"cmd": cmd})
 
-    # Request permission (uses the same "bash" permission type as bash_tool).
-    await ctx.ask(
-        permission="bash",
-        patterns=[" ".join(cmd)],
-        always=["flocks skills *"],
-        metadata={"subcommand": subcommand},
-    )
+    # Mutating subcommands need bash approval. Read-only (find/list/status) runs
+    # without prompting — same trust model as listing skills in the UI.
+    #
+    # For install/remove/install-deps, always-patterns must match the *full*
+    # argv string (e.g. "/opt/flocks/bin/flocks skills install ..."); a bare
+    # "flocks skills *" fails fnmatch and never auto-approved.
+    if subcommand not in _READ_ONLY_SUBCOMMANDS:
+        await ctx.ask(
+            permission="bash",
+            patterns=[" ".join(cmd)],
+            always=["*flocks skills *"],
+            metadata={"subcommand": subcommand},
+        )
 
     try:
         proc = await asyncio.create_subprocess_exec(

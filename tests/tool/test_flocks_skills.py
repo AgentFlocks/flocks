@@ -77,18 +77,26 @@ async def test_unknown_subcommand_returns_error():
 @pytest.mark.asyncio
 async def test_all_allowed_subcommands_accepted():
     """Ensure none of the valid subcommands are rejected by the allow-list."""
-    from flocks.tool.skill.flocks_skills import flocks_skills, _ALLOWED_SUBCOMMANDS
+    from flocks.tool.skill.flocks_skills import (
+        flocks_skills,
+        _ALLOWED_SUBCOMMANDS,
+        _READ_ONLY_SUBCOMMANDS,
+    )
 
     proc = make_proc(stdout=b"ok", returncode=0)
-    ctx = make_ctx()
 
     with (
         patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value="/usr/local/bin/flocks"),
         patch("flocks.tool.skill.flocks_skills.asyncio.create_subprocess_exec", return_value=proc),
     ):
         for sub in _ALLOWED_SUBCOMMANDS:
+            ctx = make_ctx()
             result = await flocks_skills(ctx, subcommand=sub, args="")
             assert result.success is True, f"subcommand {sub!r} should succeed"
+            if sub in _READ_ONLY_SUBCOMMANDS:
+                ctx.ask.assert_not_called()
+            else:
+                ctx.ask.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -129,10 +137,8 @@ async def test_list_success():
     cmd_args = mock_exec.call_args[0]
     assert "skills" in cmd_args
     assert "list" in cmd_args
-    # Permission must be requested for every execution
-    ctx.ask.assert_called_once()
-    call_kwargs = ctx.ask.call_args[1]
-    assert call_kwargs.get("permission") == "bash"
+    # list is read-only — no bash permission prompt
+    ctx.ask.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -153,6 +159,7 @@ async def test_find_passes_args():
     assert "find" in cmd_args
     assert "phishing" in cmd_args
     assert "analysis" in cmd_args
+    ctx.ask.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +181,7 @@ async def test_nonzero_exit_returns_failure():
 
     assert result.success is False
     assert "skill not found" in (result.error or "")
+    ctx.ask.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +211,7 @@ async def test_timeout_kills_process():
     assert result.success is False
     assert "timed out" in (result.error or "").lower()
     proc.kill.assert_called_once()
+    ctx.ask.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
