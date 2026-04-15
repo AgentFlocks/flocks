@@ -3,11 +3,12 @@ Tests for session module
 """
 
 import asyncio
+import warnings
 from unittest.mock import AsyncMock
 
 import pytest
 from flocks.session.session import Session
-from flocks.session.message import Message, MessageRole, MessageInfo
+from flocks.session.message import Message, MessageInfo, MessageRole, TokenUsage
 from flocks.session.callable_state import add_session_callable_tools, get_session_callable_tools
 from flocks.agent.registry import Agent
 from flocks.storage.storage import Storage
@@ -257,6 +258,46 @@ async def test_message_get():
     text_result = Message.get_text_content(retrieved)
     text = await text_result if asyncio.iscoroutine(text_result) else text_result
     assert text == "Test message"
+
+
+@pytest.mark.asyncio
+async def test_message_update_coerces_dict_tokens_to_token_usage():
+    """Assistant token updates should stay aligned with the Pydantic schema."""
+    session_id = "test_session_tokens_update"
+
+    message = await Message.create(
+        session_id=session_id,
+        role=MessageRole.ASSISTANT,
+        content="Token update test",
+        parentID="msg_parent",
+        modelID="test-model",
+        providerID="test-provider",
+        mode="rex",
+        agent="rex",
+    )
+
+    updated = await Message.update(
+        session_id,
+        message.id,
+        tokens={
+            "input": 12,
+            "output": 8,
+            "reasoning": 3,
+            "cache": {"read": 5, "write": 2},
+        },
+    )
+
+    assert updated is not None
+    assert isinstance(updated.tokens, TokenUsage)
+    assert updated.tokens.input == 12
+    assert updated.tokens.cache.read == 5
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dumped = updated.model_dump()
+
+    assert dumped["tokens"]["output"] == 8
+    assert not any("Pydantic serializer warnings" in str(w.message) for w in caught)
 
 
 @pytest.mark.asyncio
