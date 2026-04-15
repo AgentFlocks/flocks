@@ -72,7 +72,8 @@ async def background_output_tool(
     task = _find_task(manager, task_id)
 
     if task and block:
-        task = await manager.wait_for(task.id, timeout_ms)
+        waited = await manager.wait_for(task.id, timeout_ms)
+        task = waited or _find_task(manager, task.id)
 
     if task:
         output = (

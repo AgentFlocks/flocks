@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import flocks.task.background as background_module
+import flocks.task.manager as task_manager_module
+from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
+from flocks.task.background import BackgroundManager, BackgroundTask
 from flocks.task.executor import TaskExecutor
 from flocks.task.manager import TaskManager
 from flocks.task.models import (
@@ -132,6 +137,124 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
     assert total == 1
     assert executions[0].status == TaskStatus.QUEUED
     assert executions[0].trigger_type == ExecutionTriggerType.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path):
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="恢复阻塞循环任务",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    scheduler.trigger.next_run = datetime.now(timezone.utc) - timedelta(seconds=1)
+    await TaskStore.update_scheduler(scheduler)
+
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.SCHEDULED,
+        enqueue=False,
+    )
+    started_at = datetime.now(timezone.utc) - timedelta(
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 5
+    )
+    execution.status = TaskStatus.RUNNING
+    execution.started_at = started_at
+    execution.queued_at = started_at
+    execution.session_id = "ses_stale_task"
+    await TaskStore.update_execution(execution)
+    await TaskStore.enqueue_execution_ref(execution.id)
+
+    recovered = await manager._recover_stale_active_executions()
+
+    assert recovered == 1
+    failed = await TaskManager.get_execution(execution.id)
+    assert failed is not None
+    assert failed.status == TaskStatus.FAILED
+    assert "recovery threshold" in (failed.error or "")
+    assert await TaskStore.get_queue_ref(execution.id) is None
+
+    loop = SchedulerLoop()
+    await loop._tick()
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id, limit=10)
+
+    assert total == 2
+    assert any(item.id == execution.id and item.status == TaskStatus.FAILED for item in executions)
+    assert any(item.id != execution.id and item.status == TaskStatus.QUEUED for item in executions)
+
+
+@pytest.mark.asyncio
+async def test_queue_status_reports_stale_running_execution(tmp_path: Path):
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="阻塞诊断",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    started_at = datetime.now(timezone.utc) - timedelta(
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+    )
+    execution.status = TaskStatus.RUNNING
+    execution.started_at = started_at
+    execution.queued_at = started_at
+    await TaskStore.update_execution(execution)
+
+    status = await TaskManager.queue_status()
+
+    assert status["stale_running"] == 1
+    assert isinstance(status["oldest_running_seconds"], int)
+    assert status["oldest_running_seconds"] >= task_manager_module._RUNNING_RECOVERY_TIMEOUT_S
+
+
+@pytest.mark.asyncio
+async def test_background_task_fails_fast_when_user_input_is_required(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_session_loop(_session_id: str, callbacks=None):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise
+
+    rejected: list[str] = []
+
+    monkeypatch.setattr(background_module, "_WATCHDOG_CHECK_INTERVAL", 0.01)
+    monkeypatch.setattr(background_module.SessionLoop, "run", staticmethod(fake_session_loop))
+    monkeypatch.setattr(question_routes, "has_pending_questions", lambda _session_id: True)
+
+    async def fake_reject(session_id: str) -> int:
+        rejected.append(session_id)
+        return 1
+
+    monkeypatch.setattr(question_routes, "reject_session_questions", fake_reject)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_test",
+        status="running",
+        description="scheduled",
+        prompt="",
+        agent="rex",
+        allow_user_questions=False,
+    )
+
+    with pytest.raises(RuntimeError, match="cannot wait for user input"):
+        await manager._run_session_with_watchdog(
+            task,
+            "ses_interactive_block",
+            callbacks=None,
+            timeout_seconds=1,
+            allow_user_questions=False,
+        )
+
+    assert rejected == ["ses_interactive_block"]
 
 
 @pytest.mark.asyncio

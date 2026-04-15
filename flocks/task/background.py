@@ -46,6 +46,7 @@ class BackgroundTask:
     started_at: Optional[int] = None
     completed_at: Optional[int] = None
     last_activity_at: Optional[int] = None  # 最近一次有交互的时间戳（ms），用于不活跃超时检测
+    allow_user_questions: bool = True
 
 
 @dataclass
@@ -129,6 +130,8 @@ class BackgroundManager:
         session_id: str,
         description: str,
         agent: str,
+        *,
+        allow_user_questions: bool = True,
     ) -> BackgroundTask:
         """Run the session loop on an already-created session.
 
@@ -144,6 +147,7 @@ class BackgroundManager:
             prompt="",
             agent=agent,
             session_id=session_id,
+            allow_user_questions=allow_user_questions,
         )
         self._tasks[task_id] = task
         handle = asyncio.create_task(self._run_existing_session(task, session_id))
@@ -157,7 +161,12 @@ class BackgroundManager:
             task.status = "running"
             try:
                 callbacks = self._build_activity_callbacks(task)
-                result = await self._run_session_with_watchdog(task, session_id, callbacks)
+                result = await self._run_session_with_watchdog(
+                    task,
+                    session_id,
+                    callbacks,
+                    allow_user_questions=task.allow_user_questions,
+                )
                 output = ""
                 if result.last_message:
                     output = await Message.get_text_content(result.last_message)
@@ -182,7 +191,7 @@ class BackgroundManager:
         try:
             await asyncio.wait_for(handle, timeout=timeout)
         except asyncio.TimeoutError:
-            pass
+            return None
         return self._tasks.get(task_id)
 
     def cancel(self, task_id: Optional[str] = None, all_tasks: bool = False) -> int:
@@ -254,9 +263,12 @@ class BackgroundManager:
         session_id: str,
         callbacks,
         timeout_seconds: int = _INACTIVITY_TIMEOUT_SECONDS,
+        *,
+        allow_user_questions: bool = True,
     ):
         """运行 SessionLoop，若超过 timeout_seconds 无任何活跃交互则取消并抛出异常。"""
         inactivity_triggered: list[bool] = [False]
+        question_blocked: list[bool] = [False]
 
         loop_task = asyncio.create_task(
             SessionLoop.run(session_id, callbacks=callbacks)
@@ -269,8 +281,17 @@ class BackgroundManager:
                     break
                 # Skip timeout check while waiting for user to answer a question
                 try:
-                    from flocks.server.routes.question import has_pending_questions
+                    from flocks.server.routes.question import (
+                        has_pending_questions,
+                        reject_session_questions,
+                    )
+
                     if has_pending_questions(session_id):
+                        if not allow_user_questions:
+                            question_blocked[0] = True
+                            await reject_session_questions(session_id)
+                            loop_task.cancel()
+                            break
                         task.last_activity_at = int(datetime.now().timestamp() * 1000)
                         continue
                 except Exception:
@@ -292,6 +313,12 @@ class BackgroundManager:
             result = await loop_task
             return result
         except asyncio.CancelledError:
+            if question_blocked[0]:
+                raise RuntimeError(
+                    "Scheduled/background tasks cannot wait for user input. "
+                    "Remove question prompts, approvals, or other interactive steps "
+                    "from this task."
+                )
             if inactivity_triggered[0]:
                 raise RuntimeError(
                     f"任务因 {timeout_seconds} 秒内无活跃交互而超时"

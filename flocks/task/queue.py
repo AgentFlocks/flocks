@@ -12,7 +12,7 @@ log = Log.create(service="task.queue")
 
 
 class TaskQueue:
-    def __init__(self, max_concurrent: int = 1):
+    def __init__(self, max_concurrent: int = 4):
         self.max_concurrent = max_concurrent
         self._paused = False
         self._running_ids: set[str] = set()

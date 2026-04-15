@@ -719,6 +719,23 @@ class TaskStore:
             rows = await cur.fetchall()
         return [cls._row_to_execution(row) for row in rows]
 
+    @classmethod
+    async def list_stale_running_executions(
+        cls, before: datetime
+    ) -> List[TaskExecution]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM task_executions
+            WHERE status = 'running'
+              AND COALESCE(started_at, queued_at, created_at, updated_at) < ?
+            """,
+            (before.isoformat(),),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [cls._row_to_execution(row) for row in rows]
+
     # ------------------------------------------------------------------
     # Row helpers
     # ------------------------------------------------------------------

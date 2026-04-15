@@ -1,9 +1,10 @@
 """Task Executor — dispatch a task execution instance."""
 
 import asyncio
+import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from flocks.utils.log import Log
 
@@ -20,9 +21,23 @@ from .store import TaskStore
 log = Log.create(service="task.executor")
 
 _TASK_ABSOLUTE_TIMEOUT_S: int = 2 * 3600
+_workflow_cancel_lock = threading.Lock()
+_workflow_cancel_events: dict[str, threading.Event] = {}
+_workflow_done_events: dict[str, threading.Event] = {}
 
 
 class TaskExecutor:
+    @classmethod
+    def request_runtime_cancel(cls, execution: TaskExecution) -> bool:
+        if execution.execution_mode != ExecutionMode.WORKFLOW:
+            return False
+        with _workflow_cancel_lock:
+            cancel_event = _workflow_cancel_events.get(execution.id)
+        if cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
+
     @classmethod
     async def dispatch(
         cls,
@@ -118,6 +133,7 @@ class TaskExecutor:
             session_id=session_id,
             description=execution.title,
             agent=execution.agent_name,
+            allow_user_questions=False,
         )
         completed = await manager.wait_for(
             bg_task.id,
@@ -132,6 +148,8 @@ class TaskExecutor:
                 f"Task exceeded absolute timeout of {_TASK_ABSOLUTE_TIMEOUT_S}s "
                 f"({_TASK_ABSOLUTE_TIMEOUT_S // 3600}h)"
             )
+        if completed.status == "cancelled":
+            raise RuntimeError(completed.error or "Agent execution was cancelled")
         if completed.status == "error":
             raise RuntimeError(completed.error or "Agent execution failed")
         return completed.output
@@ -141,7 +159,6 @@ class TaskExecutor:
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
         from flocks.workflow.fs_store import read_workflow_from_fs
-        from flocks.workflow.runner import run_workflow
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
@@ -151,13 +168,50 @@ class TaskExecutor:
         snapshot = execution.execution_input_snapshot or {}
         inputs = snapshot.get("context") or scheduler.context or {}
         result = await asyncio.to_thread(
-            run_workflow,
-            workflow=workflow_data["workflowJson"],
-            inputs=inputs,
+            cls._run_workflow_sync,
+            execution.id,
+            workflow_data["workflowJson"],
+            inputs,
         )
+        result_status = getattr(result, "status", None)
+        if result_status == "CANCELLED":
+            raise RuntimeError(result.error or "Workflow execution cancelled")
+        if result_status == "TIMED_OUT":
+            raise TimeoutError(result.error or "Workflow execution timed out")
         if result.error:
             raise RuntimeError(f"Workflow failed: {result.error}")
         return str(result.outputs) if result.outputs else None
+
+    @classmethod
+    def _run_workflow_sync(
+        cls,
+        execution_id: str,
+        workflow: dict[str, Any],
+        inputs: Dict[str, Any],
+    ):
+        from flocks.workflow.runner import run_workflow
+
+        cancel_event = threading.Event()
+        done_event = threading.Event()
+        with _workflow_cancel_lock:
+            _workflow_cancel_events[execution_id] = cancel_event
+            _workflow_done_events[execution_id] = done_event
+        try:
+            return run_workflow(
+                workflow=workflow,
+                inputs=inputs,
+                timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
+                cancel=cancel_event.is_set,
+            )
+        finally:
+            done_event.set()
+            with _workflow_cancel_lock:
+                current_cancel = _workflow_cancel_events.get(execution_id)
+                if current_cancel is cancel_event:
+                    _workflow_cancel_events.pop(execution_id, None)
+                current_done = _workflow_done_events.get(execution_id)
+                if current_done is done_event:
+                    _workflow_done_events.pop(execution_id, None)
 
     @classmethod
     async def _resolve_task_session_context(

@@ -47,6 +47,21 @@ async def test_health_check(client):
     assert "task_manager_started" in data
     assert "task_scheduler_running" in data
     assert "task_scheduler_available" in data
+    assert "task_queue_running" in data
+    assert "task_queue_queued" in data
+    assert "task_stale_running" in data
+
+
+@pytest.mark.asyncio
+async def test_task_queue_status_includes_diagnostics(client):
+    response = await client.get("/api/task-system/queue/status")
+    assert response.status_code == status.HTTP_200_OK
+    data = response.json()
+    assert data["max_concurrent"] == 4
+    assert "running" in data
+    assert "queued" in data
+    assert "stale_running" in data
+    assert "oldest_running_seconds" in data
 
 
 @pytest.mark.asyncio
