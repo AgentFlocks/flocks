@@ -8,6 +8,7 @@
 
 - 每巡检完一台主机，立即把完整结果写入 `host_triage/` 下的独立 Markdown 文件。
 - 工作流循环态只保留轻量索引信息，不在 `triage_results` 中累计完整正文。
+- 轻量索引额外沉淀 `verdict`，便于后续只读索引文件就做全局概况，或直接筛出异常主机。
 - 末步不再做 LLM 汇总，只生成索引文件、manifest 和轻量结果 JSON，并返回一段很短的执行摘要。
 
 ## 输入参数（工作流 `inputs`）
@@ -37,7 +38,7 @@
   - 初始化循环状态：`host_idx=0`、`triage_results=[]`、`should_continue`。
 - 输出：`hosts`、`ssh_user`、`host_idx`、`triage_results`、`output_dir`、`per_host_dir`、`batch_report_path`、`should_continue`
 
-说明：这里的 `triage_results` 从现在开始只保存轻量索引，不保存每台机器的完整正文。
+说明：这里的 `triage_results` 从现在开始只保存轻量索引，不保存每台机器的完整正文；逐台结果至少包含 `success`、`verdict`、`per_host_md`。
 
 ### 2. 循环判断（`loop_check`）
 
@@ -55,7 +56,8 @@
   - 构造 prompt，明确要求 `ssh_run_script` 的 `host` 参数必须使用 `ssh_target`。
   - 调用 `tool.run_safe('task', ...)` 执行巡检。
   - 将本轮完整输出立即写入 `host_triage/NNNN_slug.md`。
-  - 向 `triage_results` 仅追加轻量字段：`{host, ssh_user, ssh_target, success, error, per_host_md}`。
+  - 从子 Agent 输出中提取 `Verdict`，未识别时回退为 `UNKNOWN`。
+  - 向 `triage_results` 仅追加轻量字段：`{host, ssh_user, ssh_target, success, verdict, error, per_host_md}`。
   - 向 `batch_host_triage_log.md` 追加一段索引信息，不再追加完整正文。
 - 输出：`triage_results`、`last_host`、`last_ssh_target`、`last_success`、`last_per_host_md`
 
@@ -71,10 +73,10 @@
 - 输入：`triage_results`、`hosts`、`ssh_user`、`per_host_dir`、`batch_report_path`
 - 处理逻辑：
   - 不调用 LLM。
-  - 基于轻量索引生成 `batch_host_triage_index.md`。
+  - 基于轻量索引生成 `batch_host_triage_index.md`，其中包含执行状态与 `verdict` 分布。
   - 生成 `batch_host_triage_manifest.json`。
   - 生成 `batch_host_triage_results.json`，其中 `triage_results` 仅包含轻量字段，不包含每台完整正文。
-  - 输出一段短 `executive_summary`，只说明总数、成功失败数和结果文件位置。
+  - 输出一段短 `executive_summary`，说明总数、成功失败数、`verdict` 分布和结果文件位置。
 - 输出：`executive_summary`、`index_path`、`manifest_path`、`results_json_path`、`batch_report_path`、`per_host_dir`
 
 ## 文件输出约定
@@ -89,6 +91,7 @@
 ## 设计说明
 
 - 大字段正文只写磁盘，不在循环状态里累积。
+- 末步索引和 `results.json` 会同步保留每台主机的 `success`、`verdict` 与 `per_host_md`，便于后续快速概览和异常筛选。
 - 最后一个节点只处理轻量索引，因此主机数很多时也不容易超时。
 - 若需要查看某台机器的完整分析，直接打开对应的 `host_triage/*.md` 即可。
 
