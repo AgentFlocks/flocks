@@ -54,7 +54,7 @@ function Get-OrDownloadFile {
     if (Test-Path $CachePath) {
         $existing = Get-Item -Path $CachePath
         if ($existing.Length -gt 0) {
-            Write-Host "[build-staging] Reusing cached $Label: $CachePath"
+            Write-Host "[build-staging] Reusing cached ${Label}: $CachePath"
             return
         }
         Remove-Item -Path $CachePath -Force
