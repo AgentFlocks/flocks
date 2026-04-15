@@ -576,13 +576,9 @@ class TaskManager:
                 or execution.queued_at
                 or execution.created_at
             )
-            if oldest_running_seconds is None or started_at < (
-                now - timedelta(seconds=oldest_running_seconds)
-            ):
-                oldest_running_seconds = max(
-                    int((now - started_at).total_seconds()),
-                    0,
-                )
+            elapsed = max(int((now - started_at).total_seconds()), 0)
+            if oldest_running_seconds is None or elapsed > oldest_running_seconds:
+                oldest_running_seconds = elapsed
             if started_at < stale_cutoff:
                 stale_running += 1
         status["stale_running"] = stale_running

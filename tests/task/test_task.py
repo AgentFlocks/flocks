@@ -214,6 +214,45 @@ async def test_queue_status_reports_stale_running_execution(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_queue_status_uses_largest_elapsed_running_time(tmp_path: Path):
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="阻塞诊断-多任务",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    older_execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    newer_execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    older_started_at = datetime.now(timezone.utc) - timedelta(
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+    )
+    newer_started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    older_execution.status = TaskStatus.RUNNING
+    older_execution.started_at = older_started_at
+    older_execution.queued_at = older_started_at
+    newer_execution.status = TaskStatus.RUNNING
+    newer_execution.started_at = newer_started_at
+    newer_execution.queued_at = newer_started_at
+    await TaskStore.update_execution(older_execution)
+    await TaskStore.update_execution(newer_execution)
+
+    status = await TaskManager.queue_status()
+
+    assert status["stale_running"] == 1
+    assert isinstance(status["oldest_running_seconds"], int)
+    assert status["oldest_running_seconds"] >= task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+
+
+@pytest.mark.asyncio
 async def test_background_task_fails_fast_when_user_input_is_required(
     monkeypatch: pytest.MonkeyPatch,
 ):
