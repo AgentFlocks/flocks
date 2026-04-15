@@ -1011,9 +1011,14 @@ function Install-ChromeForTesting {
     $previousRegistry = $env:npm_config_registry
     $env:npm_config_registry = $script:NpmRegistry
     try {
+        $puppeteerBrowsersPackage = "@puppeteer/browsers"
+        $chromeChannel = "chrome@stable"
+        # Use cmd.exe to execute npx.cmd with a fully quoted command line.
+        # This avoids PowerShell argument parsing edge cases on Windows PowerShell 5.1.
+        $npxCommandLine = "`"$npxPath`" --yes `"$puppeteerBrowsersPackage`" install `"$chromeChannel`" --path `"$browserDir`""
         $process = Start-Process `
-            -FilePath $npxPath `
-            -ArgumentList @("--yes", "@puppeteer/browsers", "install", "chrome@stable", "--path", $browserDir) `
+            -FilePath "cmd.exe" `
+            -ArgumentList @("/d", "/s", "/c", $npxCommandLine) `
             -WorkingDirectory $browserDir `
             -NoNewWindow `
             -Wait `
