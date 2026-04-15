@@ -417,3 +417,42 @@ class TestTestCredentialsInlineConfigFallback:
             provider.configure.assert_called_once()
             configured = provider.configure.call_args.args[0]
             assert configured.api_key == "inline-qianfan-key"
+
+    @pytest.mark.asyncio
+    async def test_existing_custom_settings_are_preserved_during_provider_test(self):
+        from flocks.server.routes.provider import test_provider_credentials
+
+        provider = MagicMock()
+        provider._config = MagicMock(
+            custom_settings={"verify_ssl": False},
+            base_url="https://gateway.internal/v1",
+        )
+        provider.chat = AsyncMock(return_value=MagicMock(content="Paris"))
+
+        model = MagicMock()
+        model.id = "gateway-model"
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "gateway-api-key"
+
+        mock_config = MagicMock()
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=mock_config),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls._load_dynamic_providers = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials("internal-openai")
+
+            assert result["success"] is True, result
+            provider.configure.assert_called_once()
+            configured = provider.configure.call_args.args[0]
+            assert configured.api_key == "gateway-api-key"
+            assert configured.base_url == "https://gateway.internal/v1"
+            assert configured.custom_settings["verify_ssl"] is False

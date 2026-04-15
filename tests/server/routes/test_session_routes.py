@@ -13,7 +13,7 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from fastapi import status
+from fastapi import HTTPException, status
 from httpx import AsyncClient
 
 # ===========================================================================
@@ -193,6 +193,360 @@ class TestSessionMessages:
             json={"parts": [{"type": "text", "text": "Hi"}]},
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_resend_user_message_updates_text_and_truncates_followups(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Resending a user message updates its text and removes later assistant replies."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.lifecycle.revert import SessionRevert
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Original user text"}],
+                "noReply": True,
+                "mockReply": "Initial reply",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        user_message = next(msg for msg in messages if msg["info"]["role"] == "user")
+        user_part = next(part for part in user_message["parts"] if part["type"] == "text")
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_prepare_replay_runtime(session_id: str, user_message):
+            return {
+                "agent_name": "rex",
+                "provider_id": "openai",
+                "model_id": "gpt-4-turbo-preview",
+            }
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            await SessionRevert.cleanup(session)
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        scheduled_coroutines = []
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fake_prepare_replay_runtime)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        resend_resp = await client.post(
+            f"/api/session/{session_id}/message/{user_message['info']['id']}/resend",
+            json={"text": "Updated user text", "partID": user_part["id"]},
+        )
+        assert resend_resp.status_code == status.HTTP_202_ACCEPTED
+
+        assert len(scheduled_coroutines) == 1
+        await scheduled_coroutines.pop(0)
+
+        updated_resp = await client.get(f"/api/session/{session_id}/message")
+        updated_messages = updated_resp.json()
+        assert len(updated_messages) == 1
+        assert updated_messages[0]["info"]["role"] == "user"
+        assert updated_messages[0]["parts"][0]["text"] == "Updated user text"
+
+    @pytest.mark.asyncio
+    async def test_resend_user_message_respects_requested_text_part(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Resend updates the explicitly selected text part instead of the first one."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.lifecycle.revert import SessionRevert
+        from flocks.session.message import Message, TextPart
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Original user text"}],
+                "noReply": True,
+                "mockReply": "Initial reply",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        user_message = next(msg for msg in messages if msg["info"]["role"] == "user")
+
+        extra_text_part = TextPart(
+            sessionID=session_id,
+            messageID=user_message["info"]["id"],
+            text="Editable follow-up text",
+        )
+        await Message.add_part(session_id, user_message["info"]["id"], extra_text_part)
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_prepare_replay_runtime(session_id: str, user_message):
+            return {
+                "agent_name": "rex",
+                "provider_id": "openai",
+                "model_id": "gpt-4-turbo-preview",
+            }
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            await SessionRevert.cleanup(session)
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        scheduled_coroutines = []
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fake_prepare_replay_runtime)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        resend_resp = await client.post(
+            f"/api/session/{session_id}/message/{user_message['info']['id']}/resend",
+            json={"text": "Updated follow-up text", "partID": extra_text_part.id},
+        )
+        assert resend_resp.status_code == status.HTTP_202_ACCEPTED
+
+        assert len(scheduled_coroutines) == 1
+        await scheduled_coroutines.pop(0)
+
+        updated_resp = await client.get(f"/api/session/{session_id}/message")
+        updated_messages = updated_resp.json()
+        assert len(updated_messages) == 1
+        text_parts = [part for part in updated_messages[0]["parts"] if part["type"] == "text"]
+        assert text_parts[0]["text"] == "Original user text"
+        assert any(
+            part["id"] == extra_text_part.id and part["text"] == "Updated follow-up text"
+            for part in text_parts
+        )
+
+    @pytest.mark.asyncio
+    async def test_resend_preflight_failure_keeps_existing_history(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Replay preflight errors must not truncate history or mutate the target text."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Original user text"}],
+                "noReply": True,
+                "mockReply": "Initial reply",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        user_message = next(msg for msg in messages if msg["info"]["role"] == "user")
+        user_part = next(part for part in user_message["parts"] if part["type"] == "text")
+
+        async def _fail_prepare_replay_runtime(session_id: str, user_message):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Provider configuration is invalid",
+            )
+
+        scheduled_coroutines = []
+
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fail_prepare_replay_runtime)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        resend_resp = await client.post(
+            f"/api/session/{session_id}/message/{user_message['info']['id']}/resend",
+            json={"text": "Should not be applied", "partID": user_part["id"]},
+        )
+        assert resend_resp.status_code == status.HTTP_202_ACCEPTED
+
+        assert len(scheduled_coroutines) == 1
+        with pytest.raises(HTTPException):
+            await scheduled_coroutines.pop(0)
+
+        updated_resp = await client.get(f"/api/session/{session_id}/message")
+        updated_messages = updated_resp.json()
+        assert len(updated_messages) == 2
+        assert next(msg for msg in updated_messages if msg["info"]["role"] == "assistant")
+        preserved_user = next(msg for msg in updated_messages if msg["info"]["role"] == "user")
+        assert preserved_user["parts"][0]["text"] == "Original user text"
+
+        session_resp = await client.get(f"/api/session/{session_id}")
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json().get("revert") is None
+
+    @pytest.mark.asyncio
+    async def test_regenerate_assistant_message_truncates_original_reply(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regenerate removes the selected assistant reply before replay starts."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.lifecycle.revert import SessionRevert
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Question"}],
+                "noReply": True,
+                "mockReply": "Assistant answer",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        assistant_message = next(msg for msg in messages if msg["info"]["role"] == "assistant")
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_prepare_replay_runtime(session_id: str, user_message):
+            return {
+                "agent_name": "rex",
+                "provider_id": "openai",
+                "model_id": "gpt-4-turbo-preview",
+            }
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            await SessionRevert.cleanup(session)
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        scheduled_coroutines = []
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fake_prepare_replay_runtime)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        regenerate_resp = await client.post(
+            f"/api/session/{session_id}/message/{assistant_message['info']['id']}/regenerate",
+        )
+        assert regenerate_resp.status_code == status.HTTP_202_ACCEPTED
+
+        assert len(scheduled_coroutines) == 1
+        await scheduled_coroutines.pop(0)
+
+        updated_resp = await client.get(f"/api/session/{session_id}/message")
+        updated_messages = updated_resp.json()
+        assert len(updated_messages) == 1
+        assert updated_messages[0]["info"]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_regenerate_assistant_message_without_text_part_is_allowed(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regenerate should not require the assistant message to retain a text part."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.lifecycle.revert import SessionRevert
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Question"}],
+                "noReply": True,
+                "mockReply": "Assistant answer",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        assistant_message = next(msg for msg in messages if msg["info"]["role"] == "assistant")
+        assistant_text_part = next(part for part in assistant_message["parts"] if part["type"] == "text")
+
+        delete_resp = await client.delete(
+            f"/api/session/{session_id}/message/{assistant_message['info']['id']}/part/{assistant_text_part['id']}",
+        )
+        assert delete_resp.status_code == status.HTTP_200_OK
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_prepare_replay_runtime(session_id: str, user_message):
+            return {
+                "agent_name": "rex",
+                "provider_id": "openai",
+                "model_id": "gpt-4-turbo-preview",
+            }
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            await SessionRevert.cleanup(session)
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        scheduled_coroutines = []
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(session_routes, "_prepare_replay_runtime", _fake_prepare_replay_runtime)
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        regenerate_resp = await client.post(
+            f"/api/session/{session_id}/message/{assistant_message['info']['id']}/regenerate",
+        )
+        assert regenerate_resp.status_code == status.HTTP_202_ACCEPTED
+        assert len(scheduled_coroutines) == 1
+        await scheduled_coroutines.pop(0)
 
 
 # ===========================================================================

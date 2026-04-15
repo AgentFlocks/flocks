@@ -17,6 +17,18 @@ tags:
   - security
   - asset-survey
 tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
+  - file_search
+  - websearch
+  - webfetch
   - threatbook_mcp_hrti_query
   - threatbook_mcp_internet_assets_query
   - threatbook_mcp_web_search

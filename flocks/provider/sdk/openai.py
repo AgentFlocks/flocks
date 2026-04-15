@@ -16,7 +16,11 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
-from flocks.provider.sdk.openai_base import extract_reasoning_content
+from flocks.provider.sdk.openai_base import (
+    _coerce_bool,
+    extract_reasoning_content,
+    resolve_verify_ssl,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai")
@@ -27,16 +31,6 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return default
 
 
 class OpenAIProvider(BaseProvider):
@@ -82,7 +76,12 @@ class OpenAIProvider(BaseProvider):
                 cfg_settings = getattr(self._config, "custom_settings", None) or {}
                 if isinstance(cfg_settings, dict) and "trust_env" in cfg_settings:
                     trust_env = _coerce_bool(cfg_settings.get("trust_env"), trust_env)
-                http_client = httpx.AsyncClient(trust_env=trust_env, timeout=120.0)
+                verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
+                http_client = httpx.AsyncClient(
+                    trust_env=trust_env,
+                    verify=verify_ssl,
+                    timeout=120.0,
+                )
 
                 if base_url:
                     self._client = AsyncOpenAI(
@@ -92,11 +91,18 @@ class OpenAIProvider(BaseProvider):
                     )
                     self.log.info(
                         "openai.client.created",
-                        {"base_url": base_url, "trust_env": trust_env},
+                        {
+                            "base_url": base_url,
+                            "trust_env": trust_env,
+                            "verify_ssl": verify_ssl,
+                        },
                     )
                 else:
                     self._client = AsyncOpenAI(api_key=api_key, http_client=http_client)
-                    self.log.info("openai.client.created", {"trust_env": trust_env})
+                    self.log.info(
+                        "openai.client.created",
+                        {"trust_env": trust_env, "verify_ssl": verify_ssl},
+                    )
                     
             except ImportError:
                 raise ImportError("openai package not installed. Install with: pip install openai")

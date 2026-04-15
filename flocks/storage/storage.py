@@ -175,9 +175,11 @@ class Storage:
                     model_id TEXT NOT NULL,
                     credential_id TEXT,
                     session_id TEXT,
+                    message_id TEXT,
                     input_tokens INTEGER NOT NULL DEFAULT 0,
                     output_tokens INTEGER NOT NULL DEFAULT 0,
                     cached_tokens INTEGER NOT NULL DEFAULT 0,
+                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
                     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
                     total_tokens INTEGER NOT NULL DEFAULT 0,
                     input_cost REAL NOT NULL DEFAULT 0,
@@ -185,14 +187,32 @@ class Storage:
                     total_cost REAL NOT NULL DEFAULT 0,
                     currency TEXT NOT NULL DEFAULT 'USD',
                     latency_ms INTEGER,
-                    created_at TEXT NOT NULL
+                    source TEXT NOT NULL DEFAULT 'live',
+                    created_at TEXT NOT NULL,
+                    backfilled_at TEXT
                 );
             """)
+
+            async with db.execute("PRAGMA table_info(usage_records)") as cursor:
+                existing_columns = {row[1] for row in await cursor.fetchall()}
+
+            schema_additions = [
+                ("message_id", "ALTER TABLE usage_records ADD COLUMN message_id TEXT"),
+                ("cache_write_tokens", "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
+                ("source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT 'live'"),
+                ("backfilled_at", "ALTER TABLE usage_records ADD COLUMN backfilled_at TEXT"),
+            ]
+            for column_name, statement in schema_additions:
+                if column_name in existing_columns:
+                    continue
+                await db.execute(statement)
 
             index_statements = [
                 "CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records(provider_id, model_id)",
                 "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)",
                 "CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_usage_message ON usage_records(session_id, message_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_unique_message ON usage_records(session_id, message_id) WHERE message_id IS NOT NULL",
             ]
             for stmt in index_statements:
                 try:

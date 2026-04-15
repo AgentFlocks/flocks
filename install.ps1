@@ -15,6 +15,33 @@ $DefaultBranch = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_DEFAULT_BRANCH)) {
 $DefaultInstallDir = Join-Path (Get-Location) "flocks"
 $InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }
 
+function Test-IsWindowsPlatform {
+    return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
+}
+
+function Test-IsAdministrator {
+    if (-not (Test-IsWindowsPlatform)) {
+        return $true
+    }
+
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Assert-Administrator {
+    if (Test-IsAdministrator) {
+        return
+    }
+
+    Fail "Administrator privileges are required. Reopen PowerShell as Administrator and rerun this installer."
+}
+
 function Write-Info {
     param([string]$Message)
     Write-Host "[flocks-bootstrap] $Message"
@@ -37,6 +64,7 @@ function Show-Usage {
     Write-Host "This script downloads the GitHub source archive to a temporary directory,"
     Write-Host "copies it to a persistent install location, and delegates to scripts/install.ps1."
     Write-Host "By default it creates a 'flocks' subdirectory under the current directory."
+    Write-Host "Run this installer in a PowerShell window opened as Administrator."
     Write-Host ""
     Write-Host "Remote usage:"
     Write-Host '  powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/Flocks/main/install.ps1 | iex"'
@@ -144,6 +172,8 @@ function Main {
         return
     }
 
+    Assert-Administrator
+
     $tempDir = New-TemporaryDirectory
     $archivePath = Join-Path $tempDir "flocks.zip"
 
@@ -163,7 +193,7 @@ function Main {
         }
 
         $installParent = Split-Path -Parent $InstallDir
-        if (-not [string]::IsNullOrWhiteSpace($installParent)) {
+        if ((-not [string]::IsNullOrWhiteSpace($installParent)) -and -not (Test-Path -LiteralPath $installParent)) {
             New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         }
         if (Test-Path $InstallDir) {

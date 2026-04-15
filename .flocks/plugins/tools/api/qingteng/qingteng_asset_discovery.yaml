@@ -1,0 +1,119 @@
+name: qingteng_asset_discovery
+description: >
+  青藤资产发现工具。支持查询已发现主机列表，以及创建/查询/更新/删除/执行资产扫描任务。
+  适用于对未安装 Agent 的主机进行网络扫描发现，了解全局资产状况。
+description_cn: >
+  青藤资产发现工具。通过 `action` 参数访问主机发现结果和扫描任务管理接口。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: qingteng
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        资产发现动作名，可选值：
+        - discovered_host_list
+          用途: 获取已发现的主机列表（无需参数）
+          是否任务型: 否
+        - job_create
+          用途: 创建资产扫描任务
+          必填: `name`（或 `body`）
+          常用: `name`、`kind`、`values`、`cronExpression`、`osDetection`、`ipList`、`advanceConfigs`
+          风险提示: 会触发网络扫描
+          是否任务型: 是
+        - job_delete
+          用途: 删除扫描任务
+          必填: `specId`（或 `body`）
+          风险提示: 不可恢复
+          是否任务型: 否
+        - job_find
+          用途: 查询扫描任务配置详情
+          必填: `specId`（或 `body`）
+          是否任务型: 否
+        - job_update
+          用途: 修改扫描任务配置（建议先 `job_find` 获取当前配置再修改）
+          必填: `specId`（或 `body`）
+          风险提示: 写操作
+          是否任务型: 否
+        - job_list
+          用途: 查询扫描任务列表
+          常用: `name`、`scanType`
+          是否任务型: 否
+        - job_execute
+          用途: 立即执行扫描任务
+          必填: `specId`（或 `body`）
+          风险提示: 会触发网络扫描
+          是否任务型: 是
+      enum:
+        - discovered_host_list
+        - job_create
+        - job_delete
+        - job_find
+        - job_update
+        - job_list
+        - job_execute
+    specId:
+      type: string
+      description: 扫描任务配置 ID，适用于 `job_delete`、`job_find`、`job_update`、`job_execute`
+    name:
+      type: string
+      description: 任务名称，`job_create` 必填，`job_list` 支持模糊查询
+    kind:
+      type: integer
+      description: >
+        扫描发起主机类型。0=自定义主机；1=自定义业务组；2=全部主机。
+        注意：只能选择 Linux 主机作为扫描发起主机
+    values:
+      type: array
+      items:
+        type: string
+      description: 当 `kind=0` 时传 agentId 列表，`kind=1` 时传 groupId 列表
+    cronExpression:
+      type: string
+      description: Cron 表达式，用于定时执行，如 `0 15 * * *`
+    osDetection:
+      type: boolean
+      description: 是否启用操作系统探测
+    ipList:
+      type: array
+      items:
+        type: string
+      description: 扫描 IP 范围列表
+    advanceConfigs:
+      type: array
+      items:
+        type: object
+      description: 高级扫描配置列表，每项包含 `scanType`、`tcpPort`、`udpPort` 等
+    scanType:
+      type: array
+      items:
+        type: integer
+      description: 扫描方式过滤，用于 `job_list`
+    query:
+      type: object
+      description: 额外 GET 查询参数对象
+    body:
+      type: object
+      description: POST 请求体对象，与对应字段参数合并
+  required:
+    - action
+
+handler:
+  type: script
+  script_file: qingteng_asset_discovery.handler.py
+  function: assetdiscovery
+
+notes: |
+  调用流程:
+  1. 自动使用已配置的凭据登录青藤，获取 jwt/signKey/comId
+  2. 对请求参数进行 SHA1 签名
+  3. 调用对应 /external/api/discoveredhost/ 或 /external/api/assetdiscovery/ 接口
+
+  典型用法:
+  - 用 `discovered_host_list` 查看当前已发现但未安装 Agent 的主机
+  - 用 `job_create` 创建新的扫描任务，配置扫描发起主机和目标 IP 范围
+  - 用 `job_execute` 立即触发扫描
+  - 扫描完成后再次调用 `discovered_host_list` 查看新发现主机

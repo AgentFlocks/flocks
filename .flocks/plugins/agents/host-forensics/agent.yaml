@@ -23,6 +23,15 @@ color: "#E74C3C"
 temperature: 0.3
 
 tools:
+  - read
+  - list
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
   - tool_search
   - ssh_run_script
   - ssh_host_cmd
@@ -35,8 +44,7 @@ tools:
   - virustotal_domain_query
   - virustotal_file_query
   - virustotal_url_query
-  - bash
-  - read
+  - file_search
   - websearch
   - webfetch
 

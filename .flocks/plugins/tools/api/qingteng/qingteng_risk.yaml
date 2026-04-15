@@ -59,7 +59,7 @@ inputSchema:
           是否任务型: 仅 `poc_scan` 为是
         - poc_job_rule_list / poc_job_add / poc_job_fix / poc_job_delete / poc_job_execute / poc_job_status / poc_job_error_host / poc_job_list / poc_job_tasks / poc_job_stats / poc_job_result_detail
           用途: 漏洞检测作业管理与结果查询
-          必填: `os_type`；删除通常需要 `jobId`
+          必填: `poc_job_rule_list` 的 `os_type` 为可选（不传或传 `linux` 时调用通用规则列表，传 `win` 时调用 Windows 规则列表）；其余动作通常需要 `os_type`；删除通常需要 `jobId`
           常用: `jobName`、`ruleIds`、`groups`、`hostIds`、`schedule`
           风险提示: 写操作较多，建议先确认任务目标范围
           是否任务型: 是

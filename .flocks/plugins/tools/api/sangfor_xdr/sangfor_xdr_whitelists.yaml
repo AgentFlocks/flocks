@@ -1,0 +1,64 @@
+name: sangfor_xdr_whitelists
+description: >
+  Manage Sangfor XDR whitelists. Create, query, update, delete whitelist
+  rules, and toggle their enabled/disabled status. Use to suppress
+  known benign alerts.
+description_cn: >
+  管理深信服 XDR 白名单规则。支持新增、查询、修改、删除白名单，
+  以及切换白名单启用/禁用状态。用于抑制已知合规告警。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        白名单操作类型：
+        - `list`          ：查询白名单列表
+        - `create`        ：新增白名单
+        - `update`        ：根据 ID 修改白名单
+        - `delete`        ：删除白名单
+        - `toggle_status` ：根据 ID 切换白名单启用状态
+      enum: [list, create, update, delete, toggle_status]
+      default: list
+    page_size:
+      type: integer
+      description: 每页条数（list 时使用）。
+      default: 20
+    page_num:
+      type: integer
+      description: 页码，从 1 开始。
+      default: 1
+    id:
+      type: string
+      description: 白名单ID（update / toggle_status 时必填）。
+    ids:
+      type: array
+      description: 白名单ID列表（delete 时使用）。
+      items:
+        type: string
+    name:
+      type: string
+      description: 白名单名称（create / update 时使用）。
+    type:
+      type: string
+      description: 白名单类型（create / update 时使用）。
+    value:
+      type: string
+      description: 白名单匹配值（create / update 时使用）。
+    description:
+      type: string
+      description: 白名单说明（create / update 时使用）。
+    status:
+      type: integer
+      description: 启用状态（toggle_status 时使用）。
+  required: [action]
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_whitelists

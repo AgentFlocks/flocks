@@ -3,27 +3,16 @@ from typer.testing import CliRunner
 
 import flocks.cli.commands.stats as stats_cmd
 from flocks.cli.commands.stats import ModelUsage, SessionStats, TokenStats
-from flocks.session.message import (
-    AssistantMessageInfo,
-    MessagePath,
-    MessageWithParts,
-    PartTime,
-    ReasoningPart,
-    TextPart,
-    TokenCache,
-    TokenUsage,
-    ToolPart,
-    ToolStatePending,
-    UserMessageInfo,
-)
+from flocks.provider.usage_service import BackfillUsageResult
+from flocks.provider.types import UsageRecord
 from flocks.session.session import SessionInfo, SessionTime
 
 runner = CliRunner()
 
 
-def _build_session() -> SessionInfo:
+def _build_session(session_id: str = "ses_stats_test") -> SessionInfo:
     return SessionInfo(
-        id="ses_stats_test",
+        id=session_id,
         projectID="proj_stats",
         directory="/tmp/stats-project",
         title="Stats Session",
@@ -31,262 +20,136 @@ def _build_session() -> SessionInfo:
     )
 
 
-def _build_messages(session_id: str) -> list[MessageWithParts]:
-    user = UserMessageInfo(
-        id="msg_user_stats",
-        sessionID=session_id,
-        role="user",
-        time={"created": 1_000},
-        agent="rex",
-        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
-    )
-    assistant = AssistantMessageInfo(
-        id="msg_assistant_stats",
-        sessionID=session_id,
-        role="assistant",
-        time={"created": 1_100, "completed": 1_200},
-        parentID=user.id,
-        modelID="claude-sonnet",
-        providerID="anthropic",
-        mode="standard",
-        agent="rex",
-        path=MessagePath(cwd="/tmp/stats-project", root="/tmp/stats-project"),
-        tokens=TokenUsage(
-            input=11,
-            output=7,
-            reasoning=3,
-            cache=TokenCache(read=5, write=2),
-        ),
-        cost=1.25,
-    )
-    return [
-        MessageWithParts(
-            info=user,
-            parts=[
-                TextPart(
-                    id="part_user_text",
-                    sessionID=session_id,
-                    messageID=user.id,
-                    text="How many tool calls?",
-                )
-            ],
-        ),
-        MessageWithParts(
-            info=assistant,
-            parts=[
-                TextPart(
-                    id="part_assistant_text",
-                    sessionID=session_id,
-                    messageID=assistant.id,
-                    text="One bash call.",
-                ),
-                ToolPart(
-                    id="part_assistant_tool",
-                    sessionID=session_id,
-                    messageID=assistant.id,
-                    callID="call_stats",
-                    tool="bash",
-                    state=ToolStatePending(input={"command": "echo hi"}, raw='{"command":"echo hi"}'),
-                ),
-            ],
-        ),
-    ]
-
-
-def _build_zero_token_messages(session_id: str) -> list[MessageWithParts]:
-    user = UserMessageInfo(
-        id=f"{session_id}_user_zero",
-        sessionID=session_id,
-        role="user",
-        time={"created": 2_000},
-        agent="rex",
-        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
-    )
-    assistant = AssistantMessageInfo(
-        id=f"{session_id}_assistant_zero",
-        sessionID=session_id,
-        role="assistant",
-        time={"created": 2_100, "completed": 2_200},
-        parentID=user.id,
-        modelID="claude-sonnet",
-        providerID="anthropic",
-        mode="standard",
-        agent="rex",
-        path=MessagePath(cwd="/tmp/stats-project", root="/tmp/stats-project"),
-        tokens=TokenUsage(),
-        cost=0.0,
-    )
-    return [
-        MessageWithParts(
-            info=user,
-            parts=[TextPart(id=f"{session_id}_user_text", sessionID=session_id, messageID=user.id, text="hi")],
-        ),
-        MessageWithParts(
-            info=assistant,
-            parts=[],
-        ),
-    ]
-
-
-def _build_estimated_token_messages(session_id: str) -> list[MessageWithParts]:
-    user = UserMessageInfo(
-        id=f"{session_id}_user_estimate",
-        sessionID=session_id,
-        role="user",
-        time={"created": 3_000},
-        agent="rex",
-        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
-    )
-    assistant = AssistantMessageInfo(
-        id=f"{session_id}_assistant_estimate",
-        sessionID=session_id,
-        role="assistant",
-        time={"created": 3_100, "completed": 3_200},
-        parentID=user.id,
-        modelID="claude-sonnet",
-        providerID="anthropic",
-        mode="standard",
-        agent="rex",
-        path=MessagePath(cwd="/tmp/stats-project", root="/tmp/stats-project"),
-        tokens=TokenUsage(),
-        cost=0.0,
-    )
-    return [
-        MessageWithParts(
-            info=user,
-            parts=[
-                TextPart(
-                    id=f"{session_id}_user_estimate_text",
-                    sessionID=session_id,
-                    messageID=user.id,
-                    text="Please investigate the issue carefully.",
-                )
-            ],
-        ),
-        MessageWithParts(
-            info=assistant,
-            parts=[
-                TextPart(
-                    id=f"{session_id}_assistant_estimate_text",
-                    sessionID=session_id,
-                    messageID=assistant.id,
-                    text="Estimated assistant answer.",
-                ),
-                ReasoningPart(
-                    id=f"{session_id}_assistant_estimate_reasoning",
-                    sessionID=session_id,
-                    messageID=assistant.id,
-                    text="Hidden chain of thought summary.",
-                    time=PartTime(start=3_120),
-                ),
-                ToolPart(
-                    id=f"{session_id}_assistant_estimate_tool",
-                    sessionID=session_id,
-                    messageID=assistant.id,
-                    callID=f"{session_id}_tool_call",
-                    tool="bash",
-                    state=ToolStatePending(
-                        input={"command": "echo estimated"},
-                        raw='{"command":"echo estimated"}',
-                    ),
-                ),
-            ],
-        ),
-    ]
-
-
 @pytest.mark.asyncio
-async def test_aggregate_stats_uses_current_message_model(monkeypatch) -> None:
+async def test_aggregate_stats_uses_usage_records(monkeypatch) -> None:
     session = _build_session()
-    messages = _build_messages(session.id)
+    record = UsageRecord(
+        id="usage-1",
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        session_id=session.id,
+        message_id="msg-1",
+        input_tokens=11,
+        output_tokens=7,
+        cached_tokens=5,
+        cache_write_tokens=2,
+        reasoning_tokens=3,
+        total_tokens=21,
+        total_cost=1.25,
+        currency="USD",
+        source="live",
+        created_at=stats_cmd.datetime.now(stats_cmd.UTC),
+    )
 
-    async def fake_get_all_sessions():
+    async def fake_resolve_project_sessions(project_filter):
+        assert project_filter is None
         return [session]
 
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        assert session_id == session.id
-        assert include_archived is False
-        return messages
+    async def fake_get_usage_records(**kwargs):
+        assert kwargs["session_ids"] == [session.id]
+        return [record]
 
-    monkeypatch.setattr(stats_cmd, "_get_all_sessions", fake_get_all_sessions)
-    monkeypatch.setattr(stats_cmd.Message, "list_with_parts", fake_list_with_parts)
+    async def fake_get_usage_stats(**kwargs):
+        assert kwargs["session_ids"] == [session.id]
+        return type("UsageStats", (), {
+            "summary": type("Summary", (), {
+                "cost_by_currency": [type("CurrencyCost", (), {"currency": "USD", "total_cost": 1.25})()],
+            })(),
+        })()
+
+    async def fake_collect_message_metrics(session_ids):
+        assert session_ids == [session.id]
+        return 2, {"bash": 1}
+
+    monkeypatch.setattr(stats_cmd, "_resolve_project_sessions", fake_resolve_project_sessions)
+    monkeypatch.setattr(stats_cmd, "get_usage_records", fake_get_usage_records)
+    monkeypatch.setattr(stats_cmd, "get_usage_stats", fake_get_usage_stats)
+    monkeypatch.setattr(stats_cmd, "_collect_message_metrics", fake_collect_message_metrics)
 
     result = await stats_cmd._aggregate_stats(days=None, project_filter=None)
 
     assert result.total_sessions == 1
     assert result.total_messages == 2
-    assert result.total_cost == 1.25
     assert result.total_tokens.input == 11
     assert result.total_tokens.output == 7
     assert result.total_tokens.reasoning == 3
     assert result.total_tokens.cache_read == 5
     assert result.total_tokens.cache_write == 2
+    assert result.total_cost_by_currency == {"USD": 1.25}
     assert result.tool_usage == {"bash": 1}
     assert result.model_usage["anthropic/claude-sonnet"].messages == 1
     assert result.model_usage["anthropic/claude-sonnet"].tokens_input == 11
     assert result.model_usage["anthropic/claude-sonnet"].tokens_output == 10
+    assert result.model_usage["anthropic/claude-sonnet"].cost_by_currency == {"USD": 1.25}
 
 
 @pytest.mark.asyncio
-async def test_aggregate_stats_median_ignores_zero_token_sessions(monkeypatch) -> None:
-    session_with_tokens = _build_session()
-    zero_session = SessionInfo(
-        id="ses_stats_zero",
-        projectID="proj_stats",
-        directory="/tmp/stats-project",
-        title="Zero Session",
-        time=SessionTime(created=2_000, updated=3_000),
-    )
+async def test_aggregate_stats_uses_active_session_median(monkeypatch) -> None:
+    first = _build_session("ses_first")
+    second = _build_session("ses_second")
+    records = [
+        UsageRecord(
+            id="usage-1",
+            provider_id="anthropic",
+            model_id="m1",
+            session_id=first.id,
+            message_id="msg-1",
+            input_tokens=10,
+            output_tokens=5,
+            cached_tokens=0,
+            cache_write_tokens=0,
+            reasoning_tokens=0,
+            total_tokens=15,
+            total_cost=0.5,
+            currency="USD",
+            source="live",
+            created_at=stats_cmd.datetime.now(stats_cmd.UTC),
+        ),
+        UsageRecord(
+            id="usage-2",
+            provider_id="anthropic",
+            model_id="m1",
+            session_id=second.id,
+            message_id="msg-2",
+            input_tokens=20,
+            output_tokens=10,
+            cached_tokens=0,
+            cache_write_tokens=0,
+            reasoning_tokens=0,
+            total_tokens=30,
+            total_cost=1.0,
+            currency="USD",
+            source="live",
+            created_at=stats_cmd.datetime.now(stats_cmd.UTC),
+        ),
+    ]
 
-    async def fake_get_all_sessions():
-        return [session_with_tokens, zero_session]
+    async def fake_resolve_project_sessions(project_filter):
+        return [first, second]
 
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        assert include_archived is False
-        if session_id == session_with_tokens.id:
-            return _build_messages(session_id)
-        return _build_zero_token_messages(session_id)
+    async def fake_get_usage_records(**kwargs):
+        return records
 
-    monkeypatch.setattr(stats_cmd, "_get_all_sessions", fake_get_all_sessions)
-    monkeypatch.setattr(stats_cmd.Message, "list_with_parts", fake_list_with_parts)
+    async def fake_get_usage_stats(**kwargs):
+        return type("UsageStats", (), {
+            "summary": type("Summary", (), {
+                "cost_by_currency": [type("CurrencyCost", (), {"currency": "USD", "total_cost": 1.5})()],
+            })(),
+        })()
+
+    async def fake_collect_message_metrics(session_ids):
+        return 4, {}
+
+    monkeypatch.setattr(stats_cmd, "_resolve_project_sessions", fake_resolve_project_sessions)
+    monkeypatch.setattr(stats_cmd, "get_usage_records", fake_get_usage_records)
+    monkeypatch.setattr(stats_cmd, "get_usage_stats", fake_get_usage_stats)
+    monkeypatch.setattr(stats_cmd, "_collect_message_metrics", fake_collect_message_metrics)
 
     result = await stats_cmd._aggregate_stats(days=None, project_filter=None)
 
     assert result.total_sessions == 2
-    assert result.median_tokens_per_session == 21
-
-
-@pytest.mark.asyncio
-async def test_aggregate_stats_estimates_missing_assistant_tokens(monkeypatch) -> None:
-    session = _build_session()
-    messages = _build_estimated_token_messages(session.id)
-
-    async def fake_get_all_sessions():
-        return [session]
-
-    async def fake_list_with_parts(session_id: str, include_archived: bool = False):
-        assert session_id == session.id
-        assert include_archived is False
-        return messages
-
-    monkeypatch.setattr(stats_cmd, "_get_all_sessions", fake_get_all_sessions)
-    monkeypatch.setattr(stats_cmd.Message, "list_with_parts", fake_list_with_parts)
-
-    result = await stats_cmd._aggregate_stats(days=None, project_filter=None)
-
-    expected_input = 800 + stats_cmd._estimate_message_context_tokens(messages[0])
-    expected_output = (
-        stats_cmd._count_tokens("Estimated assistant answer.")
-        + stats_cmd._count_tokens(stats_cmd._stringify_payload({"command": "echo estimated"}))
-    )
-    expected_reasoning = stats_cmd._count_tokens("Hidden chain of thought summary.")
-
-    assert result.total_tokens.input == expected_input
-    assert result.total_tokens.output == expected_output
-    assert result.total_tokens.reasoning == expected_reasoning
-    assert result.has_reasoning_tokens is True
-    assert result.model_usage["anthropic/claude-sonnet"].tokens_input == expected_input
-    assert result.model_usage["anthropic/claude-sonnet"].tokens_output == expected_output + expected_reasoning
+    assert result.tokens_per_session == 22.5
+    assert result.median_tokens_per_session == 22.5
 
 
 def test_stats_command_renders_output(monkeypatch) -> None:
@@ -299,16 +162,22 @@ def test_stats_command_renders_output(monkeypatch) -> None:
         return SessionStats(
             total_sessions=2,
             total_messages=4,
-            total_cost=2.5,
+            total_cost_by_currency={"USD": 2.5, "CNY": 1.2},
+            cost_per_day_by_currency={"USD": 2.5, "CNY": 1.2},
             total_tokens=TokenStats(input=20, output=10, reasoning=5, cache_read=3, cache_write=1),
             tool_usage={"bash": 2},
-            model_usage={"anthropic/claude-sonnet": ModelUsage(messages=2, tokens_input=20, tokens_output=15, cost=2.5)},
+            model_usage={
+                "anthropic/claude-sonnet": ModelUsage(
+                    messages=2,
+                    tokens_input=20,
+                    tokens_output=15,
+                    cost_by_currency={"USD": 2.5},
+                )
+            },
             days=1,
-            cost_per_day=2.5,
             tokens_per_day=35.0,
             tokens_per_session=17.5,
             median_tokens_per_session=17.5,
-            has_reasoning_tokens=True,
         )
 
     monkeypatch.setattr(stats_cmd.Storage, "init", fake_storage_init)
@@ -319,12 +188,12 @@ def test_stats_command_renders_output(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "OVERVIEW" in result.stdout
     assert "TOKENS" in result.stdout
-    assert "Total Tokens" in result.stdout
-    assert "Avg Tokens/Day" in result.stdout
-    assert "Median Tokens/Active Session" in result.stdout
+    assert "COSTS" in result.stdout
     assert "MODEL USAGE" in result.stdout
     assert "TOOL USAGE" in result.stdout
     assert "anthropic/claude-sonnet" in result.stdout
+    assert "$2.5000" in result.stdout
+    assert "¥1.2000" in result.stdout
 
 
 def test_stats_command_defaults_tools_to_five(monkeypatch) -> None:
@@ -372,7 +241,6 @@ def test_stats_command_hides_reasoning_when_zero(monkeypatch) -> None:
             tokens_per_day=30.0,
             tokens_per_session=30.0,
             median_tokens_per_session=30.0,
-            has_reasoning_tokens=False,
         )
 
     monkeypatch.setattr(stats_cmd.Storage, "init", fake_storage_init)
@@ -382,3 +250,31 @@ def test_stats_command_hides_reasoning_when_zero(monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "Reasoning" not in result.stdout
+
+
+def test_stats_backfill_command_renders_summary(monkeypatch) -> None:
+    async def fake_storage_init(*args, **kwargs) -> None:
+        return None
+
+    async def fake_resolve_project_sessions(project_filter):
+        return [_build_session()]
+
+    async def fake_backfill_usage_records(**kwargs):
+        assert kwargs["session_ids"] == ["ses_stats_test"]
+        return BackfillUsageResult(
+            scanned_messages=10,
+            inserted_records=4,
+            skipped_existing=5,
+            skipped_missing_data=1,
+        )
+
+    monkeypatch.setattr(stats_cmd.Storage, "init", fake_storage_init)
+    monkeypatch.setattr(stats_cmd, "_resolve_project_sessions", fake_resolve_project_sessions)
+    monkeypatch.setattr(stats_cmd, "backfill_usage_records", fake_backfill_usage_records)
+
+    result = runner.invoke(stats_cmd.stats_app, ["backfill"])
+
+    assert result.exit_code == 0
+    assert "USAGE BACKFILL" in result.stdout
+    assert "Inserted Records" in result.stdout
+    assert "4" in result.stdout

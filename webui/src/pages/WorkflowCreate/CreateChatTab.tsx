@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Loader2, AlertCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat, { type SSEChatEvent } from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -15,14 +15,12 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
   const { t } = useTranslation('workflow');
 
   const exampleQuestions = t('create.chat.exampleQuestions', { returnObjects: true }) as string[];
-  const welcomeMessage = t('create.chat.welcomeMessage');
 
-  const { sessionId, loading, error, retry } = useSessionChat({
+  const { sessionId, error, createAndSend, retry } = useSessionChat({
     title: t('create.chat.sessionTitle'),
     category: 'workflow',
     contextMessage: t('create.chat.contextMessage'),
-    welcomeMessage,
-    autoCreate: true,
+    welcomeMessage: t('create.chat.welcomeMessage'),
   });
 
   const knownIdsRef = useRef<Set<string>>(new Set());
@@ -85,14 +83,12 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
     return () => clearInterval(timer);
   }, [sessionId, snapshotReady, detectNewWorkflow]);
 
-  if (loading || (!sessionId && !error)) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Loader2 className="w-7 h-7 text-red-500 animate-spin" />
-        <p className="text-xs text-gray-500">{t('create.chat.preparing')}</p>
-      </div>
-    );
-  }
+  const handleCreateAndSend = useCallback(
+    async (text: string) => {
+      await createAndSend(text);
+    },
+    [createAndSend],
+  );
 
   if (error) {
     return (
@@ -113,13 +109,14 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
 
   return (
     <SessionChat
-      sessionId={sessionId!}
-      live
+      sessionId={sessionId}
+      live={!!sessionId}
       placeholder={t('create.chat.inputPlaceholder')}
       className="h-full"
       suggestions={exampleQuestions}
       onStreamingDone={handleStreamingDone}
       onSSEEvent={handleSSEEvent}
+      onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
     />
   );
 }

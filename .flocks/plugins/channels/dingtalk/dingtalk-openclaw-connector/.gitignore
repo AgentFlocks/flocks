@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+*.egg
+node_modules/
+package-lock.json
+
+# IDE
+.idea/
+
+openclaw/
+.aone_copilot/
+AGENTS.md

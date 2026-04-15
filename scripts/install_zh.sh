@@ -18,6 +18,7 @@ Flocks 中国用户源码安装脚本。
 默认软件源：
   PyPI: https://mirrors.aliyun.com/pypi/simple
   npm : https://registry.npmmirror.com/
+  uv  : https://astral.org.cn/uv/install.sh
 
 一键安装入口：
   curl -fsSL $RAW_INSTALL_ZH_SH_URL | bash
@@ -31,10 +32,13 @@ EOF
 }
 
 configure_cn_environment() {
+  export FLOCKS_INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-zh-CN}"
   export FLOCKS_INSTALL_REPO_URL="${FLOCKS_INSTALL_REPO_URL:-https://gitee.com/flocks/flocks.git}"
   export FLOCKS_RAW_INSTALL_SH_URL="${FLOCKS_RAW_INSTALL_SH_URL:-$RAW_INSTALL_ZH_SH_URL}"
   export FLOCKS_RAW_INSTALL_PS1_URL="${FLOCKS_RAW_INSTALL_PS1_URL:-$RAW_INSTALL_ZH_PS1_URL}"
   export FLOCKS_UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://mirrors.aliyun.com/pypi/simple}"
+  export FLOCKS_UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.org.cn/uv/install.sh}"
+  export FLOCKS_UV_INSTALL_PS1_URL="${FLOCKS_UV_INSTALL_PS1_URL:-https://astral.org.cn/uv/install.ps1}"
   export FLOCKS_NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmmirror.com/}"
   export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
   export FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/zh-cn/download}"

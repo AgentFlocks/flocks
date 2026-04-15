@@ -1,0 +1,53 @@
+name: sangfor_sip_events
+description: >
+  Query Sangfor SIP security event data.
+  - `sec_event` – 安全事件（含威胁级别、攻击方向、处置状态、攻击结果等）
+  Supports time-range and batch pulling. Recommended max_count: 2000 per request.
+description_cn: >
+  查询深信服 SIP 安全事件数据。
+  - `sec_event`：安全事件，包含确定性等级、威胁等级、攻击方向（src_ip/dst_ip）、
+    攻击阶段、处置状态、攻击结果等完整字段。
+  支持时间范围分批拉取，推荐每次 2000 条。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_sip
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        事件子接口（当前仅支持 `sec_event`）。
+      enum: [sec_event]
+      default: sec_event
+    from_time:
+      type: integer
+      description: >
+        起始时间戳（Unix 秒级），默认为 24 小时前。
+        支持 ISO8601 字符串，如 "2024-06-01T00:00:00"。
+    to_time:
+      type: integer
+      description: 截止时间戳（Unix 秒级），默认为当前时间。
+    max_count:
+      type: integer
+      description: >
+        单次最大拉取条数（默认 2000，最大 10000）。
+        数据按 firstTime 升序排列；若数据量超限，缩短时间范围后重试。
+      default: 2000
+  required: []
+
+response_hints: |
+  关键字段说明：
+  - threat_level: 1=低可疑 2=高可疑 3=已失陷
+  - suspect_level: 1=低威胁 2=中威胁 3=高威胁
+  - attack_state: 0=待研判 1=失败 2=成功 3=失陷
+  - stage: 1=脆弱性风险 2=侦察入侵 3=入侵 4=命令控制 5=横向控制 6=目标达成
+  - role: 1=攻击方 2=遭受方
+  - emergency: info=信息 normal=一般 important=重要 emergent=紧急
+
+handler:
+  type: script
+  script_file: sangfor_sip.handler.py
+  function: run_events

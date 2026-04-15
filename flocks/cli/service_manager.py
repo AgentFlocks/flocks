@@ -5,6 +5,7 @@ Service lifecycle helpers for local Flocks daemon commands.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import datetime
 import importlib.util
 import json
@@ -186,10 +187,15 @@ def resolve_python_subprocess_command(
     """Resolve a Python executable for child processes.
 
     Priority:
-    1. Current runtime environment inferred from installed modules.
-    2. Project/install `.venv`.
-    3. Current `sys.executable`.
+    1. Project/install ``.venv``.
+    2. Current runtime environment inferred from installed modules.
+    3. Current ``sys.executable``.
     """
+    current_root = root or repo_root()
+    venv_python = _python_executable_from_env_root(current_root / ".venv")
+    if venv_python:
+        return [venv_python]
+
     for module_name in preferred_modules:
         env_root = _python_env_root_from_module(module_name)
         if env_root is None:
@@ -198,25 +204,43 @@ def resolve_python_subprocess_command(
         if resolved:
             return [resolved]
 
-    current_root = root or repo_root()
-    venv_python = _python_executable_from_env_root(current_root / ".venv")
-    if venv_python:
-        return [venv_python]
-
     return [sys.executable]
 
 
+def _flocks_executable_from_venv(venv_root: Path) -> str | None:
+    """Return the flocks CLI entry point inside a virtual environment."""
+    candidates = [
+        venv_root / "Scripts" / "flocks.exe",
+        venv_root / "Scripts" / "flocks.cmd",
+        venv_root / "bin" / "flocks",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+    return None
+
+
 def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
-    """Resolve a command prefix that launches the `flocks` CLI reliably."""
+    """Resolve a command prefix that launches the ``flocks`` CLI reliably.
+
+    On Windows, always uses ``python.exe -m flocks.cli.main`` instead of
+    ``flocks.exe`` to avoid locking the console-script entry point, which
+    would prevent ``uv sync`` from replacing it during live upgrades.
+    """
+    current_root = root or repo_root()
+
+    if sys.platform == "win32":
+        venv_python = _python_executable_from_env_root(current_root / ".venv")
+        if venv_python:
+            return [venv_python, "-m", "flocks.cli.main"]
+    else:
+        venv_flocks = _flocks_executable_from_venv(current_root / ".venv")
+        if venv_flocks:
+            return [venv_flocks]
+
     launcher = which("flocks") or which("flocks.exe") or which("flocks.cmd")
     if launcher and not launcher.startswith("/mnt/"):
         return [launcher]
-
-    argv0 = sys.argv[0]
-    if argv0:
-        argv0_path = Path(argv0)
-        if argv0_path.exists() and argv0_path.name.lower().startswith("flocks"):
-            return [str(argv0_path.resolve())]
 
     return resolve_python_subprocess_command(root) + ["-m", "flocks.cli.main"]
 
@@ -385,10 +409,43 @@ def _unix_pid_is_zombie(pid: int | None) -> bool:
     return bool(stat and stat.startswith("Z"))
 
 
+def _windows_pid_is_running(pid: int) -> bool:
+    """Return True when a Windows process id is still alive."""
+    if sys.platform != "win32" or pid <= 0:
+        return False
+
+    process_query_limited_information = 0x1000
+    still_active = 259
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    open_process.restype = ctypes.c_void_p
+    get_exit_code_process = kernel32.GetExitCodeProcess
+    get_exit_code_process.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    get_exit_code_process.restype = ctypes.c_int
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [ctypes.c_void_p]
+    close_handle.restype = ctypes.c_int
+
+    handle = open_process(process_query_limited_information, False, pid)
+    if not handle:
+        return ctypes.get_last_error() == 5
+
+    try:
+        exit_code = ctypes.c_uint32()
+        if not get_exit_code_process(handle, ctypes.byref(exit_code)):
+            return ctypes.get_last_error() == 5
+        return exit_code.value == still_active
+    finally:
+        close_handle(handle)
+
+
 def pid_is_running(pid: int | None) -> bool:
     """Return True if a pid exists and is still alive."""
-    if pid is None:
+    if pid is None or pid <= 0:
         return False
+    if sys.platform == "win32":
+        return _windows_pid_is_running(pid)
 
     try:
         os.kill(pid, 0)
@@ -435,13 +492,18 @@ def process_group_is_running(pgid: int | None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        pass
     except OSError:
         return False
     members = _process_group_member_pids(pgid)
     if not members:
         return False
-    return any(pid_is_running(pid) for pid in members)
+    alive_members = [pid for pid in members if pid_is_running(pid)]
+    if alive_members:
+        return True
+    # macOS can raise EPERM for a defunct process-group leader even when no
+    # runnable members remain, so rely on member liveness as the source of truth.
+    return False
 
 
 def runtime_record_is_running(record: RuntimeRecord | None) -> bool:
@@ -632,6 +694,8 @@ def start_backend(config: ServiceConfig, console) -> None:
     if runtime_record is not None:
         paths.backend_pid.unlink(missing_ok=True)
 
+    _run_legacy_task_migration(root, console)
+
     command = resolve_flocks_cli_command(root) + [
         "serve",
         "--host",
@@ -787,6 +851,30 @@ def _tracked_processes_stopped(
     return not any(pid_is_running(pid) for pid in tracked_pids)
 
 
+def _runtime_record_pids(record: RuntimeRecord | None) -> list[int]:
+    """Collect the latest pids implied by a runtime record."""
+    if record is None:
+        return []
+
+    result: list[int] = []
+    if record.pid > 0:
+        result = append_unique_pids(result, collect_process_tree_pids(record.pid))
+    if record.pgid is not None and sys.platform != "win32":
+        result = append_unique_pids(result, _process_group_member_pids(record.pgid))
+    return result
+
+
+def _current_stop_targets(
+    port: int,
+    record: RuntimeRecord | None,
+    tracked_pids: Iterable[int],
+) -> list[int]:
+    """Refresh the pid list that stop_one() should verify or force kill."""
+    result = append_unique_pids([], tracked_pids)
+    result = append_unique_pids(result, _runtime_record_pids(record))
+    return append_unique_pids(result, port_owner_pids(port))
+
+
 def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
     """Signal an entire Unix process group when it exists."""
     if sys.platform == "win32" or pgid is None or pgid <= 0:
@@ -829,25 +917,34 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
         else:
             signal_pid_list(signal.SIGTERM, target_pids)
         for _ in range(10):
-            if _tracked_processes_stopped(port, runtime_record, target_pids):
+            current_targets = _current_stop_targets(port, runtime_record, target_pids)
+            if _tracked_processes_stopped(port, runtime_record, current_targets):
                 pid_file.unlink(missing_ok=True)
                 console.print(f"[flocks] {name} 已停止。")
                 return
             time.sleep(1)
 
         console.print(f"[flocks] {name} 未在预期时间内退出，强制终止...")
+        force_targets = _current_stop_targets(port, runtime_record, target_pids)
         if runtime_record and runtime_record.pgid is not None:
             signal_process_group(signal.SIGKILL, runtime_record.pgid)
-        signal_pid_list(signal.SIGKILL, append_unique_pids(target_pids, port_owner_pids(port)))
+        signal_pid_list(signal.SIGKILL, force_targets)
 
     for _ in range(10):
-        if _tracked_processes_stopped(port, runtime_record, append_unique_pids(target_pids, port_owner_pids(port))):
+        force_targets = _current_stop_targets(port, runtime_record, target_pids)
+        if _tracked_processes_stopped(port, runtime_record, force_targets):
             pid_file.unlink(missing_ok=True)
             console.print(f"[flocks] {name} 已停止。")
             return
+        if sys.platform == "win32":
+            for pid in force_targets:
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+        else:
+            if runtime_record and runtime_record.pgid is not None:
+                signal_process_group(signal.SIGKILL, runtime_record.pgid)
+            signal_pid_list(signal.SIGKILL, force_targets)
         time.sleep(1)
 
-    pid_file.unlink(missing_ok=True)
     raise ServiceError(f"{name} 未在预期时间内退出，请手动检查端口 {port}。")
 
 

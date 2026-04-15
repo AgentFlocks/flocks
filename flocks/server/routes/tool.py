@@ -239,6 +239,8 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
     Returns:
         Updated tool information
     """
+    from flocks.tool.tool_loader import find_yaml_tool, update_yaml_tool
+
     ToolRegistry.init()
 
     tool = ToolRegistry.get(tool_name)
@@ -248,12 +250,8 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
             detail=f"Tool not found: {tool_name}",
         )
 
-    source, source_name = _get_tool_source(tool.info)
-    if source == "api" and source_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"API tool '{tool_name}' must be managed via its API service",
-        )
+    if find_yaml_tool(tool_name):
+        update_yaml_tool(tool_name, {"enabled": request.enabled})
 
     tool.info.enabled = request.enabled
     log.info("tool.updated", {"name": tool_name, "enabled": request.enabled})

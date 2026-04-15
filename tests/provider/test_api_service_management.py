@@ -153,7 +153,7 @@ class TestToolRouteAPIServiceSync:
         assert response.enabled is False
 
     @pytest.mark.asyncio
-    async def test_update_tool_rejects_api_tool_toggle(self):
+    async def test_update_tool_allows_api_tool_toggle(self):
         from flocks.server.routes.tool import ToolUpdateRequest, update_tool
 
         tool = MagicMock()
@@ -169,11 +169,12 @@ class TestToolRouteAPIServiceSync:
         with (
             patch("flocks.server.routes.tool.ToolRegistry.init"),
             patch("flocks.server.routes.tool.ToolRegistry.get", return_value=tool),
+            patch("flocks.tool.tool_loader.find_yaml_tool", return_value=None),
+            patch("flocks.server.routes.tool._build_tool_response") as mock_build,
         ):
-            with pytest.raises(HTTPException) as exc:
-                await update_tool("threatbook_ip_query", ToolUpdateRequest(enabled=False))
-
-        assert exc.value.status_code == 400
+            mock_build.return_value = MagicMock()
+            await update_tool("threatbook_ip_query", ToolUpdateRequest(enabled=False))
+            assert tool.info.enabled is False
 
     @pytest.mark.asyncio
     async def test_create_tool_auto_enables_provider_backed_api_service(self):

@@ -13,6 +13,9 @@
 | 查基线任务、基线结果、授权 | `qingteng_baseline` | `job_list` / `job_status` / `spec_check_result` / `auth_list` | 通常至少要 `os_type` |
 | 查系统审计日志 | `qingteng_system_audit` | tool 直接调用 | 可空参，常补 `eventName`、`userName` |
 | 做快速风险体检 | `qingteng_vul_check` | tool 直接调用 | 常见 `risk_type`、`os_type` |
+| 查/创建/执行快速安全检测任务 | `qingteng_fastjob` | `task_list` / `job_create` / `job_execute` / `task_result` | `taskId`、`name` 等 |
+| 查发现的主机、管理资产扫描任务 | `qingteng_asset_discovery` | `discovered_host_list` / `job_create` / `job_execute` | `name`、`specId` 等 |
+| 主机网络隔离、微隔离策略管理 | `qingteng_microseg` | `seg_create` / `seg_delete` / `host_list` / `black_list` | `agentIds`、`ids` 等 |
 
 ## 通用规则
 
@@ -382,6 +385,149 @@
 - WebShell / 后门 / 漏洞 / 弱密码扫描
 - 基线任务创建 / 更新 / 执行
 - 授权信息变更
+- 快速任务作业创建 / 执行
+- 资产发现扫描任务创建 / 执行（会触发网络扫描）
+- 微隔离策略创建 / 编辑 / 删除（会阻断或恢复主机网络）
+- 主机阻断状态变更（`host_protect_status`）
+
+## 7. 快速任务：`qingteng_fastjob`
+
+适用于对单台或多台主机快速执行预定义的安全检测和应急响应任务。
+
+### 典型流程
+
+1. `task_list` — 查询可用的检测项模板（`osType=1` Linux，`2` Windows）
+2. `job_create` — 创建作业，绑定 `taskId` 和目标主机范围 `realm`
+3. `job_execute` — 立即执行，获取 `taskRecordId`
+4. `task_result` — 查看执行结果；`task_error` — 查看失败主机
+
+### 最小示例
+
+查询检测项列表：
+
+```json
+{
+  "action": "task_list",
+  "osType": 1,
+  "name": "Weblogic",
+  "page": 0,
+  "size": 20
+}
+```
+
+创建作业（全部主机）：
+
+```json
+{
+  "action": "job_create",
+  "name": "weblogic-check-2024",
+  "osType": 1,
+  "taskType": 1,
+  "taskId": "0478ee5024763edc6d3c",
+  "realm": {"type": 0},
+  "realmName": "全部主机"
+}
+```
+
+立即执行：
+
+```json
+{
+  "action": "job_execute",
+  "id": "5d1b568b67657c1b743cf33b"
+}
+```
+
+## 8. 资产发现：`qingteng_asset_discovery`
+
+适用于发现未安装 Agent 的主机，了解全局资产覆盖情况。
+
+### 典型流程
+
+1. `discovered_host_list` — 查看当前已发现的主机
+2. `job_create` — 创建扫描任务，配置发起主机和目标 IP 段
+3. `job_execute` — 立即触发扫描
+4. 扫描完成后再次调用 `discovered_host_list` 查看新发现主机
+
+### 最小示例
+
+查看发现主机：
+
+```json
+{
+  "action": "discovered_host_list"
+}
+```
+
+创建扫描任务：
+
+```json
+{
+  "action": "job_create",
+  "name": "内网段扫描",
+  "kind": 2,
+  "values": [],
+  "ipList": ["192.168.0.0/24"],
+  "osDetection": true
+}
+```
+
+执行扫描任务：
+
+```json
+{
+  "action": "job_execute",
+  "specId": "5fdacbf3edc90d7a292ae9a5"
+}
+```
+
+## 9. 微隔离：`qingteng_microseg`
+
+⚠️ **高风险操作模块**，隔离类操作会直接阻断主机网络连接，操作前必须确认 `agentId` 正确。
+
+### 三类子功能
+
+| 分组 | 代表 action |
+|---|---|
+| 隔离策略（一键隔离） | `seg_create`、`seg_edit`、`seg_delete`、`seg_list`、`seg_detail` |
+| 主机管理 | `host_list`、`host_ms_enable`、`host_protect_status`、`host_limit_out` |
+| 黑名单策略 | `black_list`、`black_create`、`black_update`、`black_delete`、`black_detail` |
+
+### 典型应急响应流程
+
+1. `host_list` — 查找目标主机 `agentId`
+2. `seg_create` — 对目标主机实施网络隔离
+3. 取证完成后 `seg_delete` — 解除隔离
+
+```json
+{
+  "action": "seg_create",
+  "agentIds": ["5fa27259dae9af8a"],
+  "remark": "疑似失陷主机紧急隔离",
+  "direction": "out",
+  "ipList": [],
+  "portList": []
+}
+```
+
+解除隔离：
+
+```json
+{
+  "action": "seg_delete",
+  "agentIds": ["5fa27259dae9af8a"]
+}
+```
+
+查看微隔离主机列表：
+
+```json
+{
+  "action": "host_list",
+  "page": 0,
+  "size": 20
+}
+```
 
 ## 何时回退浏览器
 

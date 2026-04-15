@@ -1,0 +1,90 @@
+name: sangfor_xdr_incidents
+description: >
+  Manage Sangfor XDR security incidents. Query incidents by time range,
+  update disposition status, retrieve incident proof and related entities
+  (hosts, IPs, files, processes, DNS). Key tool for incident response.
+description_cn: >
+  管理深信服 XDR 安全事件。支持按时间范围查询事件列表、
+  批量修改事件处置状态、获取事件举证信息，以及查询事件关联实体
+  （主机、内外网IP、文件、进程、DNS），是安全事件响应的核心工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        事件操作类型：
+        - `list`           ：查询安全事件列表
+        - `update_status`   ：批量修改事件处置状态
+        - `status_list`     ：查询事件处置状态枚举列表
+        - `get_proof`       ：根据事件 UUID 获取举证信息
+        - `get_entities`    ：根据事件 UUID 获取处置实体（需指定 entity_type）
+        - `get_detail`      ：根据事件 UUID 获取事件详情
+      enum: [list, update_status, status_list, get_proof, get_entities, get_detail]
+      default: list
+    start_time:
+      type: integer
+      description: 查询起始时间（Unix 秒级时间戳），默认 24 小时前。
+    end_time:
+      type: integer
+      description: 查询截止时间（Unix 秒级时间戳），默认当前时间。
+    page_size:
+      type: integer
+      description: 每页条数。
+      default: 20
+    page_num:
+      type: integer
+      description: 页码，从 1 开始。
+      default: 1
+    uuid:
+      type: string
+      description: 事件唯一ID（get_proof / get_entities / get_detail 时必填）。
+    uuids:
+      type: array
+      description: 事件 UUID 数组（update_status 时必填）。
+      items:
+        type: string
+    deal_status:
+      type: integer
+      description: >
+        处置状态（update_status 时使用）：
+        1=待处置，2=处置中，3=处置完成。
+    deal_comment:
+      type: string
+      description: 处置备注。
+    entity_type:
+      type: string
+      description: >
+        事件关联实体类型（get_entities 时必填）：
+        - `host`    ：主机实体
+        - `dns`     ：DNS 处置实体
+        - `innerip` ：内网IP处置实体
+        - `ip`      ：外网IP处置实体
+        - `file`    ：文件实体
+        - `process` ：进程实体
+      enum: [host, dns, innerip, ip, file, process]
+      default: host
+  required: [action]
+
+response_hints: |
+  事件关键字段说明（list 接口）：
+  - data.list[].uuId: 事件唯一ID
+  - data.list[].name: 事件名称
+  - data.list[].riskLevel: 风险等级
+  - data.list[].alertIds: 关联告警ID列表
+  - data.list[].dataSource: 数据来源（EDR/NDR）
+  - data.list[].hostIp: 受影响主机
+  - data.list[].dealStatus: 处置状态
+  - data.list[].detectionStatus: 事件检测状态（0=事中，1=事后）
+  - data.list[].attackStory: 攻击故事线(JSON)
+  - data.list[].rootCauseAnalysis: 根因分析(JSON)
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_incidents

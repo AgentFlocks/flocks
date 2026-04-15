@@ -22,6 +22,7 @@ class CostCalculator:
         output_tokens: int,
         pricing: PriceConfig,
         cached_tokens: int = 0,
+        cache_write_tokens: int = 0,
     ) -> UsageCost:
         """
         Calculate cost from token usage and pricing.
@@ -30,7 +31,8 @@ class CostCalculator:
             input_tokens: Number of input tokens (excluding cached).
             output_tokens: Number of output tokens.
             pricing: Model price configuration.
-            cached_tokens: Number of cached input tokens.
+            cached_tokens: Number of cache-read input tokens.
+            cache_write_tokens: Number of cache-write input tokens.
 
         Returns:
             Computed costs.
@@ -48,6 +50,8 @@ class CostCalculator:
         cache_cost = 0.0
         if cached_tokens > 0 and pricing.cache_read is not None:
             cache_cost = (cached_tokens / unit) * pricing.cache_read
+        if cache_write_tokens > 0 and pricing.cache_write is not None:
+            cache_cost += (cache_write_tokens / unit) * pricing.cache_write
 
         total_cost = input_cost + output_cost + cache_cost
 

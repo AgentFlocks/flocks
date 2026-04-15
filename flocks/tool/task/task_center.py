@@ -249,24 +249,63 @@ async def task_create(
 # task_list
 # ======================================================================
 
+_SCHEDULER_STATUSES = {"active", "disabled", "paused"}
+_EXECUTION_STATUSES = {"pending", "queued", "running", "completed", "failed", "cancelled", "paused"}
+_EXECUTION_TYPES = {"queued", "execution"}
+_VALID_TYPES = {"scheduled"} | _EXECUTION_TYPES
+
+
 @ToolRegistry.register_function(
     name="task_list",
-    description="List tasks with optional filters (status, type, etc.)",
+    description=(
+        "List tasks with optional filters.\n\n"
+        "Routing rules (IMPORTANT - read before calling):\n"
+        "- No parameters -> lists scheduled task definitions (schedulers).\n"
+        "- status='active' -> lists active scheduled tasks.\n"
+        "- status='paused' or 'disabled' -> lists paused or disabled scheduled tasks "
+        "unless type='execution' or type='queued' is explicitly provided.\n"
+        "- status='running' / 'completed' / 'failed' / 'pending' / 'queued' / 'cancelled' "
+        "-> lists task executions with that status.\n"
+        "- type='scheduled' -> forces listing schedulers.\n"
+        "- type='execution' -> forces listing executions.\n"
+        "- type='queued' -> legacy alias for type='execution'.\n\n"
+        "Common scenarios:\n"
+        "- 'How many scheduled tasks are there?' / 'List scheduled tasks' "
+        "-> call with no parameters.\n"
+        "- 'How many tasks are currently running?' -> call with status='running'.\n"
+        "- 'Which scheduled tasks are disabled?' -> call with status='disabled'.\n"
+        "- 'Which paused executions are waiting to resume?' -> call with "
+        "type='execution', status='paused'."
+    ),
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="status",
             type=ParameterType.STRING,
-            description="Filter by status",
+            description=(
+                "Filter by status. "
+                "Scheduler statuses: 'active', 'disabled', 'paused'. "
+                "Execution statuses: 'pending', 'queued', 'running', 'completed', "
+                "'failed', 'cancelled', 'paused'. "
+                "If type is omitted, 'paused' defaults to scheduled tasks."
+            ),
             required=False,
-            enum=["pending", "queued", "running", "completed", "failed", "cancelled", "paused"],
+            enum=[
+                "active", "disabled", "paused",
+                "pending", "queued", "running", "completed", "failed", "cancelled",
+            ],
         ),
         ToolParameter(
             name="type",
             type=ParameterType.STRING,
-            description="Filter by type",
+            description=(
+                "Force query target: 'scheduled' = list schedulers (task definitions), "
+                "'execution' = list task executions (task run history). "
+                "'queued' is a legacy alias for 'execution'. "
+                "If omitted, the target is inferred from status."
+            ),
             required=False,
-            enum=["queued", "scheduled"],
+            enum=["queued", "execution", "scheduled"],
         ),
         ToolParameter(
             name="limit",
@@ -286,23 +325,75 @@ async def task_list(
     from flocks.task.manager import TaskManager
     from flocks.task.models import SchedulerStatus, TaskStatus
 
+    if type is not None and type not in _VALID_TYPES:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Invalid type '{type}'. "
+                f"Valid values: {', '.join(sorted(_VALID_TYPES))}."
+            ),
+        )
+
     if type == "scheduled":
+        query_schedulers = True
+    elif type in _EXECUTION_TYPES:
+        query_schedulers = False
+    elif status is None or status in _SCHEDULER_STATUSES:
+        query_schedulers = True
+    elif status in _EXECUTION_STATUSES:
+        query_schedulers = False
+    else:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Invalid status '{status}'. "
+                f"Scheduler statuses: {', '.join(sorted(_SCHEDULER_STATUSES))}. "
+                f"Execution statuses: {', '.join(sorted(_EXECUTION_STATUSES))}. "
+                "Use type='scheduled' for scheduler states or "
+                "type='execution' for execution states."
+            ),
+        )
+
+    if query_schedulers:
+        if status is not None and status not in _SCHEDULER_STATUSES:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Invalid status '{status}' for type='scheduled'. "
+                    f"Valid scheduler statuses: {', '.join(sorted(_SCHEDULER_STATUSES))}. "
+                    "Use type='execution' to query execution statuses like "
+                    f"'{status}'."
+                ),
+            )
         scheduler_status = None
-        if status == "running":
+        if status == "active":
             scheduler_status = SchedulerStatus.ACTIVE
-        elif status == "paused":
+        elif status in ("paused", "disabled"):
             scheduler_status = SchedulerStatus.DISABLED
         tasks, total = await TaskManager.list_schedulers(
             status=scheduler_status,
+            scheduled_only=True,
             limit=limit,
         )
+        label = "Scheduled tasks"
     else:
+        try:
+            task_status = TaskStatus(status) if status else None
+        except ValueError:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Invalid execution status '{status}'. "
+                    f"Valid values: {', '.join(s.value for s in TaskStatus)}."
+                ),
+            )
         tasks, total = await TaskManager.list_executions(
-            status=TaskStatus(status) if status else None,
+            status=task_status,
             limit=limit,
         )
+        label = "Task executions"
 
-    lines = [f"Tasks ({total} total, showing {len(tasks)}):"]
+    lines = [f"{label} ({total} total, showing {len(tasks)}):"]
     for t in tasks:
         lines.append(_format_task_line(t))
 

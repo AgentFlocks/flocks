@@ -38,6 +38,44 @@ def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
     assert not pid_file.exists()
 
 
+def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_windows_pid_is_running", lambda pid: pid == 123)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("os.kill should not be used on Windows")
+
+    monkeypatch.setattr(service_manager.os, "kill", fail_if_called)
+
+    assert service_manager.pid_is_running(123) is True
+    assert service_manager.pid_is_running(456) is False
+
+
+def test_process_group_is_running_ignores_permission_error_without_live_members(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [])
+
+    assert service_manager.process_group_is_running(222) is False
+
+
+def test_process_group_is_running_checks_members_after_permission_error(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [333, 444])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 444)
+
+    assert service_manager.process_group_is_running(222) is True
+
+
 def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
     pid_file = tmp_path / "backend.pid"
     pid_file.write_text("12345\n", encoding="utf-8")
@@ -236,7 +274,29 @@ def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
     service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
 
 
-def test_resolve_python_subprocess_command_prefers_module_env(
+def test_resolve_python_subprocess_command_prefers_venv(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    tool_env = tmp_path / "tool-env"
+    tool_python = tool_env / "bin" / "python"
+    tool_python.parent.mkdir(parents=True)
+    tool_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service_manager,
+        "_python_env_root_from_module",
+        lambda module_name: tool_env if module_name == "uvicorn" else None,
+    )
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
+
+
+def test_resolve_python_subprocess_command_falls_back_to_module_env(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -254,26 +314,40 @@ def test_resolve_python_subprocess_command_prefers_module_env(
     assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(python_exe)]
 
 
-def test_resolve_python_subprocess_command_falls_back_to_repo_venv(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    venv_python = tmp_path / ".venv" / "bin" / "python"
+def test_resolve_flocks_cli_command_prefers_venv_entry_point_unix(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    venv_flocks = tmp_path / ".venv" / "bin" / "flocks"
+    venv_flocks.parent.mkdir(parents=True)
+    venv_flocks.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
+
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == [str(venv_flocks.resolve())]
+
+
+def test_resolve_flocks_cli_command_uses_python_module_on_windows(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
     venv_python.parent.mkdir(parents=True)
     venv_python.write_text("", encoding="utf-8")
 
-    monkeypatch.setattr(service_manager, "_python_env_root_from_module", lambda _module_name: None)
+    monkeypatch.setattr(service_manager, "which", lambda name: r"C:\tools\flocks.exe" if name == "flocks" else None)
 
-    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == [
+        str(venv_python),
+        "-m",
+        "flocks.cli.main",
+    ]
 
 
-def test_resolve_flocks_cli_command_prefers_launcher(monkeypatch) -> None:
+def test_resolve_flocks_cli_command_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/flocks" if name == "flocks" else None)
 
-    assert service_manager.resolve_flocks_cli_command() == ["/usr/local/bin/flocks"]
+    assert service_manager.resolve_flocks_cli_command(tmp_path) == ["/usr/local/bin/flocks"]
 
 
 def test_resolve_flocks_cli_command_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "_flocks_executable_from_venv", lambda _venv_root: None)
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
     monkeypatch.setattr(service_manager.sys, "argv", ["python"])
     monkeypatch.setattr(service_manager, "resolve_python_subprocess_command", lambda root=None: ["/env/bin/python"])
@@ -579,6 +653,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
     monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
     monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
+    monkeypatch.setenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", "preview.example.com")
 
     config = service_manager.ServiceConfig(
         backend_host="10.0.0.8",
@@ -590,6 +665,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
 
     assert build_calls[0]["command"] == ["/usr/bin/npm", "run", "build"]
     assert build_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert build_calls[0]["kwargs"]["env"]["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "preview.example.com"
     assert "VITE_API_BASE_URL" not in build_calls[0]["kwargs"]["env"]
 
     assert preview_calls[0]["command"] == [
@@ -603,6 +679,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
         "5174",
     ]
     assert preview_calls[0]["kwargs"]["env"]["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert preview_calls[0]["kwargs"]["env"]["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "preview.example.com"
     assert "VITE_API_BASE_URL" not in preview_calls[0]["kwargs"]["env"]
     record = service_manager.read_runtime_record(paths.frontend_pid)
     assert record is not None
@@ -799,6 +876,69 @@ def test_stop_one_uses_taskkill_on_windows(monkeypatch, tmp_path: Path) -> None:
         ["taskkill", "/PID", "111", "/T", "/F"],
         ["taskkill", "/PID", "222", "/T", "/F"],
     ]
+
+
+def test_stop_one_force_kill_refreshes_process_group_members(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=111, pgid=222, port=8000),
+    )
+    console = DummyConsole()
+    pid_signals: list[tuple[signal.Signals, list[int]]] = []
+    group_signals: list[tuple[signal.Signals, int | None]] = []
+    alive_group_members = {333}
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111])
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda pgid: [333] if pgid == 222 and alive_group_members else [])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid in alive_group_members)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: bool(pgid == 222 and alive_group_members))
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    def fake_signal_group(sig, pgid):
+        group_signals.append((sig, pgid))
+
+    def fake_signal_pid_list(sig, pids):
+        pid_list = list(pids)
+        pid_signals.append((sig, pid_list))
+        if sig == signal.SIGKILL and 333 in pid_list:
+            alive_group_members.clear()
+
+    monkeypatch.setattr(service_manager, "signal_process_group", fake_signal_group)
+    monkeypatch.setattr(service_manager, "signal_pid_list", fake_signal_pid_list)
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert (signal.SIGTERM, 222) in group_signals
+    assert any(sig == signal.SIGKILL and 333 in pids for sig, pids in pid_signals)
+    assert not pid_file.exists()
+    assert console.messages[-1] == "[flocks] 后端 已停止。"
+
+
+def test_stop_one_keeps_runtime_record_when_force_kill_still_times_out(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=111, pgid=222, port=8000),
+    )
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111])
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda pgid: [333] if pgid == 222 else [])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: pgid == 222)
+    monkeypatch.setattr(service_manager, "signal_process_group", lambda *_args: None)
+    monkeypatch.setattr(service_manager, "signal_pid_list", lambda *_args: None)
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="未在预期时间内退出"):
+        service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert pid_file.exists()
 
 
 @contextlib.contextmanager

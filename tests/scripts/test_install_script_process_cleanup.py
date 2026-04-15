@@ -20,7 +20,7 @@ def test_bash_installer_stops_processes_before_retrying_locked_operations() -> N
     assert "list_flocks_process_ids()" in script
     assert "is_lock_error_output()" in script
     assert 'run_with_lock_retry "Python backend dependency installation" uv sync --group dev' in script
-    assert 'run_with_lock_retry "Global flocks CLI installation" uv tool install --editable "$ROOT_DIR" --force' in script
+    assert 'ln -sf "$target" "$link_dir/flocks"' in script
     assert "os\\ error\\ 5" in script
     assert 'pkill -f "uv sync"' not in script
     assert 'pkill -f "npm run preview"' not in script
@@ -42,10 +42,10 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert "-RedirectStandardOutput $stdoutPath" in script
     assert "-RedirectStandardError $stderrPath" in script
     assert "Invoke-InstallerCommandWithLockRetry" in script
-    assert "$result = Invoke-NativeCommandOrFail" in script
+    assert "$process = Start-Process" in script
     assert "$null = Invoke-NativeCommandOrFail" in script
     assert '-Description "Python backend dependency installation"' in script
-    assert '-Description "Global flocks CLI installation"' in script
+    assert "flocks.cmd" in script
     assert "Failed to update Windows PE resources" in script
     assert '& $ScriptBlock 2>&1' not in script
     assert "Stop-FlocksProcesses -Aggressive" not in script

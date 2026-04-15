@@ -24,10 +24,10 @@ from flocks.utils.id import Identifier
 
 log = Log.create(service="tool.read")
 
-# Constants matching Flocks
-DEFAULT_READ_LIMIT = 2000
-MAX_LINE_LENGTH = 2000
-MAX_BYTES = 50 * 1024
+# Constants — keep output within the 10 K-char tool result budget
+DEFAULT_READ_LIMIT = 200
+MAX_LINE_LENGTH = 500
+MAX_BYTES = 8 * 1024  # 8 KB
 
 # Binary file extensions
 BINARY_EXTENSIONS = {
@@ -47,9 +47,9 @@ Assume this tool is able to read all files on the machine. If the User provides 
 
 Usage:
 - The filePath parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
-- Any lines longer than 2000 characters will be truncated
+- By default, it reads up to 200 lines starting from the beginning of the file
+- For files longer than 200 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=200, then offset=200 limit=200, etc.)
+- Any lines longer than 500 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -194,7 +194,7 @@ async def _resolve_sandbox_file_path(ctx: ToolContext, filepath: str) -> tuple[O
         ToolParameter(
             name="limit",
             type=ParameterType.INTEGER,
-            description="The number of lines to read (defaults to 2000)",
+            description="The number of lines to read (defaults to 200)",
             required=False,
             default=DEFAULT_READ_LIMIT
         ),
@@ -402,11 +402,19 @@ async def read_tool(
     output += "\n".join(content_lines)
     
     if truncated_by_bytes:
-        output += f"\n\n(Output truncated at {MAX_BYTES} bytes. Use 'offset' parameter to read beyond line {last_read_line})"
+        remaining = total_lines - last_read_line
+        output += (
+            f"\n\n(Output truncated at {MAX_BYTES} bytes — showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
+            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
+        )
     elif has_more_lines:
-        output += f"\n\n(File has more lines. Use 'offset' parameter to read beyond line {last_read_line})"
+        remaining = total_lines - last_read_line
+        output += (
+            f"\n\n(Showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
+            f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
+        )
     else:
-        output += f"\n\n(End of file - total {total_lines} lines)"
+        output += f"\n\n(End of file — total {total_lines} lines)"
     
     output += "\n</file>"
     

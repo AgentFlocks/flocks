@@ -955,6 +955,13 @@ class MessageWithParts(BaseModel):
     parts: List[MessagePartInfo] = []
 
 
+class MessageEditRequest(BaseModel):
+    """Request to edit message text."""
+
+    text: str = Field(..., description="Updated raw text content")
+    partID: Optional[str] = Field(None, description="Specific text part ID to edit")
+
+
 @router.get(
     "/{sessionID}/message",
     response_model=List[MessageWithParts],
@@ -996,7 +1003,7 @@ async def get_session_messages(
                             model_info = agent_obj.model
                         else:
                             model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
-                    except:
+                    except Exception:
                         model_info = {"providerID": "openai", "modelID": "gpt-4-turbo-preview"}
                 
                 info = UserMessageInfo(
@@ -1228,6 +1235,434 @@ async def update_message_part(
     except Exception as e:
         log.error("message.part.update.error", {"error": str(e)})
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
+async def _get_message_text_part(
+    session_id: str,
+    message_id: str,
+    part_id: Optional[str] = None,
+):
+    """Return the target message and an editable text part."""
+    from flocks.session.message import Message
+
+    message = await Message.get(session_id, message_id)
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message {message_id} not found in session {session_id}",
+        )
+
+    parts = await Message.parts(message_id, session_id)
+    if part_id:
+        text_part = next((part for part in parts if getattr(part, "id", None) == part_id), None)
+        if not text_part:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Part {part_id} not found in message {message_id}",
+            )
+        if getattr(text_part, "type", None) != "text":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Part {part_id} is not an editable text part",
+            )
+    else:
+        text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
+    if not text_part:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Message {message_id} does not have an editable text part",
+        )
+
+    return message, text_part
+
+
+async def _publish_text_part_update(
+    session_id: str,
+    message_id: str,
+    part_id: str,
+    text: str,
+) -> None:
+    """Broadcast a text part update so other subscribers stay in sync."""
+    from flocks.server.routes.event import publish_event
+
+    await publish_event("message.part.updated", {
+        "part": {
+            "id": part_id,
+            "messageID": message_id,
+            "sessionID": session_id,
+            "type": "text",
+            "text": text,
+        }
+    })
+
+
+def _track_background_task(task: "asyncio.Task[Any]") -> None:
+    """Keep background tasks alive until completion."""
+    if not hasattr(router, "_pending_tasks"):
+        router._pending_tasks = set()
+    router._pending_tasks.add(task)
+    task.add_done_callback(lambda t: router._pending_tasks.discard(t))
+
+
+def _schedule_background_coro(
+    coro,
+    *,
+    session_id: Optional[str] = None,
+    action: str = "session.background",
+) -> None:
+    """Schedule a background coroutine with unified error reporting."""
+    import asyncio
+
+    async def _guarded_coro() -> None:
+        try:
+            await coro
+        except Exception as exc:
+            log.error("session.background.error", {
+                "sessionID": session_id,
+                "action": action,
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
+            if session_id:
+                from flocks.server.routes.event import publish_event
+
+                try:
+                    await publish_event("session.error", {
+                        "sessionID": session_id,
+                        "error": {
+                            "name": type(exc).__name__,
+                            "message": str(exc),
+                            "data": {"message": str(exc), "action": action},
+                        },
+                    })
+                except Exception as publish_exc:
+                    log.error("session.background.error.publish_failed", {
+                        "sessionID": session_id,
+                        "action": action,
+                        "error": str(publish_exc),
+                        "error_type": type(publish_exc).__name__,
+                    })
+
+    task = asyncio.get_running_loop().create_task(_guarded_coro())
+    _track_background_task(task)
+
+
+async def _prepare_replay_runtime(
+    session_id: str,
+    user_message,
+) -> Dict[str, str]:
+    """Resolve replay runtime state before mutating session history."""
+    from flocks.agent.registry import Agent
+    from flocks.config.config import Config
+    from flocks.provider.provider import Provider
+
+    agent_name = getattr(user_message, "agent", None) or await Agent.default_agent()
+    agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+
+    model_info = getattr(user_message, "model", None)
+    provider_id = model_info.get("providerID") if isinstance(model_info, dict) else None
+    model_id = model_info.get("modelID") if isinstance(model_info, dict) else None
+    if not provider_id or not model_id:
+        dummy_request = type(
+            "_MessageReplayRequest",
+            (),
+            {"model": None, "agent": agent_name},
+        )()
+        provider_id, model_id, _ = await _resolve_model(dummy_request, agent, session_id)
+
+    Provider._ensure_initialized()
+    config = await Config.get()
+    await Provider.apply_config(config, provider_id=provider_id)
+    provider = Provider.get(provider_id)
+    if not provider:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Provider {provider_id} not found",
+        )
+
+    return {
+        "agent_name": agent_name,
+        "provider_id": provider_id,
+        "model_id": model_id,
+    }
+
+
+async def _run_existing_user_message(
+    session_id: str,
+    session,
+    user_message,
+    working_directory: str,
+    runtime: Optional[Dict[str, str]] = None,
+):
+    """Run SessionLoop using an already-persisted user message."""
+    from flocks.server.routes.event import publish_event
+    from flocks.session.lifecycle.revert import SessionRevert
+    from flocks.session.message import Message
+    from flocks.session.session_loop import SessionLoop, LoopCallbacks
+    from flocks.utils.id import Identifier
+
+    runtime = runtime or await _prepare_replay_runtime(session_id, user_message)
+    agent_name = runtime["agent_name"]
+    provider_id = runtime["provider_id"]
+    model_id = runtime["model_id"]
+
+    await SessionRevert.cleanup(session)
+
+    async def _on_error(error: str):
+        await publish_event("session.error", {
+            "sessionID": session_id,
+            "error": {"name": "SessionError", "message": error, "data": {"message": error}},
+        })
+
+    loop_callbacks = LoopCallbacks(
+        on_error=_on_error,
+        event_publish_callback=publish_event,
+    )
+    result = await SessionLoop.run(
+        session_id=session_id,
+        provider_id=provider_id,
+        model_id=model_id,
+        agent_name=agent_name,
+        callbacks=loop_callbacks,
+    )
+
+    if result.action == "queued":
+        log.info("session.message.replay.queued", {
+            "sessionID": session_id,
+            "user_message_id": user_message.id,
+        })
+        return {
+            "status": "queued",
+            "sessionID": session_id,
+            "messageID": user_message.id,
+        }
+
+    end_ms = int(time.time() * 1000)
+    finish_reason = "stop"
+    final_content = ""
+    assistant_message_id = None
+    created_ms = end_ms
+
+    if result.last_message:
+        assistant_message_id = result.last_message.id
+        final_content = await Message.get_text_content(result.last_message)
+        finish = getattr(result.last_message, "finish", None)
+        if finish:
+            finish_reason = finish
+        result_time = getattr(result.last_message, "time", None)
+        if isinstance(result_time, dict):
+            created_ms = result_time.get("created", created_ms)
+
+    if result.action == "error":
+        finish_reason = "error"
+        if not assistant_message_id:
+            assistant_message_id = Identifier.create("message")
+
+    if not assistant_message_id:
+        assistant_message_id = Identifier.create("message")
+
+    await publish_event("message.updated", {
+        "info": {
+            "id": assistant_message_id,
+            "sessionID": session_id,
+            "role": "assistant",
+            "time": {"created": created_ms, "completed": end_ms},
+            "parentID": user_message.id,
+            "modelID": model_id,
+            "providerID": provider_id,
+            "mode": agent_name,
+            "agent": agent_name,
+            "path": {"cwd": working_directory, "root": working_directory},
+            "cost": 0,
+            "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "finish": finish_reason,
+        }
+    })
+
+    log.info("session.message.replay.completed", {
+        "sessionID": session_id,
+        "user_message_id": user_message.id,
+        "assistant_message_id": assistant_message_id,
+        "finish": finish_reason,
+        "content_length": len(final_content),
+    })
+
+    return {
+        "status": "completed",
+        "sessionID": session_id,
+        "messageID": assistant_message_id,
+        "finish": finish_reason,
+    }
+
+
+@router.post(
+    "/{sessionID}/message/{messageID}/resend",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Replay edited user message",
+    description="Update a user message and regenerate subsequent assistant output",
+)
+async def resend_session_message(
+    sessionID: str,
+    messageID: str,
+    body: MessageEditRequest,
+) -> Dict[str, str]:
+    import os
+
+    from flocks.project.bootstrap import instance_bootstrap
+    from flocks.project.instance import Instance
+    from flocks.session.lifecycle.revert import SessionRevert
+    from flocks.session.message import Message
+    from flocks.session.session_loop import SessionLoop
+
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Edited message text cannot be empty",
+        )
+
+    message, text_part = await _get_message_text_part(sessionID, messageID, body.partID)
+    if getattr(message, "role", None) != "user":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only user messages can be resent",
+        )
+
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+
+    if SessionLoop.is_running(sessionID):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Session is currently generating a response",
+        )
+
+    working_directory = session.directory or os.getcwd()
+
+    async def _handle_resend() -> None:
+        runtime = await _prepare_replay_runtime(sessionID, message)
+        updated_session = await SessionRevert.revert(sessionID, messageID)
+        await Message.update_part(sessionID, messageID, text_part.id, text=text)
+        await _publish_text_part_update(sessionID, messageID, text_part.id, text)
+
+        refreshed_message = await Message.get(sessionID, messageID)
+        if not refreshed_message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Message {messageID} not found after update",
+            )
+
+        await Instance.provide(
+            directory=working_directory,
+            init=instance_bootstrap,
+            fn=lambda: _run_existing_user_message(
+                sessionID,
+                updated_session or session,
+                refreshed_message,
+                working_directory,
+                runtime=runtime,
+            ),
+        )
+
+    _schedule_background_coro(
+        _handle_resend(),
+        session_id=sessionID,
+        action="message.resend",
+    )
+    return {"status": "accepted", "sessionID": sessionID, "messageID": messageID}
+
+
+@router.post(
+    "/{sessionID}/message/{messageID}/regenerate",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Regenerate assistant message",
+    description="Discard an assistant reply and regenerate it from its parent user message",
+)
+async def regenerate_session_message(
+    sessionID: str,
+    messageID: str,
+) -> Dict[str, str]:
+    import os
+
+    from flocks.project.bootstrap import instance_bootstrap
+    from flocks.project.instance import Instance
+    from flocks.session.lifecycle.revert import SessionRevert
+    from flocks.session.message import Message
+    from flocks.session.session_loop import SessionLoop
+
+    message = await Message.get(sessionID, messageID)
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message {messageID} not found in session {sessionID}",
+        )
+    if getattr(message, "role", None) != "assistant":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only assistant messages can be regenerated",
+        )
+
+    parent_message_id = getattr(message, "parentID", None)
+    if not parent_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assistant message does not have a parent user message",
+        )
+
+    parent_message, _ = await _get_message_text_part(sessionID, parent_message_id)
+    if getattr(parent_message, "role", None) != "user":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assistant parent message must be a user message",
+        )
+
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+
+    if SessionLoop.is_running(sessionID):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Session is currently generating a response",
+        )
+
+    working_directory = session.directory or os.getcwd()
+
+    async def _handle_regenerate() -> None:
+        runtime = await _prepare_replay_runtime(sessionID, parent_message)
+        updated_session = await SessionRevert.revert(sessionID, parent_message_id)
+        refreshed_parent = await Message.get(sessionID, parent_message_id)
+        if not refreshed_parent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Parent message {parent_message_id} not found after revert",
+            )
+
+        await Instance.provide(
+            directory=working_directory,
+            init=instance_bootstrap,
+            fn=lambda: _run_existing_user_message(
+                sessionID,
+                updated_session or session,
+                refreshed_parent,
+                working_directory,
+                runtime=runtime,
+            ),
+        )
+
+    _schedule_background_coro(
+        _handle_regenerate(),
+        session_id=sessionID,
+        action="message.regenerate",
+    )
+    return {"status": "accepted", "sessionID": sessionID, "messageID": messageID}
 
 
 @router.post(

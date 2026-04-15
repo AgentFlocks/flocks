@@ -1,0 +1,34 @@
+name: sangfor_xdr_responses
+description: >
+  Manage Sangfor XDR host isolation responses. Query currently isolated
+  hosts and release (unisolate) hosts. Use during incident containment.
+description_cn: >
+  管理深信服 XDR 主机隔离响应。查询当前已隔离主机列表，
+  以及解除主机隔离。适用于安全事件遏制与恢复阶段。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        响应操作类型：
+        - `isolate_list` ：查询已隔离主机策略列表
+        - `unisolate`    ：解除主机隔离
+      enum: [isolate_list, unisolate]
+      default: isolate_list
+    host_ips:
+      type: array
+      description: 要解除隔离的主机 IP 列表（unisolate 时使用）。
+      items:
+        type: string
+  required: [action]
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_responses

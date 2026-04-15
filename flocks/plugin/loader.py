@@ -345,12 +345,13 @@ class PluginLoader:
 
             try:
                 module = load_module(source, base_dir)
-            except Exception as e:
+            except BaseException as e:
                 log.error(
                     "plugin.load_failed",
                     {
                         "source": source,
                         "error": str(e),
+                        "type": type(e).__name__,
                     },
                 )
                 continue

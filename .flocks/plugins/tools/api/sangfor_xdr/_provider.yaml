@@ -1,0 +1,55 @@
+name: sangfor_xdr
+service_id: sangfor_xdr
+description: >
+  Sangfor XDR (Extended Detection and Response) Open API.
+  Provides unified security operations including alert/incident management,
+  asset management, response actions, whitelist management, and vulnerability
+  management. Uses HMAC-SHA256 signature authentication via auth_code.
+description_cn: >
+  深信服 XDR（扩展检测与响应）平台 Open API。
+  整合终端、网络、云端多维度安全数据，提供统一的安全运营能力，
+  涵盖安全告警与事件查询/处置、资产管理、主机隔离响应、
+  白名单管理及脆弱性管理。使用联动码（auth_code）进行 HMAC-SHA256 签名认证。
+auth:
+  type: custom
+  secret: sangfor_xdr_auth_code
+credential_fields:
+  - key: host
+    label: XDR Host / IP
+    storage: config
+    config_key: host
+    input_type: text
+    required: true
+    placeholder: "10.10.10.10"
+  - key: auth_code
+    label: Auth Code (联动码)
+    storage: secret
+    config_key: auth_code
+    secret_id: sangfor_xdr_auth_code
+    input_type: password
+    required: true
+  - key: port
+    label: Port
+    storage: config
+    config_key: port
+    input_type: text
+    required: false
+    default: "443"
+  - key: verify_ssl
+    label: Verify SSL
+    storage: config
+    config_key: verify_ssl
+    input_type: text
+    required: false
+    default: "false"
+defaults:
+  timeout: 60
+  category: custom
+notes: |
+  深信服 XDR 配置说明：
+  1. 登录 XDR 平台，从页面 URL 获取平台 Host 地址
+  2. 进入"配置管理 → 系统设置 → 开放性 → 联动码管理"页面，获取联动码
+  3. 将联动码填入 Auth Code 字段
+  4. 联动码内部包含 AK/SK，Handler 会自动解密并使用 HMAC-SHA256 签名
+  5. 签名完成后不可修改请求的任何内容
+  6. 内网部署环境可将 Verify SSL 设为 false

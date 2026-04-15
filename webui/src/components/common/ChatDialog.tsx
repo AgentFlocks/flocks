@@ -2,9 +2,10 @@
  * ChatDialog - 统一的对话弹窗组件
  *
  * 使用 useSessionChat 创建会话，通过 SessionChat 展示对话并支持追问。
+ * 会话在用户首次发送消息时才创建，避免空会话污染会话列表。
  */
-import { useEffect } from 'react';
-import { X, Sparkles, Loader2 } from 'lucide-react';
+import { useEffect, useCallback } from 'react';
+import { X, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
@@ -34,14 +35,23 @@ export default function ChatDialog({
   width = 'max-w-2xl',
 }: ChatDialogProps) {
   const { t } = useTranslation('common');
-  const { sessionId, loading, create, reset } = useSessionChat({
+  const { sessionId, createAndSend, reset } = useSessionChat({
     title,
   });
 
   useEffect(() => {
-    if (open) create().catch(() => {});
-    else reset();
-  }, [open, create, reset]);
+    if (open && initialPrompt) {
+      createAndSend(initialPrompt).catch(() => {});
+    }
+    if (!open) reset();
+  }, [open, reset, initialPrompt, createAndSend]);
+
+  const handleCreateAndSend = useCallback(
+    async (text: string) => {
+      await createAndSend(text);
+    },
+    [createAndSend],
+  );
 
   if (!open) return null;
 
@@ -70,32 +80,22 @@ export default function ChatDialog({
         </div>
 
         {/* Body */}
-        {loading ? (
-          <div className="flex-1 flex items-center justify-center bg-gray-50">
-            <div className="text-center">
-              <Loader2 className="w-8 h-8 text-red-500 animate-spin mx-auto mb-3" />
-              <p className="text-sm text-gray-500">{t('chat.creating')}</p>
-            </div>
-          </div>
-        ) : sessionId ? (
-          <SessionChat
-            sessionId={sessionId}
-            live
-            placeholder={placeholder ?? t('chat.inputPlaceholder')}
-            className="flex-1 min-h-0 rounded-b-xl"
-            emptyText={t('chat.starting')}
-            suggestions={suggestions}
-            initialMessage={initialPrompt}
-          />
-        ) : (
-          <div className="flex-1 flex items-center justify-center bg-gray-50 rounded-b-xl">
+        <SessionChat
+          sessionId={sessionId}
+          live={!!sessionId}
+          placeholder={placeholder ?? t('chat.inputPlaceholder')}
+          className="flex-1 min-h-0 rounded-b-xl"
+          emptyText={t('chat.starting')}
+          suggestions={suggestions}
+          onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
+          welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
               <Sparkles className="w-10 h-10 text-red-500 mx-auto mb-3" />
               <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('chat.talkToRex')}</h3>
               <p className="text-sm text-gray-500">{t('chat.talkToRexHint')}</p>
             </div>
-          </div>
-        )}
+          ) : undefined}
+        />
       </div>
     </div>
   );

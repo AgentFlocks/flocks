@@ -332,6 +332,33 @@ class TestOpenAIBaseProviderConfiguration:
         
         assert provider._base_url == "https://api.test.com/v1"
 
+    @patch("httpx.AsyncClient")
+    @patch("openai.AsyncOpenAI")
+    def test_get_client_respects_verify_ssl_false(self, mock_async_openai, mock_http_client):
+        """verify_ssl=false should disable certificate verification for self-hosted gateways."""
+        provider = MockProviderWithCatalog()
+        provider.configure(
+            ProviderConfig(
+                provider_id=provider.id,
+                api_key="test-api-key",
+                base_url="https://gateway.internal/v1",
+                custom_settings={"verify_ssl": False},
+            )
+        )
+
+        http_client = MagicMock()
+        mock_http_client.return_value = http_client
+        mock_async_openai.return_value = MagicMock()
+
+        provider._get_client()
+
+        mock_http_client.assert_called_once_with(verify=False, timeout=120.0)
+        mock_async_openai.assert_called_once_with(
+            api_key="test-api-key",
+            base_url="https://gateway.internal/v1",
+            http_client=http_client,
+        )
+
 
 class TestOpenAIBaseProviderTemperature:
     def _build_provider_with_client(self):
@@ -450,6 +477,47 @@ class TestOpenAIBaseProviderStreamingUsage:
             "completion_tokens": 7,
             "total_tokens": 18,
         }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_emits_trailing_usage_when_usage_only_chunk_arrives_after_finish(self):
+        provider, create = self._build_provider_with_stream()
+
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+        )
+        create.return_value = _stream_from_chunks(content_chunk, finish_chunk, usage_chunk)
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.5",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert any(chunk.finish_reason == "stop" for chunk in chunks)
+        assert chunks[-1].usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "total_tokens": 18,
+        }
+        assert chunks[-1].finish_reason is None
 
     @pytest.mark.asyncio
     async def test_chat_stream_retries_without_stream_options_when_unsupported(self):
