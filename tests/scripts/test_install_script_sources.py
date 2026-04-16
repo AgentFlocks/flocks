@@ -23,6 +23,8 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
     assert 'zh-CN' in script
     assert 'FLOCKS_UV_INSTALL_SH_URL' in script
     assert 'https://astral.org.cn/uv/install.sh' in script
+    assert 'FLOCKS_UV_INSTALL_SH_FALLBACK_URL' in script
+    assert 'https://uv.agentsmirror.com/install-cn.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
     assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
@@ -110,10 +112,13 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'FLOCKS_UV_INSTALL_SH_URL' in script
     assert 'https://astral.sh/uv/install.sh' in script
+    assert 'FLOCKS_UV_INSTALL_SH_FALLBACK_URL' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'Using PyPI index: $UV_DEFAULT_INDEX' in script
     assert 'Using npm registry: $NPM_REGISTRY' in script
     assert 'Using uv install script: $UV_INSTALL_SH_URL' in script
+    assert 'Using uv fallback script' not in script
+    assert '使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL' in script
     assert 'pick_fastest_url' not in script
     assert 'Probing PyPI and npm registries to choose the faster source' not in script
     assert 'npm_config_registry="$NPM_REGISTRY" npm install' in script
@@ -126,6 +131,7 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert "load_nvm()" in script
     assert 'curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_URL" | sh' in script
+    assert 'curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh' in script
     assert 'nvm install "$MIN_NODE_MAJOR"' in script
     assert 'nvm use "$MIN_NODE_MAJOR" >/dev/null' in script
     assert "Homebrew was not found. Trying to install nvm..." in script
@@ -338,6 +344,99 @@ def test_main_bash_installer_checks_node_modules_dir_before_accepting_global_pre
         }
         [[ "$install_log" == *"Switching to user prefix"* ]] || {
           printf 'missing fallback log: %s\n' "$install_log" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
+def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        export FLOCKS_INSTALL_LANGUAGE="zh-CN"
+        export FLOCKS_UV_INSTALL_SH_URL="https://primary.example/install.sh"
+        export FLOCKS_UV_INSTALL_SH_FALLBACK_URL="https://uv.agentsmirror.com/install-cn.sh"
+        export TEST_LOG="$HOME/install-uv.log"
+        INSTALL_LANGUAGE="$FLOCKS_INSTALL_LANGUAGE"
+        UV_INSTALL_SH_URL="$FLOCKS_UV_INSTALL_SH_URL"
+        UV_INSTALL_SH_FALLBACK_URL="$FLOCKS_UV_INSTALL_SH_FALLBACK_URL"
+
+        has_cmd() {
+          case "$1" in
+            curl)
+              return 0
+              ;;
+            uv)
+              [[ -f "$HOME/uv-installed" ]]
+              return $?
+              ;;
+            *)
+              command -v "$1" >/dev/null 2>&1
+              ;;
+          esac
+        }
+
+        info() {
+          printf '%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        refresh_path() {
+          :
+        }
+
+        ensure_path_persisted() {
+          :
+        }
+
+        curl() {
+          printf '%s\n' "$*" >> "$HOME/curl-commands.log"
+          if [[ "$*" == *"primary.example"* ]]; then
+            return 22
+          fi
+
+          cat <<'EOF'
+        touch "$HOME/uv-installed"
+        EOF
+        }
+
+        install_uv
+
+        curl_commands="$(<"$HOME/curl-commands.log")"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ -f "$HOME/uv-installed" ]] || {
+          printf 'uv was not installed by fallback script\n' >&2
+          exit 1
+        }
+        [[ "$curl_commands" == *"https://primary.example/install.sh"* ]] || {
+          printf 'primary uv script was not attempted: %s\n' "$curl_commands" >&2
+          exit 1
+        }
+        [[ "$curl_commands" == *"https://uv.agentsmirror.com/install-cn.sh"* ]] || {
+          printf 'fallback uv script was not attempted: %s\n' "$curl_commands" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"默认 uv 安装脚本失败，正在尝试中国大陆备用源"* ]] || {
+          printf 'fallback log missing: %s\n' "$install_log" >&2
           exit 1
         }
         """

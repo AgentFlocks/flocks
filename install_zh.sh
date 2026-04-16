@@ -42,6 +42,7 @@ Flocks 中国用户一键安装脚本。
 然后转交 scripts/install_zh.sh 继续安装。默认会在当前工作目录下创建 "flocks" 子目录。
 
 默认会为 install_zh 注入国内软件源与 uv 安装镜像。
+  uv 备用源: https://uv.agentsmirror.com/install-cn.sh
 
 远程使用：
   curl -fsSL $RAW_INSTALL_ZH_SH_URL | bash
@@ -130,6 +131,7 @@ resolve_project_dir() {
 configure_cn_environment() {
   export FLOCKS_INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-zh-CN}"
   export FLOCKS_UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.org.cn/uv/install.sh}"
+  export FLOCKS_UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-https://uv.agentsmirror.com/install-cn.sh}"
   export FLOCKS_UV_INSTALL_PS1_URL="${FLOCKS_UV_INSTALL_PS1_URL:-https://astral.org.cn/uv/install.ps1}"
   export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
 }
