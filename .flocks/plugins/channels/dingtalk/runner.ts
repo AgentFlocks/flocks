@@ -258,6 +258,10 @@ function startProxy(): Promise<number> {
         return;
       }
 
+      // Record inbound activity as early as possible, before any Flocks API
+      // calls that might fail (session creation, inference, etc.).
+      fetch(`${FLOCKS_BASE}/api/channel/dingtalk/record-inbound`, { method: 'POST' }).catch(() => {});
+
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',

@@ -286,4 +286,4 @@ class ChannelPlugin(ABC):
 
     def record_message(self) -> None:
         """Update the last-message timestamp (called by inbound dispatcher)."""
-        self._status.last_message_at = time.monotonic()
+        self._status.last_message_at = time.time()
