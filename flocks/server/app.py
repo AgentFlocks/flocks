@@ -19,6 +19,8 @@ from flocks.utils.log import Log, LogLevel
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
+from flocks.auth.service import AuthService
+from flocks.server.auth import apply_auth_for_request, clear_auth_context
 
 # Load .env file at startup
 try:
@@ -84,6 +86,20 @@ async def lifespan(app: FastAPI):
     # Initialize storage
     await Storage.init()
     log.info("storage.initialized")
+
+    # Initialize local auth/account tables
+    await AuthService.init()
+    log.info("auth.initialized")
+
+    # Best-effort migration: old sessions default to admin ownership.
+    try:
+        if await AuthService.has_users():
+            users = await AuthService.list_users()
+            admin = next((u for u in users if u.role == "admin"), None)
+            if admin:
+                await AuthService.migrate_legacy_sessions_to_admin(admin.id)
+    except Exception as e:
+        log.warning("auth.legacy_sessions.migration_failed", {"error": str(e)})
     
     # Setup question handler for real user interaction
     from flocks.tool.question_handler import setup_api_question_handler
@@ -394,6 +410,28 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def auth_guard_middleware(request: Request, call_next):
+    """Guard requests with local account auth, except public endpoints."""
+    try:
+        _blocked, token, _user = await apply_auth_for_request(request)
+    except StarletteHTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": "AuthError", "message": exc.detail},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"error": "AuthError", "message": str(exc)},
+        )
+
+    try:
+        return await call_next(request)
+    finally:
+        clear_auth_context(token)
+
+
 # Error Handlers
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -510,6 +548,9 @@ from flocks.server.routes.workspace import router as workspace_router
 from flocks.server.routes.update import router as update_router
 # Log viewing
 from flocks.server.routes.logs import router as logs_router
+from flocks.server.routes.auth import router as auth_router
+from flocks.server.routes.admin_users import router as admin_users_router
+from flocks.server.routes.cloud_account import router as cloud_account_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -560,6 +601,9 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
+app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
+app.include_router(cloud_account_router, prefix="/api/cloud-account", tags=["CloudAccount"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -620,6 +664,9 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 
 # TUI control routes (/tui/*)
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
+app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
+app.include_router(cloud_account_router, prefix="/cloud-account", tags=["CloudAccount"])
 
 
 @app.get("/", tags=["Root"])

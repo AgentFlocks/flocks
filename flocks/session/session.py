@@ -91,6 +91,12 @@ class SessionInfo(BaseModel):
     
     # Session hierarchy
     parent_id: Optional[str] = Field(None, alias="parentID", description="Parent session for branching")
+
+    # Local account ownership and visibility
+    owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
+    visibility: str = Field("private", description="Session visibility: private or team_shared")
+    shared_by: Optional[str] = Field(None, alias="sharedBy", description="User id who enabled sharing")
+    shared_at: Optional[int] = Field(None, alias="sharedAt", description="Share timestamp (ms)")
     
     # Summary and share
     summary: Optional[SessionChangeStats] = Field(None, description="File change summary")
@@ -136,6 +142,35 @@ class Session:
     def _sort_sessions(sessions: List[SessionInfo]) -> List[SessionInfo]:
         """Return sessions sorted by most recently updated."""
         return sorted(sessions, key=lambda s: s.time.updated, reverse=True)
+
+    @staticmethod
+    def _is_accessible_to_current_user(session: SessionInfo) -> bool:
+        """
+        Check session visibility against request auth context.
+
+        If no auth context exists (CLI/internal runtime), keep backward-compatible behavior.
+        """
+        try:
+            from flocks.auth.context import get_current_auth_user
+
+            auth_user = get_current_auth_user()
+        except Exception:
+            auth_user = None
+
+        if auth_user is None:
+            return True
+        if auth_user.role == "admin":
+            return True
+
+        if session.visibility == "team_shared":
+            return True
+
+        # private session: owner-only
+        if session.owner_user_id:
+            return session.owner_user_id == auth_user.id
+
+        # Legacy sessions without owner should not be exposed to members.
+        return False
 
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
@@ -220,6 +255,17 @@ class Session:
                     kwargs["memory_enabled"] = bool(getattr(memory_cfg, "enabled"))
             except Exception as e:
                 log.warn("session.memory.default.error", {"error": str(e)})
+
+        # Bind ownership from current auth context unless explicitly provided.
+        if "owner_user_id" not in kwargs:
+            try:
+                from flocks.auth.context import get_current_auth_user
+
+                current_user = get_current_auth_user()
+                if current_user:
+                    kwargs["owner_user_id"] = current_user.id
+            except Exception:
+                pass
         
         session = SessionInfo(
             project_id=project_id,
@@ -302,6 +348,8 @@ class Session:
             # Don't return deleted sessions
             if session and session.status == "deleted":
                 return None
+            if session and not cls._is_accessible_to_current_user(session):
+                return None
             return session
         except Exception as e:
             log.warn("session.get.error", {"error": str(e), "id": session_id})
@@ -326,6 +374,8 @@ class Session:
             if cls._all_sessions_cache is not None:
                 cached = next((s for s in cls._all_sessions_cache if s.id == session_id), None)
                 if cached:
+                    if not cls._is_accessible_to_current_user(cached):
+                        return None
                     return cached
 
             # Fast path: check in-memory index
@@ -333,6 +383,8 @@ class Session:
             if cached_key:
                 session = await Storage.get(cached_key, SessionInfo)
                 if session and session.status != "deleted":
+                    if not cls._is_accessible_to_current_user(session):
+                        return None
                     return session
                 # Index is stale — remove and fall through
                 cls._id_index.pop(session_id, None)
@@ -345,6 +397,8 @@ class Session:
                     try:
                         session = await Storage.get(key, SessionInfo)
                         if session and session.status != "deleted":
+                            if not cls._is_accessible_to_current_user(session):
+                                return None
                             cls._id_index[session_id] = key
                             return session
                     except Exception as _e:
@@ -369,7 +423,7 @@ class Session:
         """
         try:
             if cls._all_sessions_cache is not None:
-                return [s for s in cls._all_sessions_cache if s.project_id == project_id]
+                return [s for s in cls._all_sessions_cache if s.project_id == project_id and cls._is_accessible_to_current_user(s)]
 
             entries = await Storage.list_entries(prefix=f"session:{project_id}:", model=SessionInfo)
             sessions = []
@@ -377,7 +431,8 @@ class Session:
             for key, session in entries:
                 try:
                     if session.status != "deleted":
-                        sessions.append(session)
+                        if cls._is_accessible_to_current_user(session):
+                            sessions.append(session)
                         cls._id_index[session.id] = key
                 except Exception as e:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
@@ -399,7 +454,7 @@ class Session:
         """
         try:
             if cls._all_sessions_cache is not None:
-                return list(cls._all_sessions_cache)
+                return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
 
             entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
             sessions = []
@@ -413,7 +468,7 @@ class Session:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
 
             cls._all_sessions_cache = cls._sort_sessions(sessions)
-            return list(cls._all_sessions_cache)
+            return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
         except Exception as e:
             log.error("session.list_all.error", {"error": str(e)})
             return []
@@ -444,6 +499,9 @@ class Session:
         alias_map = {
             "project_id": "projectID",
             "parent_id": "parentID",
+            "owner_user_id": "ownerUserID",
+            "shared_by": "sharedBy",
+            "shared_at": "sharedAt",
         }
         
         # Update fields.
@@ -645,6 +703,22 @@ class Session:
         )
         
         await cls.update(project_id, session_id, share=share_info.model_dump())
+        shared_by = None
+        try:
+            from flocks.auth.context import get_current_auth_user
+
+            current_user = get_current_auth_user()
+            shared_by = current_user.id if current_user else None
+        except Exception:
+            shared_by = None
+
+        await cls.update(
+            project_id,
+            session_id,
+            visibility="team_shared",
+            shared_by=shared_by,
+            shared_at=int(datetime.now().timestamp() * 1000),
+        )
         
         # Store share secret separately
         await Storage.set(f"share:{session_id}", share_info.model_dump(), "share")
@@ -670,7 +744,14 @@ class Session:
         """
         try:
             await Storage.delete(f"share:{session_id}")
-            await cls.update(project_id, session_id, share=None)
+            await cls.update(
+                project_id,
+                session_id,
+                share=None,
+                visibility="private",
+                shared_by=_UNSET,
+                shared_at=_UNSET,
+            )
             
             log.info("session.unshared", {"id": session_id})
             return True

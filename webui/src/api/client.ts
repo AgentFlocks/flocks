@@ -6,6 +6,7 @@ const baseURL = import.meta.env.VITE_API_BASE_URL || '';
 export const apiClient = axios.create({
   baseURL,
   timeout: 30000, // 30 seconds - 缩短超时时间以更快发现连接问题
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -30,10 +31,24 @@ apiClient.interceptors.response.use(
   (error) => {
     const status = error.response?.status;
     const url = error.config?.url || '';
+    const isAuthEndpoint =
+      typeof url === 'string' &&
+      (
+        url.includes('/api/auth/login') ||
+        url.includes('/api/auth/bootstrap-status') ||
+        url.includes('/api/auth/bootstrap-admin')
+      );
     const isExpectedMissingDefaultModel =
       status === 404 && typeof url === 'string' && url.includes('/api/default-model/resolved');
 
     if (isExpectedMissingDefaultModel) {
+      return Promise.reject(error);
+    }
+
+    if (status === 401 && !isAuthEndpoint) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('flocks:auth-expired'));
+      }
       return Promise.reject(error);
     }
 

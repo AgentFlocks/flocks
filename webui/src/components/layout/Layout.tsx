@@ -23,6 +23,7 @@ import LanguageSwitcher from '@/components/common/LanguageSwitcher';
 import OnboardingModal, { isOnboardingDismissed } from '@/components/common/OnboardingModal';
 import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
 import { checkUpdate } from '@/api/update';
+import { useAuth } from '@/contexts/AuthContext';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 60_000;
@@ -41,6 +42,7 @@ export default function Layout() {
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
+  const { user, logout, changePassword } = useAuth();
 
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
@@ -153,6 +155,18 @@ export default function Layout() {
         { name: t('channels'), href: '/channels', icon: Radio },
       ],
     },
+    {
+      name: '账号与云',
+      items: [
+        { name: '云账号', href: '/cloud-account', icon: Sparkles },
+        ...(user?.role === 'admin'
+          ? [
+              { name: '账号管理', href: '/admin/users', icon: BookOpen },
+              { name: '审计日志', href: '/admin/audit-logs', icon: Radio },
+            ]
+          : []),
+      ],
+    },
   ];
 
   const isFullScreenPage =
@@ -260,6 +274,35 @@ export default function Layout() {
 
           {/* Bottom: Language switcher + version */}
           <div className={`border-t border-gray-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
+            {!collapsed && user && (
+              <div className="mb-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600">
+                <div className="font-medium text-gray-800">{user.username}</div>
+                <div className="mt-1">{user.role}</div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    onClick={async () => {
+                      const currentPassword = window.prompt('请输入当前密码');
+                      if (!currentPassword) return;
+                      const newPassword = window.prompt('请输入新密码（至少8位）');
+                      if (!newPassword) return;
+                      await changePassword(currentPassword, newPassword);
+                      alert('密码已更新');
+                    }}
+                    className="text-blue-600 hover:underline"
+                  >
+                    修改密码
+                  </button>
+                  <button
+                    onClick={async () => {
+                      await logout();
+                    }}
+                    className="text-red-600 hover:underline"
+                  >
+                    退出登录
+                  </button>
+                </div>
+              </div>
+            )}
             <LanguageSwitcher collapsed={collapsed} />
             {!collapsed && (
               <>
