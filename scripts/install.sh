@@ -21,6 +21,8 @@ UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
+NVM_GITEE_REPO_URL="${FLOCKS_NVM_GITEE_REPO_URL:-https://gitee.com/mirrors/nvm.git}"
+NVM_GITEE_RAW_URL_PREFIX="${FLOCKS_NVM_GITEE_RAW_URL_PREFIX:-https://gitee.com/mirrors/nvm/raw}"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -393,6 +395,54 @@ load_nvm() {
   command -v nvm >/dev/null 2>&1
 }
 
+should_patch_nvm_install_script_for_gitee() {
+  [[ "$NVM_INSTALL_SCRIPT_URL" == https://gitee.com/* ]]
+}
+
+patch_nvm_install_script_for_gitee() {
+  local install_script="$1" patched_script
+  [[ -f "$install_script" ]] || return 1
+
+  if ! should_patch_nvm_install_script_for_gitee; then
+    return 0
+  fi
+
+  patched_script="$(mktemp "${TMPDIR:-/tmp}/flocks-nvm-install-patched.XXXXXX")" || return 1
+  if ! sed \
+    -e "s#https://raw.githubusercontent.com/\\\${NVM_GITHUB_REPO}/\\\${NVM_VERSION}/nvm.sh#${NVM_GITEE_RAW_URL_PREFIX}/\\\${NVM_VERSION}/nvm.sh#g" \
+    -e "s#https://raw.githubusercontent.com/\\\${NVM_GITHUB_REPO}/\\\${NVM_VERSION}/nvm-exec#${NVM_GITEE_RAW_URL_PREFIX}/\\\${NVM_VERSION}/nvm-exec#g" \
+    -e "s#https://raw.githubusercontent.com/\\\${NVM_GITHUB_REPO}/\\\${NVM_VERSION}/bash_completion#${NVM_GITEE_RAW_URL_PREFIX}/\\\${NVM_VERSION}/bash_completion#g" \
+    -e "s#https://github.com/\\\${NVM_GITHUB_REPO}\\.git#${NVM_GITEE_REPO_URL}#g" \
+    "$install_script" > "$patched_script"; then
+    rm -f "$patched_script"
+    return 1
+  fi
+
+  mv "$patched_script" "$install_script"
+}
+
+run_nvm_install_script() {
+  local install_script=""
+  install_script="$(mktemp "${TMPDIR:-/tmp}/flocks-nvm-install.XXXXXX.sh")" || return 1
+
+  if ! curl -fsSL "$NVM_INSTALL_SCRIPT_URL" -o "$install_script"; then
+    rm -f "$install_script"
+    return 1
+  fi
+
+  if ! patch_nvm_install_script_for_gitee "$install_script"; then
+    rm -f "$install_script"
+    return 1
+  fi
+
+  if ! bash "$install_script"; then
+    rm -f "$install_script"
+    return 1
+  fi
+
+  rm -f "$install_script"
+}
+
 install_nodejs_with_nvm() {
   has_cmd curl || {
     warn "curl is required to install nvm automatically.$(nodejs_manual_download_hint)"
@@ -403,7 +453,7 @@ install_nodejs_with_nvm() {
     info "Using the existing nvm installation..."
   else
     info "Trying to install nvm..."
-    if ! curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash; then
+    if ! run_nvm_install_script; then
       warn "Failed to install nvm from: $NVM_INSTALL_SCRIPT_URL$(nodejs_manual_download_hint)"
       return 1
     fi

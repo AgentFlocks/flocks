@@ -137,10 +137,17 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert "nodejs_manual_download_hint" in script
     assert "FLOCKS_NVM_INSTALL_SCRIPT_URL" in script
     assert "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh" in script
+    assert "FLOCKS_NVM_GITEE_REPO_URL" in script
+    assert "https://gitee.com/mirrors/nvm.git" in script
+    assert "FLOCKS_NVM_GITEE_RAW_URL_PREFIX" in script
+    assert "https://gitee.com/mirrors/nvm/raw" in script
     assert "load_nvm()" in script
+    assert "should_patch_nvm_install_script_for_gitee()" in script
+    assert "patch_nvm_install_script_for_gitee()" in script
+    assert "run_nvm_install_script()" in script
     assert "install_nodejs_with_nvm()" in script
     assert "install_nodejs_linux_with_package_manager()" in script
-    assert 'curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash' in script
+    assert 'curl -fsSL "$NVM_INSTALL_SCRIPT_URL" -o "$install_script"' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_URL" | sh' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh' in script
     assert 'nvm install "$MIN_NODE_MAJOR"' in script
@@ -148,6 +155,8 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert "Homebrew failed to install Node.js. Falling back to nvm..." in script
     assert 'info "Trying to install Node.js ${MIN_NODE_MAJOR} with nvm first on Linux..."' in script
     assert 'warn "nvm installation failed on Linux. Falling back to the system package manager..."' in script
+    assert "https://github.com/" in script
+    assert "https://raw.githubusercontent.com/" in script
 
 
 def test_main_powershell_installer_uses_configured_default_sources_and_admin_precheck() -> None:
@@ -224,7 +233,20 @@ def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -
         }
 
         curl() {
-          cat <<'EOF'
+          local output_file=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                output_file="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+
+          cat > "$output_file" <<'EOF'
         mkdir -p "$HOME/.nvm"
         cat > "$HOME/.nvm/nvm.sh" <<'EOS'
         nvm() {
@@ -334,7 +356,20 @@ def test_main_bash_installer_falls_back_to_nvm_when_brew_install_fails_on_macos(
         }
 
         curl() {
-          cat <<'EOF'
+          local output_file=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                output_file="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+
+          cat > "$output_file" <<'EOF'
         mkdir -p "$HOME/.nvm"
         cat > "$HOME/.nvm/nvm.sh" <<'EOS'
         nvm() {
@@ -580,6 +615,81 @@ def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> 
     assert result.returncode == 0, output
 
 
+def test_main_bash_installer_patches_gitee_nvm_script_before_execution() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        export NVM_INSTALL_SCRIPT_URL="https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh"
+        export NVM_GITEE_REPO_URL="https://gitee.com/mirrors/nvm.git"
+        export NVM_GITEE_RAW_URL_PREFIX="https://gitee.com/mirrors/nvm/raw"
+
+        curl() {
+          local output_file=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                output_file="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+
+          cat > "$output_file" <<'EOF'
+        #!/usr/bin/env bash
+        printf '%s\n' 'https://github.com/${NVM_GITHUB_REPO}.git' > "$HOME/patched-nvm-urls.txt"
+        printf '%s\n' 'https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/nvm.sh' >> "$HOME/patched-nvm-urls.txt"
+        printf '%s\n' 'https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/nvm-exec' >> "$HOME/patched-nvm-urls.txt"
+        printf '%s\n' 'https://raw.githubusercontent.com/${NVM_GITHUB_REPO}/${NVM_VERSION}/bash_completion' >> "$HOME/patched-nvm-urls.txt"
+        EOF
+        }
+
+        run_nvm_install_script
+
+        patched_urls="$(<"$HOME/patched-nvm-urls.txt")"
+        [[ "$patched_urls" == *"https://gitee.com/mirrors/nvm.git"* ]] || {
+          printf 'git url was not patched: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        [[ "$patched_urls" == *"https://gitee.com/mirrors/nvm/raw/\${NVM_VERSION}/nvm.sh"* ]] || {
+          printf 'nvm.sh url was not patched: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        [[ "$patched_urls" == *"https://gitee.com/mirrors/nvm/raw/\${NVM_VERSION}/nvm-exec"* ]] || {
+          printf 'nvm-exec url was not patched: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        [[ "$patched_urls" == *"https://gitee.com/mirrors/nvm/raw/\${NVM_VERSION}/bash_completion"* ]] || {
+          printf 'bash_completion url was not patched: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        [[ "$patched_urls" != *"github.com"* ]] || {
+          printf 'github url remained after patch: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        [[ "$patched_urls" != *"raw.githubusercontent.com"* ]] || {
+          printf 'raw github url remained after patch: %s\n' "$patched_urls" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
 def test_main_bash_installer_prefers_nvm_on_linux_before_package_manager() -> None:
     script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
     script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
@@ -610,7 +720,20 @@ def test_main_bash_installer_prefers_nvm_on_linux_before_package_manager() -> No
         }
 
         curl() {
-          cat <<'EOF'
+          local output_file=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                output_file="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+
+          cat > "$output_file" <<'EOF'
         mkdir -p "$HOME/.nvm"
         cat > "$HOME/.nvm/nvm.sh" <<'EOS'
         nvm() {
