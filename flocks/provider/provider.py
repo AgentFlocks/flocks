@@ -229,6 +229,8 @@ class Provider:
                 ("threatbook-cn-llm", "flocks.provider.sdk.threatbook", "ThreatBookCnLLMProvider"),
                 ("threatbook-io-llm", "flocks.provider.sdk.threatbook", "ThreatBookIoLLMProvider"),
                 ("ollama", "flocks.provider.sdk.ollama", "OllamaProvider"),
+                # Client-side tool calling (for backends without --enable-auto-tool-choice)
+                ("cherry", "flocks.provider.sdk.cherry", "CherryProvider"),
             ]
             
             for provider_id, module_name, class_name in providers_to_register:
@@ -314,6 +316,46 @@ class Provider:
                         
                     except Exception as e:
                         log.warning("provider.dynamic_load_failed", {
+                            "provider_id": provider_id,
+                            "error": str(e)
+                        })
+
+                elif npm_package == "@ai-sdk/cherry":
+                    try:
+                        from flocks.provider.sdk.cherry import CherryProvider
+
+                        _pid = provider_id
+                        _cfg = config
+                        _base_url = base_url
+
+                        class DynamicCherryProvider(CherryProvider):
+                            """Dynamically created Cherry provider (client-side tool calling)."""
+
+                            def __init__(self):
+                                super().__init__()
+                                self.id = _pid
+                                self.name = _cfg.get("name", _pid)
+                                if _base_url:
+                                    self._base_url = _base_url
+                                if not self._api_key:
+                                    try:
+                                        from flocks.provider.credential import get_api_key
+                                        secret_key = get_api_key(_pid)
+                                        if secret_key:
+                                            self._api_key = secret_key
+                                    except Exception:
+                                        pass
+
+                        provider_instance = DynamicCherryProvider()
+                        cls.register(provider_instance)
+                        log.info("provider.dynamic_cherry_loaded", {
+                            "provider_id": provider_id,
+                            "base_url": base_url,
+                            "configured": provider_instance.is_configured()
+                        })
+
+                    except Exception as e:
+                        log.warning("provider.dynamic_cherry_load_failed", {
                             "provider_id": provider_id,
                             "error": str(e)
                         })
