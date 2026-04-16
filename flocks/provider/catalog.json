@@ -1237,5 +1237,35 @@
         }
       }
     }
+  },
+  "cherry": {
+    "name": "Cherry (Client-side Tool Calling)",
+    "description": "OpenAI-compatible endpoint with client-side tool calling — works with backends that lack server-side tool-call support (e.g. vLLM without --enable-auto-tool-choice)",
+    "npm": "@ai-sdk/cherry",
+    "default_base_url": null,
+    "allow_multiple": true,
+    "credential_schemas": [
+      {
+        "auth_method": "api_key",
+        "fields": [
+          {
+            "name": "api_key",
+            "label": "API Key",
+            "type": "secret",
+            "required": false,
+            "placeholder": "sk-..."
+          },
+          {
+            "name": "base_url",
+            "label": "Base URL",
+            "type": "text",
+            "required": true,
+            "placeholder": "https://api.example.com/v1"
+          }
+        ]
+      }
+    ],
+    "env_vars": [],
+    "models": {}
   }
 }
