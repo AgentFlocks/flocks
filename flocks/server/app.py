@@ -6,6 +6,7 @@ Main HTTP API server for AI-Native SecOps Platform
 
 import asyncio
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -298,26 +299,46 @@ log = Log.create(service="server")
 
 # CORS Configuration
 #
-# Default: only localhost origins (any port).  Users can override via
-# ``server.cors`` in flocks.json with exact origin strings
-# (e.g. ``["http://10.0.0.5:5173"]``).
+# Priority order:
+#   1. Explicit ``server.cors`` in flocks.json  → use those exact origins.
+#   2. ``_FLOCKS_WEBUI_HOST`` / ``_FLOCKS_WEBUI_PORT`` env vars set by
+#      ``start_backend()`` → auto-build origin for the actual WebUI address.
+#   3. Fallback → only localhost (any port) via regex.
 #
-# We read config synchronously at import time.  Config.get() is async, but
-# at module-load the event loop is not yet running, so ``asyncio.run`` is
-# safe here.  If it fails for any reason we fall back to the safe default.
+# This ensures ``--server-host <ip> --webui-host <ip>`` works out of the
+# box for remote access without requiring manual ``server.cors`` config.
 
 _LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
+
+_LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _is_localhost(host: str) -> bool:
+    return host in _LOCALHOST_HOSTS
 
 
 def _read_cors_config() -> tuple[list[str], str | None]:
     """Return (allow_origins, allow_origin_regex) for CORSMiddleware."""
     import asyncio
+
     try:
         cfg = asyncio.run(Config.get())
         if cfg and cfg.server and cfg.server.cors:
-            return cfg.server.cors, None
+            return cfg.server.cors, _LOCALHOST_ORIGIN_RE
     except Exception:
         pass
+
+    webui_host = os.environ.get("_FLOCKS_WEBUI_HOST", "")
+    webui_port = os.environ.get("_FLOCKS_WEBUI_PORT", "")
+
+    if webui_host and not _is_localhost(webui_host) and webui_port:
+        if webui_host == "0.0.0.0":
+            origin_re = rf"^https?://[^/]+:{re.escape(webui_port)}$"
+            return [], origin_re
+        else:
+            extra_origin = f"http://{webui_host}:{webui_port}"
+            return [extra_origin], _LOCALHOST_ORIGIN_RE
+
     return [], _LOCALHOST_ORIGIN_RE
 
 

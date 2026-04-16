@@ -704,11 +704,16 @@ def start_backend(config: ServiceConfig, console) -> None:
         str(config.backend_port),
     ]
 
+    backend_env = os.environ.copy()
+    backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
+    backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
+
     console.print("[flocks] 启动后端服务...")
     process = _spawn_process(
         command,
         cwd=root,
         log_path=paths.backend_log,
+        env=backend_env,
     )
     write_runtime_record(
         paths.backend_pid,

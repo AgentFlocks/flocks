@@ -83,11 +83,11 @@ def _normalize_allow_read_entries(entries: Optional[List[str]]) -> List[str]:
 
 
 def _blocked_for_http_read(resolved_str: str) -> bool:
-    """Always deny these sensitive locations, even if another allow-root would match."""
-    try:
-        r = Path(resolved_str).resolve()
-    except OSError:
-        return True
+    """Always deny these sensitive locations, even if another allow-root would match.
+
+    ``resolved_str`` must already be a :meth:`Path.resolve`-d absolute path.
+    """
+    r = Path(resolved_str)
 
     cfg_dir = Config.get_config_path().resolve()
     if r == cfg_dir or r.is_relative_to(cfg_dir):
@@ -100,10 +100,9 @@ def _blocked_for_http_read(resolved_str: str) -> bool:
     except OSError:
         pass
 
-    rs = str(r)
     if os.name == "posix":
         for prefix in ("/proc", "/sys", "/dev"):
-            if rs == prefix or rs.startswith(prefix + os.sep):
+            if resolved_str == prefix or resolved_str.startswith(prefix + os.sep):
                 return True
 
     return False
@@ -145,6 +144,8 @@ def _initial_abs_path(user_path: str, project_root: Optional[Path]) -> str:
     raw = user_path.strip()
     if not raw:
         raise PermissionError("Empty path")
+    if "\x00" in raw:
+        raise PermissionError("Invalid path")
     if len(raw) > 4096:
         raise PermissionError("Path too long")
 
