@@ -3,7 +3,6 @@ import {
   Zap, 
   Sparkles, 
   Github,
-  ChevronDown,
   ChevronRight,
   Workflow,
   MessageSquare,
@@ -14,20 +13,14 @@ import {
   BookOpen,
   Cpu,
 } from 'lucide-react';
-import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useStats } from '@/hooks/useStats';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 
-const GITHUB_URL = 'https://github.com/AgentFlocks/flocks';
-const GITEE_URL = 'https://gitee.com/flocks/flocks';
-const GITEE_LOGO_URL = `${import.meta.env.BASE_URL}gitee-logo.png`;
-
 export default function Home() {
   const { stats, loading, error } = useStats();
   const { t } = useTranslation('home');
-  const [isRepoMenuOpen, setIsRepoMenuOpen] = useState(false);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -44,15 +37,15 @@ export default function Home() {
               {t('badge')}
             </div>
 
-            <h1 className="text-4xl lg:text-5xl font-extrabold mb-3 tracking-tight">
+            <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
               <span className="text-red-500">Flocks</span>
             </h1>
 
-            <p className="text-lg lg:text-xl text-white font-semibold mb-2">
+            <p className="text-sm text-white font-semibold mb-2">
               {t('subtitle')}
             </p>
 
-            <p className="text-sm lg:text-base text-slate-400 leading-relaxed max-w-2xl">
+            <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
               {t('description')}
             </p>
           </div>
@@ -66,40 +59,10 @@ export default function Home() {
               <ChevronRight className="ml-1.5 w-4 h-4" />
             </button>
 
-            <div className="relative">
-              <button
-                type="button"
-                onClick={() => setIsRepoMenuOpen((open) => !open)}
-                className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-200 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-white/10"
-              >
-                <Github className="mr-2 w-4 h-4" />
-                {t('openSource')}
-                <ChevronDown className="ml-2 w-4 h-4" />
-              </button>
-
-              {isRepoMenuOpen ? (
-                <div className="absolute right-0 mt-2 min-w-52 overflow-hidden rounded-lg border border-white/10 bg-slate-900/95 shadow-xl backdrop-blur">
-                  <a
-                    href={GITHUB_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors"
-                  >
-                    <Github className="mr-2 w-4 h-4" />
-                    GitHub
-                  </a>
-                  <a
-                    href={GITEE_URL}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center px-4 py-3 text-sm text-slate-200 hover:bg-white/10 transition-colors border-t border-white/10"
-                  >
-                    <img src={GITEE_LOGO_URL} alt="Gitee" className="mr-2 w-4 h-4 rounded-sm" />
-                    Gitee
-                  </a>
-                </div>
-              ) : null}
-            </div>
+            <button className="inline-flex items-center px-6 py-2.5 bg-white/10 text-slate-200 rounded-lg font-semibold hover:bg-white/15 transition-colors border border-white/10">
+              <Github className="mr-2 w-4 h-4" />
+              {t('openSource')}
+            </button>
           </div>
         </div>
       </div>
@@ -171,7 +134,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.agentCount')}</span>
               <Bot className="w-5 h-5 text-purple-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.agents.total ?? 0}
             </div>
           </div>
@@ -181,7 +144,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.workflowCount')}</span>
               <Workflow className="w-5 h-5 text-teal-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.workflows.total ?? 0}
             </div>
           </div>
@@ -191,7 +154,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.skillCount')}</span>
               <BookOpen className="w-5 h-5 text-green-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.skills.total ?? 0}
             </div>
           </div>
@@ -201,7 +164,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.toolCount')}</span>
               <Wrench className="w-5 h-5 text-orange-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tools.total ?? 0}
             </div>
           </div>
@@ -211,7 +174,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.weeklyTasks')}</span>
               <Zap className="w-5 h-5 text-amber-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tasks.week ?? 0}
             </div>
           </div>
@@ -221,7 +184,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.activeScheduled')}</span>
               <CalendarClock className="w-5 h-5 text-violet-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tasks.scheduledActive ?? 0}
             </div>
           </div>
@@ -231,7 +194,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.modelCount')}</span>
               <Cpu className="w-5 h-5 text-pink-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.models.total ?? 0}
             </div>
           </div>
@@ -243,7 +206,7 @@ export default function Home() {
                 stats?.system.status === 'healthy' ? 'text-green-500' : 'text-red-500'
               }`} />
             </div>
-            <div className={`text-3xl font-bold ${
+            <div className={`text-xl font-bold ${
               stats?.system.status === 'healthy' ? 'text-green-600' : 'text-red-600'
             }`}>
               {stats?.system.status === 'healthy' ? t('stats.normal') : t('stats.abnormal')}

@@ -363,7 +363,7 @@ function FilesTab() {
                       panel.node?.path === item.path ? 'bg-slate-100' : 'hover:bg-gray-50'
                     }`}
                   >
-                    <td className="px-4 py-2 text-base">{fileIcon(item)}</td>
+                    <td className="px-4 py-2 text-sm">{fileIcon(item)}</td>
                     <td className="px-2 py-2 font-medium text-gray-800 truncate max-w-0">
                       <span className="block truncate">{item.name}</span>
                     </td>
@@ -404,7 +404,7 @@ function FilesTab() {
       {panel.node && (
         <div className="w-96 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
           <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
-            <span className="text-base flex-shrink-0">{fileIcon(panel.node)}</span>
+            <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
             <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
             <div className="flex items-center gap-1 flex-shrink-0">
               {panel.node.is_text_file && !panel.editing && (

@@ -231,7 +231,7 @@ function AgentSection({
           )}
           <div className="flex-1">
             <div className="flex items-center gap-2">
-              <h2 className={`text-base font-semibold ${titleColor}`}>{title}</h2>
+              <h2 className={`text-lg font-semibold ${titleColor}`}>{title}</h2>
               <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${countBg}`}>
                 {agents.length}
               </span>

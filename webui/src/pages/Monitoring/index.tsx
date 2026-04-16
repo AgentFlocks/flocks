@@ -106,7 +106,7 @@ export default function MonitoringPage() {
               {status?.status === 'down' && t('status.down')}
             </span>
           </div>
-          <div className="text-2xl font-bold text-gray-900">{t('systemStatus')}</div>
+          <div className="text-xl font-bold text-gray-900">{t('systemStatus')}</div>
           <div className="text-sm text-gray-600 mt-1">
             {t('uptime')}: {status ? formatUptime(status.uptime) : '-'}
           </div>
@@ -116,7 +116,7 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <Activity className="w-8 h-8 text-red-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
+          <div className="text-xl font-bold text-gray-900">
             {status?.activeSessions || 0}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeSessions')}</div>
@@ -126,7 +126,7 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <Zap className="w-8 h-8 text-purple-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
+          <div className="text-xl font-bold text-gray-900">
             {status?.activeAgents || 0}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeAgents')}</div>
@@ -136,7 +136,7 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <TrendingUp className="w-8 h-8 text-orange-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
+          <div className="text-xl font-bold text-gray-900">
             {metrics?.messageRate.toFixed(1) || '0'}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('messagesPerMin')}</div>
@@ -150,31 +150,31 @@ export default function MonitoringPage() {
           <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.messageRate')}</div>
-              <div className="text-2xl font-bold text-gray-900">
+              <div className="text-xl font-bold text-gray-900">
                 {metrics.messageRate.toFixed(1)}/min
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.toolCallRate')}</div>
-              <div className="text-2xl font-bold text-gray-900">
+              <div className="text-xl font-bold text-gray-900">
                 {metrics.toolCallRate.toFixed(1)}/min
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.errorRate')}</div>
-              <div className="text-2xl font-bold text-red-600">
+              <div className="text-xl font-bold text-red-600">
                 {metrics.errorRate.toFixed(1)}/min
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.avgResponse')}</div>
-              <div className="text-2xl font-bold text-gray-900">
+              <div className="text-xl font-bold text-gray-900">
                 {metrics.avgResponseTime.toFixed(0)}ms
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.activeRequests')}</div>
-              <div className="text-2xl font-bold text-gray-900">
+              <div className="text-xl font-bold text-gray-900">
                 {metrics.activeRequests}
               </div>
             </div>

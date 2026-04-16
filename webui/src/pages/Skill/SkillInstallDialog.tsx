@@ -86,7 +86,7 @@ export default function SkillInstallDialog({ onClose, onInstalled }: SkillInstal
           <div className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center">
             <CloudDownload className="w-4 h-4 text-red-600" />
           </div>
-          <h2 className="text-base font-semibold text-gray-900 flex-1">
+          <h2 className="text-lg font-semibold text-gray-900 flex-1">
             {t('installDialog.title')}
           </h2>
           <button
