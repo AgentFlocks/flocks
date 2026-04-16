@@ -170,6 +170,7 @@
     "enableDesc": "When enabled, the bot will connect to DingTalk via Stream long-connection and start receiving and replying to messages.",
     "credentials": "App Credentials",
     "credentialsDesc": "Fill in after creating an app in the DingTalk Open Platform with Stream mode enabled.",
+    "downloadGuide": "Download Configuration Guide",
     "clientIdHint": "DingTalk app Client ID (i.e. AppKey)",
     "clientSecretHint": "DingTalk app Client Secret (i.e. AppSecret)",
     "gatewayToken": "Gateway Token",

@@ -436,7 +436,9 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
 const FEISHU_GUIDE_PDF_FILENAME = 'feishu-bot-guide.pdf';
 const WECOM_GUIDE_PDF_URL = '/wecom-bot-guide.pdf';
-const WECOM_GUIDE_PDF_FILENAME = '企业微信配置指引.pdf';
+const WECOM_GUIDE_PDF_FILENAME = 'wecom-bot-guide.pdf';
+const DINGTALK_GUIDE_PDF_URL = '/dingtalk-channel-guide.pdf';
+const DINGTALK_GUIDE_PDF_FILENAME = 'dingtalk-channel-guide.pdf';
 
 function getChannelIcon(id: string, size: 'sm' | 'md' = 'sm') {
   const dim = size === 'md' ? 'w-10 h-10' : 'w-9 h-9';
@@ -1105,6 +1107,11 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
   return (
     <>
       <Section title={t('dingtalk.credentials')} description={t('dingtalk.credentialsDesc')}>
+        <GuideDownloadButton
+          href={DINGTALK_GUIDE_PDF_URL}
+          download={DINGTALK_GUIDE_PDF_FILENAME}
+          label={t('dingtalk.downloadGuide')}
+        />
         <FieldRow label="Client ID" required hint={t('dingtalk.clientIdHint')}>
           <TextInput
             value={config.clientId ?? ''}

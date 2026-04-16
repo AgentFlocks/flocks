@@ -170,6 +170,7 @@
     "enableDesc": "启用后，机器人将通过钉钉 Stream 长连接接入钉钉，并开始接收和回复消息。",
     "credentials": "应用凭证",
     "credentialsDesc": "在钉钉开放平台创建应用并开启 Stream 模式后填写。",
+    "downloadGuide": "下载配置指引",
     "clientIdHint": "钉钉应用的 Client ID（即 AppKey）",
     "clientSecretHint": "钉钉应用的 Client Secret（即 AppSecret）",
     "gatewayToken": "网关令牌",
