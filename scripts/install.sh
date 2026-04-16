@@ -17,6 +17,7 @@ PATH_REFRESH_HINT_REQUIRED=0
 INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-en}"
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
 UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.sh/uv/install.sh}"
+UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
@@ -59,6 +60,9 @@ select_install_sources() {
     info "使用 PyPI 源: $UV_DEFAULT_INDEX"
     info "使用 npm 源: $NPM_REGISTRY"
     info "使用 uv 安装脚本: $UV_INSTALL_SH_URL"
+    if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
+      info "使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL"
+    fi
   else
     info "Using PyPI index: $UV_DEFAULT_INDEX"
     info "Using npm registry: $NPM_REGISTRY"
@@ -517,6 +521,7 @@ ensure_npm_global_prefix_writable() {
 }
 
 install_uv() {
+  local primary_install_failed=0
   if has_cmd uv; then
     return
   fi
@@ -528,9 +533,30 @@ install_uv() {
     has_cmd curl || fail "curl is required to install uv automatically."
     info "uv was not found. Installing it automatically..."
   fi
-  curl -LsSf "$UV_INSTALL_SH_URL" | sh
+  if ! curl -LsSf "$UV_INSTALL_SH_URL" | sh; then
+    primary_install_failed=1
+  fi
   refresh_path
   ensure_path_persisted "$HOME/.local/bin"
+
+  if has_cmd uv; then
+    return
+  fi
+
+  if is_zh_install && [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
+    if [[ "$primary_install_failed" -eq 1 ]]; then
+      info "默认 uv 安装脚本失败，正在尝试中国大陆备用源..."
+    else
+      info "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试中国大陆备用源..."
+    fi
+
+    if ! curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh; then
+      fail "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。"
+    fi
+    refresh_path
+    ensure_path_persisted "$HOME/.local/bin"
+  fi
+
   if is_zh_install; then
     has_cmd uv || fail "uv 安装已完成，但当前仍无法找到 uv。请检查 PATH 后重试。"
   else
