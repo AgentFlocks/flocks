@@ -5,7 +5,7 @@ import client from './client';
 // ======================================================================
 
 export type TaskType = 'queued' | 'scheduled';
-export type TaskStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+export type TaskStatus = 'pending' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type TaskPriority = 'urgent' | 'high' | 'normal' | 'low';
 export type DeliveryStatus = 'unread' | 'notified' | 'viewed';
 export type ExecutionMode = 'agent' | 'workflow';
@@ -213,12 +213,6 @@ export const taskAPI = {
 
   cancelExecution: (executionId: string) =>
     client.post<TaskExecution>(`/api/task-executions/${executionId}/cancel`),
-
-  pauseExecution: (executionId: string) =>
-    client.post<TaskExecution>(`/api/task-executions/${executionId}/pause`),
-
-  resumeExecution: (executionId: string) =>
-    client.post<TaskExecution>(`/api/task-executions/${executionId}/resume`),
 
   retryExecution: (executionId: string) =>
     client.post<TaskExecution>(`/api/task-executions/${executionId}/retry`),

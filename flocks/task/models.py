@@ -22,7 +22,6 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    PAUSED = "paused"
 
 
 class SchedulerStatus(str, Enum):

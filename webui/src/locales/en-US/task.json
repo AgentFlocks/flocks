@@ -13,8 +13,7 @@
     "running": "Running",
     "completed": "Completed",
     "failed": "Failed",
-    "cancelled": "Cancelled",
-    "paused": "Paused"
+    "cancelled": "Cancelled"
   },
   "priority": {
     "urgent": "Urgent",
@@ -92,8 +91,6 @@
     "pagination": "{{total}} total, page {{page}}/{{totalPages}}",
     "detailWaiting": "Waiting for execution...",
     "detailNoRecord": "No execution record",
-    "actionPause": "Pause",
-    "actionResume": "Resume",
     "actionCancel": "Cancel",
     "actionRetry": "Retry",
     "actionRerun": "Re-run",

@@ -38,6 +38,7 @@ class TaskStore:
         for stmt in _INDEX_STMTS:
             await cls._conn.execute(stmt)
         await cls._conn.commit()
+        await cls._normalize_legacy_paused_executions()
         cls._initialized = True
         log.info("task.store.initialized")
 
@@ -312,6 +313,24 @@ class TaskStore:
         )
 
     @classmethod
+    async def list_active_executions_for_scheduler(
+        cls, scheduler_id: str
+    ) -> List[TaskExecution]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM task_executions
+            WHERE scheduler_id = ?
+              AND status IN ('pending', 'queued', 'running')
+            ORDER BY created_at ASC
+            """,
+            (scheduler_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [cls._row_to_execution(row) for row in rows]
+
+    @classmethod
     async def update_execution(cls, execution: TaskExecution) -> TaskExecution:
         execution.touch()
         db = await cls._db()
@@ -422,6 +441,43 @@ class TaskStore:
         return ref
 
     @classmethod
+    async def ensure_queued_execution_ref(
+        cls, execution_id: str
+    ) -> TaskExecutionQueueRef:
+        active = await cls.get_queue_ref(execution_id)
+        db = await cls._db()
+        if active is None:
+            ref = TaskExecutionQueueRef(execution_id=execution_id)
+            await db.execute(
+                """
+                INSERT INTO task_execution_queue_refs (id, execution_id, status, created_at, started_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    ref.id,
+                    ref.execution_id,
+                    ref.status.value,
+                    ref.created_at.isoformat(),
+                    None,
+                ),
+            )
+            await db.commit()
+            return ref
+
+        await db.execute(
+            """
+            UPDATE task_execution_queue_refs
+            SET status = 'queued', started_at = NULL
+            WHERE id = ?
+            """,
+            (active.id,),
+        )
+        await db.commit()
+        active.status = TaskStatus.QUEUED
+        active.started_at = None
+        return active
+
+    @classmethod
     async def get_queue_ref(
         cls, execution_id: str
     ) -> Optional[TaskExecutionQueueRef]:
@@ -449,7 +505,7 @@ class TaskStore:
             """
             SELECT * FROM task_executions
             WHERE scheduler_id = ?
-              AND status IN ('pending', 'queued', 'running', 'paused')
+              AND status IN ('pending', 'queued', 'running')
             ORDER BY created_at DESC
             LIMIT 1
             """,
@@ -457,6 +513,25 @@ class TaskStore:
         ) as cur:
             row = await cur.fetchone()
         return cls._row_to_execution(row) if row else None
+
+    @classmethod
+    async def list_orphaned_queued_executions(cls) -> List[TaskExecution]:
+        db = await cls._db()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT e.*
+            FROM task_executions e
+            LEFT JOIN task_execution_queue_refs q
+              ON q.execution_id = e.id
+             AND q.status IN ('queued', 'running')
+            WHERE e.status = 'queued'
+              AND q.id IS NULL
+            ORDER BY COALESCE(e.queued_at, e.created_at) ASC
+            """
+        ) as cur:
+            rows = await cur.fetchall()
+        return [cls._row_to_execution(row) for row in rows]
 
     @classmethod
     async def claim_next_queue_execution(
@@ -813,7 +888,51 @@ class TaskStore:
             if data.get(col):
                 data[col] = json.loads(data[col])
         data.setdefault("execution_input_snapshot", {})
+        cls._normalize_execution_row(data)
         return TaskExecution(**data)
+
+    @staticmethod
+    def _normalize_execution_row(data: Dict[str, Any]) -> None:
+        if data.get("status") != "paused":
+            return
+        data["status"] = TaskStatus.CANCELLED.value
+        data["completed_at"] = (
+            data.get("completed_at")
+            or data.get("updated_at")
+            or data.get("created_at")
+        )
+        if not data.get("error"):
+            data["error"] = "Normalized from legacy paused state."
+
+    @classmethod
+    async def _normalize_legacy_paused_executions(cls) -> None:
+        db = await cls._db()
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            """
+            DELETE FROM task_execution_queue_refs
+            WHERE execution_id IN (
+                SELECT id FROM task_executions WHERE status = 'paused'
+            )
+            """
+        )
+        await db.execute(
+            """
+            UPDATE task_executions
+            SET status = ?,
+                completed_at = COALESCE(completed_at, updated_at, created_at, ?),
+                error = COALESCE(NULLIF(error, ''), ?),
+                updated_at = ?
+            WHERE status = 'paused'
+            """,
+            (
+                TaskStatus.CANCELLED.value,
+                now,
+                "Normalized from legacy paused state.",
+                now,
+            ),
+        )
+        await db.commit()
 
     @classmethod
     def _row_to_queue_ref(

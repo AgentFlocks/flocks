@@ -37,6 +37,7 @@ _TASK_EXPIRY_HOURS: int = 24
 _CLEANUP_INTERVAL_S: int = 3600
 _RETRY_CHECK_INTERVAL_S: int = 30
 _STALE_RECOVERY_INTERVAL_S: int = 30
+_ORPHANED_QUEUE_RECOVERY_INTERVAL_S: int = 30
 _DISPATCH_GUARD_TIMEOUT_S: int = _TASK_ABSOLUTE_TIMEOUT_S + 30
 _RUNNING_RECOVERY_TIMEOUT_S: int = _DISPATCH_GUARD_TIMEOUT_S + 300
 
@@ -68,6 +69,7 @@ class TaskManager:
         self._running = False
         self._last_retry_check: float = 0.0
         self._last_stale_recovery_check: float = 0.0
+        self._last_orphaned_queue_recovery_check: float = 0.0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -94,6 +96,9 @@ class TaskManager:
         recovered = await mgr._recover_orphaned_executions()
         if recovered:
             log.info("manager.orphan_recovery", {"count": recovered})
+        recovered_queued = await mgr._recover_orphaned_queued_executions()
+        if recovered_queued:
+            log.info("manager.orphaned_queue_recovery", {"count": recovered_queued})
 
         mgr._running = True
         mgr._loop_task = asyncio.create_task(mgr._execution_loop())
@@ -302,6 +307,7 @@ class TaskManager:
         scheduler = await TaskStore.get_scheduler(scheduler_id)
         if not scheduler:
             return False
+        await cls._cleanup_scheduler_active_executions(scheduler.id)
         if scheduler.dedup_key and scheduler.dedup_key.startswith("builtin:"):
             scheduler.status = SchedulerStatus.ARCHIVED
             await TaskStore.update_scheduler(scheduler)
@@ -446,36 +452,6 @@ class TaskManager:
         return execution
 
     @classmethod
-    async def pause_execution(
-        cls, execution_id: str
-    ) -> Optional[TaskExecution]:
-        execution = await TaskStore.get_execution(execution_id)
-        if not execution or execution.status != TaskStatus.RUNNING:
-            return execution
-        execution.status = TaskStatus.PAUSED
-        execution = await TaskStore.update_execution(execution)
-        await cls._publish_execution_update(execution)
-        return execution
-
-    @classmethod
-    async def resume_execution(
-        cls, execution_id: str
-    ) -> Optional[TaskExecution]:
-        execution = await TaskStore.get_execution(execution_id)
-        if not execution or execution.status != TaskStatus.PAUSED:
-            return execution
-        execution.status = TaskStatus.QUEUED
-        execution.queued_at = datetime.now(timezone.utc)
-        execution.started_at = None
-        execution.completed_at = None
-        execution.duration_ms = None
-        execution.error = None
-        execution.result_summary = None
-        execution.session_id = None
-        execution = await cls._enqueue_execution(execution)
-        return execution
-
-    @classmethod
     async def retry_execution(
         cls, execution_id: str
     ) -> Optional[TaskExecution]:
@@ -501,7 +477,7 @@ class TaskManager:
         execution = await TaskStore.get_execution(execution_id)
         if not execution:
             return None
-        if execution.status in (TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.PAUSED):
+        if execution.status in (TaskStatus.RUNNING, TaskStatus.QUEUED):
             await cls.cancel_execution(execution_id)
         scheduler = await TaskStore.get_scheduler(execution.scheduler_id)
         if not scheduler:
@@ -517,9 +493,19 @@ class TaskManager:
         execution = await TaskStore.get_execution(execution_id)
         if not execution:
             return False
-        if execution.status in (TaskStatus.RUNNING, TaskStatus.QUEUED, TaskStatus.PAUSED):
+        if execution.status in (TaskStatus.RUNNING, TaskStatus.QUEUED):
             await cls.cancel_execution(execution_id)
         return await TaskStore.delete_execution(execution_id)
+
+    @classmethod
+    async def _cleanup_scheduler_active_executions(cls, scheduler_id: str) -> int:
+        active_executions = await TaskStore.list_active_executions_for_scheduler(scheduler_id)
+        cleaned = 0
+        for execution in active_executions:
+            cancelled = await cls.cancel_execution(execution.id)
+            if cancelled is not None:
+                cleaned += 1
+        return cleaned
 
     @classmethod
     async def batch_cancel(cls, execution_ids: List[str]) -> int:
@@ -646,6 +632,12 @@ class TaskManager:
                 if now - self._last_stale_recovery_check >= _STALE_RECOVERY_INTERVAL_S:
                     self._last_stale_recovery_check = now
                     await self._recover_stale_active_executions()
+                if (
+                    now - self._last_orphaned_queue_recovery_check
+                    >= _ORPHANED_QUEUE_RECOVERY_INTERVAL_S
+                ):
+                    self._last_orphaned_queue_recovery_check = now
+                    await self._recover_orphaned_queued_executions()
                 execution = await self.queue.dequeue()
                 if execution:
                     task = asyncio.create_task(self._run_execution(execution))
@@ -670,11 +662,21 @@ class TaskManager:
             execution.completed_at = datetime.now(timezone.utc)
             await TaskStore.update_execution(execution)
             return
+        should_finish_queue_ref = True
         try:
             execution = await asyncio.wait_for(
                 TaskExecutor.dispatch(execution, scheduler),
                 timeout=_DISPATCH_GUARD_TIMEOUT_S,
             )
+        except asyncio.CancelledError:
+            current = await TaskStore.get_execution(execution.id)
+            if current is not None:
+                execution = current
+            if not execution.is_terminal:
+                execution = await self._requeue_execution(execution)
+                should_finish_queue_ref = False
+                await self._publish_execution_update(execution)
+            raise
         except asyncio.TimeoutError:
             await self._cancel_execution_runtime(execution)
             log.error(
@@ -690,7 +692,8 @@ class TaskManager:
             execution = await self._mark_execution_failed(execution, str(exc))
         finally:
             self.queue.mark_finished(execution.id)
-            await TaskStore.finish_queue_ref(execution.id)
+            if should_finish_queue_ref:
+                await TaskStore.finish_queue_ref(execution.id)
 
         await self._publish_execution_update(execution)
         if execution.status == TaskStatus.FAILED:
@@ -728,11 +731,13 @@ class TaskManager:
         orphans = await TaskStore.list_executions_by_status(TaskStatus.RUNNING)
         await TaskStore.requeue_running_refs()
         for execution in orphans:
-            execution.status = TaskStatus.QUEUED
-            execution.started_at = None
-            execution.session_id = None
-            await TaskStore.update_execution(execution)
-            await TaskStore.enqueue_execution_ref(execution.id)
+            await self._requeue_execution(execution)
+        return len(orphans)
+
+    async def _recover_orphaned_queued_executions(self) -> int:
+        orphans = await TaskStore.list_orphaned_queued_executions()
+        for execution in orphans:
+            await self._requeue_execution(execution)
         return len(orphans)
 
     async def _cleanup_loop(self) -> None:
@@ -838,13 +843,20 @@ class TaskManager:
 
     @classmethod
     async def _enqueue_execution(cls, execution: TaskExecution) -> TaskExecution:
+        return await cls._requeue_execution(execution)
+
+    @classmethod
+    async def _requeue_execution(cls, execution: TaskExecution) -> TaskExecution:
         execution.status = TaskStatus.QUEUED
         execution.queued_at = datetime.now(timezone.utc)
         execution.started_at = None
         execution.completed_at = None
         execution.duration_ms = None
+        execution.session_id = None
+        execution.result_summary = None
+        execution.error = None
         execution = await TaskStore.update_execution(execution)
-        await TaskStore.enqueue_execution_ref(execution.id)
+        await TaskStore.ensure_queued_execution_ref(execution.id)
         return execution
 
     @staticmethod

@@ -165,7 +165,9 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
           params.runOnce = true;
           params.runAt = formData.runAt ? new Date(formData.runAt).toISOString() : undefined;
         } else if (isRecurring) {
-          params.cron = effectiveCron;
+          params.cron = effectiveCron.trim();
+          params.timezone = formData.timezone;
+          params.cronDescription = formData.cronDescription.trim() || undefined;
         }
         await taskAPI.createScheduler(params);
       }
@@ -413,7 +415,7 @@ function TaskFormContent({
             <>
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1.5">
-                  {isEdit ? t('form.freqRecurringLabel') : ''}
+                  {t('form.freqRecurringLabel')}
                 </label>
                 <select
                   value={
@@ -456,38 +458,34 @@ function TaskFormContent({
                 <p className="text-xs text-purple-600 font-medium">{describeCron(effectiveCron)}</p>
               )}
 
-              {/* Timezone + custom description (edit only) */}
-              {isEdit && (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.timezoneLabel')}</label>
-                    <select
-                      value={formData.timezone}
-                      onChange={(e) => update({ timezone: e.target.value })}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white"
-                    >
-                      <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
-                      <option value="UTC">UTC</option>
-                      <option value="America/New_York">America/New_York（UTC-5/4）</option>
-                      <option value="Europe/London">Europe/London（UTC+0/1）</option>
-                      <option value="Asia/Tokyo">Asia/Tokyo（UTC+9）</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">
-                      {t('form.cronDescLabel')}
-                      <span className="text-gray-400 font-normal ml-1">{t('form.cronDescHint')}</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.cronDescription}
-                      onChange={(e) => update({ cronDescription: e.target.value })}
-                      placeholder={effectiveCron ? describeCron(effectiveCron) : t('form.cronDescPlaceholder')}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
-                    />
-                  </div>
-                </>
-              )}
+              {/* Timezone + custom description */}
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.timezoneLabel')}</label>
+                <select
+                  value={formData.timezone}
+                  onChange={(e) => update({ timezone: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white"
+                >
+                  <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
+                  <option value="UTC">UTC</option>
+                  <option value="America/New_York">America/New_York（UTC-5/4）</option>
+                  <option value="Europe/London">Europe/London（UTC+0/1）</option>
+                  <option value="Asia/Tokyo">Asia/Tokyo（UTC+9）</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">
+                  {t('form.cronDescLabel')}
+                  <span className="text-gray-400 font-normal ml-1">{t('form.cronDescHint')}</span>
+                </label>
+                <input
+                  type="text"
+                  value={formData.cronDescription}
+                  onChange={(e) => update({ cronDescription: e.target.value })}
+                  placeholder={effectiveCron ? describeCron(effectiveCron) : t('form.cronDescPlaceholder')}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
+                />
+              </div>
             </>
           )}
         </div>
