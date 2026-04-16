@@ -258,6 +258,10 @@ function startProxy(): Promise<number> {
         return;
       }
 
+      // Record inbound activity as early as possible, before any Flocks API
+      // calls that might fail (session creation, inference, etc.).
+      fetch(`${FLOCKS_BASE}/api/channel/dingtalk/record-inbound`, { method: 'POST' }).catch(() => {});
+
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -266,8 +270,6 @@ function startProxy(): Promise<number> {
 
       try {
         const sessionId = await getOrCreateSession(sessionKey, agentName);
-        // Notify the Python gateway so last_message_at is updated for this channel.
-        fetch(`${FLOCKS_BASE}/api/channel/dingtalk/record-inbound`, { method: 'POST' }).catch(() => {});
         for await (const chunk of flocksToOpenAIStream(sessionId, userText, agentName, systemPrompts)) {
           res.write(chunk);
         }
