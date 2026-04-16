@@ -700,7 +700,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>}
           </div>
           <button onClick={onClose} className="flex-shrink-0 p-1 rounded hover:bg-gray-100 transition-colors">

@@ -21,7 +21,6 @@ import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCi
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
-import { useToast } from './Toast';
 import { QuestionTool } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
@@ -33,7 +32,6 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { workspaceAPI } from '@/api/workspace';
-import { copyText } from '@/utils/clipboard';
 import { formatSmartTime } from '@/utils/time';
 import type { Message, MessagePart, ToolState } from '@/types';
 
@@ -110,6 +108,8 @@ export interface SessionChatProps {
    * The parent should create a session and update sessionId + initialMessage props.
    */
   onCreateAndSend?: (text: string) => Promise<void> | void;
+  /** Called when the user sends "/new" to create a new session */
+  onCreateNewSession?: () => Promise<void> | void;
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
@@ -163,34 +163,6 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
   return result;
 }
 
-export function getMessageBubbleClassName({
-  compact,
-  isUser,
-  isEditing,
-}: {
-  compact: boolean;
-  isUser: boolean;
-  isEditing: boolean;
-}): string {
-  if (compact) {
-    return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
-      isUser
-        ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-        : 'bg-white border border-gray-200 shadow-sm'
-    }`;
-  }
-
-  const widthClass = isUser
-    ? (isEditing ? 'max-w-2xl w-full' : 'max-w-2xl w-auto')
-    : 'max-w-2xl w-full';
-
-  return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
-    isUser
-      ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-      : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
-  }`;
-}
-
 // ============================================================================
 // Main component
 // ============================================================================
@@ -233,11 +205,10 @@ export default function SessionChat({
   onSSEEvent,
   onError,
   onCreateAndSend,
+  onCreateNewSession,
   onInitialMessageConsumed,
 }: SessionChatProps) {
   const { t } = useTranslation('session');
-  const { t: tCommon } = useTranslation('common');
-  const toast = useToast();
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
@@ -549,7 +520,12 @@ export default function SessionChat({
     commandsLoadedRef.current = true; // Optimistic: prevent concurrent fetches
     try {
       const res = await commandAPI.list();
-      setCommands(res.data ?? []);
+      const serverCommands = res.data ?? [];
+      // Merge client-side /new command into the autocomplete list
+      setCommands([
+        { name: 'new', description: 'Create a new session', template: '', hidden: false },
+        ...serverCommands,
+      ]);
     } catch {
       commandsLoadedRef.current = false; // Allow retry on failure
     }
@@ -807,6 +783,14 @@ export default function SessionChat({
     // Route slash commands through the command API (requires an active session)
     const parsed = attachmentsToSend.length === 0 ? parseSlashCommand(rawText) : null;
     if (parsed) {
+      // Handle /new command locally: create a new session
+      if (parsed.command === 'new') {
+        if (onCreateNewSession) {
+          await onCreateNewSession();
+        }
+        return;
+      }
+
       if (!sessionId) {
         // Slash commands need an existing session; restore input and do nothing
         setInput(rawText);
@@ -945,17 +929,9 @@ export default function SessionChat({
   }, [isStreaming, sessionId, refetch]);
 
   // Copy text to clipboard
-  const handleCopy = useCallback(async (text: string) => {
-    try {
-      await copyText(text);
-      toast.success(tCommon('clipboard.copySuccessTitle'));
-    } catch (error) {
-      toast.error(
-        tCommon('clipboard.copyFailedTitle'),
-        error instanceof Error ? error.message : tCommon('clipboard.copyFailedDescription'),
-      );
-    }
-  }, [tCommon, toast]);
+  const handleCopy = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).catch(() => {});
+  }, []);
 
   const resetEditingState = useCallback(() => {
     setEditingMessageId(null);
@@ -1130,8 +1106,8 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3'
-    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
+    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3 scrollbar-hide'
+    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 scrollbar-hide';
 
   const msgListClass = compact ? '' : 'space-y-6 max-w-3xl mx-auto w-full px-4';
 
@@ -1559,7 +1535,17 @@ function ChatMessageBubbleInner({
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
 
-  const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
+  const bubbleClass = compact
+    ? `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
+        isUser
+          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+          : 'bg-white border border-gray-200 shadow-sm'
+      }`
+    : `${isUser ? 'max-w-2xl w-auto' : 'max-w-2xl w-full'} px-6 py-4 rounded-2xl text-sm break-words ${
+        isUser
+          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+          : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
+      }`;
   const actionBarClass = `absolute bottom-0 z-10 flex items-center gap-1.5 transition-all duration-150 ${
     isUser ? 'right-3 translate-x-0.5 translate-y-1/2' : 'left-3 -translate-x-0.5 translate-y-1/2'
   } ${

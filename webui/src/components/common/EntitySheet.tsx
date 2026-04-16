@@ -336,7 +336,7 @@ export default function EntitySheet({
         <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             {icon && <div className="text-gray-500 flex-shrink-0">{icon}</div>}
-            <h2 className="text-base font-semibold text-gray-900 flex-1 min-w-0 break-words">
+            <h2 className="text-lg font-semibold text-gray-900 flex-1 min-w-0 break-words">
               {title}
             </h2>
             <button

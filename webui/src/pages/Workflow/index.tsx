@@ -144,15 +144,15 @@ function WorkflowCard({ workflow, index = 0 }: { workflow: Workflow; index?: num
       {/* 统计数字（保留） */}
       <div className="border-t border-gray-200/80 px-4 py-3 grid grid-cols-3 gap-2 bg-white/40">
         <div>
-          <div className="text-base font-bold text-gray-900">{workflow.stats.callCount}</div>
+          <div className="text-lg font-bold text-gray-900">{workflow.stats.callCount}</div>
           <div className="text-[10px] text-gray-500">{t('stats.calls')}</div>
         </div>
         <div>
-          <div className="text-base font-bold text-green-600">{successRate}%</div>
+          <div className="text-lg font-bold text-green-600">{successRate}%</div>
           <div className="text-[10px] text-gray-500">{t('stats.successRate')}</div>
         </div>
         <div>
-          <div className="text-base font-bold text-gray-900">{workflow.stats.avgRuntime.toFixed(1)}s</div>
+          <div className="text-lg font-bold text-gray-900">{workflow.stats.avgRuntime.toFixed(1)}s</div>
           <div className="text-[10px] text-gray-500">{t('stats.avgRuntime')}</div>
         </div>
       </div>

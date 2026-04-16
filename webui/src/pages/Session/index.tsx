@@ -151,6 +151,17 @@ export default function SessionPage() {
     }
   }, [creating, addSession, toast, t]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key === 'n') {
+        e.preventDefault();
+        void handleCreateSession();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleCreateSession]);
+
   const handleCreateAndSend = useCallback(async (text: string) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
@@ -361,6 +372,7 @@ export default function SessionPage() {
                   ? <Loader2 className="w-5 h-5 animate-spin" />
                   : <Plus className="w-5 h-5" />}
                 <span className="font-medium">{t('newSession')}</span>
+                <span className="text-xs text-gray-400">(Alt + N)</span>
               </button>
               <button
                 onClick={handleEnterSelectMode}
@@ -373,7 +385,7 @@ export default function SessionPage() {
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-2">
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-1 scrollbar-hide">
           {sessions.length === 0 ? (
             <div className="text-center py-8 text-gray-400">
               <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -472,7 +484,7 @@ export default function SessionPage() {
                               e.stopPropagation();
                               handleStartRename(session.id, session.title);
                             }}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50"
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50"
                           >
                             <PencilLine className="w-3.5 h-3.5" />
                             <span>{t('rename')}</span>
@@ -483,7 +495,7 @@ export default function SessionPage() {
                               void handleDownloadSession(session.id, session.title);
                             }}
                             disabled={downloadingSessionId === session.id}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <Download className="w-3.5 h-3.5" />
                             <span>{t('downloadJson')}</span>
@@ -495,7 +507,7 @@ export default function SessionPage() {
                               setOpenMenuSessionId(null);
                               void handleDeleteSession(session.id);
                             }}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50"
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                             <span>{t('deleteAction')}</span>
@@ -608,6 +620,7 @@ export default function SessionPage() {
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
+          onCreateNewSession={handleCreateSession}
           onStreamingDone={() => setPendingInitialMessage(null)}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
@@ -627,8 +640,8 @@ function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void 
       <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center shadow-lg">
         <Sparkles className="w-10 h-10 text-white" />
       </div>
-      <h3 className="text-3xl font-bold text-gray-900 mb-3">{t('welcome.title')}</h3>
-      <p className="text-gray-600 mb-8 text-lg">{t('welcome.description')}</p>
+      <h3 className="text-xl font-bold text-gray-900 mb-3">{t('welcome.title')}</h3>
+      <p className="text-sm text-gray-600 mb-8">{t('welcome.description')}</p>
 
       <div className="flex flex-wrap gap-3 justify-center">
         <button
