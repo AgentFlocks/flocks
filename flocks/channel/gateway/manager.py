@@ -79,7 +79,7 @@ class GatewayManager:
                     channel_id=channel_id,
                     plugin=plugin,
                     config=config_dict,
-                    on_message=self._dispatcher.dispatch,
+                    on_message=self._make_on_message(plugin, self._dispatcher.dispatch),
                     abort_event=abort_event,
                 ),
                 name=f"channel-{channel_id}",
@@ -182,7 +182,7 @@ class GatewayManager:
                 channel_id=channel_id,
                 plugin=plugin,
                 config=config_dict,
-                on_message=self._dispatcher.dispatch,
+                on_message=self._make_on_message(plugin, self._dispatcher.dispatch),
                 abort_event=abort_event,
             ),
             name=f"channel-{channel_id}",
@@ -327,6 +327,23 @@ class GatewayManager:
     # ------------------------------------------------------------------
     # Reconnect helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_on_message(
+        plugin: ChannelPlugin,
+        dispatch: Callable,
+    ) -> Callable:
+        """Wrap *dispatch* so that each inbound message records a timestamp."""
+        async def _on_message(msg) -> None:
+            plugin.record_message()
+            await dispatch(msg)
+        return _on_message
+
+    def record_message(self, channel_id: str) -> None:
+        """Update last_message_at on a running channel plugin (e.g. from an HTTP handler)."""
+        plugin = self._running_plugins.get(channel_id) or self._registry.get(channel_id)
+        if plugin:
+            plugin.record_message()
 
     @staticmethod
     async def _mark_connected(plugin: ChannelPlugin, channel_id: str) -> None:

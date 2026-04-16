@@ -178,6 +178,17 @@ async def list_channels():
     ]
 
 
+@router.post("/{channel_id}/record-inbound")
+async def record_inbound(channel_id: str):
+    """Notify the gateway that a message was received on this channel.
+
+    Used by out-of-process bridges (e.g. DingTalk's runner.ts) that bypass the
+    InboundDispatcher so that last_message_at is updated on the plugin status.
+    """
+    default_manager.record_message(channel_id)
+    return {"ok": True}
+
+
 @router.post("/{channel_id}/restart")
 async def restart_channel(channel_id: str):
     """Restart a single channel connection with the latest config.
