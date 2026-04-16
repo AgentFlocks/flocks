@@ -60,6 +60,7 @@ select_install_sources() {
     info "使用 PyPI 源: $UV_DEFAULT_INDEX"
     info "使用 npm 源: $NPM_REGISTRY"
     info "使用 uv 安装脚本: $UV_INSTALL_SH_URL"
+    info "使用 nvm 安装脚本: $NVM_INSTALL_SCRIPT_URL"
     if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
       info "使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL"
     fi
@@ -67,6 +68,7 @@ select_install_sources() {
     info "Using PyPI index: $UV_DEFAULT_INDEX"
     info "Using npm registry: $NPM_REGISTRY"
     info "Using uv install script: $UV_INSTALL_SH_URL"
+    info "Using nvm install script: $NVM_INSTALL_SCRIPT_URL"
   fi
 }
 
@@ -391,29 +393,57 @@ load_nvm() {
   command -v nvm >/dev/null 2>&1
 }
 
-install_nodejs_macos() {
-  if has_cmd brew; then
-    info "Trying to install or upgrade Node.js with Homebrew..."
-    brew install node
-    return
-  fi
-
-  has_cmd curl || fail "A compatible npm installation was not found. Homebrew is not installed, and curl is required to install nvm automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
+install_nodejs_with_nvm() {
+  has_cmd curl || {
+    warn "curl is required to install nvm automatically.$(nodejs_manual_download_hint)"
+    return 1
+  }
 
   if load_nvm; then
-    info "Homebrew was not found. Using the existing nvm installation..."
+    info "Using the existing nvm installation..."
   else
-    info "Homebrew was not found. Trying to install nvm..."
-    curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash
-    load_nvm || fail "nvm was installed, but it could not be loaded from $NVM_DIR/nvm.sh. Open a new shell and retry.$(nodejs_manual_download_hint)"
+    info "Trying to install nvm..."
+    if ! curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash; then
+      warn "Failed to install nvm from: $NVM_INSTALL_SCRIPT_URL$(nodejs_manual_download_hint)"
+      return 1
+    fi
+    if ! load_nvm; then
+      warn "nvm was installed, but it could not be loaded from $NVM_DIR/nvm.sh. Open a new shell and retry.$(nodejs_manual_download_hint)"
+      return 1
+    fi
   fi
 
   info "Trying to install Node.js ${MIN_NODE_MAJOR} with nvm..."
-  nvm install "$MIN_NODE_MAJOR"
-  nvm use "$MIN_NODE_MAJOR" >/dev/null
+  if ! nvm install "$MIN_NODE_MAJOR"; then
+    warn "Failed to install Node.js ${MIN_NODE_MAJOR} with nvm.$(nodejs_manual_download_hint)"
+    return 1
+  fi
+  if ! nvm use "$MIN_NODE_MAJOR" >/dev/null; then
+    warn "Node.js ${MIN_NODE_MAJOR} was installed with nvm, but activating it failed.$(nodejs_manual_download_hint)"
+    return 1
+  fi
 }
 
-install_nodejs_linux() {
+install_nodejs_macos() {
+  if has_cmd brew; then
+    info "Trying to install or upgrade Node.js with Homebrew..."
+    if brew install node; then
+      return
+    fi
+    warn "Homebrew failed to install Node.js. Falling back to nvm..."
+  fi
+
+  if install_nodejs_with_nvm; then
+    return
+  fi
+
+  if has_cmd brew; then
+    fail "Homebrew and nvm could not install a compatible Node.js runtime on macOS.$(nodejs_manual_download_hint)"
+  fi
+  fail "A compatible npm installation was not found. Homebrew is not installed, and nvm could not be installed automatically on macOS. Install Homebrew first and retry: /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"$(nodejs_manual_download_hint)"
+}
+
+install_nodejs_linux_with_package_manager() {
   info "A compatible npm installation was not found. Trying to install or upgrade Node.js automatically..."
 
   if has_cmd apt-get; then
@@ -464,6 +494,16 @@ install_nodejs_linux() {
   fi
 
   fail "No supported Linux package manager was detected, so Node.js (including npm) cannot be installed automatically.$(nodejs_manual_download_hint)"
+}
+
+install_nodejs_linux() {
+  info "Trying to install Node.js ${MIN_NODE_MAJOR} with nvm first on Linux..."
+  if install_nodejs_with_nvm; then
+    return
+  fi
+
+  warn "nvm installation failed on Linux. Falling back to the system package manager..."
+  install_nodejs_linux_with_package_manager
 }
 
 ensure_npm_installed() {

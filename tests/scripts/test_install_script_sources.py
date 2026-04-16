@@ -27,6 +27,10 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
     assert 'https://uv.agentsmirror.com/install-cn.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
+    assert 'FLOCKS_NPM_REGISTRY' in script
+    assert 'https://registry.npmmirror.com/' in script
+    assert 'FLOCKS_NVM_INSTALL_SCRIPT_URL' in script
+    assert 'https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh' in script
     assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
     assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
 
@@ -72,6 +76,8 @@ def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> 
     assert 'https://astral.org.cn/uv/install.ps1' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
+    assert 'FLOCKS_NVM_INSTALL_SCRIPT_URL' in script
+    assert 'https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh' in script
     assert 'FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL' in script
     assert "https://nodejs.org/zh-cn/download" in script
     assert 'exec bash "$SCRIPT_DIR/install.sh" "$@"' in script
@@ -117,25 +123,31 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'Using PyPI index: $UV_DEFAULT_INDEX' in script
     assert 'Using npm registry: $NPM_REGISTRY' in script
     assert 'Using uv install script: $UV_INSTALL_SH_URL' in script
+    assert 'Using nvm install script: $NVM_INSTALL_SCRIPT_URL' in script
     assert 'Using uv fallback script' not in script
     assert '使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL' in script
     assert 'pick_fastest_url' not in script
     assert 'Probing PyPI and npm registries to choose the faster source' not in script
     assert 'npm_config_registry="$NPM_REGISTRY" npm install' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
     assert 'npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser' in script
+    assert 'local connector_dir="$ROOT_DIR/.flocks/plugins/channels/dingtalk/dingtalk-openclaw-connector"' in script
     assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
     assert "https://nodejs.org/en/download" in script
     assert "nodejs_manual_download_hint" in script
     assert "FLOCKS_NVM_INSTALL_SCRIPT_URL" in script
     assert "https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh" in script
     assert "load_nvm()" in script
+    assert "install_nodejs_with_nvm()" in script
+    assert "install_nodejs_linux_with_package_manager()" in script
     assert 'curl -o- "$NVM_INSTALL_SCRIPT_URL" | bash' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_URL" | sh' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh' in script
     assert 'nvm install "$MIN_NODE_MAJOR"' in script
     assert 'nvm use "$MIN_NODE_MAJOR" >/dev/null' in script
-    assert "Homebrew was not found. Trying to install nvm..." in script
-    assert "Homebrew was not found. Using the existing nvm installation..." in script
+    assert "Homebrew failed to install Node.js. Falling back to nvm..." in script
+    assert 'info "Trying to install Node.js ${MIN_NODE_MAJOR} with nvm first on Linux..."' in script
+    assert 'warn "nvm installation failed on Linux. Falling back to the system package manager..."' in script
 
 
 def test_main_powershell_installer_uses_configured_default_sources_and_admin_precheck() -> None:
@@ -266,6 +278,121 @@ def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -
         }
         [[ "$install_log" == *"Trying to install nvm"* ]] || {
           printf 'nvm install message missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
+def test_main_bash_installer_falls_back_to_nvm_when_brew_install_fails_on_macos() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        unset NVM_DIR
+        export TEST_LOG="$HOME/install-node.log"
+
+        info() {
+          printf '%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        warn() {
+          printf 'WARN:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        has_cmd() {
+          case "$1" in
+            brew|curl)
+              return 0
+              ;;
+            *)
+              command -v "$1" >/dev/null 2>&1
+              ;;
+          esac
+        }
+
+        brew() {
+          printf '%s\n' "$*" >> "$HOME/brew-commands.log"
+          return 1
+        }
+
+        curl() {
+          cat <<'EOF'
+        mkdir -p "$HOME/.nvm"
+        cat > "$HOME/.nvm/nvm.sh" <<'EOS'
+        nvm() {
+          printf '%s\n' "$*" >> "$HOME/nvm-commands.log"
+          if [[ "$1" == "install" ]]; then
+            mkdir -p "$HOME/.nvm/versions/node/v22.22.2/bin"
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/node" <<'EON'
+        #!/usr/bin/env bash
+        printf 'v22.22.2\n'
+        EON
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/npm" <<'EON'
+        #!/usr/bin/env bash
+        printf '10.9.7\n'
+        EON
+            chmod +x "$HOME/.nvm/versions/node/v22.22.2/bin/node" "$HOME/.nvm/versions/node/v22.22.2/bin/npm"
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          if [[ "$1" == "use" ]]; then
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          return 0
+        }
+        EOS
+        EOF
+        }
+
+        install_nodejs_macos
+
+        node_version="$(node -v)"
+        npm_version="$(npm -v)"
+        brew_commands="$(<"$HOME/brew-commands.log")"
+        nvm_commands="$(<"$HOME/nvm-commands.log")"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ "$node_version" == "v22.22.2" ]] || {
+          printf 'unexpected node version: %s\n' "$node_version" >&2
+          exit 1
+        }
+        [[ "$npm_version" == "10.9.7" ]] || {
+          printf 'unexpected npm version: %s\n' "$npm_version" >&2
+          exit 1
+        }
+        [[ "$brew_commands" == *"install node"* ]] || {
+          printf 'brew install node was not attempted: %s\n' "$brew_commands" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"install 22"* ]] || {
+          printf 'nvm install was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"use 22"* ]] || {
+          printf 'nvm use was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"WARN:Homebrew failed to install Node.js. Falling back to nvm..."* ]] || {
+          printf 'brew fallback warning missing: %s\n' "$install_log" >&2
           exit 1
         }
         """
@@ -437,6 +564,200 @@ def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> 
         }
         [[ "$install_log" == *"默认 uv 安装脚本失败，正在尝试中国大陆备用源"* ]] || {
           printf 'fallback log missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
+def test_main_bash_installer_prefers_nvm_on_linux_before_package_manager() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        export TEST_LOG="$HOME/install-node.log"
+
+        info() {
+          printf 'INFO:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        has_cmd() {
+          case "$1" in
+            curl|pacman)
+              return 0
+              ;;
+            *)
+              command -v "$1" >/dev/null 2>&1
+              ;;
+          esac
+        }
+
+        curl() {
+          cat <<'EOF'
+        mkdir -p "$HOME/.nvm"
+        cat > "$HOME/.nvm/nvm.sh" <<'EOS'
+        nvm() {
+          printf '%s\n' "$*" >> "$HOME/nvm-commands.log"
+          if [[ "$1" == "install" ]]; then
+            mkdir -p "$HOME/.nvm/versions/node/v22.22.2/bin"
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/node" <<'EON'
+        #!/usr/bin/env bash
+        printf 'v22.22.2\n'
+        EON
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/npm" <<'EON'
+        #!/usr/bin/env bash
+        printf '10.9.7\n'
+        EON
+            chmod +x "$HOME/.nvm/versions/node/v22.22.2/bin/node" "$HOME/.nvm/versions/node/v22.22.2/bin/npm"
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          if [[ "$1" == "use" ]]; then
+            export PATH="$HOME/.nvm/versions/node/v22.22.2/bin:$PATH"
+            return 0
+          fi
+          return 0
+        }
+        EOS
+        EOF
+        }
+
+        run_with_privilege() {
+          printf '%s\n' "$*" >> "$HOME/pkg-commands.log"
+          return 0
+        }
+
+        install_nodejs_linux
+
+        node_version="$(node -v)"
+        npm_version="$(npm -v)"
+        nvm_commands="$(<"$HOME/nvm-commands.log")"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ "$node_version" == "v22.22.2" ]] || {
+          printf 'unexpected node version: %s\n' "$node_version" >&2
+          exit 1
+        }
+        [[ "$npm_version" == "10.9.7" ]] || {
+          printf 'unexpected npm version: %s\n' "$npm_version" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"install 22"* ]] || {
+          printf 'nvm install was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$nvm_commands" == *"use 22"* ]] || {
+          printf 'nvm use was not called: %s\n' "$nvm_commands" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"INFO:Trying to install Node.js 22 with nvm first on Linux..."* ]] || {
+          printf 'linux nvm-first log missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        [[ ! -f "$HOME/pkg-commands.log" ]] || {
+          printf 'package manager fallback should not run when nvm succeeds: %s\n' "$(<"$HOME/pkg-commands.log")" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
+def test_main_bash_installer_falls_back_to_package_manager_when_nvm_fails_on_linux() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        export TEST_LOG="$HOME/install-node.log"
+        export TEST_URL="https://example.invalid/nvm-install.sh"
+        NVM_INSTALL_SCRIPT_URL="$TEST_URL"
+
+        info() {
+          printf 'INFO:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        warn() {
+          printf 'WARN:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        nodejs_manual_download_hint() {
+          printf ''
+        }
+
+        has_cmd() {
+          case "$1" in
+            curl|pacman)
+              return 0
+              ;;
+            *)
+              return 1
+              ;;
+          esac
+        }
+
+        curl() {
+          printf '%s\n' "$*" >> "$HOME/curl-commands.log"
+          return 22
+        }
+
+        run_with_privilege() {
+          printf '%s\n' "$*" >> "$HOME/pkg-commands.log"
+          return 0
+        }
+
+        install_nodejs_linux
+
+        curl_commands="$(<"$HOME/curl-commands.log")"
+        pkg_commands="$(<"$HOME/pkg-commands.log")"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ "$curl_commands" == *"$TEST_URL"* ]] || {
+          printf 'nvm install url was not attempted: %s\n' "$curl_commands" >&2
+          exit 1
+        }
+        [[ "$pkg_commands" == *"pacman -Sy --noconfirm nodejs npm"* ]] || {
+          printf 'package manager fallback was not used: %s\n' "$pkg_commands" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"WARN:Failed to install nvm from: $TEST_URL"* ]] || {
+          printf 'nvm failure warning missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"WARN:nvm installation failed on Linux. Falling back to the system package manager..."* ]] || {
+          printf 'linux fallback warning missing: %s\n' "$install_log" >&2
           exit 1
         }
         """
