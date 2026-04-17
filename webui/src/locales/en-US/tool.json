@@ -315,9 +315,9 @@
     "execFailed": "Execution Failed",
     "close": "Close",
     "testTool": "Test Tool",
-    "overridden": "Customized",
-    "overrideTooltip": "Current state comes from a user override; YAML default is {{def}}",
-    "resetOverride": "Reset to default",
+    "customized": "Customized",
+    "customizedTooltip": "Current state comes from a user customization; YAML default is {{def}}",
+    "resetSetting": "Reset to default",
     "resetting": "Resetting…"
   },
 

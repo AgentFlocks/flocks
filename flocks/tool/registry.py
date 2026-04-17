@@ -409,10 +409,10 @@ class ToolRegistry:
 
     # Snapshot of every tool's registration-time ``enabled`` flag — taken
     # after :meth:`_load_plugin_tools` finishes loading but BEFORE
-    # ``_sync_api_service_states`` / ``_apply_tool_overrides`` mutate
+    # ``_sync_api_service_states`` / ``_apply_tool_settings`` mutate
     # ``tool.info.enabled`` in place.  This is the source of truth for the
     # "factory default" surfaced in the HTTP API and used by
-    # :func:`reset_tool_override` to recover the original value for tools
+    # :func:`reset_tool_setting` to recover the original value for tools
     # that don't have a YAML file (built-in / plugin_py).
     _enabled_defaults: Dict[str, bool] = {}
 
@@ -702,7 +702,7 @@ class ToolRegistry:
         # default" is preserved even after sync/overlay run.
         cls._snapshot_enabled_defaults()
         cls._sync_api_service_states()
-        cls._apply_tool_overrides()
+        cls._apply_tool_settings()
 
     @classmethod
     def _bootstrap_user_api_services(cls) -> None:
@@ -791,7 +791,7 @@ class ToolRegistry:
         """Capture the registration-time ``enabled`` flag of every tool.
 
         Called once per :meth:`_load_plugin_tools` cycle, before
-        :meth:`_sync_api_service_states` and :meth:`_apply_tool_overrides`
+        :meth:`_sync_api_service_states` and :meth:`_apply_tool_settings`
         run so the snapshot reflects the YAML/registration defaults
         rather than the post-sync state.
 
@@ -799,7 +799,7 @@ class ToolRegistry:
         NOT overwrite snapshot entries for tools that were not reloaded
         (e.g. built-in tools).  Without this, the stale in-memory
         ``info.enabled`` (which may already reflect an overlay) would be
-        captured as the new "default", making ``reset_tool_override``
+        captured as the new "default", making ``reset_tool_setting``
         return the wrong value.
         """
         for name, t in cls._tools.items():
@@ -816,11 +816,11 @@ class ToolRegistry:
         return cls._enabled_defaults.get(name)
 
     @classmethod
-    def _apply_tool_overrides(cls) -> None:
-        """Apply user-level ``tool_overrides`` from flocks.json on top of YAML defaults.
+    def _apply_tool_settings(cls) -> None:
+        """Apply user-level ``tool_settings`` from flocks.json on top of YAML defaults.
 
         The YAML file is treated as the factory default; the overlay in
-        ``flocks.json`` (``tool_overrides[<tool_name>]``) is the user's
+        ``flocks.json`` (``tool_settings[<tool_name>]``) is the user's
         current choice and is applied last.
 
         Service gate: an overlay can NEVER enable a tool whose API service
@@ -836,7 +836,7 @@ class ToolRegistry:
         """
         try:
             from flocks.config.config_writer import ConfigWriter
-            overrides = ConfigWriter.list_tool_overrides()
+            settings = ConfigWriter.list_tool_settings()
             api_services = ConfigWriter.list_api_services_raw()
         except Exception:
             return
@@ -844,17 +844,17 @@ class ToolRegistry:
         applied = 0
         unknown: List[str] = []
         blocked: List[str] = []
-        for name, ov in overrides.items():
-            if not isinstance(ov, dict):
+        for name, entry in settings.items():
+            if not isinstance(entry, dict):
                 continue
             tool = cls._tools.get(name)
             if tool is None:
                 unknown.append(name)
                 continue
-            if "enabled" not in ov:
+            if "enabled" not in entry:
                 continue
 
-            desired = bool(ov["enabled"])
+            desired = bool(entry["enabled"])
             if desired and tool.info.provider:
                 svc = api_services.get(tool.info.provider, {})
                 if not svc.get("enabled", False):
@@ -868,7 +868,7 @@ class ToolRegistry:
             applied += 1
 
         if applied or unknown or blocked:
-            log.info("tool_registry.tool_overrides_applied", {
+            log.info("tool_registry.tool_settings_applied", {
                 "applied": applied,
                 "stale": unknown,
                 "blocked_by_service": blocked,

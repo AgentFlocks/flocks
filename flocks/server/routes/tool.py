@@ -34,7 +34,7 @@ class ToolInfoResponse(BaseModel):
     parameters: List[Dict[str, Any]] = Field(default_factory=list, description="Tool parameters")
     enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
     enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
-    enabled_overridden: bool = Field(False, description="True if a user override is set in flocks.json tool_overrides")
+    enabled_customized: bool = Field(False, description="True if a user setting is recorded in flocks.json tool_settings")
     requires_confirmation: bool = Field(False, description="Requires confirmation")
 
 
@@ -130,8 +130,8 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
 def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
     """Build ToolInfoResponse with source info and overlay metadata."""
     source, source_name = _get_tool_source(t)
-    override = ConfigWriter.get_tool_override(t.name) or {}
-    overridden = "enabled" in override
+    setting = ConfigWriter.get_tool_setting(t.name) or {}
+    customized = "enabled" in setting
     enabled_default = _get_default_enabled(t)
     return ToolInfoResponse(
         name=t.name,
@@ -143,7 +143,7 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         parameters=[p.model_dump() for p in t.parameters],
         enabled=_get_effective_tool_enabled(t),
         enabled_default=enabled_default,
-        enabled_overridden=overridden,
+        enabled_customized=customized,
         requires_confirmation=t.requires_confirmation,
     )
 
@@ -172,7 +172,7 @@ def _get_default_enabled(t: ToolInfo) -> bool:
 def _service_allows_enable(t: ToolInfo) -> bool:
     """Return True when the API service backing ``t`` (if any) is enabled.
 
-    Mirrors the gate in :meth:`ToolRegistry._apply_tool_overrides` so that
+    Mirrors the gate in :meth:`ToolRegistry._apply_tool_settings` so that
     HTTP mutations stay consistent with what the registry would compute
     on its next reload: an overlay can never *open* a tool whose service
     is currently disabled.
@@ -275,11 +275,11 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
     Update tool settings (e.g., enable or disable).
 
     The ``enabled`` flag is persisted to the user-level overlay in
-    ``flocks.json`` (``tool_overrides.<tool_name>.enabled``) instead of
+    ``flocks.json`` (``tool_settings.<tool_name>.enabled``) instead of
     mutating the YAML plugin file.  This keeps project-level YAML files
     (which may be tracked by git and overwritten on upgrade) clean and
     treats the YAML's ``enabled:`` field as the factory default that the
-    overlay can selectively override.
+    overlay can selectively customise.
 
     Two behaviours of note:
 
@@ -290,7 +290,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
       still persists the overlay (so the intent survives the service
       being re-enabled later) but does not flip the in-memory
       ``info.enabled`` flag, mirroring the gate in
-      :meth:`ToolRegistry._apply_tool_overrides`.
+      :meth:`ToolRegistry._apply_tool_settings`.
     """
     ToolRegistry.init()
 
@@ -309,7 +309,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
     new_enabled = desired and service_ok
 
     if desired == default:
-        removed = ConfigWriter.delete_tool_override(tool_name)
+        removed = ConfigWriter.delete_tool_setting(tool_name)
         log.info("tool.updated.reset_to_default", {
             "name": tool_name,
             "enabled": new_enabled,
@@ -317,7 +317,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
             "removed_overlay": removed,
         })
     else:
-        ConfigWriter.set_tool_override(tool_name, {"enabled": desired})
+        ConfigWriter.set_tool_setting(tool_name, {"enabled": desired})
         log.info("tool.updated", {
             "name": tool_name,
             "enabled": new_enabled,
@@ -332,16 +332,16 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
 
 
 @router.post(
-    "/{tool_name}/override/reset",
+    "/{tool_name}/reset",
     response_model=ToolInfoResponse,
     summary="Reset a tool to its YAML/registration default",
 )
-async def reset_tool_override(tool_name: str):
-    """Remove the user override for ``tool_name`` and restore the default.
+async def reset_tool_setting(tool_name: str):
+    """Remove the user setting for ``tool_name`` and restore the default.
 
     Restores the registration-time ``enabled`` value from the registry's
     snapshot (or the YAML file as a fallback) and re-applies the same
-    service gate as :meth:`ToolRegistry._apply_tool_overrides`, so the
+    service gate as :meth:`ToolRegistry._apply_tool_settings`, so the
     HTTP layer never leaves the in-memory state in a position the
     registry would refuse on its next reload.
     """
@@ -354,12 +354,12 @@ async def reset_tool_override(tool_name: str):
             detail=f"Tool not found: {tool_name}",
         )
 
-    removed = ConfigWriter.delete_tool_override(tool_name)
+    removed = ConfigWriter.delete_tool_setting(tool_name)
     default = _get_default_enabled(tool.info)
     new_enabled = default and _service_allows_enable(tool.info)
     tool.info.enabled = new_enabled
 
-    log.info("tool.override.reset", {
+    log.info("tool.setting.reset", {
         "name": tool_name,
         "removed": removed,
         "default": default,

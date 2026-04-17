@@ -3342,20 +3342,20 @@ function ToolDetailDrawer({
   const { t, i18n } = useTranslation('tool');
   const [section, setSection] = useState<'info' | 'test'>('info');
   const [enabled, setEnabled] = useState(tool.enabled);
-  const [overridden, setOverridden] = useState<boolean>(!!tool.enabled_overridden);
+  const [customized, setCustomized] = useState<boolean>(!!tool.enabled_customized);
   const [enabledDefault, setEnabledDefault] = useState<boolean>(
     tool.enabled_default ?? tool.enabled
   );
   const [toggling, setToggling] = useState(false);
-  const [resettingOverride, setResettingOverride] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
 
   useEffect(() => {
     setEnabled(tool.enabled);
-    setOverridden(!!tool.enabled_overridden);
+    setCustomized(!!tool.enabled_customized);
     setEnabledDefault(tool.enabled_default ?? tool.enabled);
-  }, [tool.enabled, tool.enabled_overridden, tool.enabled_default]);
+  }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
 
   const handleToggleEnabled = async () => {
     if (toggling) return;
@@ -3364,7 +3364,7 @@ function ToolDetailDrawer({
     try {
       const { data: updated } = await toolAPI.setEnabled(tool.name, next);
       setEnabled(updated.enabled);
-      setOverridden(!!updated.enabled_overridden);
+      setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
       onEnabledChange?.(tool.name, updated.enabled);
     } catch (err: any) {
@@ -3374,19 +3374,19 @@ function ToolDetailDrawer({
     }
   };
 
-  const handleResetOverride = async () => {
-    if (resettingOverride) return;
-    setResettingOverride(true);
+  const handleResetSetting = async () => {
+    if (resetting) return;
+    setResetting(true);
     try {
-      const { data: updated } = await toolAPI.resetOverride(tool.name);
+      const { data: updated } = await toolAPI.resetSetting(tool.name);
       setEnabled(updated.enabled);
-      setOverridden(!!updated.enabled_overridden);
+      setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
       onEnabledChange?.(tool.name, updated.enabled);
     } catch (err: any) {
       alert(err.response?.data?.message || err.response?.data?.detail || err.message);
     } finally {
-      setResettingOverride(false);
+      setResetting(false);
     }
   };
 
@@ -3478,25 +3478,25 @@ function ToolDetailDrawer({
                     <span className={`text-sm font-medium ${enabled ? 'text-slate-700' : 'text-gray-400'}`}>
                       {toggling ? t('toolDetail.updating') : enabled ? t('toolDetail.enabled') : t('toolDetail.disabled')}
                     </span>
-                    {overridden && (
+                    {customized && (
                       <>
                         <span
-                          title={t('toolDetail.overrideTooltip', {
-                            defaultValue: '当前状态来自用户覆盖，YAML 默认值为 {{def}}',
+                          title={t('toolDetail.customizedTooltip', {
+                            defaultValue: '当前状态来自用户自定义，YAML 默认值为 {{def}}',
                             def: enabledDefault ? t('toolDetail.enabled') : t('toolDetail.disabled'),
                           })}
                           className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800"
                         >
-                          {t('toolDetail.overridden', { defaultValue: '已自定义' })}
+                          {t('toolDetail.customized', { defaultValue: '已自定义' })}
                         </span>
                         <button
-                          onClick={handleResetOverride}
-                          disabled={resettingOverride || toggling}
+                          onClick={handleResetSetting}
+                          disabled={resetting || toggling}
                           className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-gray-100 disabled:opacity-50"
                         >
-                          {resettingOverride
+                          {resetting
                             ? t('toolDetail.resetting', { defaultValue: '重置中…' })
-                            : t('toolDetail.resetOverride', { defaultValue: '恢复默认' })}
+                            : t('toolDetail.resetSetting', { defaultValue: '恢复默认' })}
                         </button>
                       </>
                     )}

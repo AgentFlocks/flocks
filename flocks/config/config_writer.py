@@ -526,10 +526,12 @@ class ConfigWriter:
         return True
 
     # ------------------------------------------------------------------
-    # Tool overrides  (tool_overrides section)
+    # Tool settings  (tool_settings section)
     # ------------------------------------------------------------------
     #
     # User-level overlay for per-tool settings (currently: ``enabled``).
+    # The section mirrors ``model_settings`` for naming consistency —
+    # both are flat maps keyed by the entity's unique id.
     #
     # Why this exists:  YAML plugin tool files under
     # ``<project>/.flocks/plugins/tools/`` are tracked by git and may be
@@ -543,66 +545,66 @@ class ConfigWriter:
     # regardless of where the YAML lives.
 
     @classmethod
-    def list_tool_overrides(cls) -> Dict[str, Dict[str, Any]]:
-        """Return all raw tool_overrides entries from flocks.json."""
+    def list_tool_settings(cls) -> Dict[str, Dict[str, Any]]:
+        """Return all raw tool_settings entries from flocks.json."""
         data = cls._read_raw()
-        overrides = data.get("tool_overrides", {})
-        return overrides if isinstance(overrides, dict) else {}
+        settings = data.get("tool_settings", {})
+        return settings if isinstance(settings, dict) else {}
 
     @classmethod
-    def get_tool_override(cls, tool_name: str) -> Optional[Dict[str, Any]]:
-        """Read a single tool override entry, or None if not set."""
-        overrides = cls.list_tool_overrides()
-        entry = overrides.get(tool_name)
+    def get_tool_setting(cls, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Read a single tool_settings entry, or None if not set."""
+        settings = cls.list_tool_settings()
+        entry = settings.get(tool_name)
         return entry if isinstance(entry, dict) else None
 
     @classmethod
-    def set_tool_override(cls, tool_name: str, override: Dict[str, Any]) -> None:
-        """Merge ``override`` into the tool_overrides[tool_name] entry.
+    def set_tool_setting(cls, tool_name: str, setting: Dict[str, Any]) -> None:
+        """Merge ``setting`` into the tool_settings[tool_name] entry.
 
-        Existing keys not present in ``override`` are preserved so callers
+        Existing keys not present in ``setting`` are preserved so callers
         can update a single field (e.g. ``{"enabled": False}``) without
         wiping other overlay fields that may be added later.
         """
         if not tool_name:
             raise ValueError("tool_name must be a non-empty string")
         data = cls._read_raw()
-        overrides = data.get("tool_overrides")
-        if not isinstance(overrides, dict):
-            overrides = {}
-        existing = overrides.get(tool_name)
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        existing = settings.get(tool_name)
         if not isinstance(existing, dict):
             existing = {}
-        merged = {**existing, **(override or {})}
-        overrides[tool_name] = merged
-        data["tool_overrides"] = overrides
+        merged = {**existing, **(setting or {})}
+        settings[tool_name] = merged
+        data["tool_settings"] = settings
         cls._write_raw(data)
-        log.info("config_writer.tool_override_set", {
+        log.info("config_writer.tool_setting_set", {
             "tool": tool_name,
             "fields": sorted(merged.keys()),
         })
 
     @classmethod
-    def delete_tool_override(cls, tool_name: str) -> bool:
-        """Remove the tool_overrides[tool_name] entry.
+    def delete_tool_setting(cls, tool_name: str) -> bool:
+        """Remove the tool_settings[tool_name] entry.
 
-        Pops the whole ``tool_overrides`` key when the last entry is
+        Pops the whole ``tool_settings`` key when the last entry is
         removed so flocks.json doesn't accumulate empty container objects
         as users toggle their last customised tool back to default.
 
         Returns True if an entry existed and was removed.
         """
         data = cls._read_raw()
-        overrides = data.get("tool_overrides")
-        if not isinstance(overrides, dict) or tool_name not in overrides:
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict) or tool_name not in settings:
             return False
-        del overrides[tool_name]
-        if overrides:
-            data["tool_overrides"] = overrides
+        del settings[tool_name]
+        if settings:
+            data["tool_settings"] = settings
         else:
-            data.pop("tool_overrides", None)
+            data.pop("tool_settings", None)
         cls._write_raw(data)
-        log.info("config_writer.tool_override_removed", {"tool": tool_name})
+        log.info("config_writer.tool_setting_removed", {"tool": tool_name})
         return True
 
     # ------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for ToolRegistry._apply_tool_overrides — user-level enable/disable overlay."""
+"""Tests for ToolRegistry._apply_tool_settings — user-level enable/disable overlay."""
 
 from __future__ import annotations
 
@@ -67,71 +67,71 @@ def _set_api_service(name: str, *, enabled: bool) -> None:
     })
 
 
-def test_apply_tool_overrides_enables_disabled_tool(temp_config, isolated_registry):
+def test_apply_tool_settings_enables_disabled_tool(temp_config, isolated_registry):
     from flocks.config.config_writer import ConfigWriter
 
     tool = _stub_tool("plugin_thing", enabled=False)
     ToolRegistry._tools[tool.info.name] = tool
 
-    ConfigWriter.set_tool_override("plugin_thing", {"enabled": True})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("plugin_thing", {"enabled": True})
+    ToolRegistry._apply_tool_settings()
 
     assert tool.info.enabled is True
 
 
-def test_apply_tool_overrides_disables_enabled_tool(temp_config, isolated_registry):
+def test_apply_tool_settings_disables_enabled_tool(temp_config, isolated_registry):
     from flocks.config.config_writer import ConfigWriter
 
     tool = _stub_tool("plugin_thing", enabled=True)
     ToolRegistry._tools[tool.info.name] = tool
 
-    ConfigWriter.set_tool_override("plugin_thing", {"enabled": False})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("plugin_thing", {"enabled": False})
+    ToolRegistry._apply_tool_settings()
 
     assert tool.info.enabled is False
 
 
-def test_apply_tool_overrides_skips_unknown_tool(temp_config, isolated_registry, caplog):
-    """Stale overrides for tools that no longer exist must not crash."""
+def test_apply_tool_settings_skips_unknown_tool(temp_config, isolated_registry, caplog):
+    """Stale entries for tools that no longer exist must not crash."""
     from flocks.config.config_writer import ConfigWriter
 
-    ConfigWriter.set_tool_override("ghost_tool", {"enabled": False})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("ghost_tool", {"enabled": False})
+    ToolRegistry._apply_tool_settings()
 
     assert "ghost_tool" not in ToolRegistry._tools
 
 
-def test_apply_tool_overrides_no_op_when_no_overrides(temp_config, isolated_registry):
+def test_apply_tool_settings_no_op_when_no_settings(temp_config, isolated_registry):
     tool = _stub_tool("plugin_thing", enabled=True)
     ToolRegistry._tools[tool.info.name] = tool
 
-    ToolRegistry._apply_tool_overrides()
+    ToolRegistry._apply_tool_settings()
 
     assert tool.info.enabled is True
 
 
-def test_apply_tool_overrides_works_for_user_level_tools(temp_config, isolated_registry):
+def test_apply_tool_settings_works_for_user_level_tools(temp_config, isolated_registry):
     """Overlay should apply uniformly — including to non-native (user-level) plugin tools."""
     from flocks.config.config_writer import ConfigWriter
 
     tool = _stub_tool("user_thing", enabled=True, native=False)
     ToolRegistry._tools[tool.info.name] = tool
 
-    ConfigWriter.set_tool_override("user_thing", {"enabled": False})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("user_thing", {"enabled": False})
+    ToolRegistry._apply_tool_settings()
 
     assert tool.info.enabled is False
 
 
-def test_apply_tool_overrides_ignores_non_enabled_keys(temp_config, isolated_registry):
+def test_apply_tool_settings_ignores_non_enabled_keys(temp_config, isolated_registry):
     """Overlay entries without an `enabled` key must not change tool state."""
     from flocks.config.config_writer import ConfigWriter
 
     tool = _stub_tool("plugin_thing", enabled=True)
     ToolRegistry._tools[tool.info.name] = tool
 
-    ConfigWriter.set_tool_override("plugin_thing", {"note": "future field"})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("plugin_thing", {"note": "future field"})
+    ToolRegistry._apply_tool_settings()
 
     assert tool.info.enabled is True
 
@@ -168,8 +168,8 @@ def test_overlay_cannot_enable_when_service_disabled(temp_config, isolated_regis
     ToolRegistry._sync_api_service_states()
     assert tool.info.enabled is False
 
-    ConfigWriter.set_tool_override("onesec_dns", {"enabled": True})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("onesec_dns", {"enabled": True})
+    ToolRegistry._apply_tool_settings()
     assert tool.info.enabled is False, (
         "overlay must not be able to open a tool whose API service is disabled"
     )
@@ -184,8 +184,8 @@ def test_overlay_can_disable_even_when_service_enabled(temp_config, isolated_reg
     ToolRegistry._tools[tool.info.name] = tool
     ToolRegistry._snapshot_enabled_defaults()
 
-    ConfigWriter.set_tool_override("onesec_dns", {"enabled": False})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("onesec_dns", {"enabled": False})
+    ToolRegistry._apply_tool_settings()
     assert tool.info.enabled is False
 
 
@@ -198,8 +198,8 @@ def test_overlay_re_enable_when_service_enabled(temp_config, isolated_registry):
     ToolRegistry._tools[tool.info.name] = tool
     ToolRegistry._snapshot_enabled_defaults()
 
-    ConfigWriter.set_tool_override("onesec_threat", {"enabled": True})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("onesec_threat", {"enabled": True})
+    ToolRegistry._apply_tool_settings()
     assert tool.info.enabled is True
 
 
@@ -236,8 +236,8 @@ def test_snapshot_preserves_builtin_default_on_refresh(temp_config, isolated_reg
     ToolRegistry._snapshot_enabled_defaults()
     assert ToolRegistry.get_default_enabled("builtin_thing") is True
 
-    ConfigWriter.set_tool_override("builtin_thing", {"enabled": False})
-    ToolRegistry._apply_tool_overrides()
+    ConfigWriter.set_tool_setting("builtin_thing", {"enabled": False})
+    ToolRegistry._apply_tool_settings()
     assert builtin.info.enabled is False
 
     # Simulate what refresh_plugin_tools does: snapshot again.
