@@ -52,6 +52,53 @@ def test_run_sync_handles_concurrent_submissions_without_crosstalk():
     assert thread is not None and thread.is_alive()
 
 
+def test_run_sync_re_raises_cancellation_as_asyncio_cancelled_error():
+    """Cancellation must propagate as asyncio.CancelledError, not as the
+    concurrent.futures.CancelledError that run_coroutine_threadsafe yields.
+
+    In Python 3.12 asyncio.CancelledError inherits from BaseException (so it
+    flows past ``except Exception``), while concurrent.futures.CancelledError
+    inherits from Exception and would be swallowed by workflow retry/fallback
+    logic. ``run_sync`` must preserve the stricter asyncio semantics.
+    """
+    async def _self_cancel():
+        raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        _async_runtime.run_sync(_self_cancel())
+
+    async def _never_returns():
+        await asyncio.sleep(5)
+
+    loop = _async_runtime._ensure_loop()
+    fut = asyncio.run_coroutine_threadsafe(_never_returns(), loop)
+    fut.cancel()
+    import concurrent.futures as _cf
+    with pytest.raises(_cf.CancelledError):
+        fut.result(timeout=2.0)
+
+
+def test_run_sync_cancellation_is_not_swallowed_by_except_exception():
+    """Guards the specific regression reviewed: a try/except Exception wrapper
+    (mirroring LLMClient.ask()'s retry loop) must NOT absorb the cancellation."""
+    async def _self_cancel():
+        raise asyncio.CancelledError()
+
+    swallowed = False
+    try:
+        try:
+            _async_runtime.run_sync(_self_cancel())
+        except Exception:
+            swallowed = True
+    except asyncio.CancelledError:
+        pass
+
+    assert swallowed is False, (
+        "run_sync leaked concurrent.futures.CancelledError (Exception subclass); "
+        "LLMClient.ask() retry/fallback would silently eat a real cancellation."
+    )
+
+
 def test_run_sync_from_inside_the_loop_thread_raises_instead_of_deadlocking():
     """Invoking run_sync from the dedicated loop's own thread would self-deadlock.
 

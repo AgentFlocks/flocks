@@ -31,6 +31,7 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import threading
 from typing import Any, Coroutine
 
@@ -111,7 +112,18 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
         )
 
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result()
+    try:
+        return future.result()
+    except concurrent.futures.CancelledError as exc:
+        # Preserve the cancellation semantics of the previous asyncio.run()
+        # path: callers (e.g. LLMClient.ask's `except Exception` retry loop,
+        # or an outer asyncio runtime tearing down the request) rely on
+        # cancellation propagating past `except Exception`. In Python 3.12
+        # asyncio.CancelledError inherits from BaseException, but
+        # concurrent.futures.CancelledError still inherits from Exception
+        # and would otherwise be silently swallowed and retried / rewrapped
+        # as ValueError by workflow fallback logic.
+        raise asyncio.CancelledError() from exc
 
 
 def _get_loop_for_testing() -> tuple[asyncio.AbstractEventLoop | None, threading.Thread | None]:
