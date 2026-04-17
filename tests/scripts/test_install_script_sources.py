@@ -697,6 +697,7 @@ def test_main_bash_installer_prefers_nvm_on_linux_before_package_manager() -> No
         r"""
 
         export HOME="$(mktemp -d)"
+        unset NVM_DIR
         export TEST_LOG="$HOME/install-node.log"
 
         info() {
@@ -819,6 +820,7 @@ def test_main_bash_installer_falls_back_to_package_manager_when_nvm_fails_on_lin
         r"""
 
         export HOME="$(mktemp -d)"
+        unset NVM_DIR
         export TEST_LOG="$HOME/install-node.log"
         export TEST_URL="https://example.invalid/nvm-install.sh"
         NVM_INSTALL_SCRIPT_URL="$TEST_URL"
