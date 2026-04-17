@@ -8,7 +8,6 @@ export const STATUS_CONFIG: Record<TaskStatus, { icon: string; color: string }> 
   completed: { icon: '\u2705', color: 'text-green-500' },
   failed:    { icon: '\u274c', color: 'text-red-500' },
   cancelled: { icon: '\ud83d\udeab', color: 'text-gray-400' },
-  paused:    { icon: '\u23f8\ufe0f', color: 'text-yellow-500' },
 };
 
 export const PRIORITY_CONFIG: Record<string, { color: string }> = {

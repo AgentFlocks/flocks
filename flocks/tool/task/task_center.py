@@ -5,6 +5,7 @@ Registers task management tools into ToolRegistry so Rex can
 create, list, update, delete, and query tasks via natural language.
 """
 
+import json
 from typing import Optional
 
 from flocks.tool.registry import (
@@ -18,6 +19,91 @@ from flocks.tool.registry import (
 from flocks.utils.log import Log
 
 log = Log.create(service="task.tools")
+
+
+_TRUTHY_STRINGS = {"true", "1", "yes", "y", "on"}
+_FALSY_STRINGS = {"false", "0", "no", "n", "off", ""}
+
+
+def _coerce_legacy_bool(value: object, *, default: bool = False) -> bool:
+    """Coerce values that may arrive as strings from legacy clients."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUTHY_STRINGS:
+            return True
+        if normalized in _FALSY_STRINGS:
+            return False
+    return default
+
+
+def _normalize_task_create_inputs(
+    type_value: Optional[str],
+    schedule_type: Optional[str],
+    run_once: bool,
+    run_at: Optional[str],
+    cron: Optional[str],
+    cron_description: Optional[str],
+    timezone: str,
+    schedule: Optional[str],
+) -> tuple[Optional[str], bool, Optional[str], Optional[str], Optional[str], str]:
+    """Accept common task_create aliases and infer scheduled tasks."""
+    schedule_data: dict[str, object] = {}
+    if schedule:
+        normalized_schedule = schedule.strip()
+        if normalized_schedule.startswith("{"):
+            try:
+                parsed_schedule = json.loads(normalized_schedule)
+            except json.JSONDecodeError:
+                parsed_schedule = None
+            if isinstance(parsed_schedule, dict):
+                schedule_data = parsed_schedule
+            else:
+                cron = cron or schedule
+        else:
+            cron = cron or schedule
+
+    if schedule_data:
+        type_value = type_value or schedule_data.get("type") or schedule_data.get("task_type")
+        schedule_type = (
+            schedule_type
+            or schedule_data.get("schedule_type")
+            or schedule_data.get("scheduleType")
+        )
+        cron = cron or schedule_data.get("cron")
+        run_at = run_at or schedule_data.get("run_at") or schedule_data.get("runAt")
+        cron_description = (
+            cron_description
+            or schedule_data.get("cron_description")
+            or schedule_data.get("cronDescription")
+        )
+        timezone = str(schedule_data.get("timezone") or timezone)
+        if schedule_data.get("run_once") is not None:
+            run_once = _coerce_legacy_bool(schedule_data.get("run_once"), default=run_once)
+        elif schedule_data.get("runOnce") is not None:
+            run_once = _coerce_legacy_bool(schedule_data.get("runOnce"), default=run_once)
+
+    if type_value:
+        return type_value, run_once, run_at, cron, cron_description, timezone
+    if not schedule_type:
+        # When the caller signalled a scheduled intent (run_once / run_at / cron),
+        # keep it scheduled so build_schedule can surface proper validation errors
+        # instead of silently falling back to an immediate queued execution.
+        if cron or run_at or run_once:
+            return "scheduled", run_once, run_at, cron, cron_description, timezone
+        return "queued", run_once, run_at, cron, cron_description, timezone
+
+    normalized = schedule_type.strip().lower()
+    if normalized == "queued":
+        return "queued", run_once, run_at, cron, cron_description, timezone
+    if normalized in {"scheduled", "cron", "recurring", "repeat"}:
+        return "scheduled", False, run_at, cron, cron_description, timezone
+    if normalized in {"once", "one_time", "one-time", "run_once"}:
+        return "scheduled", True, run_at, cron, cron_description, timezone
+    return schedule_type, run_once, run_at, cron, cron_description, timezone
 
 
 # ======================================================================
@@ -76,8 +162,27 @@ log = Log.create(service="task.tools")
                 "'scheduled' = triggered at a specific time (one-time or recurring, "
                 "controlled by run_once)"
             ),
-            required=True,
+            required=False,
             enum=["queued", "scheduled"],
+        ),
+        ToolParameter(
+            name="schedule_type",
+            type=ParameterType.STRING,
+            description=(
+                "Legacy alias for task schedule kind. "
+                "Accepted values include 'queued', 'scheduled', 'cron', "
+                "'once', 'one_time'. Prefer using type + run_once."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="schedule",
+            type=ParameterType.STRING,
+            description=(
+                "Legacy schedule alias. Can be a cron string like '*/5 * * * *' "
+                "or a JSON string containing cron/runAt/runOnce/timezone."
+            ),
+            required=False,
         ),
         ToolParameter(
             name="run_once",
@@ -159,13 +264,33 @@ log = Log.create(service="task.tools")
             ),
             required=False,
         ),
+        ToolParameter(
+            name="enabled",
+            type=ParameterType.BOOLEAN,
+            description=(
+                "Legacy compatibility field. False creates the task and then disables it. "
+                "True keeps it active."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="action",
+            type=ParameterType.STRING,
+            description=(
+                "Legacy compatibility field sometimes sent by models during task creation. "
+                "Ignored by task_create."
+            ),
+            required=False,
+        ),
     ],
 )
 async def task_create(
     ctx: ToolContext,
     title: str,
     description: str,
-    type: str,
+    type: Optional[str] = None,
+    schedule_type: Optional[str] = None,
+    schedule: Optional[str] = None,
     run_once: bool = False,
     priority: str = "normal",
     run_at: Optional[str] = None,
@@ -173,6 +298,8 @@ async def task_create(
     cron_description: Optional[str] = None,
     timezone: str = "Asia/Shanghai",
     user_prompt: Optional[str] = None,
+    enabled: Optional[bool] = None,
+    action: Optional[str] = None,
 ) -> ToolResult:
     from flocks.task.manager import TaskManager
     from flocks.task.models import (
@@ -182,6 +309,24 @@ async def task_create(
         TaskTrigger,
         build_schedule,
     )
+
+    del action
+
+    type, run_once, run_at, cron, cron_description, timezone = _normalize_task_create_inputs(
+        type,
+        schedule_type,
+        run_once,
+        run_at,
+        cron,
+        cron_description,
+        timezone,
+        schedule,
+    )
+    if type is None:
+        return ToolResult(
+            success=False,
+            error="type or schedule_type is required",
+        )
 
     task_priority = TaskPriority(priority)
 
@@ -214,6 +359,8 @@ async def task_create(
         source=source,
         trigger=trigger,
     )
+    if enabled is False:
+        scheduler = await TaskManager.disable_scheduler(scheduler.id) or scheduler
 
     output_lines = [
         f"ID: {scheduler.id}",
@@ -262,8 +409,9 @@ _VALID_TYPES = {"scheduled"} | _EXECUTION_TYPES
         "Routing rules (IMPORTANT - read before calling):\n"
         "- No parameters -> lists scheduled task definitions (schedulers).\n"
         "- status='active' -> lists active scheduled tasks.\n"
-        "- status='paused' or 'disabled' -> lists paused or disabled scheduled tasks "
-        "unless type='execution' or type='queued' is explicitly provided.\n"
+        "- status='disabled' -> lists disabled scheduled tasks.\n"
+        "- legacy status='paused' is still accepted and mapped to disabled schedulers "
+        "or cancelled executions depending on query target.\n"
         "- status='running' / 'completed' / 'failed' / 'pending' / 'queued' / 'cancelled' "
         "-> lists task executions with that status.\n"
         "- type='scheduled' -> forces listing schedulers.\n"
@@ -274,8 +422,7 @@ _VALID_TYPES = {"scheduled"} | _EXECUTION_TYPES
         "-> call with no parameters.\n"
         "- 'How many tasks are currently running?' -> call with status='running'.\n"
         "- 'Which scheduled tasks are disabled?' -> call with status='disabled'.\n"
-        "- 'Which paused executions are waiting to resume?' -> call with "
-        "type='execution', status='paused'."
+        "- 'Show old paused tasks' -> call with status='paused'."
     ),
     category=ToolCategory.SYSTEM,
     parameters=[
@@ -284,10 +431,9 @@ _VALID_TYPES = {"scheduled"} | _EXECUTION_TYPES
             type=ParameterType.STRING,
             description=(
                 "Filter by status. "
-                "Scheduler statuses: 'active', 'disabled', 'paused'. "
+                "Scheduler statuses: 'active', 'disabled'. "
                 "Execution statuses: 'pending', 'queued', 'running', 'completed', "
-                "'failed', 'cancelled', 'paused'. "
-                "If type is omitted, 'paused' defaults to scheduled tasks."
+                "'failed', 'cancelled'. Legacy alias: 'paused'."
             ),
             required=False,
             enum=[
@@ -368,7 +514,7 @@ async def task_list(
         scheduler_status = None
         if status == "active":
             scheduler_status = SchedulerStatus.ACTIVE
-        elif status in ("paused", "disabled"):
+        elif status in ("disabled", "paused"):
             scheduler_status = SchedulerStatus.DISABLED
         tasks, total = await TaskManager.list_schedulers(
             status=scheduler_status,
@@ -378,7 +524,8 @@ async def task_list(
         label = "Scheduled tasks"
     else:
         try:
-            task_status = TaskStatus(status) if status else None
+            mapped_status = "cancelled" if status == "paused" else status
+            task_status = TaskStatus(mapped_status) if mapped_status else None
         except ValueError:
             return ToolResult(
                 success=False,
@@ -441,7 +588,29 @@ async def task_status(ctx: ToolContext, task_id: str) -> ToolResult:
 
 @ToolRegistry.register_function(
     name="task_update",
-    description="Update a task (priority, status, title). Supports cancel/pause/resume.",
+    description=(
+        "Update a task. By default action=update, which can modify scheduler "
+        "fields like title, description, priority, cron, run_once, run_at, "
+        "cron_description, timezone, and user_prompt. Supports enable/disable "
+        "for scheduled tasks, and cancel/retry "
+        "for execution tasks.\n\n"
+        "IMPORTANT:\n"
+        "- Pass update fields as top-level arguments. DO NOT wrap them inside "
+        "a `fields` object or JSON string.\n"
+        "- To stop a scheduled task, use action='disable', 'pause', or 'stop'. "
+        "To resume it, use action='enable', 'resume', or 'start'.\n"
+        "- When changing a schedule, also pass a human-readable `title` and "
+        "`cron_description` that reflect the new schedule, otherwise the task "
+        "title shown in the UI may remain the old wording.\n\n"
+        "Good example for recurring schedule update:\n"
+        "task_update(task_id='tsk_xxx', cron='*/10 * * * *', "
+        "title='每10分钟执行关键词搜索摘要生成工作流', "
+        "cron_description='每10分钟执行一次')\n"
+        "Good example for stopping a scheduled task:\n"
+        "task_update(task_id='tsk_xxx', action='disable')\n"
+        "Bad example:\n"
+        "task_update(task_id='tsk_xxx', fields='{\"cron\":\"*/10 * * * *\"}')"
+    ),
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
@@ -454,8 +623,12 @@ async def task_status(ctx: ToolContext, task_id: str) -> ToolResult:
             name="action",
             type=ParameterType.STRING,
             description="Action to perform",
-            required=True,
-            enum=["cancel", "pause", "resume", "retry", "update"],
+            required=False,
+            default="update",
+            enum=[
+                "cancel", "retry", "update",
+                "disable", "enable", "pause", "resume", "stop", "start",
+            ],
         ),
         ToolParameter(
             name="priority",
@@ -467,7 +640,67 @@ async def task_status(ctx: ToolContext, task_id: str) -> ToolResult:
         ToolParameter(
             name="title",
             type=ParameterType.STRING,
-            description="New title (only for action=update)",
+            description=(
+                "New title (only for action=update). When changing cron/run_at, "
+                "also update title so the UI wording matches the new schedule."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="description",
+            type=ParameterType.STRING,
+            description="New description (only for action=update)",
+            required=False,
+        ),
+        ToolParameter(
+            name="run_once",
+            type=ParameterType.BOOLEAN,
+            description="Update one-time vs recurring schedule",
+            required=False,
+        ),
+        ToolParameter(
+            name="run_at",
+            type=ParameterType.STRING,
+            description="ISO 8601 datetime for one-time scheduled execution",
+            required=False,
+        ),
+        ToolParameter(
+            name="cron",
+            type=ParameterType.STRING,
+            description=(
+                "Cron expression for recurring scheduled execution. Pass this as "
+                "a top-level argument, not inside a `fields` wrapper."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="cron_description",
+            type=ParameterType.STRING,
+            description=(
+                "Human-readable Chinese schedule description shown in UI. "
+                "When changing schedule, provide this together with title."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="timezone",
+            type=ParameterType.STRING,
+            description="Timezone for scheduled tasks",
+            required=False,
+        ),
+        ToolParameter(
+            name="user_prompt",
+            type=ParameterType.STRING,
+            description="Execution prompt stored with the scheduler",
+            required=False,
+        ),
+        ToolParameter(
+            name="enabled",
+            type=ParameterType.BOOLEAN,
+            description=(
+                "Enable or disable a scheduled task. False stops it; True resumes it. "
+                "Can be used with action=update as a compatibility shortcut."
+            ),
             required=False,
         ),
     ],
@@ -475,28 +708,62 @@ async def task_status(ctx: ToolContext, task_id: str) -> ToolResult:
 async def task_update(
     ctx: ToolContext,
     task_id: str,
-    action: str,
+    action: str = "update",
     priority: Optional[str] = None,
     title: Optional[str] = None,
+    description: Optional[str] = None,
+    run_once: Optional[bool] = None,
+    run_at: Optional[str] = None,
+    cron: Optional[str] = None,
+    cron_description: Optional[str] = None,
+    timezone: Optional[str] = None,
+    user_prompt: Optional[str] = None,
+    enabled: Optional[bool] = None,
 ) -> ToolResult:
     from flocks.task.manager import TaskManager
     from flocks.task.models import TaskPriority
 
-    if action == "cancel":
+    normalized_action = (action or "update").lower()
+    if normalized_action in {"pause", "stop"}:
+        normalized_action = "disable"
+    elif normalized_action in {"resume", "start"}:
+        normalized_action = "enable"
+
+    if normalized_action == "cancel":
         task = await TaskManager.cancel_execution(task_id)
-    elif action == "pause":
-        task = await TaskManager.pause_execution(task_id)
-    elif action == "resume":
-        task = await TaskManager.resume_execution(task_id)
-    elif action == "retry":
+    elif normalized_action == "retry":
         task = await TaskManager.retry_execution(task_id)
-    elif action == "update":
+    elif normalized_action == "disable":
+        task = await TaskManager.disable_scheduler(task_id)
+    elif normalized_action == "enable":
+        task = await TaskManager.enable_scheduler(task_id)
+    elif normalized_action == "update":
         fields = {}
         if priority:
             fields["priority"] = TaskPriority(priority)
         if title:
             fields["title"] = title
-        task = await TaskManager.update_scheduler(task_id, **fields)
+        if description is not None:
+            fields["description"] = description
+        try:
+            task = await TaskManager.update_scheduler_with_trigger(
+                task_id,
+                fields=fields,
+                cron=cron,
+                timezone=timezone,
+                cron_description=cron_description,
+                run_once=run_once,
+                run_at=run_at,
+                user_prompt=user_prompt,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
+        if enabled is False:
+            task = await TaskManager.disable_scheduler(task_id) or task
+            normalized_action = "disable"
+        elif enabled is True:
+            task = await TaskManager.enable_scheduler(task_id) or task
+            normalized_action = "enable"
     else:
         return ToolResult(success=False, error=f"Unknown action: {action}")
 
@@ -506,7 +773,7 @@ async def task_update(
     return ToolResult(
         success=True,
         output=_format_task(task),
-        title=f"Task {action}d: {task.title}",
+        title=f"Task {normalized_action}d: {task.title}",
     )
 
 
@@ -546,7 +813,7 @@ async def task_delete(ctx: ToolContext, task_id: str) -> ToolResult:
 
 @ToolRegistry.register_function(
     name="task_rerun",
-    description="Rerun a task. If the task is currently running, it will be stopped and requeued.",
+    description="Rerun a task. If it is active, it will be cancelled and a new execution will be created.",
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
@@ -584,7 +851,6 @@ _STATUS_ICON = {
     "completed": "✅",
     "failed": "❌",
     "cancelled": "🚫",
-    "paused": "⏸️",
 }
 
 

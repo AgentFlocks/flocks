@@ -14,7 +14,13 @@ from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.task.executor import TaskExecutor
 from flocks.task.manager import TaskManager
-from flocks.task.models import ExecutionTriggerType, SchedulerMode, TaskStatus, TaskTrigger
+from flocks.task.models import (
+    ExecutionTriggerType,
+    SchedulerMode,
+    SchedulerStatus,
+    TaskStatus,
+    TaskTrigger,
+)
 from flocks.task.store import TaskStore
 
 
@@ -169,6 +175,101 @@ async def test_dispatch_timeout_releases_queue_for_following_execution(
 
     assert "hard timeout" in (failed.error or "")
     assert completed.result_summary == "后续任务 done"
+
+
+@pytest.mark.asyncio
+async def test_delete_scheduler_releases_claimed_queue_slot(tmp_path: Path):
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    scheduler = await TaskManager.create_scheduler(
+        title="删除释放槽位",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace-1"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+
+    manager = TaskManager.get()
+    assert manager is not None
+
+    claimed = await manager.queue.dequeue()
+
+    assert claimed is not None
+    assert claimed.id == execution.id
+    assert execution.id in manager.queue._running_ids
+
+    deleted = await TaskManager.delete_scheduler(scheduler.id)
+
+    assert deleted is True
+    assert execution.id not in manager.queue._running_ids
+    assert await TaskManager.get_execution(execution.id) is None
+    assert await TaskStore.get_queue_ref(execution.id) is None
+
+    next_scheduler = await TaskManager.create_scheduler(
+        title="后续可领取",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace-2"),
+    )
+    next_execution = await TaskManager.create_execution_from_scheduler(
+        next_scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+
+    next_claimed = await manager.queue.dequeue()
+
+    assert next_claimed is not None
+    assert next_claimed.id == next_execution.id
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_requeues_execution_instead_of_losing_queue_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    async def fake_dispatch(_execution, _scheduler):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(TaskExecutor, "dispatch", fake_dispatch)
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+
+    scheduler = await TaskManager.create_scheduler(
+        title="取消后回队",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+
+    manager = TaskManager.get()
+    assert manager is not None
+
+    claimed = await manager.queue.dequeue()
+    assert claimed is not None
+    assert claimed.id == execution.id
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager._run_execution(claimed)
+
+    refreshed = await TaskManager.get_execution(execution.id)
+    queue_ref = await TaskStore.get_queue_ref(execution.id)
+
+    assert refreshed is not None
+    assert refreshed.status == TaskStatus.QUEUED
+    assert refreshed.started_at is None
+    assert refreshed.completed_at is None
+    assert refreshed.session_id is None
+    assert queue_ref is not None
+    assert queue_ref.status == TaskStatus.QUEUED
 
 
 @pytest.mark.asyncio
@@ -376,3 +477,116 @@ async def test_standalone_legacy_migration_script_migrates_existing_tables(tmp_p
     assert execution.session_id == "ses_123"
     assert TaskManager._legacy_tables_exist() is False
     assert state_path.exists() is False
+
+
+@pytest.mark.asyncio
+async def test_standalone_legacy_migration_preserves_paused_scheduled_task_history(
+    tmp_path: Path,
+):
+    db = await TaskStore.raw_db()
+    now = datetime.now(timezone.utc)
+    created_at = (now - timedelta(minutes=5)).isoformat()
+
+    await db.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            description TEXT,
+            type TEXT,
+            status TEXT,
+            priority TEXT,
+            source TEXT,
+            schedule TEXT,
+            execution_mode TEXT,
+            agent_name TEXT,
+            workflow_id TEXT,
+            skills TEXT,
+            category TEXT,
+            context TEXT,
+            workspace_directory TEXT,
+            retry TEXT,
+            tags TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            created_by TEXT,
+            dedup_key TEXT,
+            delivery_status TEXT,
+            execution TEXT
+        );
+        CREATE TABLE task_execution_records (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            status TEXT,
+            delivery_status TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            duration_ms INTEGER,
+            session_id TEXT,
+            result_summary TEXT,
+            error TEXT
+        );
+        CREATE TABLE task_queue_refs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
+            execution_record_id TEXT,
+            status TEXT,
+            created_at TEXT,
+            started_at TEXT
+        );
+        """
+    )
+    await db.execute(
+        """
+        INSERT INTO tasks (
+            id, title, description, type, status, priority, source, schedule,
+            execution_mode, agent_name, context, workspace_directory, retry,
+            tags, created_at, updated_at, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "task_paused_sched",
+            "旧 paused 定时任务",
+            "legacy paused scheduled task",
+            "scheduled",
+            "paused",
+            "normal",
+            json.dumps({"sourceType": "scheduled_trigger"}),
+            json.dumps({"runOnce": True, "runAt": created_at, "enabled": True}),
+            "agent",
+            "rex",
+            json.dumps({}),
+            str(tmp_path / "workspace"),
+            json.dumps({"maxRetries": 0, "retryDelaySeconds": 60, "retryCount": 0}),
+            json.dumps([]),
+            created_at,
+            created_at,
+            "migration",
+        ),
+    )
+    await db.commit()
+
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "migrate_legacy_task_tables.py"
+    state_path = tmp_path / "task_migration_state.json"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(script_path),
+        "--db",
+        str(Storage.get_db_path()),
+        "--state-file",
+        str(state_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, (stdout or b"").decode() + (stderr or b"").decode()
+
+    scheduler = await TaskManager.get_scheduler("task_paused_sched")
+    execution = await TaskManager.get_execution("legacy_exec_task_paused_sched")
+
+    assert scheduler is not None
+    assert scheduler.status in (SchedulerStatus.ACTIVE, SchedulerStatus.DISABLED)
+    assert execution is not None
+    assert execution.scheduler_id == "task_paused_sched"
+    assert execution.status == TaskStatus.CANCELLED
+    assert execution.error == "Normalized from legacy paused state."

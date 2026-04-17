@@ -13,8 +13,7 @@
     "running": "运行中",
     "completed": "已完成",
     "failed": "失败",
-    "cancelled": "已取消",
-    "paused": "已暂停"
+    "cancelled": "已取消"
   },
   "priority": {
     "urgent": "紧急",
@@ -92,8 +91,6 @@
     "pagination": "共 {{total}} 条，第 {{page}}/{{totalPages}} 页",
     "detailWaiting": "等待执行中...",
     "detailNoRecord": "暂无执行记录",
-    "actionPause": "暂停",
-    "actionResume": "恢复",
     "actionCancel": "取消",
     "actionRetry": "重试",
     "actionRerun": "重跑",
