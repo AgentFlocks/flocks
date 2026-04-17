@@ -192,6 +192,10 @@ export interface Tool {
   source_name?: string;
   parameters: ToolParameter[];
   enabled: boolean;
+  /** Factory default from the YAML/registration source (no overlay applied). */
+  enabled_default?: boolean;
+  /** True when a user setting is recorded in flocks.json `tool_settings`. */
+  enabled_customized?: boolean;
   requires_confirmation: boolean;
 }
 
