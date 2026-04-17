@@ -11,6 +11,7 @@ import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
 import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
+import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 
@@ -333,6 +334,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   const { t } = useTranslation('task');
   const sessionId = task.sessionID;
   const isActive = ['queued', 'running'].includes(task.status);
+  const isWorkflowExecution = task.executionMode === 'workflow';
   const emptyText = ['pending', 'queued'].includes(task.status)
     ? t('queued.detailWaiting')
     : t('queued.detailNoRecord');
@@ -427,19 +429,384 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
           </div>
         </div>
 
-        <SessionChat
-          sessionId={sessionId}
-          live={isActive}
-          hideInput
-          emptyText={emptyText}
-          className="flex-1 min-h-0"
-          onSSEEvent={(event) => {
-            if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
-              onRefresh?.();
-            }
-          }}
-        />
+        {isWorkflowExecution ? (
+          <QueuedWorkflowDetail task={task} emptyText={emptyText} />
+        ) : (
+          <SessionChat
+            sessionId={sessionId}
+            live={isActive}
+            hideInput
+            emptyText={emptyText}
+            className="flex-1 min-h-0"
+            onSSEEvent={(event) => {
+              if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
+                onRefresh?.();
+              }
+            }}
+          />
+        )}
       </div>
     </>
   );
+}
+
+function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyText: string }) {
+  const { t } = useTranslation('task');
+  const { t: tCommon } = useTranslation('common');
+  const toast = useToast();
+  const inputPayload = getWorkflowInputPayload(task);
+  const parsedResult = parseStructuredResult(task.resultSummary);
+  const hasInputPayload = Object.keys(inputPayload).length > 0;
+  const resultText = task.resultSummary?.trim();
+  const inputText = JSON.stringify(inputPayload, null, 2);
+  const formattedResultText = parsedResult ? JSON.stringify(parsedResult, null, 2) : null;
+  const [showFormattedResult, setShowFormattedResult] = useState(false);
+  const displayedResultText = showFormattedResult && formattedResultText
+    ? formattedResultText
+    : resultText;
+
+  useEffect(() => {
+    setShowFormattedResult(false);
+  }, [task.id, task.resultSummary]);
+
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await copyText(text);
+      toast.success(tCommon('clipboard.copySuccessTitle'));
+    } catch (error) {
+      toast.error(
+        tCommon('clipboard.copyFailedTitle'),
+        error instanceof Error ? error.message : tCommon('clipboard.copyFailedDescription'),
+      );
+    }
+  }, [tCommon, toast]);
+
+  return (
+    <div className="flex-1 min-h-0 overflow-hidden">
+      <div className="h-full overflow-y-auto px-6 py-4">
+        <div className="space-y-4 pb-10">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              {t('queued.workflowId')}
+            </div>
+            <div className="mt-1 break-all font-mono text-sm text-slate-700">
+              {task.workflowID || '--'}
+            </div>
+          </div>
+
+          {hasInputPayload && (
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-gray-700">
+                  {t('queued.workflowInput')}
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => void handleCopy(inputText)}
+                  className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                >
+                  {tCommon('button.copy')}
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
+                {inputText}
+              </pre>
+            </div>
+          )}
+
+          {displayedResultText && (
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-gray-700">
+                  {t('queued.workflowResult')}
+                </h4>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopy(displayedResultText)}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                  >
+                    {tCommon('button.copy')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowFormattedResult(true)}
+                    disabled={!formattedResultText || showFormattedResult}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white disabled:hover:text-slate-600"
+                  >
+                    {t('queued.workflowJsonFormat')}
+                  </button>
+                </div>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
+                {displayedResultText}
+              </pre>
+            </div>
+          )}
+
+          {task.error && (
+            <div>
+              <h4 className="mb-2 text-sm font-semibold text-red-700">
+                {t('queued.workflowError')}
+              </h4>
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 whitespace-pre-wrap">
+                {task.error}
+              </div>
+            </div>
+          )}
+
+          {!task.error && !resultText && (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+              {emptyText}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getWorkflowInputPayload(task: TaskExecution): Record<string, unknown> {
+  const snapshot = task.executionInputSnapshot ?? {};
+  const context = snapshot.context;
+  if (context && typeof context === 'object' && !Array.isArray(context) && Object.keys(context).length > 0) {
+    return context as Record<string, unknown>;
+  }
+  return snapshot;
+}
+
+function parseStructuredResult(value?: string): unknown | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isStructuredResult(parsed) ? parsed : null;
+  } catch {
+    try {
+      const parsed = parsePythonLikeLiteral(trimmed);
+      return isStructuredResult(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function isStructuredResult(value: unknown): value is Record<string, unknown> | unknown[] {
+  return (Array.isArray(value) || (typeof value === 'object' && value !== null));
+}
+
+function parsePythonLikeLiteral(source: string): unknown {
+  let index = 0;
+
+  const skipWhitespace = () => {
+    while (index < source.length && /\s/.test(source[index])) {
+      index += 1;
+    }
+  };
+
+  const expect = (char: string) => {
+    if (source[index] !== char) {
+      throw new Error(`Expected ${char} at ${index}`);
+    }
+    index += 1;
+  };
+
+  const parseString = (): string => {
+    const quote = source[index];
+    if (quote !== '\'' && quote !== '"') {
+      throw new Error(`Expected string at ${index}`);
+    }
+    index += 1;
+    let result = '';
+    while (index < source.length) {
+      const char = source[index];
+      if (char === quote) {
+        index += 1;
+        return result;
+      }
+      if (char === '\\') {
+        index += 1;
+        if (index >= source.length) {
+          throw new Error('Unterminated escape sequence');
+        }
+        const escaped = source[index];
+        switch (escaped) {
+          case 'n': result += '\n'; break;
+          case 'r': result += '\r'; break;
+          case 't': result += '\t'; break;
+          case 'b': result += '\b'; break;
+          case 'f': result += '\f'; break;
+          case '\\': result += '\\'; break;
+          case '\'': result += '\''; break;
+          case '"': result += '"'; break;
+          case 'u': {
+            const hex = source.slice(index + 1, index + 5);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+              throw new Error(`Invalid unicode escape at ${index}`);
+            }
+            result += String.fromCharCode(parseInt(hex, 16));
+            index += 4;
+            break;
+          }
+          case 'x': {
+            const hex = source.slice(index + 1, index + 3);
+            if (!/^[0-9a-fA-F]{2}$/.test(hex)) {
+              throw new Error(`Invalid hex escape at ${index}`);
+            }
+            result += String.fromCharCode(parseInt(hex, 16));
+            index += 2;
+            break;
+          }
+          default:
+            result += escaped;
+            break;
+        }
+        index += 1;
+        continue;
+      }
+      result += char;
+      index += 1;
+    }
+    throw new Error('Unterminated string literal');
+  };
+
+  const parseNumber = (): number => {
+    const match = source.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!match) {
+      throw new Error(`Invalid number at ${index}`);
+    }
+    index += match[0].length;
+    return Number(match[0]);
+  };
+
+  const parseArray = (): unknown[] => {
+    const values: unknown[] = [];
+    expect('[');
+    skipWhitespace();
+    if (source[index] === ']') {
+      index += 1;
+      return values;
+    }
+    while (index < source.length) {
+      values.push(parseValue());
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === ']') {
+          index += 1;
+          return values;
+        }
+        continue;
+      }
+      if (source[index] === ']') {
+        index += 1;
+        return values;
+      }
+      throw new Error(`Expected , or ] at ${index}`);
+    }
+    throw new Error('Unterminated array');
+  };
+
+  const parseTuple = (): unknown[] => {
+    const values: unknown[] = [];
+    expect('(');
+    skipWhitespace();
+    if (source[index] === ')') {
+      index += 1;
+      return values;
+    }
+    while (index < source.length) {
+      values.push(parseValue());
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === ')') {
+          index += 1;
+          return values;
+        }
+        continue;
+      }
+      if (source[index] === ')') {
+        index += 1;
+        return values;
+      }
+      throw new Error(`Expected , or ) at ${index}`);
+    }
+    throw new Error('Unterminated tuple');
+  };
+
+  const parseObject = (): Record<string, unknown> => {
+    const obj: Record<string, unknown> = {};
+    expect('{');
+    skipWhitespace();
+    if (source[index] === '}') {
+      index += 1;
+      return obj;
+    }
+    while (index < source.length) {
+      const key = parseValue();
+      skipWhitespace();
+      expect(':');
+      skipWhitespace();
+      obj[String(key)] = parseValue();
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === '}') {
+          index += 1;
+          return obj;
+        }
+        continue;
+      }
+      if (source[index] === '}') {
+        index += 1;
+        return obj;
+      }
+      throw new Error(`Expected , or } at ${index}`);
+    }
+    throw new Error('Unterminated object');
+  };
+
+  const parseIdentifier = (): unknown => {
+    if (source.startsWith('True', index)) {
+      index += 4;
+      return true;
+    }
+    if (source.startsWith('False', index)) {
+      index += 5;
+      return false;
+    }
+    if (source.startsWith('None', index)) {
+      index += 4;
+      return null;
+    }
+    if (source.startsWith('null', index)) {
+      index += 4;
+      return null;
+    }
+    throw new Error(`Unexpected token at ${index}`);
+  };
+
+  const parseValue = (): unknown => {
+    skipWhitespace();
+    const char = source[index];
+    if (char === '{') return parseObject();
+    if (char === '[') return parseArray();
+    if (char === '(') return parseTuple();
+    if (char === '\'' || char === '"') return parseString();
+    if (char === '-' || /\d/.test(char)) return parseNumber();
+    return parseIdentifier();
+  };
+
+  const parsed = parseValue();
+  skipWhitespace();
+  if (index !== source.length) {
+    throw new Error(`Unexpected trailing input at ${index}`);
+  }
+  return parsed;
 }
