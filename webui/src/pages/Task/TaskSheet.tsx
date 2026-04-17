@@ -208,7 +208,7 @@ ${fields}
       if (messages.length > initialCount) {
         const lastAssistant = [...messages]
           .reverse()
-          .find((m: any) => m.role === 'assistant' && m.finish);
+          .find((m: any) => (m.info?.role ?? m.role) === 'assistant' && (m.info?.finish ?? m.finish));
 
         if (lastAssistant) {
           const text = (lastAssistant.parts ?? [])

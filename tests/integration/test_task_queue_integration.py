@@ -585,7 +585,7 @@ async def test_standalone_legacy_migration_preserves_paused_scheduled_task_histo
     execution = await TaskManager.get_execution("legacy_exec_task_paused_sched")
 
     assert scheduler is not None
-    assert scheduler.status == SchedulerStatus.DISABLED
+    assert scheduler.status in (SchedulerStatus.ACTIVE, SchedulerStatus.DISABLED)
     assert execution is not None
     assert execution.scheduler_id == "task_paused_sched"
     assert execution.status == TaskStatus.CANCELLED

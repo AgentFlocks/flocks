@@ -106,17 +106,6 @@ def _enum_value(value: Any, default: str, allowed: set[str]) -> str:
     return value_str if value_str in allowed else default
 
 
-def _normalize_execution_status(value: Any) -> str:
-    status = str(value) if value is not None else "pending"
-    if status == "paused":
-        return "cancelled"
-    return _enum_value(
-        status,
-        "pending",
-        {"pending", "queued", "running", "completed", "failed", "cancelled"},
-    )
-
-
 def _fetch_all(conn: sqlite3.Connection, sql: str) -> list[dict[str, Any]]:
     cur = conn.execute(sql)
     columns = [d[0] for d in cur.description]
@@ -265,12 +254,7 @@ def _build_scheduler_payload(row: dict[str, Any]) -> dict[str, Any]:
     }
     if row.get("type") == "scheduled":
         mode = "once" if schedule.get("run_once") or schedule.get("runOnce") else "cron"
-        status = (
-            "active"
-            if schedule.get("enabled", True)
-            and row.get("status") not in ("cancelled", "paused")
-            else "disabled"
-        )
+        status = "active" if schedule.get("enabled", True) and row.get("status") != "cancelled" else "disabled"
     else:
         mode = "once"
         status = "archived" if row.get("status") in ("completed", "failed", "cancelled") else "active"
@@ -318,7 +302,11 @@ def _build_manual_execution_payload(row: dict[str, Any]) -> dict[str, Any]:
         "priority": _enum_value(row.get("priority"), "normal", {"urgent", "high", "normal", "low"}),
         "source": json.dumps(source),
         "trigger_type": "run_once",
-        "status": _normalize_execution_status(row.get("status")),
+        "status": _enum_value(
+            row.get("status"),
+            "pending",
+            {"pending", "queued", "running", "completed", "failed", "cancelled", "paused"},
+        ),
         "delivery_status": row.get("delivery_status") or "unread",
         "queued_at": _dt_to_iso(queued_at),
         "started_at": _dt_to_iso(started_at),
@@ -326,11 +314,7 @@ def _build_manual_execution_payload(row: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": legacy_execution.get("duration_ms") or legacy_execution.get("durationMs"),
         "session_id": legacy_execution.get("session_id") or legacy_execution.get("sessionID"),
         "result_summary": legacy_execution.get("result_summary") or legacy_execution.get("resultSummary"),
-        "error": legacy_execution.get("error") or (
-            "Normalized from legacy paused state."
-            if row.get("status") == "paused"
-            else None
-        ),
+        "error": legacy_execution.get("error"),
         "execution_input_snapshot": json.dumps(
             {
                 "title": row.get("title"),
@@ -365,7 +349,11 @@ def _build_record_execution_payload(row: dict[str, Any], task_row: dict[str, Any
         "priority": _enum_value(task_row.get("priority") if task_row else None, "normal", {"urgent", "high", "normal", "low"}),
         "source": json.dumps(source or {"sourceType": "scheduled_trigger"}),
         "trigger_type": "run_once" if run_once else "scheduled",
-        "status": _normalize_execution_status(row.get("status")),
+        "status": _enum_value(
+            row.get("status"),
+            "pending",
+            {"pending", "queued", "running", "completed", "failed", "cancelled", "paused"},
+        ),
         "delivery_status": row.get("delivery_status") or "unread",
         "queued_at": _dt_to_iso(queued_at),
         "started_at": row.get("started_at"),
@@ -373,11 +361,7 @@ def _build_record_execution_payload(row: dict[str, Any], task_row: dict[str, Any
         "duration_ms": row.get("duration_ms"),
         "session_id": row.get("session_id"),
         "result_summary": row.get("result_summary"),
-        "error": row.get("error") or (
-            "Normalized from legacy paused state."
-            if row.get("status") == "paused"
-            else None
-        ),
+        "error": row.get("error"),
         "execution_input_snapshot": json.dumps(
             {
                 "title": task_row.get("title") if task_row else "",
@@ -447,8 +431,6 @@ def migrate(db_path: Path, state_path: Path | None = None) -> int:
 
         seen_queue_targets: set[str] = set()
         for row in queue_refs:
-            if row.get("status") == "paused":
-                continue
             execution_id = row.get("execution_record_id")
             if not execution_id:
                 task_row = task_map.get(row["task_id"])

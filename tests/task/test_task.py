@@ -188,6 +188,10 @@ async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path
 @pytest.mark.asyncio
 async def test_recover_orphaned_queued_execution_restores_queue_ref(tmp_path: Path):
     await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    # Pause the execution loop so it cannot race the test by claiming the
+    # execution before we manually simulate the orphan state (queued row
+    # with no queue ref).
+    TaskManager.pause_queue()
     scheduler = await TaskManager.create_scheduler(
         title="恢复孤儿排队任务",
         mode=SchedulerMode.ONCE,

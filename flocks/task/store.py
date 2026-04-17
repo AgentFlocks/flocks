@@ -583,15 +583,43 @@ class TaskStore:
             ),
         )
         claimed_at = datetime.now(timezone.utc)
-        await db.execute(
-            """
-            UPDATE task_execution_queue_refs
-            SET status = 'running', started_at = ?
-            WHERE id = ? AND status = 'queued'
-            """,
-            (claimed_at.isoformat(), queue_ref.id),
-        )
-        await db.commit()
+        claimed_iso = claimed_at.isoformat()
+        # Atomically flip both the queue ref and the execution row so the two
+        # tables can never be observed in an inconsistent state. If any step
+        # of the transaction fails we will roll back and leave the execution
+        # in `queued`, letting the next poll retry the claim.
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                """
+                UPDATE task_execution_queue_refs
+                SET status = 'running', started_at = ?
+                WHERE id = ? AND status = 'queued'
+                """,
+                (claimed_iso, queue_ref.id),
+            )
+            if cur.rowcount == 0:
+                await db.rollback()
+                return None
+            await db.execute(
+                """
+                UPDATE task_executions
+                SET status = 'running',
+                    started_at = COALESCE(started_at, ?),
+                    updated_at = ?
+                WHERE id = ?
+                  AND status IN ('pending', 'queued')
+                """,
+                (claimed_iso, claimed_iso, queue_ref.execution_id),
+            )
+            await db.commit()
+        except Exception:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            raise
+
         queue_ref.status = TaskStatus.RUNNING
         queue_ref.started_at = claimed_at
         execution_data = dict(row)
@@ -603,6 +631,12 @@ class TaskStore:
             "queue_ref_started_at",
         ):
             execution_data.pop(key, None)
+        # Reflect the atomic update in the in-memory snapshot so callers see
+        # the post-claim state (status=running, started_at=claimed_at).
+        execution_data["status"] = TaskStatus.RUNNING.value
+        if not execution_data.get("started_at"):
+            execution_data["started_at"] = claimed_iso
+        execution_data["updated_at"] = claimed_iso
         return cls._row_to_execution(execution_data), queue_ref
 
     @classmethod
@@ -911,9 +945,10 @@ class TaskStore:
         await db.execute(
             """
             DELETE FROM task_execution_queue_refs
-            WHERE execution_id IN (
-                SELECT id FROM task_executions WHERE status = 'paused'
-            )
+            WHERE status = 'paused'
+               OR execution_id IN (
+                   SELECT id FROM task_executions WHERE status = 'paused'
+               )
             """
         )
         await db.execute(
