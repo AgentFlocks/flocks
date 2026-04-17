@@ -319,6 +319,81 @@ class TestConfigWriterModelSettings:
         assert "mcp" in data
 
 
+class TestConfigWriterToolSettings:
+    """Test tool_settings section CRUD (user-level overlay for plugin tools)."""
+
+    def test_list_empty(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        assert ConfigWriter.list_tool_settings() == {}
+
+    def test_get_missing_returns_none(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        assert ConfigWriter.get_tool_setting("onesec_threat") is None
+
+    def test_set_and_get(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        entry = ConfigWriter.get_tool_setting("onesec_threat")
+        assert entry == {"enabled": False}
+        assert ConfigWriter.list_tool_settings() == {"onesec_threat": {"enabled": False}}
+
+    def test_set_merges_existing_keys(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False, "note": "x"})
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": True})
+        entry = ConfigWriter.get_tool_setting("onesec_threat")
+        assert entry == {"enabled": True, "note": "x"}
+
+    def test_delete_existing(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        assert ConfigWriter.delete_tool_setting("onesec_threat") is True
+        assert ConfigWriter.get_tool_setting("onesec_threat") is None
+        assert ConfigWriter.list_tool_settings() == {}
+
+    def test_delete_last_entry_pops_section(self, temp_project):
+        """Removing the last entry should drop ``tool_settings`` entirely."""
+        from flocks.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("a", {"enabled": False})
+        ConfigWriter.set_tool_setting("b", {"enabled": True})
+
+        ConfigWriter.delete_tool_setting("a")
+        assert "tool_settings" in ConfigWriter._read_raw()
+
+        ConfigWriter.delete_tool_setting("b")
+        assert "tool_settings" not in ConfigWriter._read_raw()
+
+    def test_delete_missing_returns_false(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        assert ConfigWriter.delete_tool_setting("not_set") is False
+
+    def test_set_empty_name_raises(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        with pytest.raises(ValueError):
+            ConfigWriter.set_tool_setting("", {"enabled": True})
+
+    def test_preserves_other_sections(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        data = ConfigWriter._read_raw()
+        assert "provider" in data
+        assert "anthropic" in data["provider"]
+        assert data["tool_settings"]["onesec_threat"]["enabled"] is False
+
+    def test_corrupt_settings_section_treated_as_empty(self, temp_project):
+        """If tool_settings is somehow not a dict, the API should not crash."""
+        import json as _json
+        from flocks.config.config import Config
+        cfg_path = Config.get_config_file()
+        data = _json.loads(cfg_path.read_text())
+        data["tool_settings"] = "garbage"
+        cfg_path.write_text(_json.dumps(data))
+
+        from flocks.config.config_writer import ConfigWriter
+        assert ConfigWriter.list_tool_settings() == {}
+        assert ConfigWriter.get_tool_setting("anything") is None
+
+
 class TestConfigWriterDefaultModels:
     """Test default_models section CRUD."""
 
