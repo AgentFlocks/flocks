@@ -794,10 +794,16 @@ class ToolRegistry:
         :meth:`_sync_api_service_states` and :meth:`_apply_tool_overrides`
         run so the snapshot reflects the YAML/registration defaults
         rather than the post-sync state.
+
+        Uses ``setdefault`` so that a ``refresh_plugin_tools`` cycle does
+        NOT overwrite snapshot entries for tools that were not reloaded
+        (e.g. built-in tools).  Without this, the stale in-memory
+        ``info.enabled`` (which may already reflect an overlay) would be
+        captured as the new "default", making ``reset_tool_override``
+        return the wrong value.
         """
-        cls._enabled_defaults = {
-            name: bool(t.info.enabled) for name, t in cls._tools.items()
-        }
+        for name, t in cls._tools.items():
+            cls._enabled_defaults.setdefault(name, bool(t.info.enabled))
 
     @classmethod
     def get_default_enabled(cls, name: str) -> Optional[bool]:

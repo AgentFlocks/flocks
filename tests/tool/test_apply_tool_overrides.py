@@ -222,3 +222,28 @@ def test_snapshot_captures_yaml_default_before_sync(temp_config, isolated_regist
 
 def test_get_default_enabled_returns_none_for_unknown(temp_config, isolated_registry):
     assert ToolRegistry.get_default_enabled("never_seen") is None
+
+
+def test_snapshot_preserves_builtin_default_on_refresh(temp_config, isolated_registry):
+    """Regression: refresh_plugin_tools must NOT overwrite the snapshot of
+    builtin tools whose info.enabled was already mutated by a previous
+    overlay application.
+    """
+    from flocks.config.config_writer import ConfigWriter
+
+    builtin = _stub_tool("builtin_thing", enabled=True)
+    ToolRegistry._tools[builtin.info.name] = builtin
+    ToolRegistry._snapshot_enabled_defaults()
+    assert ToolRegistry.get_default_enabled("builtin_thing") is True
+
+    ConfigWriter.set_tool_override("builtin_thing", {"enabled": False})
+    ToolRegistry._apply_tool_overrides()
+    assert builtin.info.enabled is False
+
+    # Simulate what refresh_plugin_tools does: snapshot again.
+    # The snapshot must NOT pick up the overlay-mutated value.
+    ToolRegistry._snapshot_enabled_defaults()
+    assert ToolRegistry.get_default_enabled("builtin_thing") is True, (
+        "snapshot must use setdefault so a refresh cycle does not overwrite "
+        "the original default with the overlay-mutated value"
+    )
