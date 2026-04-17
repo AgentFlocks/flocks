@@ -31,6 +31,7 @@ class _FakeProvider:
         self._configured = configured
         self._models = models or []
         self.calls = 0
+        self.close_calls = 0
         self.last_config = None
 
     def configure(self, cfg):  # pragma: no cover
@@ -57,6 +58,9 @@ class _FakeProvider:
             await asyncio.sleep(0.05)
             return _FakeResponse("late")
         return _FakeResponse(f"{self.id}:{model_id}")
+
+    async def _close_client_safely(self):
+        self.close_calls += 1
 
 
 def _patch_provider(monkeypatch, providers: dict[str, _FakeProvider]):
@@ -101,6 +105,7 @@ def test_llm_ask_uses_provider_chat(monkeypatch):
 
     assert out == "demo:m"
     assert provider.calls == 1
+    assert provider.close_calls == 1
 
 
 def test_llm_keeps_trust_env_from_workflow_config(monkeypatch):
@@ -197,6 +202,8 @@ def test_llm_falls_back_to_default_when_requested_call_fails(monkeypatch):
     assert out == "fallback:fallback-model"
     assert requested.calls == 1
     assert fallback.calls == 1
+    assert requested.close_calls == 1
+    assert fallback.close_calls == 1
 
 
 def test_llm_retries_then_succeeds(monkeypatch):
@@ -208,6 +215,7 @@ def test_llm_retries_then_succeeds(monkeypatch):
 
     assert out == "demo:m"
     assert provider.calls == 3
+    assert provider.close_calls == 3
 
 
 def test_llm_timeout_retries_then_raises(monkeypatch):
@@ -219,6 +227,7 @@ def test_llm_timeout_retries_then_raises(monkeypatch):
         client.ask("hello", timeout_s=0.01, max_retries=2, retry_delay_s=0)
 
     assert provider.calls == 3
+    assert provider.close_calls == 3
 
 
 def test_llm_raises_clear_error_when_default_is_unavailable(monkeypatch):
@@ -257,4 +266,29 @@ def test_get_llm_client_does_not_stick_to_old_default(monkeypatch):
 
     assert out1 == "first:first-model"
     assert out2 == "second:second-model"
+
+
+def test_llm_cleanup_does_not_emit_loop_closed_noise_on_success(monkeypatch, capsys):
+    provider = _FakeProvider("demo", "ok", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    assert client.ask("hello") == "demo:m"
+
+    captured = capsys.readouterr()
+    assert provider.close_calls == 1
+    assert "Event loop is closed" not in captured.err
+
+
+def test_llm_cleanup_does_not_emit_loop_closed_noise_on_error(monkeypatch, capsys):
+    provider = _FakeProvider("demo", "error", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError, match="Workflow 默认模型不可用"):
+        client.ask("hello")
+
+    captured = capsys.readouterr()
+    assert provider.close_calls == 1
+    assert "Event loop is closed" not in captured.err
 

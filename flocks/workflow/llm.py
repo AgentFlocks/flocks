@@ -300,14 +300,26 @@ class LLMClient:
             provider = self._prepare_provider(target.provider_id)
 
             async def _call():
-                coro = provider.chat(
-                    model_id=target.model_id,
-                    messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
-                    temperature=temperature,
-                )
-                if timeout_s is not None and float(timeout_s) > 0:
-                    return await asyncio.wait_for(coro, timeout=float(timeout_s))
-                return await coro
+                try:
+                    coro = provider.chat(
+                        model_id=target.model_id,
+                        messages=[ChatMessage(role="user", content=prompt + "请使用中文输出。")],
+                        temperature=temperature,
+                    )
+                    if timeout_s is not None and float(timeout_s) > 0:
+                        return await asyncio.wait_for(coro, timeout=float(timeout_s))
+                    return await coro
+                finally:
+                    close_method = getattr(provider, "_close_client_safely", None)
+                    if close_method is not None:
+                        try:
+                            await close_method()
+                        except Exception:
+                            pass
+                    try:
+                        await asyncio.sleep(0)
+                    except Exception:
+                        pass
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):
