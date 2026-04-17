@@ -122,6 +122,9 @@ webui/.env.production.local
 webui/.vite/deps/_metadata.json
 .vite
 
+# Windows packaging outputs
+packaging/windows/Output/
+
 .flocks/.storage_migrated
 artifacts/
 prompt.txt

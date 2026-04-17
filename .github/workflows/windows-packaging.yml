@@ -1,4 +1,4 @@
-name: Windows packaging (Tier B staging)
+name: Windows packaging (installer)
 
 on:
   workflow_dispatch:
@@ -6,35 +6,42 @@ on:
     paths:
       - "packaging/windows/**"
       - "scripts/install.ps1"
+      - "scripts/install_zh.ps1"
       - "scripts/bootstrap-windows.ps1"
       - "flocks/cli/service_manager.py"
       - ".github/workflows/windows-packaging.yml"
+      - ".github/workflows/windows-packaging-release.yml"
 
 permissions:
   contents: read
 
 jobs:
-  staging:
+  installer:
     runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build staging directory
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build installer
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP "flocks-staging"
-          & "${{ github.workspace }}/packaging/windows/build-staging.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
-          $zip = Join-Path $env:RUNNER_TEMP "flocks-windows-staging.zip"
-          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
-          "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "${{ github.workspace }}/packaging/windows/build-installer.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
+          $exe = Join-Path "${{ github.workspace }}" "packaging/windows/Output/FlocksSetup.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Installer not found: $exe"
+          }
+          Copy-Item -Path $exe -Destination (Join-Path $env:RUNNER_TEMP "FlocksSetup.exe") -Force
 
-      - name: Upload staging artifact
+      - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flocks-windows-staging
-          path: ${{ runner.temp }}/flocks-windows-staging.zip
+          name: flocks-windows-installer
+          path: ${{ runner.temp }}/FlocksSetup.exe
           if-no-files-found: error
-          # GitHub caps retention by plan; explicit max avoids surprises. For permanent
-          # downloads use a GitHub Release (see packaging/windows/DOWNLOAD-HOSTING.txt).
           retention-days: 90

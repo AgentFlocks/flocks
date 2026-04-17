@@ -29,7 +29,7 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
 def test_powershell_installer_prefers_explicit_browser_configuration() -> None:
     script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
 
-    assert "Find-BundledChromePath" in script
+    assert "Resolve-BundledChromePath" in script
     assert "flocks-bundled-chrome.exe.relative.txt" in script
     assert "Find-SystemBrowserPath" in script
     assert "AGENT_BROWSER_EXECUTABLE_PATH" in script

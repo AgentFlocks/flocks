@@ -1,7 +1,6 @@
-# Build Tier-B staging zip and attach it to the GitHub Release for the pushed tag.
-# Long-term download: use Release assets (not Actions artifacts). Push tag v* after creating a Release, or let softprops create the release.
+# Build the Windows installer and attach it to the GitHub Release for the pushed tag.
 
-name: Windows packaging — release asset
+name: Windows packaging — release installer
 
 on:
   push:
@@ -18,21 +17,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build staging zip
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build installer
         id: pack
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP "flocks-staging"
-          & "${{ github.workspace }}/packaging/windows/build-staging.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
-          $name = "flocks-windows-staging-${{ github.ref_name }}.zip"
-          $zip = Join-Path $env:RUNNER_TEMP $name
-          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
-          Add-Content -Path $env:GITHUB_OUTPUT -Value "zip_path=$zip" -Encoding utf8NoBOM
+          & "${{ github.workspace }}/packaging/windows/build-installer.ps1" -OutputDir $out -RepoRoot "${{ github.workspace }}"
+          $builtInstaller = Join-Path "${{ github.workspace }}" "packaging/windows/Output/FlocksSetup.exe"
+          if (-not (Test-Path $builtInstaller)) {
+            throw "Installer not found: $builtInstaller"
+          }
+          $name = "FlocksSetup-${{ github.ref_name }}.exe"
+          $installer = Join-Path $env:RUNNER_TEMP $name
+          Copy-Item -Path $builtInstaller -Destination $installer -Force
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "installer_path=$installer" -Encoding utf8NoBOM
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.pack.outputs.zip_path }}
+          files: ${{ steps.pack.outputs.installer_path }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

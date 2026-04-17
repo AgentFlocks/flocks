@@ -1,4 +1,4 @@
-# Tier-B / bundled-toolchain bootstrap: run after copying staging (tools\ + flocks\) to the target machine.
+﻿# Tier-B / bundled-toolchain bootstrap: run after copying staging (tools\ + flocks\) to the target machine.
 # Requires FLOCKS_INSTALL_ROOT (or -InstallRoot) pointing at the directory that contains tools\ and flocks\.
 #
 # Example (installer post-install or manual):
@@ -21,8 +21,20 @@ if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
 
 $InstallRoot = $InstallRoot.TrimEnd('\', '/')
 $env:FLOCKS_INSTALL_ROOT = $InstallRoot
+$env:FLOCKS_REPO_ROOT = (Join-Path $InstallRoot "flocks")
+$env:FLOCKS_SKIP_ADMIN_CHECK = "1"
 
-$installer = Join-Path $InstallRoot "flocks\scripts\install.ps1"
+if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_LANGUAGE)) {
+    $env:FLOCKS_INSTALL_LANGUAGE = "zh-CN"
+}
+if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) {
+    $env:FLOCKS_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
+}
+if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
+    $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
+}
+
+$installer = Join-Path $InstallRoot "flocks\scripts\install_zh.ps1"
 if (-not (Test-Path $installer)) {
     Write-Host "[flocks-bootstrap] error: installer not found: $installer" -ForegroundColor Red
     exit 1
