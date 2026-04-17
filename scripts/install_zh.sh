@@ -19,6 +19,7 @@ Flocks 中国用户源码安装脚本。
   PyPI: https://mirrors.aliyun.com/pypi/simple
   npm : https://registry.npmmirror.com/
   uv  : https://astral.org.cn/uv/install.sh
+  nvm : https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh
   uv 备用源: https://uv.agentsmirror.com/install-cn.sh
 
 一键安装入口：
@@ -42,6 +43,7 @@ configure_cn_environment() {
   export FLOCKS_UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-https://uv.agentsmirror.com/install-cn.sh}"
   export FLOCKS_UV_INSTALL_PS1_URL="${FLOCKS_UV_INSTALL_PS1_URL:-https://astral.org.cn/uv/install.ps1}"
   export FLOCKS_NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmmirror.com/}"
+  export FLOCKS_NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh}"
   export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
   export FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/zh-cn/download}"
 }
