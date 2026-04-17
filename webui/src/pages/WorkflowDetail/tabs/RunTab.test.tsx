@@ -26,7 +26,11 @@ vi.mock('@/api/workflow', () => ({
 }));
 
 vi.mock('@/components/common/CopyButton', () => ({
-  default: () => null,
+  default: ({ text }: { text: string }) => (
+    <button type="button" data-testid="copy-button" aria-label={`copy:${text}`}>
+      copy
+    </button>
+  ),
 }));
 
 vi.mock('@/components/common/WorkflowStatusBadge', () => ({
@@ -201,6 +205,27 @@ describe('RunTab', () => {
     await waitFor(() => {
       expect(workflowAPI.saveSampleInputs).toHaveBeenCalledWith('wf-1', { topic: 'saved' });
       expect(workflowAPI.run).toHaveBeenCalledWith('wf-1', { inputs: { topic: 'saved' } });
+    });
+  });
+
+  it('shows a copy button when output results are available', async () => {
+    render(
+      <ControlledRunTab
+        initialExecution={{
+          id: 'exec-output',
+          workflowId: 'wf-1',
+          inputParams: { topic: 'demo' },
+          outputResults: { result: 'ok' },
+          status: 'success',
+          startedAt: Date.now(),
+          executionLog: [],
+        }}
+      />
+    );
+
+    await waitFor(() => {
+      const copyButtons = screen.getAllByTestId('copy-button');
+      expect(copyButtons.some((button) => button.getAttribute('aria-label') === 'copy:{\n  "result": "ok"\n}')).toBe(true);
     });
   });
 

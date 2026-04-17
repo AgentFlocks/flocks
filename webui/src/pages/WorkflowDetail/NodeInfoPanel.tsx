@@ -6,6 +6,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
+import CopyButton from '@/components/common/CopyButton';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -296,13 +297,17 @@ function RuntimeJsonBlock({ label, value, tone }: {
   tone: 'amber' | 'green';
 }) {
   const bgClass = tone === 'amber' ? 'bg-amber-50 border-amber-100 text-amber-900' : 'bg-green-50 border-green-100 text-green-900';
+  const formattedValue = JSON.stringify(value, null, 2);
 
   return (
     <div className="space-y-1.5">
-      <FL>{label}</FL>
+      <div className="flex items-center justify-between gap-2">
+        <FL>{label}</FL>
+        <CopyButton text={formattedValue} size="w-3 h-3" />
+      </div>
       <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
         <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
-          {JSON.stringify(value, null, 2)}
+          {formattedValue}
         </pre>
       </div>
     </div>

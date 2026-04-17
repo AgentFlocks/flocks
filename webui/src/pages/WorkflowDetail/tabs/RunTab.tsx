@@ -429,13 +429,19 @@ function TestSection({
 
               {execution.outputResults && (
                 <div>
-                  <button
-                    onClick={() => setOutputExpanded(v => !v)}
-                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 transition-colors"
-                  >
-                    <span className="text-xs font-medium text-gray-600">{t('detail.run.outputResults')}</span>
-                    {outputExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
-                  </button>
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-gray-50 transition-colors">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs font-medium text-gray-600">{t('detail.run.outputResults')}</span>
+                      <CopyButton text={JSON.stringify(execution.outputResults, null, 2)} size="w-3 h-3" />
+                    </div>
+                    <button
+                      onClick={() => setOutputExpanded(v => !v)}
+                      className="flex items-center rounded p-0.5 hover:bg-gray-100"
+                      aria-label={t('detail.run.outputResults')}
+                    >
+                      {outputExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
+                    </button>
+                  </div>
                   {outputExpanded && (
                     <div className="bg-gray-900 px-3 py-2 max-h-48 overflow-y-auto">
                       <pre className="text-xs text-green-300 font-mono whitespace-pre-wrap">

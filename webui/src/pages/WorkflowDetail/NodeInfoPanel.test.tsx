@@ -20,6 +20,14 @@ vi.mock('@/api/workflow', async () => {
   };
 });
 
+vi.mock('@/components/common/CopyButton', () => ({
+  default: ({ text }: { text: string }) => (
+    <button type="button" data-testid="copy-button" aria-label={`copy:${text}`}>
+      copy
+    </button>
+  ),
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
@@ -149,6 +157,10 @@ describe('NodeInfoPanel', () => {
     expect(screen.getByText('真实输出')).toBeInTheDocument();
     expect(screen.getByDisplayValue(/demo.local/)).toBeInTheDocument();
     expect(screen.getByText(/"result": "ok"/)).toBeInTheDocument();
+    const copyButtons = screen.getAllByTestId('copy-button');
+    expect(copyButtons).toHaveLength(2);
+    expect(copyButtons[0]).toHaveAttribute('aria-label', 'copy:{\n  "host": "demo.local"\n}');
+    expect(copyButtons[1]).toHaveAttribute('aria-label', 'copy:{\n  "result": "ok"\n}');
   });
 
   it('shows empty runtime hint when there is no latest execution', () => {
