@@ -415,17 +415,6 @@ class OpenAIBaseProvider(BaseProvider):
             )
         return self._client
 
-    async def _close_client_safely(self) -> None:
-        """Close the cached AsyncOpenAI client on the active event loop."""
-        client = self._client
-        if client is None:
-            return
-        self._client = None
-        try:
-            await client.close()
-        except Exception:
-            pass
-
     # ==================== Catalog Integration ====================
 
     def get_meta(self):
