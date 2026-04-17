@@ -816,25 +816,33 @@ class ToolRegistry:
         """Idempotent safety-net for the ``_enabled_defaults`` snapshot.
 
         The *primary* write path is :meth:`register` (see comment on
-        ``_enabled_defaults``).  This method exists only as a defensive
-        backstop for:
+        ``_enabled_defaults``); refresh paths keep the snapshot fresh via
+        :meth:`_unregister_plugin_tools` / :meth:`_unregister_dynamic_tools`
+        popping the entry and the subsequent ``register`` call overwriting
+        it.  This method exists only as a defensive backstop for:
 
         - Tests that bypass :meth:`register` by poking at ``_tools``
           directly (``tests/tool/test_apply_tool_settings.py`` uses this
           to stage stub tools without invoking catalog-defaults logic).
         - Any future registration path that inserts into ``_tools``
-          outside :meth:`register` — we'd rather notice a stale snapshot
-          here than hand out a bogus ``enabled_default`` via the API.
+          outside :meth:`register` — we'd rather have a best-effort
+          factory value in the snapshot than hand out ``None`` via the
+          HTTP API.
 
-        It runs at the end of :meth:`_load_plugin_tools` where no
-        mutation of ``tool.info.enabled`` has occurred yet
-        (``_sync_api_service_states`` and ``_apply_tool_settings`` run
-        *after* this), so the read is still a factory value.  Direct
-        assignment is used so that a YAML upgrade that changed
-        ``enabled:`` is picked up even on the snapshot-only path.
+        ``setdefault`` is deliberate: this method is called at the end of
+        :meth:`_load_plugin_tools`, which in turn runs on every
+        :meth:`refresh_plugin_tools` cycle.  On the *second* and later
+        cycles any built-in / previously-registered tool's
+        ``info.enabled`` has already been mutated by the prior run's
+        :meth:`_sync_api_service_states` / :meth:`_apply_tool_settings`,
+        so a direct assignment here would overwrite the true factory
+        default with the post-sync state.  Since :meth:`register` is the
+        authoritative writer for anything that actually goes through it,
+        a ``setdefault`` here only fills in genuinely missing entries and
+        leaves correct snapshots untouched.
         """
         for name, t in cls._tools.items():
-            cls._enabled_defaults[name] = bool(t.info.enabled)
+            cls._enabled_defaults.setdefault(name, bool(t.info.enabled))
 
     @classmethod
     def get_default_enabled(cls, name: str) -> Optional[bool]:
@@ -1254,6 +1262,14 @@ class ToolRegistry:
             return
         for tool_name in old_tools:
             cls._tools.pop(tool_name, None)
+            # Mirror ``_unregister_plugin_tools``: the factory-default
+            # snapshot lives in lock-step with ``_tools``.  Reload of the
+            # same module re-registers via ``register()`` which overwrites
+            # the entry, but when a dynamic module is deleted entirely
+            # (the ``module_name not in modules`` branch of
+            # ``_register_dynamic_tools``) nothing re-adds it, so without
+            # this pop a stale factory default would linger forever.
+            cls._enabled_defaults.pop(tool_name, None)
         log.info("tool.dynamic.unregistered", {
             "module": module_name,
             "tools": old_tools,

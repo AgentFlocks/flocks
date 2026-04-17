@@ -48,17 +48,25 @@ def temp_config(tmp_path, monkeypatch):
 
 @pytest.fixture
 def isolated_registry(monkeypatch):
-    """Replace the registry's tool dict + defaults snapshot with a known set."""
+    """Replace the registry's tool dict + defaults snapshot with a known set.
+
+    Also shadows ``_plugin_tool_names`` and ``_dynamic_tools_by_module``
+    so tests exercising the unregister paths can't leak names into the
+    real registry when the test process later runs unrelated tests.
+    """
     saved_tools = dict(ToolRegistry._tools)
     saved_defaults = dict(ToolRegistry._enabled_defaults)
     saved_plugin_names = list(ToolRegistry._plugin_tool_names)
+    saved_dynamic = dict(ToolRegistry._dynamic_tools_by_module)
     monkeypatch.setattr(ToolRegistry, "_tools", {})
     monkeypatch.setattr(ToolRegistry, "_enabled_defaults", {})
     monkeypatch.setattr(ToolRegistry, "_plugin_tool_names", [])
+    monkeypatch.setattr(ToolRegistry, "_dynamic_tools_by_module", {})
     yield
     ToolRegistry._tools = saved_tools
     ToolRegistry._enabled_defaults = saved_defaults
     ToolRegistry._plugin_tool_names = saved_plugin_names
+    ToolRegistry._dynamic_tools_by_module = saved_dynamic
 
 
 def _set_api_service(name: str, *, enabled: bool) -> None:
@@ -327,16 +335,77 @@ def test_refresh_cycle_picks_up_new_yaml_default(temp_config, isolated_registry)
     )
 
 
-def test_snapshot_defaults_safety_net_uses_assignment(temp_config, isolated_registry):
-    """``_snapshot_enabled_defaults`` is a backstop for code paths that
-    insert into ``_tools`` without going through :meth:`register`.  It
-    must use direct assignment (not ``setdefault``) so a stale entry
-    from a previous cycle is corrected rather than kept.
+def test_snapshot_safety_net_does_not_clobber_post_sync_state(temp_config, isolated_registry):
+    """``_snapshot_enabled_defaults`` runs at the tail of every
+    ``_load_plugin_tools`` cycle — including the ones triggered by
+    :meth:`refresh_plugin_tools`.  By the time the *second* cycle
+    reaches it, the previous cycle's :meth:`_sync_api_service_states`
+    has already flipped ``info.enabled`` on any built-in / previously
+    registered tool whose API service is disabled.
+
+    If the safety net overwrote with direct assignment it would capture
+    that post-sync ``False`` as the "factory default", breaking
+    :meth:`reset_tool_setting` and ``enabled_default`` reporting for
+    every built-in API tool whose provider happens to be disabled.  The
+    contract is therefore: :meth:`register` is the authoritative writer,
+    the safety net must only fill genuine gaps (``setdefault``), and
+    must never clobber a correct snapshot.
+    """
+    tool = _stub_api_tool("onesec_threat", enabled=True, provider="onesec_api")
+    ToolRegistry.register(tool)
+    assert ToolRegistry.get_default_enabled("onesec_threat") is True
+
+    # Simulate the first init-style sequence: service sync flips live state.
+    _set_api_service("onesec_api", enabled=False)
+    ToolRegistry._sync_api_service_states()
+    assert tool.info.enabled is False
+
+    # And now the refresh-style tail call runs again.  It must not turn
+    # the snapshot into a mirror of the post-sync (False) state.
+    ToolRegistry._snapshot_enabled_defaults()
+
+    assert ToolRegistry.get_default_enabled("onesec_threat") is True, (
+        "safety net must never overwrite a correct factory-default "
+        "snapshot with the post-sync live state"
+    )
+
+
+def test_snapshot_safety_net_fills_missing_entry(temp_config, isolated_registry):
+    """For tools that landed in ``_tools`` without going through
+    :meth:`register` (exclusively a test / unorthodox code path) the
+    safety net is still expected to insert a best-effort factory
+    default so ``enabled_default`` doesn't come back as ``None``.
     """
     tool = _stub_tool("plugin_thing", enabled=True)
     ToolRegistry._tools[tool.info.name] = tool
-    ToolRegistry._enabled_defaults["plugin_thing"] = False  # stale entry
+    assert ToolRegistry.get_default_enabled("plugin_thing") is None
 
     ToolRegistry._snapshot_enabled_defaults()
 
     assert ToolRegistry.get_default_enabled("plugin_thing") is True
+
+
+def test_unregister_dynamic_tools_drops_enabled_default(temp_config, isolated_registry):
+    """Dynamic tools go through a different unregister path
+    (:meth:`_unregister_dynamic_tools`) than plugin tools.  When a
+    dynamic module is deleted — the ``module_name not in modules``
+    branch of :meth:`_register_dynamic_tools` — the tool vanishes
+    from ``_tools`` for good, so the matching factory-default snapshot
+    must be popped too.  Otherwise ``enabled_default`` would keep
+    reporting a stale value for a tool that no longer exists.
+    """
+    tool = _stub_tool("dyn_thing", enabled=True)
+    ToolRegistry.register(tool)
+    ToolRegistry._dynamic_tools_by_module["dyn_module"] = ["dyn_thing"]
+    assert ToolRegistry.get_default_enabled("dyn_thing") is True
+
+    try:
+        ToolRegistry._unregister_dynamic_tools("dyn_module")
+    finally:
+        ToolRegistry._dynamic_tools_by_module.pop("dyn_module", None)
+
+    assert "dyn_thing" not in ToolRegistry._tools
+    assert ToolRegistry.get_default_enabled("dyn_thing") is None, (
+        "_unregister_dynamic_tools must pop the snapshot entry to keep "
+        "the factory-default lifecycle symmetric with plugin tools"
+    )
