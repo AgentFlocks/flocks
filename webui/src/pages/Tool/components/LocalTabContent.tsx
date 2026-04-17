@@ -115,6 +115,19 @@ export default function LocalTabContent({
                     <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${statusBadgeClass}`}>
                       {statusLabel}
                     </span>
+                    {tool.enabled_overridden && (
+                      <span
+                        title={t('toolDetail.overrideTooltip', {
+                          defaultValue: '当前状态来自用户覆盖，YAML 默认值为 {{def}}',
+                          def: (tool.enabled_default ?? tool.enabled)
+                            ? t('enabledBadge.enabled')
+                            : t('enabledBadge.disabled'),
+                        })}
+                        className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-xs font-medium rounded-full shrink-0"
+                      >
+                        {t('toolDetail.overridden', { defaultValue: '已自定义' })}
+                      </span>
+                    )}
                     <span className="px-1.5 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full shrink-0">
                       {t('source.local')}
                     </span>

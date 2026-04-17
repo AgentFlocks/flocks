@@ -314,7 +314,11 @@
     "execSuccess": "执行成功",
     "execFailed": "执行失败",
     "close": "关闭",
-    "testTool": "测试工具"
+    "testTool": "测试工具",
+    "overridden": "已自定义",
+    "overrideTooltip": "当前状态来自用户覆盖，YAML 默认值为 {{def}}",
+    "resetOverride": "恢复默认",
+    "resetting": "重置中…"
   },
 
   "statusBadge": {

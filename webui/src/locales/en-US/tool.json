@@ -314,7 +314,11 @@
     "execSuccess": "Execution Successful",
     "execFailed": "Execution Failed",
     "close": "Close",
-    "testTool": "Test Tool"
+    "testTool": "Test Tool",
+    "overridden": "Customized",
+    "overrideTooltip": "Current state comes from a user override; YAML default is {{def}}",
+    "resetOverride": "Reset to default",
+    "resetting": "Resetting…"
   },
 
   "statusBadge": {

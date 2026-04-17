@@ -407,6 +407,15 @@ class ToolRegistry:
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
 
+    # Snapshot of every tool's registration-time ``enabled`` flag — taken
+    # after :meth:`_load_plugin_tools` finishes loading but BEFORE
+    # ``_sync_api_service_states`` / ``_apply_tool_overrides`` mutate
+    # ``tool.info.enabled`` in place.  This is the source of truth for the
+    # "factory default" surfaced in the HTTP API and used by
+    # :func:`reset_tool_override` to recover the original value for tools
+    # that don't have a YAML file (built-in / plugin_py).
+    _enabled_defaults: Dict[str, bool] = {}
+
     @classmethod
     def register(cls, tool: Tool) -> None:
         """Register a tool"""
@@ -689,7 +698,11 @@ class ToolRegistry:
                 tool.info.source = "plugin_py"
         cls._plugin_tool_names = new_plugin_tools
         cls._bootstrap_user_api_services()
+        # Snapshot defaults BEFORE any in-place mutation so the "factory
+        # default" is preserved even after sync/overlay run.
+        cls._snapshot_enabled_defaults()
         cls._sync_api_service_states()
+        cls._apply_tool_overrides()
 
     @classmethod
     def _bootstrap_user_api_services(cls) -> None:
@@ -771,6 +784,88 @@ class ToolRegistry:
             log.info("tool_registry.api_service_sync", {
                 "disabled_tools": disabled_count,
                 "disabled_providers": disabled_providers,
+            })
+
+    @classmethod
+    def _snapshot_enabled_defaults(cls) -> None:
+        """Capture the registration-time ``enabled`` flag of every tool.
+
+        Called once per :meth:`_load_plugin_tools` cycle, before
+        :meth:`_sync_api_service_states` and :meth:`_apply_tool_overrides`
+        run so the snapshot reflects the YAML/registration defaults
+        rather than the post-sync state.
+        """
+        cls._enabled_defaults = {
+            name: bool(t.info.enabled) for name, t in cls._tools.items()
+        }
+
+    @classmethod
+    def get_default_enabled(cls, name: str) -> Optional[bool]:
+        """Return the YAML/registration default ``enabled`` for ``name``.
+
+        Returns ``None`` if the tool was never seen during plugin loading
+        (e.g. dynamic tools registered after init).  Callers should fall
+        back to the live ``ToolInfo.enabled`` in that case.
+        """
+        return cls._enabled_defaults.get(name)
+
+    @classmethod
+    def _apply_tool_overrides(cls) -> None:
+        """Apply user-level ``tool_overrides`` from flocks.json on top of YAML defaults.
+
+        The YAML file is treated as the factory default; the overlay in
+        ``flocks.json`` (``tool_overrides[<tool_name>]``) is the user's
+        current choice and is applied last.
+
+        Service gate: an overlay can NEVER enable a tool whose API service
+        is currently ``enabled: false`` in ``api_services``.  Without this
+        gate ``ToolRegistry.execute`` (which only checks
+        ``tool.info.enabled``) would happily run a tool whose service has
+        no credentials configured, producing repeated auth failures and
+        eventually triggering the auto-disable threshold in
+        :meth:`_record_failure`.
+
+        An overlay can always *disable* a tool, regardless of service
+        state.
+        """
+        try:
+            from flocks.config.config_writer import ConfigWriter
+            overrides = ConfigWriter.list_tool_overrides()
+            api_services = ConfigWriter.list_api_services_raw()
+        except Exception:
+            return
+
+        applied = 0
+        unknown: List[str] = []
+        blocked: List[str] = []
+        for name, ov in overrides.items():
+            if not isinstance(ov, dict):
+                continue
+            tool = cls._tools.get(name)
+            if tool is None:
+                unknown.append(name)
+                continue
+            if "enabled" not in ov:
+                continue
+
+            desired = bool(ov["enabled"])
+            if desired and tool.info.provider:
+                svc = api_services.get(tool.info.provider, {})
+                if not svc.get("enabled", False):
+                    # Service disabled — refuse to "open" the tool via overlay.
+                    # The overlay entry stays in flocks.json so that re-enabling
+                    # the service later restores the user's intent automatically.
+                    blocked.append(name)
+                    continue
+
+            tool.info.enabled = desired
+            applied += 1
+
+        if applied or unknown or blocked:
+            log.info("tool_registry.tool_overrides_applied", {
+                "applied": applied,
+                "stale": unknown,
+                "blocked_by_service": blocked,
             })
 
     @classmethod

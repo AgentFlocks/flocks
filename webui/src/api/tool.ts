@@ -33,6 +33,13 @@ export const toolAPI = {
   setEnabled: (name: string, enabled: boolean) =>
     client.patch<Tool>(`/api/tools/${name}`, { enabled }),
 
+  /**
+   * Remove the user-level override and restore the YAML/registration default
+   * for this tool (currently only the `enabled` flag is overlaid).
+   */
+  resetOverride: (name: string) =>
+    client.post<Tool>(`/api/tools/${name}/override/reset`),
+
   delete: (name: string) =>
     client.delete<{ status: string; message: string }>(`/api/tools/${name}`),
 };

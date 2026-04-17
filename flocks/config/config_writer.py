@@ -526,6 +526,86 @@ class ConfigWriter:
         return True
 
     # ------------------------------------------------------------------
+    # Tool overrides  (tool_overrides section)
+    # ------------------------------------------------------------------
+    #
+    # User-level overlay for per-tool settings (currently: ``enabled``).
+    #
+    # Why this exists:  YAML plugin tool files under
+    # ``<project>/.flocks/plugins/tools/`` are tracked by git and may be
+    # overwritten on upgrade.  Writing a user toggle (e.g. enable/disable)
+    # back into the YAML pollutes git diffs and breaks upgrades.  We keep
+    # the YAML as "factory defaults" and store the user's choice in
+    # ``flocks.json`` instead.
+    #
+    # The same overlay applies uniformly to user-level YAML files under
+    # ``~/.flocks/plugins/tools/`` so that UI behaviour is consistent
+    # regardless of where the YAML lives.
+
+    @classmethod
+    def list_tool_overrides(cls) -> Dict[str, Dict[str, Any]]:
+        """Return all raw tool_overrides entries from flocks.json."""
+        data = cls._read_raw()
+        overrides = data.get("tool_overrides", {})
+        return overrides if isinstance(overrides, dict) else {}
+
+    @classmethod
+    def get_tool_override(cls, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Read a single tool override entry, or None if not set."""
+        overrides = cls.list_tool_overrides()
+        entry = overrides.get(tool_name)
+        return entry if isinstance(entry, dict) else None
+
+    @classmethod
+    def set_tool_override(cls, tool_name: str, override: Dict[str, Any]) -> None:
+        """Merge ``override`` into the tool_overrides[tool_name] entry.
+
+        Existing keys not present in ``override`` are preserved so callers
+        can update a single field (e.g. ``{"enabled": False}``) without
+        wiping other overlay fields that may be added later.
+        """
+        if not tool_name:
+            raise ValueError("tool_name must be a non-empty string")
+        data = cls._read_raw()
+        overrides = data.get("tool_overrides")
+        if not isinstance(overrides, dict):
+            overrides = {}
+        existing = overrides.get(tool_name)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, **(override or {})}
+        overrides[tool_name] = merged
+        data["tool_overrides"] = overrides
+        cls._write_raw(data)
+        log.info("config_writer.tool_override_set", {
+            "tool": tool_name,
+            "fields": sorted(merged.keys()),
+        })
+
+    @classmethod
+    def delete_tool_override(cls, tool_name: str) -> bool:
+        """Remove the tool_overrides[tool_name] entry.
+
+        Pops the whole ``tool_overrides`` key when the last entry is
+        removed so flocks.json doesn't accumulate empty container objects
+        as users toggle their last customised tool back to default.
+
+        Returns True if an entry existed and was removed.
+        """
+        data = cls._read_raw()
+        overrides = data.get("tool_overrides")
+        if not isinstance(overrides, dict) or tool_name not in overrides:
+            return False
+        del overrides[tool_name]
+        if overrides:
+            data["tool_overrides"] = overrides
+        else:
+            data.pop("tool_overrides", None)
+        cls._write_raw(data)
+        log.info("config_writer.tool_override_removed", {"tool": tool_name})
+        return True
+
+    # ------------------------------------------------------------------
     # Default model cleanup helpers
     # ------------------------------------------------------------------
 
