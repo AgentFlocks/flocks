@@ -83,21 +83,22 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 
   // When the user selects a task, also fetch it directly to be sure
   // we have the latest data even if it's not on the current page.
-  const fetchDetailTask = useCallback(async (task: TaskExecution) => {
+  const fetchDetailTask = useCallback(async (taskId: string) => {
     try {
-      const res = await taskAPI.getExecution(task.id);
+      const res = await taskAPI.getExecution(taskId);
       const detail = await markViewedIfNeeded(res.data);
       setDetailTask(detail);
     } catch { /* ignore — list sync will cover it */ }
   }, [markViewedIfNeeded]);
 
+  // The detail drawer is intentionally kept open across page/filter changes,
+  // so we must refresh it by ID rather than looking it up in the current page.
   const refreshWithDetail = useCallback(() => {
     refresh();
     if (selectedId) {
-      const selected = tasks.find(t => t.id === selectedId);
-      if (selected) fetchDetailTask(selected);
+      fetchDetailTask(selectedId);
     }
-  }, [refresh, selectedId, fetchDetailTask, tasks]);
+  }, [refresh, selectedId, fetchDetailTask]);
 
   const closeDetail = useCallback(() => {
     setSelectedId(null);
@@ -111,7 +112,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     }
     setSelectedId(task.id);
     setDetailTask(task);
-    fetchDetailTask(task);
+    fetchDetailTask(task.id);
   }, [selectedId, closeDetail, fetchDetailTask]);
 
   const handleAction = async (action: string, taskId: string) => {
@@ -138,8 +139,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       }
       refresh();
       if (selectedId === taskId) {
-        const selected = tasks.find(t => t.id === taskId);
-        if (selected) fetchDetailTask(selected);
+        fetchDetailTask(taskId);
       }
     } catch (err: unknown) {
       toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));

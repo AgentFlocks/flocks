@@ -21,6 +21,25 @@ from flocks.utils.log import Log
 log = Log.create(service="task.tools")
 
 
+_TRUTHY_STRINGS = {"true", "1", "yes", "y", "on"}
+_FALSY_STRINGS = {"false", "0", "no", "n", "off", ""}
+
+
+def _coerce_legacy_bool(value: object, *, default: bool = False) -> bool:
+    """Coerce values that may arrive as strings from legacy clients."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUTHY_STRINGS:
+            return True
+        if normalized in _FALSY_STRINGS:
+            return False
+    return default
+
+
 def _normalize_task_create_inputs(
     type_value: Optional[str],
     schedule_type: Optional[str],
@@ -63,15 +82,19 @@ def _normalize_task_create_inputs(
         )
         timezone = str(schedule_data.get("timezone") or timezone)
         if schedule_data.get("run_once") is not None:
-            run_once = bool(schedule_data.get("run_once"))
+            run_once = _coerce_legacy_bool(schedule_data.get("run_once"), default=run_once)
         elif schedule_data.get("runOnce") is not None:
-            run_once = bool(schedule_data.get("runOnce"))
+            run_once = _coerce_legacy_bool(schedule_data.get("runOnce"), default=run_once)
 
     if type_value:
         return type_value, run_once, run_at, cron, cron_description, timezone
     if not schedule_type:
-        inferred_type = "scheduled" if (cron or run_at) else "queued"
-        return inferred_type, run_once, run_at, cron, cron_description, timezone
+        # When the caller signalled a scheduled intent (run_once / run_at / cron),
+        # keep it scheduled so build_schedule can surface proper validation errors
+        # instead of silently falling back to an immediate queued execution.
+        if cron or run_at or run_once:
+            return "scheduled", run_once, run_at, cron, cron_description, timezone
+        return "queued", run_once, run_at, cron, cron_description, timezone
 
     normalized = schedule_type.strip().lower()
     if normalized == "queued":

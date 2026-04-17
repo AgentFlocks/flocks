@@ -173,6 +173,51 @@ class TestTaskCenterCompatibility:
         assert updated.source.user_prompt == "更新后的执行内容"
 
     @pytest.mark.asyncio
+    async def test_task_create_rejects_run_once_without_time_instead_of_immediate(self):
+        """run_once=True with no run_at/cron must NOT silently become an immediate task.
+
+        Previously such inputs were inferred as ``queued`` and executed right away,
+        masking missing-schedule mistakes from legacy clients.
+        """
+        result = await ToolRegistry.execute(
+            "task_create",
+            ctx=_make_ctx(),
+            title="缺少时间参数",
+            description="只传了 run_once=True 但没给 run_at/cron",
+            run_once=True,
+            user_prompt="不应该被立即执行",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "run_at" in result.error or "cron" in result.error
+
+        _, total = await TaskManager.list_schedulers(limit=10)
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_task_create_schedule_json_accepts_string_boolean_run_once(self):
+        """Legacy clients may serialise run_once as the string "false"/"0" —
+        those must be coerced to False, not treated as truthy."""
+        result = await ToolRegistry.execute(
+            "task_create",
+            ctx=_make_ctx(),
+            title="字符串布尔值兼容",
+            description="run_once 以字符串 'false' 传入",
+            schedule='{"cron": "*/5 * * * *", "run_once": "false"}',
+            user_prompt="循环任务",
+        )
+
+        assert result.success is True
+
+        schedulers, total = await TaskManager.list_schedulers(limit=10)
+        assert total == 1
+        scheduler = schedulers[0]
+        assert scheduler.mode == SchedulerMode.CRON
+        assert scheduler.trigger.cron == "*/5 * * * *"
+        assert scheduler.trigger.run_immediately is False
+
+    @pytest.mark.asyncio
     async def test_task_update_can_disable_and_enable_scheduled_task(self):
         scheduler = await TaskManager.create_scheduler(
             title="可停止的定时任务",
