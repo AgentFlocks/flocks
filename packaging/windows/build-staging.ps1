@@ -1,4 +1,4 @@
-# Build Tier-B staging directory: tools/ (uv, node, Chrome for Testing) + flocks/ (repository copy). No .venv — installer/bootstrap runs later.
+﻿# Build Tier-B staging directory: tools/ (uv, node, Chrome for Testing) + flocks/ (repository copy). No .venv — installer/bootstrap runs later.
 # Run on Windows (PowerShell 5+). Requires: network access, Expand-Archive, robocopy (built-in).
 #
 # Usage:
@@ -195,7 +195,20 @@ else {
     $cftVersion = $stable.version
     $cftUrl = $stableChrome.url
 }
-$cftZip = Join-Path $cacheRoot ("downloads\\chrome-for-testing-win64-" + $cftVersion + ".zip")
+# Canonical cache name; some mirrors or manual saves use "-stable-" in the filename — reuse if present.
+$dlDir = Join-Path $cacheRoot "downloads"
+$cftZipPrimary = Join-Path $dlDir ("chrome-for-testing-win64-" + $cftVersion + ".zip")
+$cftZipAltStable = Join-Path $dlDir ("chrome-for-testing-win64-stable-" + $cftVersion + ".zip")
+if (Test-Path -LiteralPath $cftZipPrimary -PathType Leaf) {
+    $cftZip = $cftZipPrimary
+}
+elseif (Test-Path -LiteralPath $cftZipAltStable -PathType Leaf) {
+    $cftZip = $cftZipAltStable
+    Write-Host "[build-staging] Reusing cached Chrome zip (alternate filename): $cftZip"
+}
+else {
+    $cftZip = $cftZipPrimary
+}
 Get-OrDownloadFile -Url $cftUrl -CachePath $cftZip -Label ("Chrome for Testing " + $cftVersion)
 
 $cftExtract = Join-Path $env:TEMP ("cft-extract-" + $cftVersion)

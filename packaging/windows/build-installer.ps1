@@ -27,7 +27,20 @@ if (-not (Test-Path $installerScript)) {
 }
 
 Write-Host "[build-installer] Building staging directory..."
-& powershell -NoProfile -ExecutionPolicy Bypass -File $buildStagingScript -OutputDir $OutputDir -RepoRoot $RepoRoot -ManifestPath $ManifestPath -CacheRoot $CacheRoot
+# When -CacheRoot is empty, do not pass it: nested `powershell -File ... -CacheRoot $empty`
+# can drop the value and leave -CacheRoot without an argument (PS 5.1).
+$stagingInvoke = @(
+    '-NoProfile',
+    '-ExecutionPolicy', 'Bypass',
+    '-File', $buildStagingScript,
+    '-OutputDir', $OutputDir,
+    '-RepoRoot', $RepoRoot,
+    '-ManifestPath', $ManifestPath
+)
+if (-not [string]::IsNullOrWhiteSpace($CacheRoot)) {
+    $stagingInvoke += @('-CacheRoot', $CacheRoot)
+}
+& powershell.exe @stagingInvoke
 if ($LASTEXITCODE -ne 0) {
     throw "Staging build failed with exit code $LASTEXITCODE"
 }

@@ -59,3 +59,17 @@ Name: "{userdesktop}\{#MyAppName}"; Filename: "{%USERPROFILE}\.local\bin\flocks.
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\bootstrap-windows.ps1"" -InstallRoot ""{app}"""; StatusMsg: "Setting up Python and JavaScript dependencies..."; Flags: runascurrentuser waituntilterminated
+
+; Runs before [Files] are deleted: flocks stop (graceful), then taskkill fallback, PATH/env/flocks.cmd cleanup, bundled Chrome junction.
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\uninstall-flocks-user-state.ps1"" -InstallRoot ""{app}"""; Flags: runascurrentuser
+
+; Explicit shortcut removal (desktop / Start menu). Targets outside {app} may not always be tracked by the default icon uninstall.
+[UninstallDelete]
+Type: files; Name: "{userdesktop}\{#MyAppName}.lnk"
+Type: files; Name: "{autoprograms}\{#MyAppName}\Start Flocks.lnk"
+Type: files; Name: "{autoprograms}\{#MyAppName}\Flocks repository.lnk"
+Type: dirifempty; Name: "{autoprograms}\{#MyAppName}"
+; Do not recursively delete {app}\* during uninstall. Users may choose a custom
+; existing directory and broad sweep can remove unrelated files.
+Type: dirifempty; Name: "{app}"
