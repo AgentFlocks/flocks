@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   refetch: vi.fn(),
   confirm: vi.fn(),
   toastError: vi.fn(),
+  toastSuccess: vi.fn(),
   batchCancelExecutions: vi.fn().mockResolvedValue({ data: { cancelled: 0 } }),
   batchDeleteExecutions: vi.fn().mockResolvedValue({ data: { deleted: 0 } }),
   getExecution: vi.fn(),
@@ -19,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   retryExecution: vi.fn(),
   rerunExecution: vi.fn(),
   deleteExecution: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -29,6 +31,11 @@ vi.mock('react-i18next', () => ({
         'queued.filterAll': '全部',
         'queued.filterCompleted': '已完成',
         'queued.filterFailed': '失败',
+        'queued.workflowId': 'Workflow ID',
+        'queued.workflowInput': '输入参数',
+        'queued.workflowResult': '执行结果',
+        'queued.workflowError': '错误信息',
+        'queued.workflowJsonFormat': 'JSON format',
         'queued.batchCancel': '批量取消',
         'queued.batchDelete': '批量删除',
         'queued.confirmBatchCancelBtn': '确认批量取消',
@@ -40,6 +47,10 @@ vi.mock('react-i18next', () => ({
         'queued.colMode': '模式',
         'queued.colPriority': '优先级',
         'queued.colTime': '时间',
+        'button.copy': '复制',
+        'clipboard.copySuccessTitle': '已复制到剪贴板',
+        'clipboard.copyFailedTitle': '复制失败',
+        'clipboard.copyFailedDescription': '复制描述',
       };
       if (key === 'queued.selectedCount') {
         return `已选 ${count} 项`;
@@ -56,7 +67,7 @@ vi.mock('react-i18next', () => ({
 vi.mock('@/components/common/Toast', () => ({
   useToast: () => ({
     error: mocks.toastError,
-    success: vi.fn(),
+    success: mocks.toastSuccess,
     info: vi.fn(),
     warning: vi.fn(),
     addToast: vi.fn(),
@@ -84,6 +95,10 @@ vi.mock('@/api/task', () => ({
     rerunExecution: mocks.rerunExecution,
     deleteExecution: mocks.deleteExecution,
   },
+}));
+
+vi.mock('@/utils/clipboard', () => ({
+  copyText: (...args: unknown[]) => mocks.copyText(...args),
 }));
 
 vi.mock('@/components/common/LoadingSpinner', () => ({
@@ -118,6 +133,7 @@ function buildExecution(
   id: string,
   title: string,
   status: TaskExecution['status'] = 'queued',
+  overrides: Partial<TaskExecution> = {},
 ): TaskExecution {
   return {
     id,
@@ -149,6 +165,7 @@ function buildExecution(
     workflowID: undefined,
     createdAt: '2026-04-16T00:00:00Z',
     updatedAt: '2026-04-16T00:00:00Z',
+    ...overrides,
   };
 }
 
@@ -213,5 +230,85 @@ describe('QueuedSection', () => {
       const [nextHeaderCheckbox] = screen.getAllByRole('checkbox');
       expect((nextHeaderCheckbox as HTMLInputElement).checked).toBe(false);
     });
+  });
+
+  it('workflow 任务详情展示执行摘要而不是空会话', async () => {
+    const user = userEvent.setup();
+    const workflowTask = buildExecution(
+      'exec-workflow-1',
+      '工作流任务',
+      'completed',
+      {
+        executionMode: 'workflow',
+        workflowID: 'keyword-search-summary',
+        resultSummary: 'workflow-output',
+        executionInputSnapshot: {
+          context: {
+            keywords: 'agent ai',
+          },
+        },
+      },
+    );
+
+    mocks.useTaskExecutions.mockReturnValue({
+      tasks: [workflowTask],
+      total: 1,
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getExecution.mockResolvedValue({ data: workflowTask });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+
+    await user.click(screen.getByText('工作流任务'));
+
+    expect(await screen.findByText('workflow-output')).toBeInTheDocument();
+    expect(screen.getByText('keyword-search-summary')).toBeInTheDocument();
+    expect(screen.getByText(/"keywords": "agent ai"/)).toBeInTheDocument();
+    expect(screen.queryByText('session-chat')).not.toBeInTheDocument();
+  });
+
+  it('workflow 结果支持 JSON format 和复制', async () => {
+    const user = userEvent.setup();
+    const workflowTask = buildExecution(
+      'exec-workflow-2',
+      '工作流任务 2',
+      'completed',
+      {
+        executionMode: 'workflow',
+        workflowID: 'keyword-search-summary',
+        resultSummary: "{'result': {'keywords': 'flocks agent', 'search_success': True, 'result_count': 8}}",
+        executionInputSnapshot: {
+          context: {
+            keywords: 'flocks agent',
+          },
+        },
+      },
+    );
+
+    mocks.useTaskExecutions.mockReturnValue({
+      tasks: [workflowTask],
+      total: 1,
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getExecution.mockResolvedValue({ data: workflowTask });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+
+    await user.click(screen.getByText('工作流任务 2'));
+
+    await user.click(screen.getByRole('button', { name: 'JSON format' }));
+
+    expect(await screen.findByText(/"search_success": true/)).toBeInTheDocument();
+    expect(screen.getByText(/"result_count": 8/)).toBeInTheDocument();
+
+    const copyButtons = screen.getAllByRole('button', { name: '复制' });
+    await user.click(copyButtons[1]);
+
+    expect(mocks.copyText).toHaveBeenCalledWith(expect.stringContaining('"keywords": "flocks agent"'));
+    expect(mocks.toastSuccess).toHaveBeenCalled();
   });
 });
