@@ -243,7 +243,7 @@ function NodeDetailModal({ node, isStart, onClose }: NodeDetailModalProps) {
                   </span>
                 )}
               </div>
-              <h2 className="text-base font-bold text-gray-900 font-mono mt-0.5">{node.id}</h2>
+              <h2 className="text-lg font-bold text-gray-900 font-mono mt-0.5">{node.id}</h2>
             </div>
           </div>
           <button

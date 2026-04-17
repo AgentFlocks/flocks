@@ -645,7 +645,7 @@ export default function ToolPage() {
           }}
           onEnabledChange={(name, newEnabled) => {
             setSelectedTool((prev) => prev ? { ...prev, enabled: newEnabled } : prev);
-            refetch();
+            handleRefresh();
           }}
         />
       )}
@@ -1596,7 +1596,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && (
               <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>
             )}
@@ -3346,8 +3346,6 @@ function ToolDetailDrawer({
   const [deleting, setDeleting] = useState(false);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
 
-  useEffect(() => { setEnabled(tool.enabled); }, [tool.enabled]);
-
   const handleToggleEnabled = async () => {
     if (toggling) return;
     const next = !enabled;
@@ -3356,8 +3354,8 @@ function ToolDetailDrawer({
       await toolAPI.setEnabled(tool.name, next);
       setEnabled(next);
       onEnabledChange?.(tool.name, next);
-    } catch (err: any) {
-      alert(err.response?.data?.message || err.response?.data?.detail || err.message);
+    } catch {
+      // revert on error
     } finally {
       setToggling(false);
     }
@@ -3385,7 +3383,7 @@ function ToolDetailDrawer({
               <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
                   {sb.label}

@@ -81,7 +81,7 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
               <Bot className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="text-base font-semibold text-gray-900">{t('agent:chat.createTitle')}</h2>
+              <h2 className="text-lg font-semibold text-gray-900">{t('agent:chat.createTitle')}</h2>
               <p className="text-xs text-gray-500 mt-0.5">{t('agent:chat.subtitle')}</p>
             </div>
           </div>

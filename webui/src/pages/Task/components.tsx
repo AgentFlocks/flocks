@@ -70,7 +70,7 @@ export function DashboardCards({ counts }: { counts: DashboardCounts | null }) {
         <div key={card.label} className={`${card.bg} rounded-xl p-4 flex items-center gap-3`}>
           <div className="p-2 bg-white rounded-lg shadow-sm">{card.icon}</div>
           <div>
-            <p className="text-2xl font-bold text-gray-900">{card.value}</p>
+            <p className="text-xl font-bold text-gray-900">{card.value}</p>
             <p className="text-xs text-gray-500">{card.label}</p>
           </div>
         </div>
