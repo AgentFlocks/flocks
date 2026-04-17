@@ -1,30 +1,22 @@
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import time
 from typing import Any, Dict, Optional
 
 from flocks.config.config import Config
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
+from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
 
 
 def _run_coro_sync(coro):
-    """Run async provider calls from sync workflow code."""
-    try:
-        asyncio.get_running_loop()
-        in_running_loop = True
-    except RuntimeError:
-        in_running_loop = False
+    """Run async provider calls from sync workflow code on the shared workflow loop.
 
-    if not in_running_loop:
-        return asyncio.run(coro)
-
-    ex = getattr(_run_coro_sync, "_executor", None)
-    if ex is None:
-        ex = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wf-llm")
-        setattr(_run_coro_sync, "_executor", ex)
-    fut = ex.submit(lambda: asyncio.run(coro))
-    return fut.result()
+    All workflow-triggered async work (config loading, provider.apply_config,
+    provider.chat) is routed through a single persistent background loop so
+    that loop-bound resources (httpx.AsyncClient, OpenAI streams) never
+    outlive their owning loop. See ``flocks.workflow._async_runtime``.
+    """
+    return _run_sync_on_shared_loop(coro)
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
