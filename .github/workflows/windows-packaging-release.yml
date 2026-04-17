@@ -17,6 +17,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Cache bundled tool downloads
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\AppData\Local\flocks\cache
+          key: windows-flocks-cache-${{ hashFiles('packaging/windows/versions.manifest.json') }}
+          restore-keys: |
+            windows-flocks-cache-
+
       - name: Install Inno Setup
         shell: pwsh
         run: |

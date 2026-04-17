@@ -127,6 +127,36 @@ function Get-OrDownloadFile {
     }
 }
 
+function Get-OrDownloadFileFromCandidates {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Urls,
+        [Parameter(Mandatory = $true)][string]$CachePath,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    if ($Urls.Count -eq 0) {
+        throw "No download URL candidates provided for $Label"
+    }
+
+    $lastError = $null
+    foreach ($url in $Urls) {
+        try {
+            Write-Host "[build-staging] Attempting $Label from: $url"
+            Get-OrDownloadFile -Url $url -CachePath $CachePath -Label $Label
+            return
+        }
+        catch {
+            $lastError = $_
+            Write-Host "[build-staging] Candidate failed for ${Label}: $($_.Exception.Message)"
+        }
+    }
+
+    if ($lastError) {
+        throw $lastError
+    }
+    throw "Failed to download $Label"
+}
+
 Write-Host "[build-staging] RepoRoot: $RepoRoot"
 Write-Host "[build-staging] OutputDir: $OutputDir"
 
@@ -175,10 +205,17 @@ Remove-PathWithRetry -Path $nodeExtract
 # Use the pinned version from the manifest when available (reproducible builds); fall back to LKGR.
 Write-Host "[build-staging] Installing Chrome for Testing to tools\chrome (prefers cached direct download)..."
 $pinnedCftVersion = $manifest.chrome_for_testing.version
+$cftMirrorBase = $env:FLOCKS_CFT_MIRROR_BASE_URL
+$cftUrls = @()
 if (-not [string]::IsNullOrWhiteSpace($pinnedCftVersion)) {
     Write-Host "[build-staging] Using pinned Chrome for Testing version: $pinnedCftVersion"
     $cftVersion = $pinnedCftVersion
-    $cftUrl = "https://storage.googleapis.com/chrome-for-testing-public/$cftVersion/win64/chrome-win64.zip"
+    if (-not [string]::IsNullOrWhiteSpace($cftMirrorBase)) {
+        $mirrorBase = $cftMirrorBase.TrimEnd('/')
+        $cftUrls += "$mirrorBase/$cftVersion/win64/chrome-win64.zip"
+        Write-Host "[build-staging] Added mirror candidate from FLOCKS_CFT_MIRROR_BASE_URL"
+    }
+    $cftUrls += "https://storage.googleapis.com/chrome-for-testing-public/$cftVersion/win64/chrome-win64.zip"
 }
 else {
     Write-Host "[build-staging] No pinned Chrome version in manifest — resolving via LKGR..."
@@ -193,7 +230,12 @@ else {
         throw "Failed to resolve win64 download URL from Chrome for Testing metadata"
     }
     $cftVersion = $stable.version
-    $cftUrl = $stableChrome.url
+    if (-not [string]::IsNullOrWhiteSpace($cftMirrorBase)) {
+        $mirrorBase = $cftMirrorBase.TrimEnd('/')
+        $cftUrls += "$mirrorBase/$cftVersion/win64/chrome-win64.zip"
+        Write-Host "[build-staging] Added mirror candidate from FLOCKS_CFT_MIRROR_BASE_URL"
+    }
+    $cftUrls += $stableChrome.url
 }
 # Canonical cache name; some mirrors or manual saves use "-stable-" in the filename — reuse if present.
 $dlDir = Join-Path $cacheRoot "downloads"
@@ -209,7 +251,7 @@ elseif (Test-Path -LiteralPath $cftZipAltStable -PathType Leaf) {
 else {
     $cftZip = $cftZipPrimary
 }
-Get-OrDownloadFile -Url $cftUrl -CachePath $cftZip -Label ("Chrome for Testing " + $cftVersion)
+Get-OrDownloadFileFromCandidates -Urls $cftUrls -CachePath $cftZip -Label ("Chrome for Testing " + $cftVersion)
 
 $cftExtract = Join-Path $env:TEMP ("cft-extract-" + $cftVersion)
 Remove-PathWithRetry -Path $cftExtract
