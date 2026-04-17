@@ -120,6 +120,33 @@ class TestToolInfoResponse:
         assert body["enabled_default"] is False
         assert body["enabled_customized"] is False
 
+    def test_reload_path_refreshes_enabled_default(self, tool_client):
+        """Regression for review P2: when the YAML on disk changes its
+        ``enabled:`` default and the tool gets re-registered (as
+        ``POST /api/tools/{name}/reload`` and ``PUT /api/tools/{name}``
+        both do internally), the ``enabled_default`` exposed over HTTP
+        must pick up the new value instead of echoing the one observed
+        on first load.
+        """
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+
+        # Sanity: initial default is True (seeded by the fixture).
+        body = client.get(f"/api/tools/{enabled_tool.info.name}").json()
+        assert body["enabled_default"] is True
+
+        # Simulate the YAML being edited to ship with enabled: false
+        # and the same reload path the PUT/reload routes take.
+        v2 = _stub_api_tool(enabled_tool.info.name, enabled=False)
+        ToolRegistry.register(v2)
+
+        body = client.get(f"/api/tools/{enabled_tool.info.name}").json()
+        assert body["enabled_default"] is False, (
+            "register() must refresh _enabled_defaults; otherwise PUT/reload "
+            "leave the HTTP API exposing the old factory default and "
+            "`reset` restores the wrong value"
+        )
+
 
 class TestUpdateTool:
     def test_overlay_persisted_when_differs_from_default(self, tool_client):

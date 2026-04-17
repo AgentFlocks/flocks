@@ -407,13 +407,22 @@ class ToolRegistry:
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
 
-    # Snapshot of every tool's registration-time ``enabled`` flag — taken
-    # after :meth:`_load_plugin_tools` finishes loading but BEFORE
-    # ``_sync_api_service_states`` / ``_apply_tool_settings`` mutate
-    # ``tool.info.enabled`` in place.  This is the source of truth for the
+    # Snapshot of every tool's factory-default ``enabled`` flag — captured
+    # in :meth:`register` at the moment the tool object is handed to the
+    # registry (i.e. right after construction from YAML / decorator /
+    # ``TOOLS`` attribute + :func:`apply_tool_catalog_defaults`, but
+    # BEFORE any of the overlay / service-sync machinery gets to mutate
+    # ``tool.info.enabled``).  This is the source of truth for the
     # "factory default" surfaced in the HTTP API and used by
     # :func:`reset_tool_setting` to recover the original value for tools
     # that don't have a YAML file (built-in / plugin_py).
+    #
+    # Lifecycle is kept in lock-step with ``_tools``:
+    #   • :meth:`register`                 → write (always overwrites,
+    #     so a YAML upgrade that flips the default is picked up on the
+    #     next reload/`POST /reload`).
+    #   • :meth:`_unregister_plugin_tools` → pop  (avoids stale defaults
+    #     leaking across ``refresh_plugin_tools`` cycles).
     _enabled_defaults: Dict[str, bool] = {}
 
     @classmethod
@@ -428,6 +437,19 @@ class ToolRegistry:
                 "name": tool.info.name,
                 "error": str(e),
             })
+        # Capture the factory default BEFORE anything else can touch
+        # ``info.enabled``.  ``apply_tool_catalog_defaults`` above only
+        # fills metadata like ``always_load`` and never flips
+        # ``enabled``, so whatever we read here is the value written in
+        # the YAML / decorator at source-tree time.
+        #
+        # Direct assignment (not setdefault) is deliberate: every
+        # ``register`` — including re-registering the same name after a
+        # YAML edit via ``POST /api/tools/{name}/reload`` or a
+        # ``refresh_plugin_tools`` cycle — must refresh the snapshot so
+        # ``enabled_default`` / ``reset`` reflect the current source of
+        # truth instead of the first value ever observed.
+        cls._enabled_defaults[tool.info.name] = bool(tool.info.enabled)
         cls._tools[tool.info.name] = tool
         log.debug("tool.registered", {
             "name": tool.info.name,
@@ -698,8 +720,11 @@ class ToolRegistry:
                 tool.info.source = "plugin_py"
         cls._plugin_tool_names = new_plugin_tools
         cls._bootstrap_user_api_services()
-        # Snapshot defaults BEFORE any in-place mutation so the "factory
-        # default" is preserved even after sync/overlay run.
+        # Defence-in-depth: ``register()`` is the canonical writer for
+        # ``_enabled_defaults`` but this catches any tool that landed in
+        # ``_tools`` via an unorthodox path.  Must run BEFORE
+        # ``_sync_api_service_states`` / ``_apply_tool_settings`` so the
+        # snapshot still reflects factory values, not overlay results.
         cls._snapshot_enabled_defaults()
         cls._sync_api_service_states()
         cls._apply_tool_settings()
@@ -788,22 +813,28 @@ class ToolRegistry:
 
     @classmethod
     def _snapshot_enabled_defaults(cls) -> None:
-        """Capture the registration-time ``enabled`` flag of every tool.
+        """Idempotent safety-net for the ``_enabled_defaults`` snapshot.
 
-        Called once per :meth:`_load_plugin_tools` cycle, before
-        :meth:`_sync_api_service_states` and :meth:`_apply_tool_settings`
-        run so the snapshot reflects the YAML/registration defaults
-        rather than the post-sync state.
+        The *primary* write path is :meth:`register` (see comment on
+        ``_enabled_defaults``).  This method exists only as a defensive
+        backstop for:
 
-        Uses ``setdefault`` so that a ``refresh_plugin_tools`` cycle does
-        NOT overwrite snapshot entries for tools that were not reloaded
-        (e.g. built-in tools).  Without this, the stale in-memory
-        ``info.enabled`` (which may already reflect an overlay) would be
-        captured as the new "default", making ``reset_tool_setting``
-        return the wrong value.
+        - Tests that bypass :meth:`register` by poking at ``_tools``
+          directly (``tests/tool/test_apply_tool_settings.py`` uses this
+          to stage stub tools without invoking catalog-defaults logic).
+        - Any future registration path that inserts into ``_tools``
+          outside :meth:`register` — we'd rather notice a stale snapshot
+          here than hand out a bogus ``enabled_default`` via the API.
+
+        It runs at the end of :meth:`_load_plugin_tools` where no
+        mutation of ``tool.info.enabled`` has occurred yet
+        (``_sync_api_service_states`` and ``_apply_tool_settings`` run
+        *after* this), so the read is still a factory value.  Direct
+        assignment is used so that a YAML upgrade that changed
+        ``enabled:`` is picked up even on the snapshot-only path.
         """
         for name, t in cls._tools.items():
-            cls._enabled_defaults.setdefault(name, bool(t.info.enabled))
+            cls._enabled_defaults[name] = bool(t.info.enabled)
 
     @classmethod
     def get_default_enabled(cls, name: str) -> Optional[bool]:
@@ -1064,11 +1095,19 @@ class ToolRegistry:
         so that tools registered via any mechanism (YAML, ``TOOLS``
         attribute, or ``@register_function`` decorator) are correctly
         cleaned up.
+
+        Also drops the matching entries from ``_enabled_defaults`` so a
+        subsequent ``_load_plugin_tools`` call picks up the current YAML
+        factory default rather than the one observed on a previous
+        cycle.  Without this, editing a YAML file to flip ``enabled:``
+        and hitting ``refresh_plugin_tools`` would leave the snapshot —
+        and therefore ``reset_tool_setting`` — stuck on the old value.
         """
         removed: List[str] = []
         for name in cls._plugin_tool_names:
             if cls._tools.pop(name, None) is not None:
                 removed.append(name)
+            cls._enabled_defaults.pop(name, None)
         if removed:
             log.info("tool.plugin.unregistered", {"tools": removed})
         cls._plugin_tool_names = []
