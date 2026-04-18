@@ -245,9 +245,40 @@ def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
     return resolve_python_subprocess_command(root) + ["-m", "flocks.cli.main"]
 
 
+def _bundled_node_install_dir() -> Path | None:
+    """Return the bundled Node.js installation directory when available."""
+    candidates: list[str] = []
+    node_home = os.getenv("FLOCKS_NODE_HOME")
+    if node_home:
+        candidates.append(node_home)
+
+    install_root = os.getenv("FLOCKS_INSTALL_ROOT")
+    if install_root:
+        candidates.append(str(Path(install_root).expanduser() / "tools" / "node"))
+
+    for candidate in candidates:
+        node_dir = Path(candidate).expanduser()
+        if sys.platform == "win32":
+            node_executable = node_dir / "node.exe"
+        else:
+            node_executable = node_dir / "bin" / "node"
+        if node_executable.exists():
+            return node_dir.resolve()
+    return None
+
+
+def resolve_node_executable() -> str | None:
+    """Resolve node executable from bundled toolchain first, then PATH."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        node_executable = node_dir / ("node.exe" if sys.platform == "win32" else "bin/node")
+        return str(node_executable)
+    return which("node")
+
+
 def get_node_major_version() -> int | None:
     """Return the detected Node.js major version."""
-    node = which("node")
+    node = resolve_node_executable()
     if not node:
         return None
 

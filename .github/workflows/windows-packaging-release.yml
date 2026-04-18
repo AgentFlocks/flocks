@@ -10,6 +10,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   release-asset:
     runs-on: windows-latest
@@ -35,12 +38,46 @@ jobs:
         shell: pwsh
         run: |
           $out = Join-Path $env:RUNNER_TEMP "flocks-staging"
+          $manifestPath = Join-Path "${{ github.workspace }}" "packaging/windows/versions.manifest.json"
+          $manifest = Get-Content -Path $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
           $tag = "${{ github.ref_name }}"
           $appVersion = $tag.TrimStart('v')
           & "${{ github.workspace }}/packaging/windows/build-installer.ps1" `
             -OutputDir $out `
             -RepoRoot "${{ github.workspace }}" `
             -AppVersion $appVersion
+          $uvExe = Join-Path $out "tools/uv/uv.exe"
+          $nodeExe = Join-Path $out "tools/node/node.exe"
+          $chromeExe = Get-ChildItem -Path (Join-Path $out "tools/chrome") -Recurse -Filter "chrome.exe" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "chrome-win" } |
+            Select-Object -First 1
+          if (-not (Test-Path $uvExe)) {
+            throw "uv executable not found in staging: $uvExe"
+          }
+          if (-not (Test-Path $nodeExe)) {
+            throw "node executable not found in staging: $nodeExe"
+          }
+          if (-not $chromeExe) {
+            throw "chrome executable not found in staging under tools/chrome"
+          }
+          $uvVersion = (& $uvExe --version).Trim()
+          $nodeVersion = (& $nodeExe --version).Trim()
+          $chromeVersion = (& $chromeExe.FullName --version).Trim()
+          Write-Host "[runtime] pinned uv version: $($manifest.uv.version)"
+          Write-Host "[runtime] bundled uv version: $uvVersion"
+          Write-Host "[runtime] pinned node version: $($manifest.nodejs.version)"
+          Write-Host "[runtime] bundled node version: $nodeVersion"
+          Write-Host "[runtime] pinned chrome version: $($manifest.chrome_for_testing.version)"
+          Write-Host "[runtime] bundled chrome version: $chromeVersion"
+          if ($uvVersion -notmatch ("^uv\s+" + [regex]::Escape($manifest.uv.version) + "(\s|$)")) {
+            throw "Bundled uv version does not match pinned version in manifest"
+          }
+          if ($nodeVersion -ne ("v" + $manifest.nodejs.version)) {
+            throw "Bundled node version does not match pinned version in manifest"
+          }
+          if ($chromeVersion -notmatch [regex]::Escape($manifest.chrome_for_testing.version)) {
+            throw "Bundled chrome version does not match pinned version in manifest"
+          }
           $builtInstaller = Join-Path "${{ github.workspace }}" "packaging/windows/Output/FlocksSetup.exe"
           if (-not (Test-Path $builtInstaller)) {
             throw "Installer not found: $builtInstaller"
