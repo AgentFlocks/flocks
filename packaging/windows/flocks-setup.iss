@@ -36,7 +36,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; written during install; cmd.exe doesn't respond to WM_SETTINGCHANGE, so
 ; any pre-existing shells keep stale env vars.
 [Messages]
-FinishedLabel=Setup has finished installing [name] on your computer.%n%nHow to start Flocks:%n- Use the desktop shortcut%n- Or open a NEW terminal in the install directory and run `flocks start`%n%nPlease open a NEW terminal window first, so the updated environment variables (PATH, FLOCKS_NODE_HOME, ...) take effect.%n%n安装已完成。启动方式：%n- 使用桌面快捷方式启动%n- 或在安装目录打开新的终端后执行 `flocks start`%n%n请先打开新的终端窗口，以便新的环境变量（PATH、FLOCKS_NODE_HOME 等）生效。
+FinishedLabel=Setup has finished installing [name] on your computer.%n%nHow to start Flocks:%n- Use the desktop shortcut%n- Or open a NEW terminal in the install directory and run `flocks start`%n%nPlease open a NEW terminal window first, so the updated environment variables (PATH, FLOCKS_NODE_HOME, ...) take effect.%n%n安装已完成。启动方式：%n- 使用桌面快捷方式启动%n- 或在安装目录打开新的终端后执行 `flocks start`%n%n请重新打开终端窗口，以便新的环境变量（PATH、FLOCKS_NODE_HOME 等）生效。
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
