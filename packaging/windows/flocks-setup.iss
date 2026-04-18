@@ -63,7 +63,7 @@ Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Com
 
 ; Runs before [Files] are deleted: flocks stop (graceful), then taskkill fallback, PATH/env/flocks.cmd cleanup, bundled Chrome junction.
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\uninstall-flocks-user-state.ps1"" -InstallRoot ""{app}"""; Flags: runascurrentuser
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\uninstall-flocks-user-state.ps1"" -InstallRoot ""{app}"""; RunOnceId: "FlocksUninstallCleanup"; Flags: runascurrentuser
 
 ; Explicit shortcut removal (desktop / Start menu). Targets outside {app} may not always be tracked by the default icon uninstall.
 [UninstallDelete]

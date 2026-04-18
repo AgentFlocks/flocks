@@ -60,7 +60,13 @@ jobs:
           }
           $uvVersion = (& $uvExe --version).Trim()
           $nodeVersion = (& $nodeExe --version).Trim()
-          $chromeVersion = (& $chromeExe.FullName --version).Trim()
+          $chromeVersion = (Get-Item -LiteralPath $chromeExe.FullName).VersionInfo.ProductVersion
+          if ([string]::IsNullOrWhiteSpace($chromeVersion)) {
+            $chromeVersion = (Get-Item -LiteralPath $chromeExe.FullName).VersionInfo.FileVersion
+          }
+          if ([string]::IsNullOrWhiteSpace($chromeVersion)) {
+            throw "Failed to resolve bundled chrome version from file metadata"
+          }
           Write-Host "[runtime] pinned uv version: $($manifest.uv.version)"
           Write-Host "[runtime] bundled uv version: $uvVersion"
           Write-Host "[runtime] pinned node version: $($manifest.nodejs.version)"
