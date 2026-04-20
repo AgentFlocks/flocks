@@ -12,14 +12,67 @@ $ErrorActionPreference = "Stop"
 
 $RepoSlug = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_REPO_SLUG)) { "flocks/flocks" } else { $env:FLOCKS_REPO_SLUG }
 $DefaultBranch = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_DEFAULT_BRANCH)) { "main" } else { $env:FLOCKS_DEFAULT_BRANCH }
-$DefaultInstallDir = Join-Path (Get-Location) "flocks"
-$InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }
 $RawInstallZhShUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_SH_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.sh" } else { $env:FLOCKS_RAW_INSTALL_ZH_SH_URL }
 $RawInstallZhPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_RAW_INSTALL_ZH_PS1_URL)) { "https://gitee.com/flocks/flocks/raw/main/install_zh.ps1" } else { $env:FLOCKS_RAW_INSTALL_ZH_PS1_URL }
 
 function Test-IsWindowsPlatform {
     return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
+
+function Test-IsSystem32Path {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    $rawComparablePath = $Path.TrimEnd('\', '/').Replace('/', '\')
+
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        $normalizedPath = $Path
+    }
+    $comparablePath = $normalizedPath.TrimEnd('\', '/').Replace('/', '\')
+
+    if ($rawComparablePath -match '^[A-Za-z]:\\Windows\\System32$' -or $comparablePath -match '^[A-Za-z]:\\Windows\\System32$') {
+        return $true
+    }
+
+    $windowsDir = [Environment]::GetFolderPath("Windows")
+    if ([string]::IsNullOrWhiteSpace($windowsDir) -and -not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $windowsDir = $env:SystemRoot
+    }
+
+    if ([string]::IsNullOrWhiteSpace($windowsDir)) {
+        return $false
+    }
+
+    $system32Path = [System.IO.Path]::Combine($windowsDir, "System32").TrimEnd('\', '/').Replace('/', '\')
+    return [string]::Equals(
+        $comparablePath,
+        $system32Path,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Get-DefaultInstallDir {
+    param(
+        [string]$CurrentDirectory = (Get-Location).Path,
+        [string]$HomeDirectory = $HOME
+    )
+
+    $baseDirectory = $CurrentDirectory
+    if (Test-IsSystem32Path -Path $CurrentDirectory -and -not [string]::IsNullOrWhiteSpace($HomeDirectory)) {
+        $baseDirectory = $HomeDirectory
+    }
+
+    return ([System.IO.Path]::Combine($baseDirectory, "flocks"))
+}
+
+$DefaultInstallDir = Get-DefaultInstallDir
+$InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }
 
 function Test-IsAdministrator {
     if (-not (Test-IsWindowsPlatform)) {
@@ -65,6 +118,7 @@ function Show-Usage {
     Write-Host "Flocks 中国用户一键安装脚本。"
     Write-Host "该脚本会从 Gitee 下载仓库源码压缩包到临时目录，复制到持久化安装目录后，转交 scripts/install_zh.ps1。"
     Write-Host "默认会在当前目录下创建 'flocks' 子目录。"
+    Write-Host "如果当前目录是 Windows System32，则会自动回退到用户主目录。"
     Write-Host "请在“以管理员身份运行”的 PowerShell 窗口中执行此安装脚本。"
     Write-Host ""
     Write-Host "远程使用："
@@ -207,6 +261,9 @@ function Main {
         Write-Info "仓库: $RepoSlug"
         Write-Info "版本: $Version"
         Write-Info "临时目录: $tempDir"
+        if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR) -and (Test-IsSystem32Path -Path (Get-Location).Path)) {
+            Write-Info "当前目录是 Windows System32，安装目录将自动回退到用户主目录。"
+        }
 
         $downloadUrl = Download-Archive -ArchivePath $archivePath
 

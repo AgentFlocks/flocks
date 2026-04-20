@@ -1,6 +1,7 @@
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -84,12 +85,18 @@ if (-not $paths[2].EndsWith([IO.Path]::DirectorySeparatorChar + 'run' + [IO.Path
 }
 """
     )
-    result = subprocess.run(
-        ["pwsh", "-NoProfile", "-Command", test_script],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="\r\n", suffix=".ps1", delete=False) as handle:
+        handle.write(test_script)
+        temp_script_path = handle.name
+    try:
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-File", temp_script_path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        Path(temp_script_path).unlink(missing_ok=True)
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode == 0, output
 
