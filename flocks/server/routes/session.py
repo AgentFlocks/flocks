@@ -1879,8 +1879,14 @@ async def _run_session_compaction(
     parent_message_id: Optional[str] = None,
     auto: bool = False,
     event_publish_callback=None,
+    focus_instruction: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """Execute session compaction directly without routing through the LLM loop."""
+    """Execute session compaction directly without routing through the LLM loop.
+
+    ``focus_instruction`` is forwarded verbatim to ``run_compaction`` so
+    manual ``/compact <focus>`` invocations can bias what the
+    summariser preserves.  ``None``/empty leaves the default behaviour.
+    """
     from flocks.session.lifecycle.compaction import run_compaction
     from flocks.session.lifecycle.revert import SessionRevert
     from flocks.session.message import Message, MessageRole
@@ -1916,6 +1922,7 @@ async def _run_session_compaction(
         auto=auto,
         event_publish_callback=event_publish_callback,
         status_after="idle",
+        focus_instruction=focus_instruction,
     )
     if result == "stop":
         raise RuntimeError("Compaction failed")
@@ -2636,6 +2643,7 @@ async def send_session_command(sessionID: str, request: CommandRequest):
         agent_for_compaction: Optional[str],
         provider_id: str,
         model_id: str,
+        focus_instruction: Optional[str] = None,
     ) -> None:
         from flocks.project.bootstrap import instance_bootstrap
         from flocks.project.instance import Instance
@@ -2651,6 +2659,7 @@ async def send_session_command(sessionID: str, request: CommandRequest):
                 parent_message_id=parent_msg_id,
                 auto=False,
                 event_publish_callback=publish_event,
+                focus_instruction=focus_instruction,
             ),
         )
 
@@ -2667,10 +2676,12 @@ async def send_session_command(sessionID: str, request: CommandRequest):
 
         try:
             if request.command.lower() == "compact":
-                if request.arguments.strip():
-                    user_msg_id = await _create_user_message()
-                    await _publish_direct_response("Usage: /compact", user_msg_id)
-                    return
+                # Manual compaction trigger.  ``request.arguments`` is
+                # treated as a free-form "focus instruction" appended to
+                # the summarisation prompt — e.g. ``/compact focus on
+                # unresolved decisions``.  Empty arguments preserve the
+                # legacy default-prompt behaviour.
+                focus_instruction = request.arguments.strip() or None
                 compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
                     sessionID,
                     requested_agent=request.agent,
@@ -2688,6 +2699,7 @@ async def send_session_command(sessionID: str, request: CommandRequest):
                     agent_for_compaction=compact_agent,
                     provider_id=compact_provider_id,
                     model_id=compact_model_id,
+                    focus_instruction=focus_instruction,
                 )
                 return
 

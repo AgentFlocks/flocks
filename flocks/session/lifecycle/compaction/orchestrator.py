@@ -67,8 +67,15 @@ async def run_compaction(
     event_publish_callback: Optional[EventPublishCallback] = None,
     policy: Optional[CompactionPolicy] = None,
     status_after: StatusAfter = "idle",
+    focus_instruction: Optional[str] = None,
 ) -> Literal["continue", "stop"]:
-    """Run compaction with shared status transitions and event publishing."""
+    """Run compaction with shared status transitions and event publishing.
+
+    ``focus_instruction`` is an optional free-form user directive (used
+    by manual ``/compact <focus>`` invocations) forwarded verbatim to
+    ``SessionCompaction.process`` so the summariser biases what
+    information it preserves.
+    """
     resolved_policy = policy
     if resolved_policy is None:
         resolved_policy = build_compaction_policy(provider_id, model_id)
@@ -95,6 +102,7 @@ async def run_compaction(
             provider_id=provider_id,
             auto=auto,
             policy=resolved_policy,
+            focus_instruction=focus_instruction,
         )
     finally:
         if status_after == "busy":

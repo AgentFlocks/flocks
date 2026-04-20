@@ -68,6 +68,26 @@ _REQUIRED_SECTIONS = [
 ]
 
 
+def _build_focus_block(focus_instruction: Optional[str]) -> str:
+    """Render the ``## User Focus`` block to append to summarisation prompts.
+
+    The block is empty (``""``) when no focus instruction is supplied,
+    so callers can unconditionally interpolate it without conditionals.
+    The block is wrapped in delimiters that are obvious to the model so
+    the user-supplied text cannot accidentally collide with our
+    structural section headers (``## Decisions``…).
+    """
+    if not focus_instruction:
+        return ""
+    text = focus_instruction.strip()
+    if not text:
+        return ""
+    return (
+        "\n\n## User Focus (user-supplied; emphasise these aspects in the summary)\n"
+        f"{text}\n"
+    )
+
+
 def build_fallback_summary(chat_messages: list) -> str:
     """Build a structured fallback summary when LLM summarization fails.
 
@@ -132,8 +152,15 @@ async def summarize_single_pass(
     provider_client: Any,
     model_id: str,
     max_tokens: int,
+    focus_instruction: Optional[str] = None,
 ) -> Optional[str]:
-    """Generate summary in a single LLM call (for short conversations)."""
+    """Generate summary in a single LLM call (for short conversations).
+
+    ``focus_instruction`` is an optional free-form user-supplied string
+    (e.g. from ``/compact <focus>``) appended to the prompt as a
+    "User Focus" block so the model emphasises that aspect while still
+    producing the default structured sections.
+    """
     from flocks.provider.provider import ChatMessage
 
     text = conversation_text
@@ -148,7 +175,7 @@ async def summarize_single_pass(
         keep = int(len(text) * 0.8)
         text = "…(earlier conversation truncated)…\n\n" + text[-keep:]
 
-    request = f"{text}\n\n---\n\n{prompt_text}"
+    request = f"{text}\n\n---\n\n{prompt_text}{_build_focus_block(focus_instruction)}"
     try:
         response = await _llm_chat_with_timeout(
             provider_client,
@@ -185,6 +212,7 @@ async def summarize_chunked(
     max_tokens: int,
     session_id: str,
     chunk_size: Optional[int] = None,
+    focus_instruction: Optional[str] = None,
 ) -> Optional[str]:
     """Generate summary by chunking a long conversation.
 
@@ -197,6 +225,13 @@ async def summarize_chunked(
     cap (*target_chars*) are intentionally separate so callers can
     request more / smaller chunks (better parallelism) without
     enlarging the per-chunk truncation envelope.
+
+    ``focus_instruction`` (e.g. from ``/compact <focus>``) is injected
+    into BOTH the per-chunk prompt and the merge prompt.  Injecting it
+    into the chunk stage matters: without it, the chunk-level summaries
+    discard details the user actually cares about and the merge step
+    cannot recover them — the focus must steer information selection,
+    not just the final phrasing.
     """
     from flocks.provider.provider import ChatMessage
 
@@ -237,6 +272,7 @@ async def summarize_chunked(
         "Summarize the following conversation segment concisely. "
         "Focus on: actions taken, decisions made, files modified, "
         "and key results. Keep the same language as the conversation."
+        f"{_build_focus_block(focus_instruction)}"
     )
 
     # Per-chunk timeout is now the full compaction timeout — chunks run in
@@ -324,6 +360,7 @@ async def summarize_chunked(
             f"The following are summaries of different parts of a "
             f"conversation. Combine them into a single coherent summary.\n\n"
             f"{merged}\n\n---\n\n{prompt_text}"
+            f"{_build_focus_block(focus_instruction)}"
         )
         merge_timeout = _merge_timeout_seconds()
         merge_started = time.perf_counter()

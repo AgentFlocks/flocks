@@ -593,11 +593,21 @@ class SessionCompaction:
         auto: bool = True,
         custom_prompt: Optional[str] = None,
         policy: Optional[CompactionPolicy] = None,
+        focus_instruction: Optional[str] = None,
     ) -> Literal["continue", "stop"]:
         """Process compaction by generating a summary message.
 
         Creates an assistant message with a summary of the conversation
         to reduce token count while preserving context.
+
+        ``focus_instruction`` is a free-form user directive (e.g. from
+        ``/compact 专注于未解决的决策``) that is passed through to the
+        summariser and injected into BOTH the per-chunk prompts and the
+        final merge prompt, biasing what information the model retains.
+        It is composed *with* (not in place of) ``custom_prompt`` /
+        ``DEFAULT_COMPACTION_PROMPT`` so the structural sections
+        (Decisions / Current Task / Open TODOs / Key Files) are still
+        produced.
         """
         effective_summary_tokens = policy.summary_max_tokens if policy else 4000
 
@@ -682,12 +692,14 @@ class SessionCompaction:
                 "chunk_size": chunk_size,
                 "total_chars": total_chars,
                 "target_chars": target_chars,
+                "has_focus": bool(focus_instruction and focus_instruction.strip()),
             })
 
             if not use_chunked:
                 summary_text = await summary.summarize_single_pass(
                     conversation_text, prompt_text, target_chars,
                     provider_client, model_id, effective_summary_tokens,
+                    focus_instruction=focus_instruction,
                 )
             else:
                 summary_text = await summary.summarize_chunked(
@@ -695,6 +707,7 @@ class SessionCompaction:
                     provider_client, model_id, effective_summary_tokens,
                     session_id,
                     chunk_size=chunk_size,
+                    focus_instruction=focus_instruction,
                 )
 
             log.info("compaction.process.complete", {
