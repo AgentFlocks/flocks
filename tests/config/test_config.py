@@ -226,3 +226,56 @@ def test_sandbox_mode_config_parsing():
     config = ConfigInfo.model_validate({"sandbox": {"mode": "on"}})
     assert config.sandbox is not None
     assert config.sandbox.get("mode") == "on"
+
+
+@pytest.mark.asyncio
+async def test_load_text_handles_secret_with_backslash(tmp_path, monkeypatch):
+    """Secret values containing ``\\`` must be JSON-escaped on substitution.
+
+    Regression test for the "Invalid \\escape" failure observed on Anolis OS
+    after configuring an API service whose key contained a backslash.
+    The substituted value used to land verbatim inside the JSON string,
+    producing an unparsable file (``json.JSONDecodeError: Invalid \\escape``).
+    """
+    secret_value = r"abc\def\u1234\"qq"  # backslashes + quote + \u sequence
+
+    monkeypatch.setattr(
+        "flocks.security.resolve_secret_value",
+        lambda secret_id, secrets=None: secret_value if secret_id == "broken_key" else None,
+    )
+    monkeypatch.setattr(
+        "flocks.security.get_secret_manager",
+        lambda: object(),
+    )
+
+    config_file = tmp_path / "flocks.json"
+    config_file.write_text(
+        json.dumps({"provider": {"x": {"options": {"apiKey": "{secret:broken_key}"}}}}, indent=2),
+        encoding="utf-8",
+    )
+
+    loaded = await Config.load_file(config_file)
+
+    provider = (loaded.provider or {}).get("x")
+    assert provider is not None
+    assert provider.options is not None
+    assert provider.options.api_key == secret_value
+
+
+@pytest.mark.asyncio
+async def test_load_text_handles_env_with_backslash(tmp_path, monkeypatch):
+    """Environment values containing ``\\`` must also be JSON-escaped."""
+    monkeypatch.setenv("FLOCKS_TEST_BACKSLASH", r"C:\Users\me\token\nVAL")
+
+    config_file = tmp_path / "flocks.json"
+    config_file.write_text(
+        json.dumps({"provider": {"x": {"options": {"apiKey": "{env:FLOCKS_TEST_BACKSLASH}"}}}}, indent=2),
+        encoding="utf-8",
+    )
+
+    loaded = await Config.load_file(config_file)
+
+    provider = (loaded.provider or {}).get("x")
+    assert provider is not None
+    assert provider.options is not None
+    assert provider.options.api_key == r"C:\Users\me\token\nVAL"

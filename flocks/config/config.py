@@ -844,6 +844,18 @@ class Config:
         # Convert back to ConfigInfo
         return ConfigInfo.model_validate(merged)
     
+    @staticmethod
+    def _json_string_escape(value: str) -> str:
+        """JSON-escape a value so it is safe to splice into a JSON string literal.
+
+        Strips the surrounding quotes that ``json.dumps`` adds, leaving just the
+        escaped body. This guarantees backslashes, quotes and control characters
+        in the substituted value cannot break the surrounding JSON document
+        (e.g. a Windows-style path or a token containing ``\\u`` would otherwise
+        produce an "Invalid \\escape" error when the file is parsed).
+        """
+        return json.dumps(value, ensure_ascii=False)[1:-1]
+
     @classmethod
     def replace_env_vars(cls, text: str) -> str:
         """
@@ -859,7 +871,8 @@ class Config:
         """
         def replacer(match):
             var_name = match.group(1)
-            return os.getenv(var_name, "")
+            value = os.getenv(var_name, "")
+            return cls._json_string_escape(value)
         
         return re.sub(r'\{env:([^}]+)\}', replacer, text)
     
@@ -876,13 +889,22 @@ class Config:
         Returns:
             Text with secrets substituted
         """
-        # Only import when needed to avoid circular dependencies
         if '{secret:' not in text:
             return text
         
         try:
-            from flocks.security import resolve_secret_refs
-            return resolve_secret_refs(text)
+            from flocks.security import resolve_secret_value, get_secret_manager
+
+            secrets = get_secret_manager()
+
+            def replacer(match: "re.Match") -> str:
+                secret_id = match.group(1)
+                value = resolve_secret_value(secret_id, secrets)
+                if value is None:
+                    return ""
+                return cls._json_string_escape(value)
+
+            return re.sub(r'\{secret:([^}]+)\}', replacer, text)
         except Exception as e:
             from flocks.utils.log import Log
             log = Log.create(service="config")
