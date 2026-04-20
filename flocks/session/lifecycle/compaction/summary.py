@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Optional, Any
 
 from flocks.utils.log import Log
@@ -11,6 +12,19 @@ from flocks.session.prompt import SessionPrompt
 log = Log.create(service="session.compaction.summarization")
 
 COMPACTION_TIMEOUT_SECONDS = 300
+
+# Maximum number of chunk-summary LLM calls to run concurrently in
+# ``summarize_chunked``.  Defaults to 4 which is a safe trade-off between
+# throughput and provider rate-limits; can be tuned per deployment via the
+# ``FLOCKS_COMPACTION_CHUNK_CONCURRENCY`` environment variable.
+def _chunk_concurrency_limit() -> int:
+    raw = os.getenv("FLOCKS_COMPACTION_CHUNK_CONCURRENCY", "4")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 4
+    return max(1, value)
+
 
 _REQUIRED_SECTIONS = [
     "## Decisions",
@@ -166,52 +180,65 @@ async def summarize_chunked(
     if current_chunk:
         chunks.append("\n\n".join(current_chunk))
 
+    concurrency = _chunk_concurrency_limit()
+
     log.info("compaction.chunked_summarize.start", {
         "session_id": session_id,
         "num_chunks": len(chunks),
         "total_messages": len(chat_messages),
+        "concurrency": concurrency,
     })
 
-    chunk_summaries: list[str] = []
     chunk_prompt = (
         "Summarize the following conversation segment concisely. "
         "Focus on: actions taken, decisions made, files modified, "
         "and key results. Keep the same language as the conversation."
     )
 
-    per_chunk_timeout = max(60, COMPACTION_TIMEOUT_SECONDS // max(1, len(chunks)))
+    # Per-chunk timeout is now the full compaction timeout — chunks run in
+    # parallel and each has independent timing. Previous logic divided the
+    # budget across chunks because they ran serially; that gave very little
+    # time per chunk when N was large.
+    per_chunk_timeout = COMPACTION_TIMEOUT_SECONDS
 
-    for i, chunk in enumerate(chunks):
-        if len(chunk) > target_chars:
-            chunk = chunk[:target_chars] + "\n…(truncated)"
+    semaphore = asyncio.Semaphore(concurrency)
 
-        try:
-            resp = await _llm_chat_with_timeout(
-                provider_client,
-                model_id=model_id,
-                messages=[ChatMessage(
-                    role="user",
-                    content=f"{chunk}\n\n---\n\n{chunk_prompt}",
-                )],
-                max_tokens=max(1000, max_tokens // 2),
-                timeout=per_chunk_timeout,
-            )
-            if resp and resp.content:
-                chunk_summaries.append(f"## Part {i + 1}\n{resp.content}")
-        except asyncio.TimeoutError:
-            log.warn("compaction.chunk_summary_timeout", {
-                "session_id": session_id,
-                "chunk": i,
-                "timeout": per_chunk_timeout,
-            })
-            chunk_summaries.append(f"## Part {i + 1}\n{chunk[:500]}…")
-        except Exception as e:
-            log.warn("compaction.chunk_summary_error", {
-                "session_id": session_id,
-                "chunk": i,
-                "error": str(e),
-            })
-            chunk_summaries.append(f"## Part {i + 1}\n{chunk[:500]}…")
+    async def _summarize_one(idx: int, chunk_text: str) -> str:
+        if len(chunk_text) > target_chars:
+            chunk_text = chunk_text[:target_chars] + "\n…(truncated)"
+        async with semaphore:
+            try:
+                resp = await _llm_chat_with_timeout(
+                    provider_client,
+                    model_id=model_id,
+                    messages=[ChatMessage(
+                        role="user",
+                        content=f"{chunk_text}\n\n---\n\n{chunk_prompt}",
+                    )],
+                    max_tokens=max(1000, max_tokens // 2),
+                    timeout=per_chunk_timeout,
+                )
+                if resp and resp.content:
+                    return f"## Part {idx + 1}\n{resp.content}"
+                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
+            except asyncio.TimeoutError:
+                log.warn("compaction.chunk_summary_timeout", {
+                    "session_id": session_id,
+                    "chunk": idx,
+                    "timeout": per_chunk_timeout,
+                })
+                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
+            except Exception as e:
+                log.warn("compaction.chunk_summary_error", {
+                    "session_id": session_id,
+                    "chunk": idx,
+                    "error": str(e),
+                })
+                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
+
+    chunk_summaries = await asyncio.gather(
+        *(_summarize_one(i, c) for i, c in enumerate(chunks))
+    )
 
     if not chunk_summaries:
         return None

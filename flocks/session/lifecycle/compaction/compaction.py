@@ -6,6 +6,8 @@ to manage context window limits.  Delegates heavy lifting to sibling modules.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import List, Optional, Dict, Any, Literal
 
 from flocks.utils.log import Log
@@ -19,6 +21,46 @@ from .models import (
 from . import pruning, summary
 
 log = Log.create(service="session.compaction")
+
+
+# ---------------------------------------------------------------------------
+# Background memory-flush task tracking
+# ---------------------------------------------------------------------------
+#
+# Memory flush (``_flush_memory_to_daily`` → ``extract_and_save``) issues a
+# second LLM call after the summary has already been generated.  It writes to
+# a daily memory file but is NOT required for the session to continue, so we
+# run it in the background to avoid blocking the post-compaction continuation.
+#
+# A module-level set keeps a strong reference to in-flight tasks so they are
+# not garbage-collected mid-flight (Python's ``asyncio.create_task`` only
+# holds a weak reference).  The done-callback removes finished tasks from the
+# set and logs any exception.
+#
+# Set ``FLOCKS_COMPACTION_FLUSH_BACKGROUND=0`` to fall back to the legacy
+# synchronous behaviour (useful for tests or debugging).
+
+_pending_flush_tasks: set[asyncio.Task] = set()
+
+
+def _flush_in_background_enabled() -> bool:
+    raw = os.getenv("FLOCKS_COMPACTION_FLUSH_BACKGROUND", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
+def _on_flush_task_done(task: "asyncio.Task") -> None:
+    _pending_flush_tasks.discard(task)
+    if task.cancelled():
+        log.info("compaction.flush.background.cancelled", {"task": task.get_name()})
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warn("compaction.flush.background.error", {
+            "task": task.get_name(),
+            "error": str(exc),
+        })
+    else:
+        log.debug("compaction.flush.background.done", {"task": task.get_name()})
 
 
 class SessionCompaction:
@@ -139,6 +181,58 @@ class SessionCompaction:
             count_tokens=SessionPrompt.count_tokens,
         )
 
+    @classmethod
+    async def _dispatch_memory_flush(
+        cls,
+        *,
+        session_id: str,
+        summary_text: str,
+        chat_messages: list,
+        model_id: str,
+        provider_client: Any,
+        ChatMessage: Any,
+        policy: Optional[CompactionPolicy],
+    ) -> None:
+        """Run ``_flush_memory_to_daily`` either in the background or inline.
+
+        Background scheduling is the default; the legacy synchronous mode is
+        re-enabled by setting ``FLOCKS_COMPACTION_FLUSH_BACKGROUND=0``.
+        Falls back to a synchronous await whenever no event loop is running
+        (defensive — should not happen in normal operation).
+        """
+        kwargs = dict(
+            session_id=session_id,
+            summary=summary_text,
+            chat_messages=chat_messages,
+            model_id=model_id,
+            provider=provider_client,
+            ChatMessage=ChatMessage,
+            policy=policy,
+        )
+
+        if not _flush_in_background_enabled():
+            await cls._flush_memory_to_daily(**kwargs)
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            await cls._flush_memory_to_daily(**kwargs)
+            return
+
+        flush_task = loop.create_task(
+            cls._flush_memory_to_daily(**kwargs),
+            name=f"compaction.flush.{session_id}",
+        )
+        _pending_flush_tasks.add(flush_task)
+        flush_task.add_done_callback(_on_flush_task_done)
+        log.info("compaction.flush.scheduled_background", {
+            "session_id": session_id,
+        })
+
     # ------------------------------------------------------------------
     # Main compaction process
     # ------------------------------------------------------------------
@@ -255,13 +349,17 @@ class SessionCompaction:
                 log.warn("compaction.process.empty_summary_fallback", {"session_id": session_id})
                 summary_text = summary.build_fallback_summary(chat_messages)
 
-            # Memory flush
-            await cls._flush_memory_to_daily(
+            # Memory flush — issues another LLM call to extract durable
+            # memories. The compacted session does NOT depend on it for
+            # continuation, so we schedule it as a fire-and-forget task by
+            # default and let the main flow proceed with archive + summary
+            # write immediately.
+            await cls._dispatch_memory_flush(
                 session_id=session_id,
-                summary=summary_text,
+                summary_text=summary_text,
                 chat_messages=chat_messages,
                 model_id=model_id,
-                provider=provider_client,
+                provider_client=provider_client,
                 ChatMessage=ChatMessage,
                 policy=policy,
             )
