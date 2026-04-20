@@ -94,6 +94,141 @@ def _flush_timeout_seconds() -> float:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Chunked-summarization preemptive trigger
+# ---------------------------------------------------------------------------
+#
+# Empirically a single ``summarize_single_pass`` call against a 10–14k char
+# conversation can take 60–90s on slow OpenAI-compatible providers (e.g.
+# minimax via threatbook).  ``summarize_chunked`` issues N small parallel
+# calls + 1 short merge call, so it scales much better with provider
+# latency even when the conversation would technically *fit* a single pass.
+#
+# The legacy hand-off rule was ``total_chars > target_chars * 2``, which
+# means medium conversations (well below ~60k chars) always took the slow
+# path.  We add a second, looser trigger that splits at a fraction of the
+# target so even ~10k conversations get the parallel speedup.
+#
+# Tunables (all overridable via env for emergency tuning):
+#   * ``FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO`` (default 0.2):
+#     fraction of ``target_chars`` above which we proactively chunk.
+#   * ``FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS`` (default 3):
+#     desired number of chunks when preemptive chunking kicks in.
+#   * ``FLOCKS_COMPACTION_MIN_CHUNK_CHARS`` (default 3000):
+#     floor on chunk size so we never pay the merge-LLM tax for trivial
+#     conversations (where single_pass is genuinely faster).
+
+_DEFAULT_PREEMPTIVE_CHUNK_RATIO = 0.2
+_DEFAULT_TARGET_PARALLEL_CHUNKS = 3
+_DEFAULT_MIN_CHUNK_CHARS = 3000
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warn("compaction.env.parse_error", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    if value <= 0:
+        log.warn("compaction.env.non_positive", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    return value
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warn("compaction.env.parse_error", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    if value <= 0:
+        log.warn("compaction.env.non_positive", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    return value
+
+
+def _decide_chunked_strategy(
+    *, total_chars: int, target_chars: int,
+) -> tuple[bool, Optional[int], str]:
+    """Decide whether to use chunked summarisation and at what chunk size.
+
+    Returns ``(use_chunked, chunk_size, reason)``:
+      * ``use_chunked``: ``True`` if the caller should invoke
+        ``summarize_chunked``; ``False`` for ``summarize_single_pass``.
+      * ``chunk_size``: when chunked, the per-chunk char budget passed
+        through to ``summarize_chunked``; ``None`` when not chunked.
+      * ``reason``: short tag for observability (logged at the call site).
+
+    Three branches:
+      1. ``"oversize"``    — legacy rule, conversation is much bigger
+         than the target; chunked is *required* for correctness.
+      2. ``"preemptive"``  — conversation fits single-pass but is large
+         enough that parallel chunked summarisation is faster than one
+         big LLM call.  Triggered when ``total_chars`` exceeds both
+         ``target_chars * ratio`` and ``min_chunk_chars * 2``.
+      3. ``"single_pass"`` — small conversation; parallelism overhead
+         (one extra merge LLM call) outweighs the speedup.
+    """
+    if total_chars > target_chars * 2:
+        # Legacy hard requirement — content does not fit a single pass.
+        ratio_hint = _env_float(
+            "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
+            _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
+        )
+        target_parallel = _env_int(
+            "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
+            _DEFAULT_TARGET_PARALLEL_CHUNKS,
+        )
+        min_chunk = _env_int(
+            "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
+            _DEFAULT_MIN_CHUNK_CHARS,
+        )
+        # For oversize content keep the legacy behaviour: pass through
+        # the original target_chars as the split cap (chunk_size=None
+        # makes summarize_chunked default to target_chars).  Splitting
+        # finer for already-huge conversations would explode chunk
+        # count without obvious benefit.
+        del ratio_hint, target_parallel, min_chunk
+        return True, None, "oversize"
+
+    ratio = _env_float(
+        "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
+        _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
+    )
+    min_chunk = _env_int(
+        "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
+        _DEFAULT_MIN_CHUNK_CHARS,
+    )
+    target_parallel = _env_int(
+        "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
+        _DEFAULT_TARGET_PARALLEL_CHUNKS,
+    )
+
+    threshold = max(min_chunk * 2, int(target_chars * ratio))
+    if total_chars < threshold:
+        return False, None, "single_pass"
+
+    # Aim for ``target_parallel`` chunks; never go below ``min_chunk``
+    # so we don't fragment a 6k conversation into 6 tiny calls.
+    raw_size = total_chars // max(1, target_parallel) + 1
+    chunk_size = max(min_chunk, raw_size)
+    return True, chunk_size, "preemptive"
+
+
 def _get_flush_lock(session_id: str) -> asyncio.Lock:
     """Return (lazily creating) the per-session flush serialisation lock."""
     lock = _session_flush_locks.get(session_id)
@@ -536,7 +671,20 @@ class SessionCompaction:
         })
 
         try:
-            if total_chars <= target_chars * 2:
+            use_chunked, chunk_size, decision = _decide_chunked_strategy(
+                total_chars=total_chars, target_chars=target_chars,
+            )
+
+            log.info("compaction.process.strategy", {
+                "session_id": session_id,
+                "decision": decision,
+                "use_chunked": use_chunked,
+                "chunk_size": chunk_size,
+                "total_chars": total_chars,
+                "target_chars": target_chars,
+            })
+
+            if not use_chunked:
                 summary_text = await summary.summarize_single_pass(
                     conversation_text, prompt_text, target_chars,
                     provider_client, model_id, effective_summary_tokens,
@@ -546,13 +694,15 @@ class SessionCompaction:
                     chat_messages, prompt_text, target_chars,
                     provider_client, model_id, effective_summary_tokens,
                     session_id,
+                    chunk_size=chunk_size,
                 )
 
             log.info("compaction.process.complete", {
                 "session_id": session_id,
                 "summary_length": len(summary_text) if summary_text else 0,
                 "summary_max_tokens": effective_summary_tokens,
-                "chunked": total_chars > target_chars * 2,
+                "chunked": use_chunked,
+                "decision": decision,
             })
 
             if not summary_text:

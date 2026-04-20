@@ -150,14 +150,23 @@ async def summarize_chunked(
     model_id: str,
     max_tokens: int,
     session_id: str,
+    chunk_size: Optional[int] = None,
 ) -> Optional[str]:
     """Generate summary by chunking a long conversation.
 
-    Splits messages into chunks that fit within *target_chars*,
-    summarizes each chunk, then merges all chunk summaries into a
+    Splits messages into chunks of at most *chunk_size* characters
+    (defaults to *target_chars* for backward compatibility), summarises
+    each chunk in parallel, then merges all chunk summaries into a
     final combined summary.
+
+    The split granularity (*chunk_size*) and the per-chunk truncation
+    cap (*target_chars*) are intentionally separate so callers can
+    request more / smaller chunks (better parallelism) without
+    enlarging the per-chunk truncation envelope.
     """
     from flocks.provider.provider import ChatMessage
+
+    split_at = chunk_size if (chunk_size and chunk_size > 0) else target_chars
 
     chunks: list[str] = []
     current_chunk: list[str] = []
@@ -169,7 +178,7 @@ async def summarize_chunked(
         line = f"[{role}]: {content}"
         line_len = len(line)
 
-        if current_len + line_len > target_chars and current_chunk:
+        if current_len + line_len > split_at and current_chunk:
             chunks.append("\n\n".join(current_chunk))
             current_chunk = []
             current_len = 0
@@ -187,6 +196,7 @@ async def summarize_chunked(
         "num_chunks": len(chunks),
         "total_messages": len(chat_messages),
         "concurrency": concurrency,
+        "split_at": split_at,
     })
 
     chunk_prompt = (
