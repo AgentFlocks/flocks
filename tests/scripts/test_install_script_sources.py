@@ -38,6 +38,10 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
 def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_workspace_installer() -> None:
     script = (REPO_ROOT / "install_zh.ps1").read_text(encoding="utf-8-sig")
 
+    assert 'function Test-IsSystem32Path' in script
+    assert 'function Get-DefaultInstallDir' in script
+    assert 'Windows System32' in script
+    assert '用户主目录' in script
     assert 'https://gitee.com/$RepoSlug/repository/archive/$Version.zip' in script
     assert 'https://gitee.com/$RepoSlug/archive/refs/tags/$Version.zip' in script
     assert 'scripts\\install_zh.ps1' in script
@@ -175,6 +179,19 @@ def test_main_powershell_installer_uses_configured_default_sources_and_admin_pre
     assert "irm '$script:UvInstallPs1FallbackUrl' | iex" in script
     assert 'function Assert-Administrator' in script
     assert 'Assert-Administrator' in script
+
+
+def test_windows_bootstrap_installers_detect_system32_and_fall_back_to_home() -> None:
+    for path in (
+        REPO_ROOT / "install.ps1",
+        REPO_ROOT / "install_zh.ps1",
+    ):
+        script = path.read_text(encoding="utf-8-sig")
+        assert 'function Test-IsSystem32Path' in script
+        assert 'function Get-DefaultInstallDir' in script
+        assert '[System.IO.Path]::Combine($baseDirectory, "flocks")' in script
+        assert 'Test-IsSystem32Path -Path $CurrentDirectory' in script
+        assert '$InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }' in script
 
 
 def test_windows_powershell_installers_require_admin_before_install() -> None:

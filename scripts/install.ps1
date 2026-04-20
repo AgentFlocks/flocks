@@ -1122,13 +1122,6 @@ function Install-DingtalkChannelDeps {
     Write-Info (Get-LocalizedText -English "DingTalk channel dependencies installed." -Chinese "钉钉频道依赖安装完成。")
 }
 
-function Write-RunCommandHint {
-    param([string]$Action)
-
-    $runScriptPath = Join-Path $RootDir "scripts\run.ps1"
-    Write-Host ('     & "{0}" {1}' -f $runScriptPath, $Action)
-}
-
 function Main {
     if ($Help) {
         Show-Usage
