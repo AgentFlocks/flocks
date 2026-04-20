@@ -6,9 +6,12 @@ to manage context window limits.  Delegates heavy lifting to sibling modules.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import os
+import re
 import time
+from collections import OrderedDict
 from typing import List, Optional, Dict, Any, Literal
 
 from flocks.utils.log import Log
@@ -83,11 +86,26 @@ _session_flush_locks: dict[str, asyncio.Lock] = {}
 # We keep ``return "stop"`` to preserve the loop contract, but stash the
 # user-facing message here so ``_run_session_compaction`` can raise a
 # detailed RuntimeError that the SSE ``session.error`` payload propagates
-# verbatim to the toast.  Entries are *single-shot*: producers ``set``,
-# the command path ``pop``s; if no consumer reads it within the same
-# compaction attempt the next attempt's record will overwrite it (we
-# never want a stale message to leak into a later, unrelated failure).
-_last_compaction_error: dict[str, str] = {}
+# verbatim to the toast.  Consumption is single-shot (the manual
+# ``/compact`` path ``pop``s on read); the auto-compaction path in
+# ``session_loop`` writes but never reads, so we cap the cache size with
+# an LRU eviction policy to prevent unbounded growth on long-running
+# instances where many sessions fail compaction without ever being
+# manually retried.
+_LAST_ERROR_MAX_ENTRIES = 256
+# Keep the toast readable.  Provider exceptions can embed huge JSON
+# payloads or stack traces; the UI shows this verbatim so we cap it.
+_LAST_ERROR_MAX_LEN = 500
+# Matches a trailing repr-formatted dict at the end of the error string,
+# anchored on the dict opening brace.  We use ``re.search`` (not
+# ``partition``) so embedded ``" - "`` separators inside the leading
+# context (e.g. ``"500 - upstream error - {...}"``) don't fool us.
+_PROVIDER_ERROR_PAYLOAD_RE = re.compile(r"(\{.*\})\s*$", re.DOTALL)
+# Matches ``Error code: 529`` (or similar) at the start, used as a
+# grep-friendly prefix for screenshots.
+_PROVIDER_ERROR_CODE_RE = re.compile(r"^\s*Error code:\s*\d+", re.IGNORECASE)
+
+_last_compaction_error: "OrderedDict[str, str]" = OrderedDict()
 
 
 def _record_compaction_error(session_id: str, error: BaseException) -> None:
@@ -99,10 +117,21 @@ def _record_compaction_error(session_id: str, error: BaseException) -> None:
     to the raw ``str(exc)`` otherwise — *never* fabricates a generic
     "Compaction failed", because the whole point of this helper is to
     avoid that.
+
+    The detail is truncated and the per-session cache is bounded so the
+    UI toast stays readable and we never leak memory across thousands of
+    failed sessions.
     """
     raw = str(error).strip()
     detail = _extract_provider_message(raw) or raw or type(error).__name__
+    if len(detail) > _LAST_ERROR_MAX_LEN:
+        # Keep head (carries the HTTP code + start of message) and add a
+        # visible truncation marker so users know it's been clipped.
+        detail = detail[: _LAST_ERROR_MAX_LEN - 1].rstrip() + "…"
     _last_compaction_error[session_id] = detail
+    _last_compaction_error.move_to_end(session_id)
+    while len(_last_compaction_error) > _LAST_ERROR_MAX_ENTRIES:
+        _last_compaction_error.popitem(last=False)
 
 
 def pop_last_compaction_error(session_id: str) -> Optional[str]:
@@ -116,32 +145,39 @@ def _extract_provider_message(text: str) -> Optional[str]:
     OpenAI-compatible SDKs format errors like
     ``Error code: 529 - {'error': {'message': '模型服务暂时不可用',
     'type': 'SERVICE_UNAVAILABLE'}}``.  The dict is repr-formatted
-    (single quotes), so ``json.loads`` won't work directly; ``ast.literal_eval``
-    on the substring after ``" - "`` does.  Returns ``None`` if the
-    pattern doesn't match — the caller falls back to the raw text.
+    (single quotes), so ``json.loads`` won't work directly; we anchor on
+    the trailing ``{...}`` payload and run ``ast.literal_eval`` on it.
+    Returns ``None`` if the pattern doesn't match — the caller falls
+    back to the raw text.
+
+    Anchoring on the trailing dict (rather than splitting on the *first*
+    ``" - "``) is deliberate: provider error strings sometimes contain
+    stray ``" - "`` separators in the leading context (e.g.
+    ``"500 - upstream error - {...}"``) which would otherwise feed
+    invalid syntax to ``literal_eval``.
     """
-    if not text or " - " not in text:
+    if not text:
+        return None
+    match = _PROVIDER_ERROR_PAYLOAD_RE.search(text)
+    if not match:
         return None
     try:
-        import ast
-        _, _, payload = text.partition(" - ")
-        parsed = ast.literal_eval(payload.strip())
-        if not isinstance(parsed, dict):
-            return None
-        err = parsed.get("error")
-        if isinstance(err, dict):
-            msg = err.get("message")
-            if isinstance(msg, str) and msg.strip():
-                # Prepend the HTTP code if present so users / ops can
-                # still grep for "529" in screenshots.
-                code_prefix = ""
-                head = text.split(" - ", 1)[0]
-                if head.lower().startswith("error code:"):
-                    code_prefix = head.strip() + " — "
-                return f"{code_prefix}{msg.strip()}"
-    except (ValueError, SyntaxError):
+        parsed = ast.literal_eval(match.group(1))
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
         return None
-    return None
+    if not isinstance(parsed, dict):
+        return None
+    err = parsed.get("error")
+    if not isinstance(err, dict):
+        return None
+    msg = err.get("message")
+    if not isinstance(msg, str) or not msg.strip():
+        return None
+    # Prepend the HTTP code if present so users / ops can still grep for
+    # "529" in screenshots.
+    head = text[: match.start()].strip().rstrip("-").strip()
+    code_prefix = f"{head} — " if _PROVIDER_ERROR_CODE_RE.match(head) else ""
+    return f"{code_prefix}{msg.strip()}"
 
 
 def _flush_in_background_enabled() -> bool:
