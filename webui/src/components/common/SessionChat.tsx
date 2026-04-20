@@ -123,6 +123,82 @@ interface ComposerAttachment {
   error?: string;
 }
 
+// Backend stages emitted by ``SessionCompaction.process`` /
+// ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
+// Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
+type CompactionStage =
+  | 'load'
+  | 'strategy'
+  | 'chunk_done'
+  | 'merge_started'
+  | 'merge_done'
+  | 'summarize_done'
+  | 'complete';
+
+interface CompactionStageEntry {
+  stage: CompactionStage;
+  data: Record<string, unknown>;
+  ts: number;
+}
+
+/**
+ * Render a single human-readable line for one compaction stage event.
+ *
+ * Kept i18n-aware (caller passes ``t``) and total-aware so e.g.
+ * ``chunk_done`` shows ``2 / 5``.  Numbers are rendered defensively —
+ * the SSE payload is untyped JSON, so we type-narrow before formatting.
+ *
+ * Returns ``null`` if the stage is unknown so the caller can ``filter
+ * Boolean`` the list without printing raw event names to end users.
+ */
+function describeCompactionStage(
+  entry: CompactionStageEntry,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  const data = entry.data;
+  const num = (k: string): number | undefined =>
+    typeof data[k] === 'number' ? (data[k] as number) : undefined;
+  switch (entry.stage) {
+    case 'load': {
+      const count = num('message_count');
+      return t('chat.compactionStage.load', { count: count ?? '?' });
+    }
+    case 'strategy': {
+      const decision = typeof data.decision === 'string' ? data.decision : 'single_pass';
+      const chunks = num('chunks');
+      if (chunks && chunks > 1) {
+        return t('chat.compactionStage.strategyChunked', { count: chunks });
+      }
+      return t(`chat.compactionStage.strategy_${decision}`, {
+        defaultValue: t('chat.compactionStage.strategyGeneric'),
+      });
+    }
+    case 'chunk_done':
+      // Per-chunk events drive the percentage bar but are intentionally
+      // hidden from the milestone list — users asked for a single
+      // overall progress signal rather than N noisy "chunk X/N done"
+      // lines that arrive out of order under ``asyncio.gather``.
+      return null;
+    case 'merge_started':
+      return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
+    case 'merge_done': {
+      const ok = data.ok !== false;
+      const ms = num('duration_ms');
+      return ok
+        ? t('chat.compactionStage.mergeDone', {
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+          })
+        : t('chat.compactionStage.mergeFailed');
+    }
+    case 'summarize_done':
+      return t('chat.compactionStage.summarizeDone', { chars: num('summary_chars') ?? 0 });
+    case 'complete':
+      return t('chat.compactionStage.complete');
+    default:
+      return null;
+  }
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -250,6 +326,60 @@ export default function SessionChat({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  // Live compaction progress, populated by ``session.compaction_progress`` SSE
+  // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
+  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
+  // The chunk progress bar (``done/total``) is *derived* from this single
+  // source via useMemo below — keeping a parallel state would risk drift if
+  // either updater missed an event (and earlier did: a stale closure read
+  // froze ``done`` at 1 for multi-chunk runs).
+  const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
+  // Single weighted progress percentage (0–100) covering the whole
+  // compaction pipeline. Per-chunk events drive the parallel-summary
+  // band (10–70%); merge owns 70–95%; summary write + completion
+  // close the last 5%. Single-pass runs skip the chunk band entirely
+  // and jump strategy → summarize_done (20% → 95%).
+  //
+  // Why fixed weights instead of timing-based progress:
+  //  - Chunks finish in non-deterministic order so a time-linear bar
+  //    would jitter or stall whenever the slowest chunk dominates.
+  //  - The user only needs "where am I in the pipeline", not real-time
+  //    estimation; phase advancement gives a credible signal of life.
+  const compactionPercent = useMemo<number | null>(() => {
+    if (compactionStages.length === 0) return null;
+    const seenStage = new Set(compactionStages.map((e) => e.stage));
+    if (seenStage.has('complete')) return 100;
+
+    const strategyEvent = compactionStages.find((e) => e.stage === 'strategy');
+    const useChunked = strategyEvent
+      ? Boolean((strategyEvent.data as { use_chunked?: boolean }).use_chunked)
+      : false;
+
+    if (useChunked) {
+      if (seenStage.has('summarize_done')) return 97;
+      if (seenStage.has('merge_done')) return 95;
+      if (seenStage.has('merge_started')) return 75;
+      let total = 0;
+      const seenChunks = new Set<number>();
+      for (const entry of compactionStages) {
+        if (entry.stage !== 'chunk_done') continue;
+        const d = entry.data as { chunk?: number; total?: number };
+        if (typeof d.chunk === 'number') seenChunks.add(d.chunk);
+        if (typeof d.total === 'number' && d.total > total) total = d.total;
+      }
+      if (total > 0) {
+        return Math.min(70, 10 + Math.round((seenChunks.size / total) * 60));
+      }
+      if (seenStage.has('strategy')) return 10;
+      if (seenStage.has('load')) return 5;
+      return 1;
+    }
+
+    if (seenStage.has('summarize_done')) return 95;
+    if (seenStage.has('strategy')) return 20;
+    if (seenStage.has('load')) return 10;
+    return 1;
+  }, [compactionStages]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
@@ -386,16 +516,41 @@ export default function SessionChat({
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(properties.status.message || t('chat.compacting'));
+          // Reset progress state on each new compaction cycle so a stale
+          // run's stages do not leak into a fresh "Compacting..." panel.
+          setCompactionStages([]);
         } else {
           const wasCompacting = isCompactingRef.current;
           setIsCompacting(false);
           isCompactingRef.current = false;
           setCompactingMessage('');
+          setCompactionStages([]);
           if (wasCompacting) refetch();
         }
+      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
+        const stage = properties.stage as CompactionStage | undefined;
+        const data = (properties.data ?? {}) as Record<string, unknown>;
+        if (!stage) return;
+        // Single source of truth: append into ``compactionStages`` and let
+        // the progress bar derive ``done/total`` from it via useMemo.
+        // ``chunk_done`` arrives in non-deterministic order under
+        // ``asyncio.gather``; deduplicate by chunk index here so SSE
+        // reconnects / accidental re-deliveries are idempotent.
+        setCompactionStages((prev) => {
+          if (stage === 'chunk_done') {
+            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
+            if (chunkIdx !== undefined && prev.some(
+              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+            )) {
+              return prev;
+            }
+          }
+          return [...prev, { stage, data, ts: Date.now() }];
+        });
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
+        setCompactionStages([]);
         abortingRef.current = false;
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
@@ -475,6 +630,7 @@ export default function SessionChat({
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
+    setCompactionStages([]);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
@@ -1196,7 +1352,7 @@ export default function SessionChat({
               );
             })}
 
-            {/* Compacting indicator */}
+            {/* Compacting indicator with live progress stages */}
             {isCompacting && (
               <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
                 <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
@@ -1204,6 +1360,36 @@ export default function SessionChat({
                     <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                     <span>{compactingMessage || t('chat.compacting')}</span>
                   </div>
+                  {compactionPercent !== null && (
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                        <span>{compactionPercent}%</span>
+                      </div>
+                      <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                        <div
+                          className="h-full bg-amber-500 transition-all duration-300"
+                          style={{ width: `${compactionPercent}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {compactionStages.length > 0 && (
+                    <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                      {compactionStages
+                        .map((entry, idx) => {
+                          const text = describeCompactionStage(entry, t);
+                          if (!text) return null;
+                          return (
+                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                              <span className="text-amber-400">·</span>
+                              <span>{text}</span>
+                            </li>
+                          );
+                        })
+                        .filter(Boolean)}
+                    </ul>
+                  )}
                 </div>
               </div>
             )}

@@ -18,6 +18,7 @@ from flocks.utils.log import Log
 log = Log.create(service="session.compaction.orchestrator")
 
 EventPublishCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
+ProgressCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 StatusAfter = Literal["idle", "busy"]
 
 
@@ -67,8 +68,24 @@ async def run_compaction(
     event_publish_callback: Optional[EventPublishCallback] = None,
     policy: Optional[CompactionPolicy] = None,
     status_after: StatusAfter = "idle",
+    focus_instruction: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Literal["continue", "stop"]:
-    """Run compaction with shared status transitions and event publishing."""
+    """Run compaction with shared status transitions and event publishing.
+
+    ``focus_instruction`` is an optional free-form user directive (used
+    by manual ``/compact <focus>`` invocations) forwarded verbatim to
+    ``SessionCompaction.process`` so the summariser biases what
+    information it preserves.
+
+    ``progress_callback`` is forwarded verbatim to
+    ``SessionCompaction.process`` and receives ``(stage, data)`` events
+    for each pipeline phase (``load`` / ``strategy`` / ``chunk_done`` /
+    ``merge_started`` / ``merge_done`` / ``summarize_done`` /
+    ``complete``).  The route layer wires this onto an SSE event so the
+    UI can render a live multi-stage panel.  ``None`` disables
+    progress reporting (compaction itself is unaffected).
+    """
     resolved_policy = policy
     if resolved_policy is None:
         resolved_policy = build_compaction_policy(provider_id, model_id)
@@ -95,6 +112,8 @@ async def run_compaction(
             provider_id=provider_id,
             auto=auto,
             policy=resolved_policy,
+            focus_instruction=focus_instruction,
+            progress_callback=progress_callback,
         )
     finally:
         if status_after == "busy":

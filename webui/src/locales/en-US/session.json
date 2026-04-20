@@ -67,6 +67,20 @@
     "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
+    "compactionStage": {
+      "load": "Loaded {{count}} messages",
+      "strategyGeneric": "Picked compaction strategy",
+      "strategy_single_pass": "Single-pass summary (short conversation)",
+      "strategy_preemptive": "Preemptive parallel chunked summary",
+      "strategy_oversize": "Oversize parallel chunked summary",
+      "strategyChunked": "Splitting into {{count}} parallel chunks",
+      "overallProgressLabel": "Conversation compaction progress",
+      "mergeStarted": "Merging {{count}} chunk summaries…",
+      "mergeDone": "Merge done ({{seconds}}s)",
+      "mergeFailed": "Merge failed",
+      "summarizeDone": "Summary written ({{chars}} chars)",
+      "complete": "Compaction complete"
+    },
     "removeNodeRef": "Remove node reference",
     "errors": {
       "saveFailed": "Failed to save message",
