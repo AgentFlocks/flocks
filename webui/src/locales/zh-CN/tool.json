@@ -315,7 +315,11 @@
     "execSuccess": "执行成功",
     "execFailed": "执行失败",
     "close": "关闭",
-    "testTool": "测试工具"
+    "testTool": "测试工具",
+    "customized": "已自定义",
+    "customizedTooltip": "当前状态来自用户自定义，YAML 默认值为 {{def}}",
+    "resetSetting": "恢复默认",
+    "resetting": "重置中…"
   },
 
   "statusBadge": {

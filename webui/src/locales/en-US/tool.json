@@ -315,7 +315,11 @@
     "execSuccess": "Execution Successful",
     "execFailed": "Execution Failed",
     "close": "Close",
-    "testTool": "Test Tool"
+    "testTool": "Test Tool",
+    "customized": "Customized",
+    "customizedTooltip": "Current state comes from a user customization; YAML default is {{def}}",
+    "resetSetting": "Reset to default",
+    "resetting": "Resetting…"
   },
 
   "statusBadge": {
