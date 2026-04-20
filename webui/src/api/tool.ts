@@ -36,3 +36,6 @@ export const toolAPI = {
   delete: (name: string) =>
     client.delete<{ status: string; message: string }>(`/api/tools/${name}`),
 };
+
+export const canDirectlyTestTool = (tool: Pick<Tool, 'source'>) =>
+  tool.source !== 'builtin';

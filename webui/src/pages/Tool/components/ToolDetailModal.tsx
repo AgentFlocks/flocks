@@ -5,7 +5,7 @@ import {
   CheckCircle, XCircle, AlertTriangle,
 } from 'lucide-react';
 import type { Tool } from '@/api/tool';
-import { toolAPI } from '@/api/tool';
+import { canDirectlyTestTool, toolAPI } from '@/api/tool';
 import { SOURCE_BADGE, CATEGORY_LABEL_KEY } from '../constants';
 import { EnabledBadge } from './badges';
 
@@ -35,6 +35,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
   const [testParams, setTestParams] = useState(defaultParams);
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const canDirectTest = canDirectlyTestTool(tool);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') onClose();
@@ -49,6 +50,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
   const sourceLabel = sb.labelKey ? t(sb.labelKey) : (sb.label ?? tool.source);
 
   const handleTest = async () => {
+    if (!canDirectTest) return;
     try {
       setTesting(true);
       setTestResult(null);
@@ -185,7 +187,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
               </div>
               <button
                 onClick={handleTest}
-                disabled={testing || !tool.enabled}
+                disabled={testing || !tool.enabled || !canDirectTest}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
               >
                 {testing ? (
@@ -196,6 +198,9 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
               </button>
               {!tool.enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
+              )}
+              {canDirectTest ? null : (
+                <p className="text-xs text-amber-600 text-center">{t('toolDetail.sessionTestOnly')}</p>
               )}
               {testResult && (
                 <div>
@@ -230,7 +235,9 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
           {section === 'info' && (
             <button
               onClick={() => setSection('test')}
-              className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 flex items-center"
+              className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+              disabled={!canDirectTest}
+              title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}
             >
               <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
             </button>

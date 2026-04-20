@@ -44,7 +44,7 @@ import {
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useTools } from '@/hooks/useTools';
-import { toolAPI, Tool, ToolSource } from '@/api/tool';
+import { canDirectlyTestTool, toolAPI, Tool, ToolSource } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
@@ -365,6 +365,7 @@ export default function ToolPage() {
 
   const handleTest = async () => {
     if (!selectedTool) return;
+    if (!canDirectlyTestTool(selectedTool)) return;
     try {
       setTesting(true);
       setTestResult(null);
@@ -3345,6 +3346,7 @@ function ToolDetailDrawer({
   const [toggling, setToggling] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+  const canDirectTest = canDirectlyTestTool(tool);
 
   useEffect(() => { setEnabled(tool.enabled); }, [tool.enabled]);
 
@@ -3531,7 +3533,7 @@ function ToolDetailDrawer({
               </div>
               <button
                 onClick={onTest}
-                disabled={testing || !tool.enabled}
+                disabled={testing || !tool.enabled || !canDirectTest}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
               >
                 {testing
@@ -3540,6 +3542,9 @@ function ToolDetailDrawer({
               </button>
               {!tool.enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
+              )}
+              {canDirectTest ? null : (
+                <p className="text-xs text-amber-600 text-center">{t('toolDetail.sessionTestOnly')}</p>
               )}
               {testResult && (
                 <div>

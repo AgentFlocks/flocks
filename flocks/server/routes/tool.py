@@ -2,18 +2,21 @@
 Tool routes - API endpoints for tool management and execution
 """
 
+import asyncio
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
 
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
+from flocks.permission.next import DeniedError, PermissionNext
 from flocks.tool.registry import (
     ToolRegistry,
     ToolInfo,
     ToolSchema,
     ToolResult,
     ToolCategory,
+    ToolContext,
 )
 
 
@@ -49,7 +52,22 @@ class ToolUpdateRequest(BaseModel):
 
 class ToolExecuteRequest(BaseModel):
     """Tool execution request"""
+    model_config = {"populate_by_name": True}
     params: Dict[str, Any] = Field(default_factory=dict, description="Tool parameters")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 class ToolExecuteResponse(BaseModel):
@@ -68,8 +86,23 @@ class BatchToolCall(BaseModel):
 
 class BatchExecuteRequest(BaseModel):
     """Batch tool execution request"""
+    model_config = {"populate_by_name": True}
     calls: List[BatchToolCall] = Field(..., description="Tool calls to execute")
     parallel: bool = Field(True, description="Execute in parallel")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 class BatchExecuteResponse(BaseModel):
@@ -83,6 +116,15 @@ _BUILTIN_CATEGORIES = {
     ToolCategory.FILE, ToolCategory.TERMINAL, ToolCategory.BROWSER,
     ToolCategory.CODE, ToolCategory.SEARCH, ToolCategory.SYSTEM,
 }
+
+_DIRECT_HTTP_BLOCKED_MESSAGE = (
+    "Direct HTTP tool execution is disabled for local or permission-gated tools. "
+    "Use a session-backed request (provide sessionID/messageID) or run the tool via the normal agent/session flow."
+)
+_VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
+    "Direct HTTP execution for local or permission-gated tools requires a verified "
+    "session-backed request with both sessionID and messageID."
+)
 
 
 def _get_tool_source(tool_info: ToolInfo) -> tuple:
@@ -139,6 +181,188 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         enabled=_get_effective_tool_enabled(t),
         requires_confirmation=t.requires_confirmation,
     )
+
+
+def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
+    """Return True when a tool must be anchored to a real session/message context."""
+    source, _ = _get_tool_source(tool_info)
+    return source == "builtin"
+
+
+async def _validate_verified_session_message_context(
+    *,
+    requires_verified_context: bool,
+    session_id: Optional[str],
+    message_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate that session/message context exists and the message belongs to the session."""
+    effective_session_id = str(session_id or "").strip() or None
+    effective_message_id = str(message_id or "").strip() or None
+    needs_verified_context = requires_verified_context or bool(effective_session_id or effective_message_id)
+
+    if not needs_verified_context:
+        return None, None
+
+    if not effective_session_id or not effective_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_VERIFIED_CONTEXT_REQUIRED_MESSAGE,
+        )
+
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    session = await Session.get_by_id(effective_session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {effective_session_id}",
+        )
+
+    message = await Message.get(effective_session_id, effective_message_id)
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message {effective_message_id} not found in session {effective_session_id}",
+        )
+
+    return effective_session_id, effective_message_id
+
+
+async def _validate_session_message_context(
+    *,
+    tool_info: ToolInfo,
+    session_id: Optional[str],
+    message_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate context for a single tool execution request."""
+    return await _validate_verified_session_message_context(
+        requires_verified_context=_requires_session_backed_context(tool_info),
+        session_id=session_id,
+        message_id=message_id,
+    )
+
+
+def _build_http_tool_context(
+    *,
+    tool_name: str,
+    tool_info: ToolInfo,
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+) -> ToolContext:
+    """Create a safe ToolContext for HTTP-triggered execution."""
+    agent_name = agent or "rex"
+    effective_message_id = message_id or f"http-tool:{tool_name}"
+
+    if session_id:
+        async def permission_callback(request) -> None:
+            metadata = dict(request.metadata or {})
+            metadata.setdefault("messageID", effective_message_id)
+            metadata.setdefault("route", "tool.execute")
+            await PermissionNext.ask(
+                session_id=session_id,
+                permission=request.permission,
+                patterns=list(request.patterns or []),
+                ruleset=[],
+                metadata=metadata,
+                always=list(request.always or []),
+                tool={"name": tool_name},
+            )
+
+        return ToolContext(
+            session_id=session_id,
+            message_id=effective_message_id,
+            agent=agent_name,
+            permission_callback=permission_callback,
+        )
+
+    if _requires_session_backed_context(tool_info):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_DIRECT_HTTP_BLOCKED_MESSAGE,
+        )
+
+    async def deny_permission_callback(request) -> None:
+        raise PermissionError(
+            "This HTTP execution context cannot auto-approve tool permissions."
+        )
+
+    return ToolContext(
+        session_id="http-tool",
+        message_id=effective_message_id,
+        agent=agent_name,
+        permission_callback=deny_permission_callback,
+    )
+
+
+def _permission_denied_http_error(exc: Exception) -> HTTPException:
+    """Normalize permission failures into a consistent 403 response."""
+    detail = str(exc).strip() or _DIRECT_HTTP_BLOCKED_MESSAGE
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+async def _execute_with_http_context(
+    *,
+    tool_name: str,
+    tool_info: ToolInfo,
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+) -> ToolResult:
+    """Execute a tool using an HTTP-safe ToolContext."""
+    validated_session_id, validated_message_id = await _validate_session_message_context(
+        tool_info=tool_info,
+        session_id=session_id,
+        message_id=message_id,
+    )
+    ctx = _build_http_tool_context(
+        tool_name=tool_name,
+        tool_info=tool_info,
+        session_id=validated_session_id,
+        message_id=validated_message_id,
+        agent=agent,
+    )
+    try:
+        return await ToolRegistry.execute(tool_name=tool_name, ctx=ctx, **params)
+    except (DeniedError, PermissionError) as exc:
+        raise _permission_denied_http_error(exc) from exc
+
+
+async def _execute_batch_with_http_context(
+    *,
+    calls: List[BatchToolCall],
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+    parallel: bool,
+) -> List[ToolResult]:
+    """Execute batch calls with a per-tool HTTP context."""
+
+    async def run_call(call: BatchToolCall) -> ToolResult:
+        tool = ToolRegistry.get(call.name)
+        if tool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tool not found: {call.name}",
+            )
+        return await _execute_with_http_context(
+            tool_name=call.name,
+            tool_info=tool.info,
+            params=call.params,
+            session_id=session_id,
+            message_id=message_id,
+            agent=agent,
+        )
+
+    if parallel:
+        return await asyncio.gather(*(run_call(call) for call in calls))
+
+    results: List[ToolResult] = []
+    for call in calls:
+        results.append(await run_call(call))
+    return results
 
 
 def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
@@ -322,9 +546,17 @@ async def execute_tool(tool_name: str, request: ToolExecuteRequest):
     log.info("tool.execute.request", {
         "tool": tool_name,
         "params": list(request.params.keys()),
+        "session": request.session_id,
     })
-    
-    result = await ToolRegistry.execute(tool_name=tool_name, **request.params)
+
+    result = await _execute_with_http_context(
+        tool_name=tool_name,
+        tool_info=tool.info,
+        params=request.params,
+        session_id=request.session_id,
+        message_id=request.message_id,
+        agent=request.agent,
+    )
     
     return ToolExecuteResponse(
         success=result.success,
@@ -363,11 +595,32 @@ async def execute_batch(request: BatchExecuteRequest):
     log.info("tool.batch.request", {
         "count": len(request.calls),
         "parallel": request.parallel,
+        "session": request.session_id,
     })
-    
-    # Execute batch
-    calls = [{"name": c.name, "params": c.params} for c in request.calls]
-    results = await ToolRegistry.execute_batch(calls, parallel=request.parallel)
+
+    requires_verified_context = False
+    for call in request.calls:
+        tool = ToolRegistry.get(call.name)
+        if tool and _requires_session_backed_context(tool.info):
+            requires_verified_context = True
+            break
+
+    validated_session_id, validated_message_id = await _validate_verified_session_message_context(
+        requires_verified_context=requires_verified_context,
+        session_id=request.session_id,
+        message_id=request.message_id,
+    )
+
+    try:
+        results = await _execute_batch_with_http_context(
+            calls=request.calls,
+            session_id=validated_session_id,
+            message_id=validated_message_id,
+            agent=request.agent,
+            parallel=request.parallel,
+        )
+    except (DeniedError, PermissionError) as exc:
+        raise _permission_denied_http_error(exc) from exc
     
     return BatchExecuteResponse(
         results=[
@@ -442,7 +695,22 @@ async def refresh_tools():
 
 class ToolTestRequest(BaseModel):
     """Request to test a tool"""
+    model_config = {"populate_by_name": True}
     params: Dict[str, Any] = Field(default_factory=dict, description="Test parameters")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 @router.post(
@@ -466,16 +734,32 @@ async def test_tool(name: str, request: ToolTestRequest):
         )
     
     log.info("tool.test", {"name": name, "params": request.params})
-    
+
+    tool_request = ToolExecuteRequest(
+        params=request.params,
+        sessionID=request.session_id,
+        messageID=request.message_id,
+        agent=request.agent,
+    )
+
     # Execute tool
     try:
-        result = await ToolRegistry.execute(tool_name=name, **request.params)
+        result = await _execute_with_http_context(
+            tool_name=name,
+            tool_info=tool.info,
+            params=tool_request.params,
+            session_id=tool_request.session_id,
+            message_id=tool_request.message_id,
+            agent=tool_request.agent,
+        )
         return ToolExecuteResponse(
             success=result.success,
             output=result.output,
             error=result.error,
             metadata=result.metadata,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("tool.test.error", {"name": name, "error": str(e)})
         return ToolExecuteResponse(
