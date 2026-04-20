@@ -130,6 +130,7 @@ class SessionBindingService:
         msg: InboundMessage,
         default_agent: Optional[str] = None,
         scope_override: Optional[GroupSessionScope] = None,
+        directory: Optional[str] = None,
     ) -> SessionBinding:
         """Find or create a binding for *msg*.
 
@@ -141,6 +142,12 @@ class SessionBindingService:
                 - ``"group_sender"``: one session per (group, sender) pair.
                 - ``"group_topic"``: one session per topic thread in the group
                   (falls back to per-group if msg.thread_id is absent).
+            directory: Working directory used when a new session has to be
+                created. When ``None``, falls back to the current Project
+                Instance directory and finally ``os.getcwd()``. Aligning this
+                with the WebUI session creation path is what keeps ``<env>``,
+                ``AGENTS.md`` and sandbox prompts consistent across entry
+                points.
         """
         chat_id, thread_id = _resolve_session_key(msg, scope_override)
 
@@ -163,7 +170,7 @@ class SessionBindingService:
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent,
+            msg, default_agent=default_agent, directory=directory,
         )
         now = time.time()
         binding = SessionBinding(
@@ -334,18 +341,52 @@ class SessionBindingService:
     async def _create_session(
         msg: InboundMessage,
         default_agent: Optional[str] = None,
+        directory: Optional[str] = None,
     ) -> str:
-        """Create a new Flocks Session and return its ID."""
+        """Create a new Flocks Session and return its ID.
+
+        ``directory`` follows the same priority as the WebUI ``Session.create``
+        route: explicit caller value → ``Instance.get_directory()`` → server
+        ``os.getcwd()``. Keeping this aligned ensures channel-originated
+        sessions inject the same ``<env>`` block, AGENTS.md custom rules and
+        sandbox configuration as WebUI sessions.
+        """
         from flocks.session.session import Session
 
         title = _build_title(msg)
         session = await Session.create(
             project_id="channel",
-            directory=os.getcwd(),
+            directory=_resolve_session_directory(directory),
             title=title,
             agent=default_agent,
         )
         return session.id
+
+
+def _resolve_session_directory(explicit: Optional[str]) -> str:
+    """Resolve the working directory for a channel-created session.
+
+    Priority:
+        1. Explicit value passed by the dispatcher (typically from
+           ``ChannelConfig.workspace_dir``).
+        2. The active project Instance directory (same source the WebUI
+           ``Session.create`` route uses).
+        3. The server process ``os.getcwd()`` as a last resort.
+
+    Keeping this aligned with the WebUI route is what unifies the
+    ``<env>`` block, the AGENTS.md / CLAUDE.md / CONTEXT.md custom prompt
+    injection and the sandbox prompt across both entry points.
+    """
+    if explicit:
+        return explicit
+    try:
+        from flocks.project.instance import Instance
+        instance_dir = Instance.get_directory()
+        if instance_dir:
+            return instance_dir
+    except Exception:
+        pass
+    return os.getcwd()
 
 
 def _build_title(msg: InboundMessage) -> str:

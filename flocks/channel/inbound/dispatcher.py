@@ -263,7 +263,15 @@ class InboundDispatcher:
             log.warning("dispatcher.hook_inbound_failed", {"error": str(e)})
 
         # 5. session binding — resolve feishu group-level overrides (scope & agent)
-        default_agent = channel_config.default_agent or "default"
+        # default_agent priority (matches WebUI):
+        #   1. ChannelConfig.defaultAgent (or feishu group override)
+        #   2. Agent.default_agent() — honours global ``defaultAgent`` and
+        #      finally falls back to ``rex``
+        # The literal string ``"default"`` is no longer used as a fallback,
+        # because that was not a real agent name and silently fell through to
+        # ``rex`` only via ``Agent.get(name) or Agent.get("rex")``, hiding the
+        # real default and making behaviour diverge between WebUI and channel.
+        default_agent = channel_config.default_agent
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
             scope_override, feishu_agent = _resolve_feishu_group_overrides(
@@ -271,11 +279,21 @@ class InboundDispatcher:
             )
             if feishu_agent:
                 default_agent = feishu_agent
+        if not default_agent:
+            try:
+                from flocks.agent.registry import Agent as _Agent
+                default_agent = await _Agent.default_agent()
+            except Exception as exc:
+                log.debug("dispatcher.default_agent_resolution_failed", {
+                    "error": str(exc),
+                })
+                default_agent = "rex"
 
         binding = await self.binding_service.resolve_or_create(
             msg,
             default_agent=default_agent,
             scope_override=scope_override,
+            directory=channel_config.workspace_dir,
         )
 
         user_text = msg.mention_text if msg.mention_text else msg.text
@@ -371,11 +389,29 @@ class InboundDispatcher:
                     pass  # 引用内容获取失败不阻塞消息流程
 
             # 10. append user message to Session
+            #
+            # Resolve provider/model BEFORE writing the user message, mirroring
+            # what _process_session_message does in the WebUI route. Storing
+            # the resolved model on the user message keeps two things aligned
+            # between WebUI and channel:
+            #   - Title generation (``SessionLoop._run_loop`` reads
+            #     ``last_user.model``).
+            #   - The provider-specific base prompt template
+            #     (``SystemPrompt.provider``) selected on the next loop tick.
+            # Without this, channel sessions ended up with the hardcoded
+            # ``defaults.fallback_*`` values from ``Message.create``, while
+            # WebUI sessions got the real resolved model.
+            resolved_model = await _resolve_session_model(
+                binding.session_id,
+                binding.agent_id,
+            )
+
             await self._append_user_message(
                 binding.session_id,
                 user_text,
                 msg,
                 channel_config,
+                model=resolved_model,
             )
 
             # 11. build delivery callbacks
@@ -900,10 +936,11 @@ class InboundDispatcher:
         text: str,
         msg: InboundMessage,
         channel_config: Optional[ChannelConfig] = None,
+        model: Optional[dict] = None,
     ) -> None:
         from flocks.session.message import FilePart, Message, MessageRole
 
-        message = await Message.create(
+        create_kwargs: dict = dict(
             session_id=session_id,
             role=MessageRole.USER,
             content=text,
@@ -915,6 +952,10 @@ class InboundDispatcher:
                 "message_id": msg.message_id,
             },
         )
+        if model is not None:
+            create_kwargs["model"] = model
+
+        message = await Message.create(**create_kwargs)
 
         if msg.channel_id != "feishu" or not msg.media_url or channel_config is None:
             return
@@ -972,6 +1013,40 @@ async def _extract_message_text(
         log.warning("dispatcher.extract_text.failed", {
             "session": session_id,
             "error": f"{type(e).__name__}: {e}",
+        })
+        return None
+
+
+async def _resolve_session_model(
+    session_id: str,
+    agent_id: Optional[str],
+) -> Optional[dict]:
+    """Resolve provider/model for a channel-bound session.
+
+    Reuses ``SessionLoop._resolve_model`` so that channel and WebUI follow
+    the exact same resolution chain (session-stored → agent override
+    storage → AgentInfo.model → parent → config default → env). Returns
+    a ``{"providerID", "modelID"}`` dict on success, ``None`` on failure
+    so the caller can fall back to ``Message.create`` defaults.
+    """
+    try:
+        from flocks.session.session import Session as _Session
+        from flocks.session.session_loop import SessionLoop
+
+        session = await _Session.get_by_id(session_id)
+        if not session:
+            return None
+        provider_id, model_id = await SessionLoop._resolve_model(
+            session, None, None,
+        )
+        if not provider_id or not model_id:
+            return None
+        return {"providerID": provider_id, "modelID": model_id}
+    except Exception as exc:
+        log.debug("dispatcher.model_resolution_failed", {
+            "session": session_id,
+            "agent": agent_id,
+            "error": str(exc),
         })
         return None
 

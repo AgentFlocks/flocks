@@ -418,6 +418,17 @@ class ChannelConfig(BaseModel):
     group_trigger: Optional[str] = Field("mention", alias="groupTrigger")
     allow_from: Optional[List[str]] = Field(None, alias="allowFrom")
     accounts: Optional[Dict[str, ChannelAccountConfig]] = None
+    workspace_dir: Optional[str] = Field(
+        None,
+        alias="workspaceDir",
+        description=(
+            "Working directory used when this channel auto-creates a Flocks session. "
+            "If unset, falls back to the active project Instance directory, then to "
+            "the server process cwd. Aligns channel sessions with WebUI sessions so "
+            "that <env>, AGENTS.md / CLAUDE.md / CONTEXT.md and sandbox prompts are "
+            "the same on both entry points."
+        ),
+    )
 
     # ── Feishu 新增字段 ──────────────────────────────────────────────
     inbound_debounce_ms: Optional[int] = Field(
