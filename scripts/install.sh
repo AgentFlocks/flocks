@@ -49,6 +49,10 @@ has_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+clear_command_cache() {
+  hash -r 2>/dev/null || true
+}
+
 is_zh_install() {
   [[ "$INSTALL_LANGUAGE" == zh* || "$INSTALL_LANGUAGE" == cn* ]]
 }
@@ -92,7 +96,10 @@ run_with_privilege() {
 append_path() {
   local path_entry="$1"
   [[ -n "$path_entry" && -d "$path_entry" ]] || return 0
-  [[ ":$PATH:" == *":$path_entry:"* ]] || export PATH="$path_entry:$PATH"
+  if [[ ":$PATH:" != *":$path_entry:"* ]]; then
+    export PATH="$path_entry:$PATH"
+    clear_command_cache
+  fi
 }
 
 record_path_update_file() {
@@ -470,6 +477,16 @@ install_nodejs_with_nvm() {
   fi
   if ! nvm use "$MIN_NODE_MAJOR" >/dev/null; then
     warn "Node.js ${MIN_NODE_MAJOR} was installed with nvm, but activating it failed.$(nodejs_manual_download_hint)"
+    return 1
+  fi
+
+  if [[ -n "${NVM_BIN:-}" && -d "$NVM_BIN" ]]; then
+    append_path "$NVM_BIN"
+  fi
+  clear_command_cache
+
+  if ! node_version_satisfies_requirement; then
+    warn "nvm activated Node.js ${MIN_NODE_MAJOR}, but the current shell still resolves a different node binary. Open a new shell and retry.$(nodejs_manual_download_hint)"
     return 1
   fi
 }
