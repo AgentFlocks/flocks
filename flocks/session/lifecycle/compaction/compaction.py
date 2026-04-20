@@ -12,7 +12,16 @@ import os
 import re
 import time
 from collections import OrderedDict
-from typing import List, Optional, Dict, Any, Literal
+from typing import Awaitable, Callable, List, Optional, Dict, Any, Literal
+
+# Optional progress sink injected by the route layer so the front-end can
+# render a multi-stage "Compacting..." panel instead of a 30–60 s opaque
+# spinner.  Kept dependency-free: the callback signature is just
+# ``(stage, data) -> Awaitable[None]``.  Producers MUST tolerate a
+# ``None`` callback (silent / no-op) and any exception raised by the
+# sink — progress reporting is observability, never a correctness
+# contract for compaction itself.  See ``_emit_progress`` below.
+ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
@@ -137,6 +146,28 @@ def _record_compaction_error(session_id: str, error: BaseException) -> None:
 def pop_last_compaction_error(session_id: str) -> Optional[str]:
     """Return + clear the last error recorded for ``session_id``."""
     return _last_compaction_error.pop(session_id, None)
+
+
+async def _emit_progress(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort progress emit.
+
+    Swallows any callback exception (and logs WARN) so a flaky SSE sink
+    or a disconnected front-end can never cause the compaction itself
+    to fail.  Returns immediately when ``callback`` is ``None``.
+    """
+    if callback is None:
+        return
+    try:
+        await callback(stage, dict(data or {}))
+    except Exception as exc:
+        log.warn("compaction.progress.emit_error", {
+            "stage": stage,
+            "error": str(exc),
+        })
 
 
 def _extract_provider_message(text: str) -> Optional[str]:
@@ -706,6 +737,7 @@ class SessionCompaction:
         custom_prompt: Optional[str] = None,
         policy: Optional[CompactionPolicy] = None,
         focus_instruction: Optional[str] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Literal["continue", "stop"]:
         """Process compaction by generating a summary message.
 
@@ -720,6 +752,11 @@ class SessionCompaction:
         ``DEFAULT_COMPACTION_PROMPT`` so the structural sections
         (Decisions / Current Task / Open TODOs / Key Files) are still
         produced.
+
+        ``progress_callback`` (optional) receives ``(stage, data)``
+        tuples for each pipeline phase so the route layer can mirror
+        them onto an SSE channel for live UI updates.  Errors raised
+        by the sink are logged and swallowed.
         """
         effective_summary_tokens = policy.summary_max_tokens if policy else 4000
 
@@ -777,12 +814,17 @@ class SessionCompaction:
 
         chat_messages = cls._extract_chat_messages(msgs_with_parts, ChatMessage, session_id, policy)
 
+        loaded_total_chars = sum(len(m.content) for m in chat_messages)
         log.info("compaction.process.messages_loaded", {
             "session_id": session_id,
             "raw_count": len(messages),
             "with_parts_count": len(msgs_with_parts),
             "chat_messages_count": len(chat_messages),
-            "total_chars": sum(len(m.content) for m in chat_messages),
+            "total_chars": loaded_total_chars,
+        })
+        await _emit_progress(progress_callback, "load", {
+            "message_count": len(chat_messages),
+            "total_chars": loaded_total_chars,
         })
 
         # Summarization
@@ -816,6 +858,20 @@ class SessionCompaction:
                 "target_chars": target_chars,
                 "has_focus": bool(focus_instruction and focus_instruction.strip()),
             })
+            # ``chunks`` here is an *upper-bound estimate* — the actual
+            # split happens inside ``summarize_chunked`` which may emit
+            # a slightly different N via ``chunk_done``.  For the UI
+            # progress bar this approximation is good enough and lets
+            # us show the segment count before the first chunk completes.
+            estimated_chunks: Optional[int] = None
+            if use_chunked:
+                split_at = chunk_size if (chunk_size and chunk_size > 0) else target_chars
+                estimated_chunks = max(1, -(-total_chars // max(1, split_at)))
+            await _emit_progress(progress_callback, "strategy", {
+                "decision": decision,
+                "use_chunked": use_chunked,
+                "chunks": estimated_chunks,
+            })
 
             if not use_chunked:
                 summary_text = await summary.summarize_single_pass(
@@ -830,6 +886,7 @@ class SessionCompaction:
                     session_id,
                     chunk_size=chunk_size,
                     focus_instruction=focus_instruction,
+                    progress_callback=progress_callback,
                 )
 
             log.info("compaction.process.complete", {
@@ -838,6 +895,9 @@ class SessionCompaction:
                 "summary_max_tokens": effective_summary_tokens,
                 "chunked": use_chunked,
                 "decision": decision,
+            })
+            await _emit_progress(progress_callback, "summarize_done", {
+                "summary_chars": len(summary_text) if summary_text else 0,
             })
 
             if not summary_text:
@@ -860,7 +920,7 @@ class SessionCompaction:
             )
 
             # Write summary and archive old messages
-            return await cls._archive_and_write_summary(
+            result = await cls._archive_and_write_summary(
                 session_id=session_id,
                 parent_id=parent_id,
                 summary=summary_text,
@@ -869,6 +929,10 @@ class SessionCompaction:
                 auto=auto,
                 policy=policy,
             )
+            await _emit_progress(progress_callback, "complete", {
+                "result": result,
+            })
+            return result
 
         except Exception as e:
             log.error("compaction.process.error", {
@@ -876,6 +940,10 @@ class SessionCompaction:
                 "error": str(e),
             })
             _record_compaction_error(session_id, e)
+            # Note: no progress emit here.  The route layer raises
+            # RuntimeError on "stop", which surfaces via the existing
+            # ``session.error`` SSE channel — duplicating the failure
+            # on the progress channel would cause two toasts.
             return "stop"
 
     # ------------------------------------------------------------------

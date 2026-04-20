@@ -67,6 +67,22 @@
     "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
+    "compactionStage": {
+      "load": "加载消息（{{count}} 条）",
+      "strategyGeneric": "选择压缩策略",
+      "strategy_single_pass": "单次压缩（短对话）",
+      "strategy_preemptive": "预分块并行压缩",
+      "strategy_oversize": "超量分块压缩",
+      "strategyChunked": "分 {{count}} 块并行压缩",
+      "chunkProgressLabel": "分块完成进度",
+      "chunkDone": "分块 {{idx}}/{{total}} 完成（{{seconds}}s）",
+      "chunkFailed": "分块 {{idx}}/{{total}} 失败",
+      "mergeStarted": "合并 {{count}} 段摘要…",
+      "mergeDone": "合并完成（{{seconds}}s）",
+      "mergeFailed": "合并失败",
+      "summarizeDone": "生成摘要 {{chars}} 字",
+      "complete": "压缩完成"
+    },
     "removeNodeRef": "移除节点引用",
     "errors": {
       "saveFailed": "保存消息失败",

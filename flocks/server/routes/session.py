@@ -1916,6 +1916,23 @@ async def _run_session_compaction(
     if not parent_message_id:
         raise ValueError(f"Session {session_id} has no user message to compact")
 
+    progress_callback = None
+    if event_publish_callback is not None:
+        # Adapter that bridges ``ProgressCallback(stage, data)`` from the
+        # compaction pipeline onto the existing ``publish_event`` SSE
+        # channel.  We use a dedicated event type
+        # (``session.compaction_progress``) rather than overloading
+        # ``session.status`` so the front-end dispatcher stays
+        # explicit and unrelated consumers do not need to filter on a
+        # nested ``stage`` field.  ``sessionID`` is closed over from
+        # the enclosing scope.
+        async def progress_callback(stage: str, data: dict) -> None:
+            await event_publish_callback("session.compaction_progress", {
+                "sessionID": session_id,
+                "stage": stage,
+                "data": data,
+            })
+
     result = await run_compaction(
         session_id,
         parent_message_id=parent_message_id,
@@ -1926,6 +1943,7 @@ async def _run_session_compaction(
         event_publish_callback=event_publish_callback,
         status_after="idle",
         focus_instruction=focus_instruction,
+        progress_callback=progress_callback,
     )
     if result == "stop":
         # ``SessionCompaction.process`` swallows the underlying provider

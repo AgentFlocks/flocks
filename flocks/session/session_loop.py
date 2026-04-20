@@ -722,6 +722,24 @@ class SessionLoop:
                     # Build dynamic CompactionPolicy from model info
                     compaction_policy = cls._build_compaction_policy(ctx)
                     
+                    # Auto-compaction also surfaces a "Compacting..."
+                    # banner on the UI (driven by ``session.status`` →
+                    # ``compacting``), so we wire the same SSE progress
+                    # adapter as the manual ``/compact`` route.  The
+                    # closure captures ``ctx.session.id`` and the
+                    # publish callback explicitly to keep behaviour
+                    # identical between loop and route paths.
+                    _publish = callbacks.event_publish_callback if callbacks else None
+                    _session_id_for_progress = ctx.session.id
+                    progress_callback = None
+                    if _publish is not None:
+                        async def progress_callback(stage: str, data: dict) -> None:
+                            await _publish("session.compaction_progress", {
+                                "sessionID": _session_id_for_progress,
+                                "stage": stage,
+                                "data": data,
+                            })
+
                     # Process compaction
                     try:
                         compaction_result = await run_compaction(
@@ -731,9 +749,10 @@ class SessionLoop:
                             provider_id=ctx.provider_id,
                             model_id=ctx.model_id,
                             auto=getattr(task_part, 'auto', False),
-                            event_publish_callback=callbacks.event_publish_callback if callbacks else None,
+                            event_publish_callback=_publish,
                             status_after="busy",
                             policy=compaction_policy,
+                            progress_callback=progress_callback,
                         )
                         
                         if compaction_result == "stop":
@@ -971,6 +990,21 @@ class SessionLoop:
                                 policy=compaction_policy,
                             )
                             
+                            # Same SSE progress adapter as the manual
+                            # /compact route — mirrored here so the
+                            # overflow-driven path also drives the
+                            # multi-stage UI panel.
+                            _publish_overflow = callbacks.event_publish_callback if callbacks else None
+                            _session_id_overflow = ctx.session.id
+                            progress_callback_overflow = None
+                            if _publish_overflow is not None:
+                                async def progress_callback_overflow(stage: str, data: dict) -> None:
+                                    await _publish_overflow("session.compaction_progress", {
+                                        "sessionID": _session_id_overflow,
+                                        "stage": stage,
+                                        "data": data,
+                                    })
+
                             # Trigger compaction (summarization + memory flush)
                             compaction_result = await run_compaction(
                                 ctx.session.id,
@@ -979,9 +1013,10 @@ class SessionLoop:
                                 provider_id=ctx.provider_id,
                                 model_id=ctx.model_id,
                                 auto=True,
-                                event_publish_callback=callbacks.event_publish_callback if callbacks else None,
+                                event_publish_callback=_publish_overflow,
                                 status_after="busy",
                                 policy=compaction_policy,
+                                progress_callback=progress_callback_overflow,
                             )
                             ctx.last_compaction_step = ctx.step
                             set_context_state(

@@ -5,7 +5,14 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from typing import Optional, Any
+from typing import Awaitable, Callable, Dict, Optional, Any
+
+# Same shape as ``compaction.ProgressCallback``.  Re-declared locally to
+# keep the summary module free of an upward import (``compaction.py``
+# already imports ``summary`` — making it a one-way dependency avoids a
+# cycle if anyone ever adds a strict ``from .compaction import ...``
+# here in the future).
+ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
@@ -203,6 +210,28 @@ async def summarize_single_pass(
     return summary
 
 
+async def _safe_emit(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    data: Dict[str, Any],
+) -> None:
+    """Best-effort progress emit (mirrors ``compaction._emit_progress``).
+
+    Defined locally so this module does not depend on ``compaction.py``
+    (one-way import contract).  Any sink exception is logged WARN and
+    swallowed: progress is observability, never a correctness contract.
+    """
+    if callback is None:
+        return
+    try:
+        await callback(stage, data)
+    except Exception as exc:
+        log.warn("compaction.progress.emit_error", {
+            "stage": stage,
+            "error": str(exc),
+        })
+
+
 async def summarize_chunked(
     chat_messages: list,
     prompt_text: str,
@@ -213,6 +242,7 @@ async def summarize_chunked(
     session_id: str,
     chunk_size: Optional[int] = None,
     focus_instruction: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Optional[str]:
     """Generate summary by chunking a long conversation.
 
@@ -311,11 +341,27 @@ async def summarize_chunked(
                         "chunk_chars": len(chunk_text),
                         "summary_chars": len(resp.content),
                     })
+                    # Chunks finish in non-deterministic order under
+                    # ``asyncio.gather``; the front-end MUST deduplicate
+                    # by ``chunk`` index, not by arrival count.
+                    await _safe_emit(progress_callback, "chunk_done", {
+                        "chunk": idx,
+                        "total": len(chunks),
+                        "duration_ms": round(duration_ms, 2),
+                        "ok": True,
+                    })
                     return f"## Part {idx + 1}\n{resp.content}"
                 log.warn("compaction.chunk_summary.empty_response", {
                     "session_id": session_id,
                     "chunk": idx,
                     "duration_ms": round(duration_ms, 2),
+                })
+                await _safe_emit(progress_callback, "chunk_done", {
+                    "chunk": idx,
+                    "total": len(chunks),
+                    "duration_ms": round(duration_ms, 2),
+                    "ok": False,
+                    "reason": "empty_response",
                 })
                 return f"## Part {idx + 1}\n{chunk_text[:500]}…"
             except asyncio.TimeoutError:
@@ -326,6 +372,13 @@ async def summarize_chunked(
                     "timeout": per_chunk_timeout,
                     "duration_ms": round(duration_ms, 2),
                 })
+                await _safe_emit(progress_callback, "chunk_done", {
+                    "chunk": idx,
+                    "total": len(chunks),
+                    "duration_ms": round(duration_ms, 2),
+                    "ok": False,
+                    "reason": "timeout",
+                })
                 return f"## Part {idx + 1}\n{chunk_text[:500]}…"
             except Exception as e:
                 duration_ms = (time.perf_counter() - started) * 1000
@@ -334,6 +387,13 @@ async def summarize_chunked(
                     "chunk": idx,
                     "error": str(e),
                     "duration_ms": round(duration_ms, 2),
+                })
+                await _safe_emit(progress_callback, "chunk_done", {
+                    "chunk": idx,
+                    "total": len(chunks),
+                    "duration_ms": round(duration_ms, 2),
+                    "ok": False,
+                    "reason": "error",
                 })
                 return f"## Part {idx + 1}\n{chunk_text[:500]}…"
 
@@ -363,6 +423,10 @@ async def summarize_chunked(
             f"{_build_focus_block(focus_instruction)}"
         )
         merge_timeout = _merge_timeout_seconds()
+        await _safe_emit(progress_callback, "merge_started", {
+            "chunks_merged": len(chunks),
+            "merged_chars": len(merged),
+        })
         merge_started = time.perf_counter()
         try:
             resp = await _llm_chat_with_timeout(
@@ -386,6 +450,11 @@ async def summarize_chunked(
                     "duration_ms": round(merge_duration_ms, 2),
                     "summary_chars": len(summary),
                 })
+                await _safe_emit(progress_callback, "merge_done", {
+                    "duration_ms": round(merge_duration_ms, 2),
+                    "summary_chars": len(summary),
+                    "ok": True,
+                })
                 return summary
         except asyncio.TimeoutError:
             merge_duration_ms = (time.perf_counter() - merge_started) * 1000
@@ -394,10 +463,13 @@ async def summarize_chunked(
                 "timeout": merge_timeout,
                 "duration_ms": round(merge_duration_ms, 2),
             })
+            await _safe_emit(progress_callback, "merge_done", {
+                "duration_ms": round(merge_duration_ms, 2),
+                "ok": False,
+                "reason": "timeout",
+            })
         except Exception as e:
             merge_duration_ms = (time.perf_counter() - merge_started) * 1000
-            # Many gateways respond with HTML error pages on 5xx; truncate
-            # the error string so the log line stays readable.
             err_text = str(e)
             if len(err_text) > 200:
                 err_text = err_text[:200] + "…(truncated)"
@@ -405,6 +477,11 @@ async def summarize_chunked(
                 "session_id": session_id,
                 "duration_ms": round(merge_duration_ms, 2),
                 "error": err_text,
+            })
+            await _safe_emit(progress_callback, "merge_done", {
+                "duration_ms": round(merge_duration_ms, 2),
+                "ok": False,
+                "reason": "error",
             })
 
     return merged

@@ -123,6 +123,90 @@ interface ComposerAttachment {
   error?: string;
 }
 
+// Backend stages emitted by ``SessionCompaction.process`` /
+// ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
+// Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
+type CompactionStage =
+  | 'load'
+  | 'strategy'
+  | 'chunk_done'
+  | 'merge_started'
+  | 'merge_done'
+  | 'summarize_done'
+  | 'complete';
+
+interface CompactionStageEntry {
+  stage: CompactionStage;
+  data: Record<string, unknown>;
+  ts: number;
+}
+
+/**
+ * Render a single human-readable line for one compaction stage event.
+ *
+ * Kept i18n-aware (caller passes ``t``) and total-aware so e.g.
+ * ``chunk_done`` shows ``2 / 5``.  Numbers are rendered defensively —
+ * the SSE payload is untyped JSON, so we type-narrow before formatting.
+ *
+ * Returns ``null`` if the stage is unknown so the caller can ``filter
+ * Boolean`` the list without printing raw event names to end users.
+ */
+function describeCompactionStage(
+  entry: CompactionStageEntry,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  const data = entry.data;
+  const num = (k: string): number | undefined =>
+    typeof data[k] === 'number' ? (data[k] as number) : undefined;
+  switch (entry.stage) {
+    case 'load': {
+      const count = num('message_count');
+      return t('chat.compactionStage.load', { count: count ?? '?' });
+    }
+    case 'strategy': {
+      const decision = typeof data.decision === 'string' ? data.decision : 'single_pass';
+      const chunks = num('chunks');
+      if (chunks && chunks > 1) {
+        return t('chat.compactionStage.strategyChunked', { count: chunks });
+      }
+      return t(`chat.compactionStage.strategy_${decision}`, {
+        defaultValue: t('chat.compactionStage.strategyGeneric'),
+      });
+    }
+    case 'chunk_done': {
+      const idx = num('chunk');
+      const total = num('total');
+      const ms = num('duration_ms');
+      const ok = data.ok !== false;
+      if (idx === undefined || total === undefined) return null;
+      return ok
+        ? t('chat.compactionStage.chunkDone', {
+            idx: idx + 1,
+            total,
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+          })
+        : t('chat.compactionStage.chunkFailed', { idx: idx + 1, total });
+    }
+    case 'merge_started':
+      return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
+    case 'merge_done': {
+      const ok = data.ok !== false;
+      const ms = num('duration_ms');
+      return ok
+        ? t('chat.compactionStage.mergeDone', {
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+          })
+        : t('chat.compactionStage.mergeFailed');
+    }
+    case 'summarize_done':
+      return t('chat.compactionStage.summarizeDone', { chars: num('summary_chars') ?? 0 });
+    case 'complete':
+      return t('chat.compactionStage.complete');
+    default:
+      return null;
+  }
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -250,6 +334,12 @@ export default function SessionChat({
   const [isDragOver, setIsDragOver] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  // Live compaction progress, populated by ``session.compaction_progress`` SSE
+  // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
+  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index
+  // and track ``chunksDone / chunksTotal`` separately for the progress bar.
+  const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
+  const [compactionChunkProgress, setCompactionChunkProgress] = useState<{ done: number; total: number } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
@@ -386,16 +476,64 @@ export default function SessionChat({
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(properties.status.message || t('chat.compacting'));
+          // Reset progress state on each new compaction cycle so a stale
+          // run's stages do not leak into a fresh "Compacting..." panel.
+          setCompactionStages([]);
+          setCompactionChunkProgress(null);
         } else {
           const wasCompacting = isCompactingRef.current;
           setIsCompacting(false);
           isCompactingRef.current = false;
           setCompactingMessage('');
+          setCompactionStages([]);
+          setCompactionChunkProgress(null);
           if (wasCompacting) refetch();
         }
+      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
+        const stage = properties.stage as CompactionStage | undefined;
+        const data = (properties.data ?? {}) as Record<string, unknown>;
+        if (!stage) return;
+        if (stage === 'chunk_done') {
+          // ``chunk`` is the index, ``total`` the chunk count. Arrival order
+          // is non-deterministic under ``asyncio.gather`` so we count distinct
+          // indices rather than incrementing a counter on every event.
+          const total = typeof data.total === 'number' ? data.total : undefined;
+          const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
+          if (chunkIdx !== undefined && total !== undefined) {
+            setCompactionChunkProgress((prev) => {
+              const seen = new Set<number>();
+              if (prev && prev.total === total) {
+                // Re-derive ``done`` from the stage list to avoid double
+                // counting on duplicate SSE deliveries (e.g. SSE reconnect).
+                compactionStages
+                  .filter((e) => e.stage === 'chunk_done')
+                  .forEach((e) => {
+                    const i = (e.data as { chunk?: number }).chunk;
+                    if (typeof i === 'number') seen.add(i);
+                  });
+              }
+              seen.add(chunkIdx);
+              return { done: seen.size, total };
+            });
+          }
+        }
+        setCompactionStages((prev) => {
+          // Deduplicate ``chunk_done`` entries by chunk index; keep all others as-is.
+          if (stage === 'chunk_done') {
+            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
+            if (chunkIdx !== undefined && prev.some(
+              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+            )) {
+              return prev;
+            }
+          }
+          return [...prev, { stage, data, ts: Date.now() }];
+        });
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
+        setCompactionStages([]);
+        setCompactionChunkProgress(null);
         abortingRef.current = false;
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
@@ -475,6 +613,8 @@ export default function SessionChat({
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
+    setCompactionStages([]);
+    setCompactionChunkProgress(null);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
@@ -1196,7 +1336,7 @@ export default function SessionChat({
               );
             })}
 
-            {/* Compacting indicator */}
+            {/* Compacting indicator with live progress stages */}
             {isCompacting && (
               <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
                 <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
@@ -1204,6 +1344,38 @@ export default function SessionChat({
                     <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                     <span>{compactingMessage || t('chat.compacting')}</span>
                   </div>
+                  {compactionChunkProgress && compactionChunkProgress.total > 0 && (
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                        <span>{t('chat.compactionStage.chunkProgressLabel')}</span>
+                        <span>{compactionChunkProgress.done} / {compactionChunkProgress.total}</span>
+                      </div>
+                      <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                        <div
+                          className="h-full bg-amber-500 transition-all duration-300"
+                          style={{
+                            width: `${Math.min(100, Math.round((compactionChunkProgress.done / compactionChunkProgress.total) * 100))}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {compactionStages.length > 0 && (
+                    <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                      {compactionStages
+                        .map((entry, idx) => {
+                          const text = describeCompactionStage(entry, t);
+                          if (!text) return null;
+                          return (
+                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                              <span className="text-amber-400">·</span>
+                              <span>{text}</span>
+                            </li>
+                          );
+                        })
+                        .filter(Boolean)}
+                    </ul>
+                  )}
                 </div>
               </div>
             )}
