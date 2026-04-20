@@ -310,6 +310,7 @@
     "executing": "执行中...",
     "runTest": "执行测试",
     "disabledNote": "该工具已禁用，无法执行测试",
+    "sessionTestOnly": "内置工具暂不支持在 Tool 页面直接测试，请在 session 中调用测试。",
     "testResult": "测试结果",
     "execSuccess": "执行成功",
     "execFailed": "执行失败",

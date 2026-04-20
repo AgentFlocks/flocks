@@ -310,6 +310,7 @@
     "executing": "Executing...",
     "runTest": "Run Test",
     "disabledNote": "This tool is disabled, cannot run test",
+    "sessionTestOnly": "Built-in tools cannot be tested directly from the Tool page. Please invoke them from a session instead.",
     "testResult": "Test Result",
     "execSuccess": "Execution Successful",
     "execFailed": "Execution Failed",
