@@ -68,6 +68,82 @@ _pending_flush_tasks: set[asyncio.Task] = set()
 _session_flush_locks: dict[str, asyncio.Lock] = {}
 
 
+# ---------------------------------------------------------------------------
+# Last-error breadcrumb for "stop" returns
+# ---------------------------------------------------------------------------
+#
+# ``SessionCompaction.process`` historically returns the literal "stop" on
+# any unrecoverable error, swallowing the underlying provider exception
+# (e.g. ``Error code: 529 - {'error': {'message': '模型服务暂时不可用'}}``).
+# Callers like ``session_loop`` only need to know whether to halt, but the
+# manual ``/compact`` path in ``server/routes/session.py`` raises
+# ``RuntimeError("Compaction failed")`` which surfaces to the UI as a
+# useless red toast.
+#
+# We keep ``return "stop"`` to preserve the loop contract, but stash the
+# user-facing message here so ``_run_session_compaction`` can raise a
+# detailed RuntimeError that the SSE ``session.error`` payload propagates
+# verbatim to the toast.  Entries are *single-shot*: producers ``set``,
+# the command path ``pop``s; if no consumer reads it within the same
+# compaction attempt the next attempt's record will overwrite it (we
+# never want a stale message to leak into a later, unrelated failure).
+_last_compaction_error: dict[str, str] = {}
+
+
+def _record_compaction_error(session_id: str, error: BaseException) -> None:
+    """Stash a user-facing message for the next ``pop_last_compaction_error``.
+
+    Tries to extract the human-readable ``message`` field from JSON-shaped
+    provider errors (most OpenAI-compatible SDKs include a literal
+    ``{"error": {"message": "..."}}`` block in ``str(exc)``).  Falls back
+    to the raw ``str(exc)`` otherwise — *never* fabricates a generic
+    "Compaction failed", because the whole point of this helper is to
+    avoid that.
+    """
+    raw = str(error).strip()
+    detail = _extract_provider_message(raw) or raw or type(error).__name__
+    _last_compaction_error[session_id] = detail
+
+
+def pop_last_compaction_error(session_id: str) -> Optional[str]:
+    """Return + clear the last error recorded for ``session_id``."""
+    return _last_compaction_error.pop(session_id, None)
+
+
+def _extract_provider_message(text: str) -> Optional[str]:
+    """Best-effort: pull the inner ``message`` out of an SDK error string.
+
+    OpenAI-compatible SDKs format errors like
+    ``Error code: 529 - {'error': {'message': '模型服务暂时不可用',
+    'type': 'SERVICE_UNAVAILABLE'}}``.  The dict is repr-formatted
+    (single quotes), so ``json.loads`` won't work directly; ``ast.literal_eval``
+    on the substring after ``" - "`` does.  Returns ``None`` if the
+    pattern doesn't match — the caller falls back to the raw text.
+    """
+    if not text or " - " not in text:
+        return None
+    try:
+        import ast
+        _, _, payload = text.partition(" - ")
+        parsed = ast.literal_eval(payload.strip())
+        if not isinstance(parsed, dict):
+            return None
+        err = parsed.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                # Prepend the HTTP code if present so users / ops can
+                # still grep for "529" in screenshots.
+                code_prefix = ""
+                head = text.split(" - ", 1)[0]
+                if head.lower().startswith("error code:"):
+                    code_prefix = head.strip() + " — "
+                return f"{code_prefix}{msg.strip()}"
+    except (ValueError, SyntaxError):
+        return None
+    return None
+
+
 def _flush_in_background_enabled() -> bool:
     raw = os.getenv("FLOCKS_COMPACTION_FLUSH_BACKGROUND", "1").strip().lower()
     return raw not in {"0", "false", "no", "off", ""}
@@ -621,8 +697,12 @@ class SessionCompaction:
 
         try:
             from flocks.provider.provider import Provider, ChatMessage
-        except ImportError:
+        except ImportError as imp_err:
             log.error("compaction.process.import_error")
+            _record_compaction_error(
+                session_id,
+                RuntimeError(f"Provider SDK unavailable: {imp_err}"),
+            )
             return "stop"
 
         provider_client = Provider.get(provider_id)
@@ -632,6 +712,12 @@ class SessionCompaction:
                 "provider_id": provider_id,
                 "model_id": model_id,
             })
+            _record_compaction_error(
+                session_id,
+                RuntimeError(
+                    f"Provider '{provider_id}' not configured for model '{model_id}'"
+                ),
+            )
             return "stop"
 
         try:
@@ -753,6 +839,7 @@ class SessionCompaction:
                 "session_id": session_id,
                 "error": str(e),
             })
+            _record_compaction_error(session_id, e)
             return "stop"
 
     # ------------------------------------------------------------------

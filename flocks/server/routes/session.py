@@ -1888,6 +1888,9 @@ async def _run_session_compaction(
     summariser preserves.  ``None``/empty leaves the default behaviour.
     """
     from flocks.session.lifecycle.compaction import run_compaction
+    from flocks.session.lifecycle.compaction.compaction import (
+        pop_last_compaction_error,
+    )
     from flocks.session.lifecycle.revert import SessionRevert
     from flocks.session.message import Message, MessageRole
 
@@ -1925,7 +1928,14 @@ async def _run_session_compaction(
         focus_instruction=focus_instruction,
     )
     if result == "stop":
-        raise RuntimeError("Compaction failed")
+        # ``SessionCompaction.process`` swallows the underlying provider
+        # exception (so the loop path stays simple) but stashes the
+        # user-facing message via ``_record_compaction_error``.  Surface
+        # it verbatim here so the SSE ``session.error`` payload — and
+        # therefore the front-end toast — shows e.g. "Error code: 529
+        # — 模型服务暂时不可用" instead of an opaque "Compaction failed".
+        detail = pop_last_compaction_error(session_id) or "Compaction failed"
+        raise RuntimeError(detail)
     return agent_name, provider_id, model_id
 
 
