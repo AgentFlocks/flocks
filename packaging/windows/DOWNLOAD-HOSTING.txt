@@ -1,0 +1,20 @@
+Windows staging zip: where it lives and how long it stays downloadable
+=======================================================================
+
+1) GitHub Actions "Artifacts" (workflow: windows-packaging.yml)
+   - Each workflow run uploads a zip (e.g. flocks-windows-staging.zip).
+   - Retention: GitHub enforces a maximum retention period (often 90 days for
+     public repos on Free; orgs may allow longer). The workflow sets an explicit
+     retention-days so behavior is predictable.
+   - Artifacts are NOT permanent hosting. Old runs expire and the zip disappears.
+
+2) Long-term / "always" download for users
+   - Attach the same zip (or your Inno Setup FlocksSetup.exe) to a GitHub
+     RELEASE (tag, e.g. v1.2.3). Release assets stay available as long as the
+     repo and release exist (subject to GitHub policies).
+   - Use workflow: windows-packaging-release.yml — runs when you push a version
+     tag (v*), builds the staging zip, uploads it to that GitHub Release.
+
+3) Manual
+   - Build locally: packaging\windows\build-staging.ps1
+   - Upload the zip or Setup.exe to Release assets by hand in the GitHub UI.

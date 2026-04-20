@@ -137,6 +137,41 @@ def test_find_executable_checks_windows_cmd_suffixes(
     assert updater._find_executable("npm") == str(npm_cmd)
 
 
+def test_resolve_npm_executable_prefers_bundled_node_home_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node_home = tmp_path / "tools" / "node"
+    node_home.mkdir(parents=True)
+    (node_home / "node.exe").write_text("", encoding="utf-8")
+    bundled_npm = node_home / "npm.cmd"
+    bundled_npm.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: r"C:\Program Files\nodejs\npm.cmd")
+
+    assert updater._resolve_npm_executable() == str(bundled_npm)
+
+
+def test_resolve_npm_executable_falls_back_to_find_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+
+    def fake_find(name: str) -> str | None:
+        if name == "npm.cmd":
+            return r"C:\Program Files\nodejs\npm.cmd"
+        return None
+
+    monkeypatch.setattr(updater, "_find_executable", fake_find)
+
+    assert updater._resolve_npm_executable() == r"C:\Program Files\nodejs\npm.cmd"
+
+
 def test_find_executable_ignores_wsl_mnt_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1397,6 +1432,68 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
             ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
             None,
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    run_calls: list[list[str]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append(list(cmd))
+        return 0, "", ""
+
+    async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_resolve_npm_executable", lambda: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd")
+    monkeypatch.setattr(updater, "_find_executable", lambda name: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\uv\uv.exe" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
+
+    assert progresses[-1].stage == "done"
+    assert run_calls[:2] == [
+        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "install"],
+        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "run", "build"],
     ]
 
 

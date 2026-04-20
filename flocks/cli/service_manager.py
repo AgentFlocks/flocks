@@ -245,9 +245,58 @@ def resolve_flocks_cli_command(root: Path | None = None) -> list[str]:
     return resolve_python_subprocess_command(root) + ["-m", "flocks.cli.main"]
 
 
+def _bundled_node_install_dir() -> Path | None:
+    """Return the bundled Node.js installation directory when available."""
+    candidates: list[str] = []
+    node_home = os.getenv("FLOCKS_NODE_HOME")
+    if node_home:
+        candidates.append(node_home)
+
+    install_root = os.getenv("FLOCKS_INSTALL_ROOT")
+    if install_root:
+        candidates.append(str(Path(install_root).expanduser() / "tools" / "node"))
+
+    for candidate in candidates:
+        node_dir = Path(candidate).expanduser()
+        if sys.platform == "win32":
+            node_executable = node_dir / "node.exe"
+        else:
+            node_executable = node_dir / "bin" / "node"
+        if node_executable.exists():
+            return node_dir.resolve()
+    return None
+
+
+def resolve_node_executable() -> str | None:
+    """Resolve node executable from bundled toolchain first, then PATH."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        node_executable = node_dir / ("node.exe" if sys.platform == "win32" else "bin/node")
+        return str(node_executable)
+    return which("node")
+
+
+def resolve_npm_executable() -> str | None:
+    """Resolve npm from bundled toolchain first, then PATH."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        candidates = (
+            [node_dir / "npm.cmd", node_dir / "npm", node_dir / "bin/npm"]
+            if sys.platform == "win32"
+            else [node_dir / "bin/npm", node_dir / "npm"]
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+
+    if sys.platform == "win32":
+        return which("npm.cmd") or which("npm")
+    return which("npm") or which("npm.cmd")
+
+
 def get_node_major_version() -> int | None:
     """Return the detected Node.js major version."""
-    node = which("node")
+    node = resolve_node_executable()
     if not node:
         return None
 
@@ -785,7 +834,7 @@ def start_frontend(config: ServiceConfig, console) -> None:
     if runtime_record is not None:
         paths.frontend_pid.unlink(missing_ok=True)
 
-    npm = which("npm") or which("npm.cmd")
+    npm = resolve_npm_executable()
     if not npm:
         raise ServiceError("未检测到 npm，请先安装 Node.js 22+（包含 npm）后重试。")
     if not node_version_satisfies_requirement():
@@ -1343,6 +1392,22 @@ def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
     """Build frontend proxy environment variables from backend service settings."""
     env = os.environ.copy()
     env["FLOCKS_API_PROXY_TARGET"] = backend_access_base_url(config)
+
+    # When using the bundled toolchain (Windows installer), npm/node spawned by
+    # `npm run build/preview` must be able to locate the bundled node.exe via
+    # PATH — npm itself does not always inherit the caller's resolved executable
+    # location.  Prepend the bundled node directory when present.
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        if sys.platform == "win32":
+            node_bin = str(node_dir)
+        else:
+            node_bin = str(node_dir / "bin")
+        path_sep = os.pathsep
+        current_path = env.get("PATH", "")
+        if node_bin not in current_path.split(path_sep):
+            env["PATH"] = node_bin + path_sep + current_path
+
     return env
 
 

@@ -1,0 +1,129 @@
+; Inno Setup 6 — install Inno Setup, then compile e.g.:
+;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\windows\flocks-setup.iss /DStagingRoot=C:\path\to\staging
+; StagingRoot = output directory of packaging\windows\build-staging.ps1
+
+#ifndef StagingRoot
+  #define StagingRoot "dist\staging"
+#endif
+
+#ifndef AppVersion
+  #define AppVersion "0.0.0-dev"
+#endif
+
+#define MyAppName "Flocks"
+#define MyAppVersion AppVersion
+#define MyAppPublisher "Flocks"
+
+[Setup]
+AppId={{A8C9E2F1-4B3D-5E6F-9A0B-1C2D3E4F5A6B}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+DefaultDirName={localappdata}\Programs\{#MyAppName}
+DisableProgramGroupPage=yes
+OutputBaseFilename=FlocksSetup
+Compression=lzma2
+SolidCompression=yes
+WizardStyle=modern
+PrivilegesRequired=lowest
+ChangesEnvironment=yes
+
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+; Remind the user to reopen their terminal so a fresh process picks up the
+; HKCU\Environment entries (FLOCKS_INSTALL_ROOT / FLOCKS_NODE_HOME / PATH)
+; written during install; cmd.exe doesn't respond to WM_SETTINGCHANGE, so
+; any pre-existing shells keep stale env vars.
+[Messages]
+FinishedLabel=Setup has finished installing [name] on your computer.%n%nHow to start Flocks:%n- Use the desktop shortcut%n- Or open a NEW terminal in the install directory and run `flocks start`%n%nPlease open a NEW terminal window first, so the updated environment variables (PATH, FLOCKS_NODE_HOME, ...) take effect.%n%n安装已完成。启动方式：%n- 使用桌面快捷方式启动%n- 或在安装目录打开新的终端后执行 `flocks start`%n%n请重新打开终端窗口，以便新的环境变量（PATH、FLOCKS_NODE_HOME 等）生效。
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
+
+[Files]
+Source: "{#StagingRoot}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Registry]
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_INSTALL_ROOT"; ValueData: "{app}"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_REPO_ROOT"; ValueData: "{app}\flocks"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_NODE_HOME"; ValueData: "{app}\tools\node"; Flags: uninsdeletevalue
+
+; Shortcuts intentionally target the same wrapper path that `scripts\install.ps1`
+; writes, so the Start menu / desktop icon and `flocks start` typed in a new
+; terminal are strictly equivalent across all install flows.
+[Icons]
+Name: "{autoprograms}\{#MyAppName}\Start Flocks"; Filename: "{%USERPROFILE}\.local\bin\flocks.cmd"; Parameters: "start"; WorkingDir: "{%USERPROFILE}"
+Name: "{autoprograms}\{#MyAppName}\Flocks repository"; Filename: "{app}\flocks"; WorkingDir: "{app}\flocks"
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{%USERPROFILE}\.local\bin\flocks.cmd"; Parameters: "start"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
+
+[Run]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\bootstrap-windows.ps1"" -InstallRoot ""{app}"""; StatusMsg: "Setting up Python and JavaScript dependencies..."; Flags: runascurrentuser waituntilterminated
+
+; Runs before [Files] are deleted: flocks stop (graceful), then taskkill fallback, PATH/env/flocks.cmd cleanup, bundled Chrome junction.
+[UninstallRun]
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\uninstall-flocks-user-state.ps1"" -InstallRoot ""{app}"""; RunOnceId: "FlocksUninstallCleanup"; Flags: runascurrentuser
+
+; Explicit shortcut removal (desktop / Start menu). Targets outside {app} may not always be tracked by the default icon uninstall.
+[UninstallDelete]
+Type: files; Name: "{userdesktop}\{#MyAppName}.lnk"
+Type: files; Name: "{autoprograms}\{#MyAppName}\Start Flocks.lnk"
+Type: files; Name: "{autoprograms}\{#MyAppName}\Flocks repository.lnk"
+Type: dirifempty; Name: "{autoprograms}\{#MyAppName}"
+; Remove all installed code under {app}, then remove the install root directory.
+Type: filesandordirs; Name: "{app}\*"
+Type: dirifempty; Name: "{app}"
+
+[Code]
+function IsUnderBaseDir(const CandidateDir, BaseDir: string): Boolean;
+var
+  NormalizedCandidate: string;
+  NormalizedBase: string;
+begin
+  if BaseDir = '' then
+  begin
+    Result := False;
+    exit;
+  end;
+
+  NormalizedCandidate := Lowercase(RemoveBackslashUnlessRoot(ExpandFileName(CandidateDir)));
+  NormalizedBase := Lowercase(RemoveBackslashUnlessRoot(ExpandFileName(BaseDir)));
+
+  Result :=
+    (NormalizedCandidate = NormalizedBase) or
+    (Pos(NormalizedBase + '\', NormalizedCandidate + '\') = 1);
+end;
+
+function IsProgramFilesPath(const TargetDir: string): Boolean;
+var
+  ProgramFilesDir: string;
+  ProgramFilesX86Dir: string;
+begin
+  ProgramFilesDir := ExpandConstant('{%ProgramFiles}');
+  ProgramFilesX86Dir := ExpandConstant('{%ProgramFiles(x86)}');
+
+  Result :=
+    IsUnderBaseDir(TargetDir, ProgramFilesDir) or
+    IsUnderBaseDir(TargetDir, ProgramFilesX86Dir);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  SelectedDir: string;
+begin
+  Result := True;
+
+  if CurPageID <> wpSelectDir then
+    exit;
+
+  SelectedDir := WizardDirValue;
+  if IsProgramFilesPath(SelectedDir) then
+  begin
+    MsgBox(
+      'Warning: Installing under "C:\Program Files" (or Program Files (x86)) may require Administrator privileges when running or updating Flocks.' + #13#10 + #13#10 +
+      '警告：安装到“C:\Program Files”（或 Program Files (x86)）目录后，运行或更新 Flocks 可能需要管理员权限。',
+      mbInformation,
+      MB_OK
+    );
+  end;
+end;

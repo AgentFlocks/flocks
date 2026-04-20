@@ -1,0 +1,14 @@
+{
+  "description": "Pinned versions for Windows bundled staging (CI downloads + local packaging). Bump when upgrading toolchains.",
+  "uv": {
+    "version": "0.9.15"
+  },
+  "nodejs": {
+    "version": "24.14.0",
+    "windows_zip_suffix": "win-x64"
+  },
+  "chrome_for_testing": {
+    "version": "147.0.7727.57",
+    "channel": "stable"
+  }
+}

@@ -27,6 +27,10 @@ function Test-IsAdministrator {
 }
 
 function Assert-Administrator {
+    if ($env:FLOCKS_SKIP_ADMIN_CHECK -eq "1") {
+        return
+    }
+
     if (Test-IsAdministrator) {
         return
     }

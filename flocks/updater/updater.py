@@ -115,6 +115,25 @@ def _running_from_legacy_uv_tool_install() -> bool:
     return "/uv/tools/flocks/" in executable
 
 
+def _bundled_node_install_dir() -> Path | None:
+    """Return bundled Node.js install dir when Windows installer env vars are set."""
+    candidates: list[str] = []
+    node_home = os.getenv("FLOCKS_NODE_HOME")
+    if node_home:
+        candidates.append(node_home)
+
+    install_root = os.getenv("FLOCKS_INSTALL_ROOT")
+    if install_root:
+        candidates.append(str(Path(install_root).expanduser() / "tools" / "node"))
+
+    for candidate in candidates:
+        node_dir = Path(candidate).expanduser()
+        node_executable = node_dir / ("node.exe" if sys.platform == "win32" else "bin/node")
+        if node_executable.exists():
+            return node_dir.resolve()
+    return None
+
+
 def _windows_paths_match(left: str, right: str) -> bool:
     """Return True when two Windows paths likely point to the same launcher/script."""
     if not left or not right:
@@ -1857,7 +1876,7 @@ async def perform_update(
     # ------------------------------------------------------------------ #
     staged_webui_dir = content_root / "webui"
     if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
-        npm = _find_executable("npm.cmd") or _find_executable("npm")
+        npm = _resolve_npm_executable()
         if npm:
             yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
             npm_env = {"npm_config_registry": profile.npm_registry} if profile.npm_registry else None
@@ -2306,3 +2325,21 @@ def _find_executable(name: str) -> str | None:
                 return str(p)
 
     return None
+
+
+def _resolve_npm_executable() -> str | None:
+    """Resolve npm from bundled Node first, then standard executable probing."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        candidates = (
+            [node_dir / "npm.cmd", node_dir / "npm", node_dir / "bin" / "npm"]
+            if sys.platform == "win32"
+            else [node_dir / "bin" / "npm", node_dir / "npm"]
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+
+    if sys.platform == "win32":
+        return _find_executable("npm.cmd") or _find_executable("npm")
+    return _find_executable("npm") or _find_executable("npm.cmd")

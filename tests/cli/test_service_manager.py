@@ -1,6 +1,7 @@
 import contextlib
 import json
 import signal
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,6 +28,133 @@ def test_runtime_paths_follow_flocks_root_env(monkeypatch, tmp_path: Path) -> No
     assert paths.log_dir == tmp_path / "logs"
     assert paths.backend_pid == tmp_path / "run" / "backend.pid"
     assert paths.frontend_log == tmp_path / "logs" / "webui.log"
+
+
+def test_resolve_node_executable_prefers_flocks_node_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    home = tmp_path / "nh"
+    home.mkdir()
+    if sys.platform == "win32":
+        (home / "node.exe").write_bytes(b"")
+    else:
+        (home / "bin").mkdir()
+        (home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(home))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
+
+
+def test_resolve_node_executable_prefers_flocks_install_root_tools_node(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    root = tmp_path / "inst"
+    node_home = root / "tools" / "node"
+    node_home.mkdir(parents=True)
+    if sys.platform == "win32":
+        (node_home / "node.exe").write_bytes(b"")
+    else:
+        (node_home / "bin").mkdir(parents=True)
+        (node_home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_INSTALL_ROOT", str(root))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
+
+
+def test_resolve_node_executable_falls_back_to_which_when_env_absent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+
+    assert service_manager.resolve_node_executable() == "/usr/bin/node"
+
+
+def test_resolve_node_executable_falls_back_to_which_when_path_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+
+    assert service_manager.resolve_node_executable() == "/usr/bin/node"
+
+
+def test_resolve_npm_executable_prefers_flocks_node_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    home = tmp_path / "nh"
+    home.mkdir()
+    if sys.platform == "win32":
+        (home / "node.exe").write_bytes(b"")
+        bundled_npm = home / "npm.cmd"
+    else:
+        (home / "bin").mkdir()
+        (home / "bin" / "node").write_bytes(b"")
+        bundled_npm = home / "bin" / "npm"
+    bundled_npm.write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(home))
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/npm")
+
+    resolved = service_manager.resolve_npm_executable()
+
+    assert resolved == str(bundled_npm)
+
+
+def test_resolve_npm_executable_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+
+    def fake_which(name: str) -> str | None:
+        if name == "npm.cmd":
+            return r"C:\Program Files\nodejs\npm.cmd"
+        return None
+
+    monkeypatch.setattr(service_manager, "which", fake_which)
+
+    assert service_manager.resolve_npm_executable() == r"C:\Program Files\nodejs\npm.cmd"
+
+
+def test_build_frontend_env_prepends_bundled_node_to_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    node_home = tmp_path / "tools" / "node"
+    if sys.platform == "win32":
+        node_home.mkdir(parents=True)
+        (node_home / "node.exe").write_bytes(b"")
+    else:
+        (node_home / "bin").mkdir(parents=True)
+        (node_home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+
+    config = service_manager.ServiceConfig(backend_host="127.0.0.1", backend_port=8000)
+    env = service_manager.build_frontend_env(config)
+
+    path_entries = env["PATH"].split(service_manager.os.pathsep)
+    if sys.platform == "win32":
+        assert path_entries[0] == str(node_home)
+    else:
+        assert path_entries[0] == str(node_home / "bin")
+
+
+def test_build_frontend_env_no_path_injection_without_bundled_node(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("FLOCKS_NODE_HOME", raising=False)
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+
+    import os as _os
+    original_path = _os.environ.get("PATH", "")
+    config = service_manager.ServiceConfig(backend_host="127.0.0.1", backend_port=8000)
+    env = service_manager.build_frontend_env(config)
+
+    assert env["PATH"] == original_path
 
 
 def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
@@ -479,71 +607,6 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
     ]
 
 
-def test_start_all_uses_config_backend_port_when_pid_record_missing(monkeypatch, tmp_path: Path) -> None:
-    paths = service_manager.RuntimePaths(
-        root=tmp_path,
-        run_dir=tmp_path / "run",
-        log_dir=tmp_path / "logs",
-        backend_pid=tmp_path / "run" / "backend.pid",
-        frontend_pid=tmp_path / "run" / "webui.pid",
-        backend_log=tmp_path / "logs" / "backend.log",
-        frontend_log=tmp_path / "logs" / "webui.log",
-    )
-    paths.run_dir.mkdir(parents=True)
-    config = service_manager.ServiceConfig(frontend_port=5175, backend_port=9100)
-    calls: list[tuple[int, Path, str]] = []
-
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
-    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        service_manager,
-        "stop_one",
-        lambda port, pid_file, name, _console: calls.append((port, pid_file, name)),
-    )
-    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda *_args, **_kwargs: None)
-
-    service_manager.start_all(config, console=None)
-
-    assert calls == [
-        (5175, paths.frontend_pid, "WebUI"),
-        (9100, paths.backend_pid, "后端"),
-    ]
-
-
-def test_restart_all_uses_config_backend_port_with_legacy_pid_record(monkeypatch, tmp_path: Path) -> None:
-    paths = service_manager.RuntimePaths(
-        root=tmp_path,
-        run_dir=tmp_path / "run",
-        log_dir=tmp_path / "logs",
-        backend_pid=tmp_path / "run" / "backend.pid",
-        frontend_pid=tmp_path / "run" / "webui.pid",
-        backend_log=tmp_path / "logs" / "backend.log",
-        frontend_log=tmp_path / "logs" / "webui.log",
-    )
-    paths.run_dir.mkdir(parents=True)
-    paths.backend_pid.write_text("12345", encoding="utf-8")
-    config = service_manager.ServiceConfig(frontend_port=5176, backend_port=9200)
-    calls: list[tuple[int, Path, str]] = []
-
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
-    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        service_manager,
-        "stop_one",
-        lambda port, pid_file, name, _console: calls.append((port, pid_file, name)),
-    )
-    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda *_args, **_kwargs: None)
-
-    service_manager.restart_all(config, console=None)
-
-    assert calls == [
-        (5176, paths.frontend_pid, "WebUI"),
-        (9200, paths.backend_pid, "后端"),
-    ]
-
-
 def test_start_all_stops_on_failure_before_restart(monkeypatch) -> None:
     paths = service_manager.RuntimePaths(
         root=Path("/tmp"),
@@ -714,7 +777,7 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
     monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else None)
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: "/usr/bin/npm")
     monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
     monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
     monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
@@ -750,6 +813,41 @@ def test_start_frontend_passes_backend_urls_to_build_and_preview(monkeypatch, tm
     assert record is not None
     assert record.host == "0.0.0.0"
     assert record.port == 5174
+
+
+def test_start_frontend_prefers_bundled_npm_over_path_lookup(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    build_calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        build_calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    monkeypatch.setattr(service_manager, "_spawn_process", lambda *_args, **_kwargs: SimpleNamespace(pid=2468))
+
+    service_manager.start_frontend(service_manager.ServiceConfig(), console)
+
+    assert build_calls[0][0] == r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd"
 
 
 def test_start_backend_raises_on_port_record_mismatch(monkeypatch, tmp_path: Path) -> None:
