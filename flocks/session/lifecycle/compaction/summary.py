@@ -15,15 +15,17 @@ log = Log.create(service="session.compaction.summarization")
 COMPACTION_TIMEOUT_SECONDS = 300
 
 # The merge step in ``summarize_chunked`` is a SHORT prompt (just the N
-# chunk summaries) so it should normally complete in <30s.  We give it a
-# tighter budget than the per-chunk timeout because if the upstream
-# proxy (e.g. threatbook → minimax) is wedged, the chunked-fallback is
-# already a perfectly usable summary — there is no point waiting the
-# full 5-minute COMPACTION_TIMEOUT_SECONDS only to discover the
-# gateway returned 504.  Field data showed merge calls hanging for
-# 230s before the proxy gave up; a tight bound bails out much sooner
-# and unblocks the user.
-_DEFAULT_MERGE_TIMEOUT_SECONDS = 60
+# chunk summaries) so it should normally complete well under the budget.
+# We give it a tighter cap than the per-chunk timeout because if the
+# upstream proxy (e.g. threatbook → minimax) is wedged, the
+# chunked-fallback is already a perfectly usable summary — there is no
+# point waiting the full 5-minute COMPACTION_TIMEOUT_SECONDS only to
+# discover the gateway returned 504.  Field data showed merge calls
+# hanging for 230s before the proxy gave up; a 120s ceiling still
+# accommodates slower models / longer summaries while bailing out well
+# before the typical gateway 504 window, and remains tunable per
+# deployment via FLOCKS_COMPACTION_MERGE_TIMEOUT.
+_DEFAULT_MERGE_TIMEOUT_SECONDS = 120
 
 
 def _merge_timeout_seconds() -> float:
