@@ -129,6 +129,11 @@ async def test_inline_mode_when_env_disables_background(monkeypatch):
 
     assert calls == ["sess-inline"]
     assert not compaction_mod._pending_flush_tasks
+    # Inline path must NOT register a per-session lock — that bookkeeping
+    # only exists to serialise the background path.  Regression guard:
+    # if someone moves _get_flush_lock above the background branch the
+    # inline path would silently start populating the registry.
+    assert "sess-inline" not in compaction_mod._session_flush_locks
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +272,47 @@ async def test_session_lock_released_after_completion(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_single_task_observes_itself_in_pending_set_during_flush(monkeypatch):
+    """Pin the ``current is t: continue`` invariant in cleanup logic.
+
+    During the flush body the running task IS still in
+    ``_pending_flush_tasks`` (the done-callback only fires after the
+    coroutine returns).  ``_release_session_lock_if_idle`` must
+    therefore exclude the current task, otherwise a single dispatch
+    would always look "still pending" to itself and never clean up its
+    own lock — silently re-introducing the leak that motivated the
+    cleanup helper in the first place.
+    """
+    saw_self = False
+
+    async def fake_flush(**kwargs):
+        nonlocal saw_self
+        # While we are running the flush body, our own task should
+        # still be tracked.  This proves the cleanup helper must
+        # special-case ``current``.
+        saw_self = any(
+            compaction_mod._session_id_from_task(t) == "solo"
+            for t in compaction_mod._pending_flush_tasks
+        )
+
+    _patch_flush(monkeypatch, fake_flush)
+
+    await SessionCompaction._dispatch_memory_flush(
+        session_id="solo",
+        summary_text="x",
+        chat_messages=[],
+        model_id="m",
+        provider_client=object(),
+        ChatMessage=object,
+        policy=None,
+    )
+    await drain_pending_flush_tasks(timeout=2.0)
+
+    assert saw_self, "test premise broken: task did not observe itself in pending set"
+    assert "solo" not in compaction_mod._session_flush_locks
+
+
+@pytest.mark.asyncio
 async def test_session_lock_kept_while_other_task_pending(monkeypatch):
     """Cleanup must not drop the lock while another same-session task is queued."""
     release = asyncio.Event()
@@ -377,6 +423,12 @@ async def test_drain_cancel_on_timeout_clears_pending(monkeypatch):
     )
     assert leftover == 0
     assert not compaction_mod._pending_flush_tasks
+    # After cancellation the runner's `finally` should still drop the
+    # session lock, since this is the only task targeting "hangs".
+    # If this assertion ever flaps it means the cancellation-time
+    # cleanup path regressed and lock entries will leak across
+    # shutdown/restart cycles.
+    assert "hangs" not in compaction_mod._session_flush_locks
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +508,6 @@ async def test_summarize_chunked_runs_chunks_in_parallel(monkeypatch):
     msgs = [_StubMessage("user", "x" * 200) for _ in range(12)]
     provider = _StubProvider(latency=0.15)
 
-    started = time.perf_counter()
     result = await summary_mod.summarize_chunked(
         chat_messages=msgs,
         prompt_text="prompt",
@@ -466,17 +517,17 @@ async def test_summarize_chunked_runs_chunks_in_parallel(monkeypatch):
         max_tokens=2000,
         session_id="sess-chunked",
     )
-    elapsed = time.perf_counter() - started
 
     assert result is not None
     # At least 2 chunk calls plus the merge call → > 2 chats.
     assert provider.calls >= 3
-    # Parallelism actually happened.
+    # Parallelism actually happened.  We deliberately do NOT add a
+    # wall-clock assertion here — `peak_in_flight` is the semantic
+    # check we care about, and elapsed-time bounds are flaky under CI
+    # load (cold provider, GC, container scheduling).
     assert provider.peak_in_flight >= 2, (
         f"chunked summarisation ran serially: peak_in_flight = {provider.peak_in_flight}"
     )
-    # Sanity: should be much faster than serial (~6 * 0.15 = 0.9s) + merge.
-    assert elapsed < 1.5
 
 
 @pytest.mark.asyncio

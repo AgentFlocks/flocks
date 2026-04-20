@@ -112,6 +112,14 @@ def _release_session_lock_if_idle(session_id: str, lock: asyncio.Lock) -> None:
       * we only pop the entry when it is *still* the same Lock instance
         we acquired, defending against an interleaved dispatch having
         replaced it (cannot happen today but cheap to be safe).
+
+    Best-effort under cancellation: if two same-session tasks are
+    cancelled and run their ``finally`` blocks before either is marked
+    done, each will see the other as "still pending" and skip cleanup.
+    The orphaned entry is bounded (only same-session shutdown races) and
+    ``drain_pending_flush_tasks(cancel_on_timeout=True)`` is the
+    documented shutdown path, after which the process is expected to
+    terminate or the registry can be cleared explicitly.
     """
     current = asyncio.current_task()
     for t in _pending_flush_tasks:
@@ -178,6 +186,14 @@ async def drain_pending_flush_tasks(
     Returns:
         The number of tasks that were *still pending* when the function
         returned (always 0 when ``cancel_on_timeout=True``).
+
+    Note:
+        The pending set is snapshotted at function entry; any new
+        dispatches that occur *during* drain will NOT be awaited and
+        will not be reflected in the returned leftover count.  Callers
+        performing a true shutdown should arrange to stop new dispatches
+        first (e.g. by flipping a "shutting down" flag the dispatcher
+        consults before scheduling).
     """
     if not _pending_flush_tasks:
         return 0
@@ -361,7 +377,8 @@ class SessionCompaction:
         2. **Hard timeout** — wraps the flush in ``asyncio.wait_for`` so a
            stuck provider call cannot indefinitely retain ``chat_messages``
            / provider references.  Tunable via
-           ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default 600s).
+           ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default
+           ``_DEFAULT_FLUSH_TIMEOUT_SECONDS``, currently 90s).
         """
         kwargs = dict(
             session_id=session_id,
