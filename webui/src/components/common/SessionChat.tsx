@@ -336,10 +336,25 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
-  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index
-  // and track ``chunksDone / chunksTotal`` separately for the progress bar.
+  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
+  // The chunk progress bar (``done/total``) is *derived* from this single
+  // source via useMemo below — keeping a parallel state would risk drift if
+  // either updater missed an event (and earlier did: a stale closure read
+  // froze ``done`` at 1 for multi-chunk runs).
   const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
-  const [compactionChunkProgress, setCompactionChunkProgress] = useState<{ done: number; total: number } | null>(null);
+  const compactionChunkProgress = useMemo<{ done: number; total: number } | null>(() => {
+    let total = 0;
+    const seen = new Set<number>();
+    for (const entry of compactionStages) {
+      if (entry.stage !== 'chunk_done') continue;
+      const chunk = (entry.data as { chunk?: number }).chunk;
+      const t = (entry.data as { total?: number }).total;
+      if (typeof chunk === 'number') seen.add(chunk);
+      if (typeof t === 'number' && t > total) total = t;
+    }
+    if (total === 0) return null;
+    return { done: seen.size, total };
+  }, [compactionStages]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
@@ -479,46 +494,24 @@ export default function SessionChat({
           // Reset progress state on each new compaction cycle so a stale
           // run's stages do not leak into a fresh "Compacting..." panel.
           setCompactionStages([]);
-          setCompactionChunkProgress(null);
         } else {
           const wasCompacting = isCompactingRef.current;
           setIsCompacting(false);
           isCompactingRef.current = false;
           setCompactingMessage('');
           setCompactionStages([]);
-          setCompactionChunkProgress(null);
           if (wasCompacting) refetch();
         }
       } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
         const stage = properties.stage as CompactionStage | undefined;
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
-        if (stage === 'chunk_done') {
-          // ``chunk`` is the index, ``total`` the chunk count. Arrival order
-          // is non-deterministic under ``asyncio.gather`` so we count distinct
-          // indices rather than incrementing a counter on every event.
-          const total = typeof data.total === 'number' ? data.total : undefined;
-          const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
-          if (chunkIdx !== undefined && total !== undefined) {
-            setCompactionChunkProgress((prev) => {
-              const seen = new Set<number>();
-              if (prev && prev.total === total) {
-                // Re-derive ``done`` from the stage list to avoid double
-                // counting on duplicate SSE deliveries (e.g. SSE reconnect).
-                compactionStages
-                  .filter((e) => e.stage === 'chunk_done')
-                  .forEach((e) => {
-                    const i = (e.data as { chunk?: number }).chunk;
-                    if (typeof i === 'number') seen.add(i);
-                  });
-              }
-              seen.add(chunkIdx);
-              return { done: seen.size, total };
-            });
-          }
-        }
+        // Single source of truth: append into ``compactionStages`` and let
+        // the progress bar derive ``done/total`` from it via useMemo.
+        // ``chunk_done`` arrives in non-deterministic order under
+        // ``asyncio.gather``; deduplicate by chunk index here so SSE
+        // reconnects / accidental re-deliveries are idempotent.
         setCompactionStages((prev) => {
-          // Deduplicate ``chunk_done`` entries by chunk index; keep all others as-is.
           if (stage === 'chunk_done') {
             const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
             if (chunkIdx !== undefined && prev.some(
@@ -533,7 +526,6 @@ export default function SessionChat({
         setIsStreaming(false);
         setIsCompacting(false);
         setCompactionStages([]);
-        setCompactionChunkProgress(null);
         abortingRef.current = false;
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
@@ -614,7 +606,6 @@ export default function SessionChat({
     setIsCompacting(false);
     setCompactingMessage('');
     setCompactionStages([]);
-    setCompactionChunkProgress(null);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
