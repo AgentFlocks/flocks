@@ -173,20 +173,12 @@ function describeCompactionStage(
         defaultValue: t('chat.compactionStage.strategyGeneric'),
       });
     }
-    case 'chunk_done': {
-      const idx = num('chunk');
-      const total = num('total');
-      const ms = num('duration_ms');
-      const ok = data.ok !== false;
-      if (idx === undefined || total === undefined) return null;
-      return ok
-        ? t('chat.compactionStage.chunkDone', {
-            idx: idx + 1,
-            total,
-            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
-          })
-        : t('chat.compactionStage.chunkFailed', { idx: idx + 1, total });
-    }
+    case 'chunk_done':
+      // Per-chunk events drive the percentage bar but are intentionally
+      // hidden from the milestone list — users asked for a single
+      // overall progress signal rather than N noisy "chunk X/N done"
+      // lines that arrive out of order under ``asyncio.gather``.
+      return null;
     case 'merge_started':
       return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
     case 'merge_done': {
@@ -342,18 +334,51 @@ export default function SessionChat({
   // either updater missed an event (and earlier did: a stale closure read
   // froze ``done`` at 1 for multi-chunk runs).
   const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
-  const compactionChunkProgress = useMemo<{ done: number; total: number } | null>(() => {
-    let total = 0;
-    const seen = new Set<number>();
-    for (const entry of compactionStages) {
-      if (entry.stage !== 'chunk_done') continue;
-      const chunk = (entry.data as { chunk?: number }).chunk;
-      const t = (entry.data as { total?: number }).total;
-      if (typeof chunk === 'number') seen.add(chunk);
-      if (typeof t === 'number' && t > total) total = t;
+  // Single weighted progress percentage (0–100) covering the whole
+  // compaction pipeline. Per-chunk events drive the parallel-summary
+  // band (10–70%); merge owns 70–95%; summary write + completion
+  // close the last 5%. Single-pass runs skip the chunk band entirely
+  // and jump strategy → summarize_done (20% → 95%).
+  //
+  // Why fixed weights instead of timing-based progress:
+  //  - Chunks finish in non-deterministic order so a time-linear bar
+  //    would jitter or stall whenever the slowest chunk dominates.
+  //  - The user only needs "where am I in the pipeline", not real-time
+  //    estimation; phase advancement gives a credible signal of life.
+  const compactionPercent = useMemo<number | null>(() => {
+    if (compactionStages.length === 0) return null;
+    const seenStage = new Set(compactionStages.map((e) => e.stage));
+    if (seenStage.has('complete')) return 100;
+
+    const strategyEvent = compactionStages.find((e) => e.stage === 'strategy');
+    const useChunked = strategyEvent
+      ? Boolean((strategyEvent.data as { use_chunked?: boolean }).use_chunked)
+      : false;
+
+    if (useChunked) {
+      if (seenStage.has('summarize_done')) return 97;
+      if (seenStage.has('merge_done')) return 95;
+      if (seenStage.has('merge_started')) return 75;
+      let total = 0;
+      const seenChunks = new Set<number>();
+      for (const entry of compactionStages) {
+        if (entry.stage !== 'chunk_done') continue;
+        const d = entry.data as { chunk?: number; total?: number };
+        if (typeof d.chunk === 'number') seenChunks.add(d.chunk);
+        if (typeof d.total === 'number' && d.total > total) total = d.total;
+      }
+      if (total > 0) {
+        return Math.min(70, 10 + Math.round((seenChunks.size / total) * 60));
+      }
+      if (seenStage.has('strategy')) return 10;
+      if (seenStage.has('load')) return 5;
+      return 1;
     }
-    if (total === 0) return null;
-    return { done: seen.size, total };
+
+    if (seenStage.has('summarize_done')) return 95;
+    if (seenStage.has('strategy')) return 20;
+    if (seenStage.has('load')) return 10;
+    return 1;
   }, [compactionStages]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
@@ -1335,18 +1360,16 @@ export default function SessionChat({
                     <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                     <span>{compactingMessage || t('chat.compacting')}</span>
                   </div>
-                  {compactionChunkProgress && compactionChunkProgress.total > 0 && (
+                  {compactionPercent !== null && (
                     <div className="mt-2">
                       <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
-                        <span>{t('chat.compactionStage.chunkProgressLabel')}</span>
-                        <span>{compactionChunkProgress.done} / {compactionChunkProgress.total}</span>
+                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                        <span>{compactionPercent}%</span>
                       </div>
                       <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
                         <div
                           className="h-full bg-amber-500 transition-all duration-300"
-                          style={{
-                            width: `${Math.min(100, Math.round((compactionChunkProgress.done / compactionChunkProgress.total) * 100))}%`,
-                          }}
+                          style={{ width: `${compactionPercent}%` }}
                         />
                       </div>
                     </div>
