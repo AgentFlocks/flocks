@@ -12,6 +12,7 @@ Reference implementation:
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 from collections import OrderedDict
 from typing import Any, Awaitable, Callable, Optional
@@ -30,6 +31,23 @@ from flocks.utils.log import Log
 log = Log.create(service="channel.wecom")
 
 _FRAME_CACHE_MAX = 500
+_DEFAULT_RECONNECT_TIMEOUT_SECONDS = 60.0
+
+
+def _parse_reconnect_timeout_seconds(raw: Any) -> tuple[float, Optional[str]]:
+    """Parse and validate the reconnect watchdog timeout."""
+    if raw is None:
+        return _DEFAULT_RECONNECT_TIMEOUT_SECONDS, None
+
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0, "reconnectTimeoutSeconds must be a positive number"
+
+    if not math.isfinite(value) or value <= 0:
+        return 0.0, "reconnectTimeoutSeconds must be a positive number"
+
+    return value, None
 
 
 class WeComChannel(ChannelPlugin):
@@ -39,6 +57,10 @@ class WeComChannel(ChannelPlugin):
         super().__init__()
         self._ws_client: Any = None
         self._frame_cache: OrderedDict[str, Any] = OrderedDict()
+        self._intentional_disconnect = False
+        self._reconnect_timeout_seconds = _DEFAULT_RECONNECT_TIMEOUT_SECONDS
+        self._reconnect_timeout_event = asyncio.Event()
+        self._reconnect_watchdog_task: asyncio.Task[None] | None = None
 
     def meta(self) -> ChannelMeta:
         return ChannelMeta(
@@ -57,6 +79,13 @@ class WeComChannel(ChannelPlugin):
         for key in ("botId", "secret"):
             if not config.get(key):
                 return f"Missing required config: {key}"
+        reconnect_timeout_seconds, error = _parse_reconnect_timeout_seconds(
+            config.get("reconnectTimeoutSeconds")
+        )
+        if error:
+            return error
+        if "reconnectTimeoutSeconds" in config:
+            config["reconnectTimeoutSeconds"] = reconnect_timeout_seconds
         # WeCom only delivers @mentioned group messages; normalize legacy "all".
         if config.get("groupTrigger") == "all":
             config["groupTrigger"] = "mention"
@@ -70,6 +99,14 @@ class WeComChannel(ChannelPlugin):
         """Connect to WeCom via WebSocket and block until *abort_event* fires."""
         self._config = config
         self._on_message = on_message
+        self._intentional_disconnect = False
+        self._reconnect_timeout_seconds, error = _parse_reconnect_timeout_seconds(
+            config.get("reconnectTimeoutSeconds")
+        )
+        if error:
+            raise ValueError(error)
+        self._reconnect_timeout_event = asyncio.Event()
+        self._cancel_reconnect_watchdog()
 
         try:
             from wecom_aibot_sdk import WSClient
@@ -90,19 +127,10 @@ class WeComChannel(ChannelPlugin):
             plug_version="1.0.0",  # 企微服务端用于下发 MCP Server URL 时的版本校验
         )
 
-        self._ws_client.on("authenticated", lambda: (
-            self.mark_connected(),
-            log.info("wecom.ws.authenticated"),
-        ))
-        self._ws_client.on("disconnected", lambda r: (
-            log.warning("wecom.ws.disconnected", {"reason": r}),
-        ))
-        self._ws_client.on("reconnecting", lambda n: (
-            log.info("wecom.ws.reconnecting", {"attempt": n}),
-        ))
-        self._ws_client.on("error", lambda e: (
-            log.error("wecom.ws.error", {"error": str(e)}),
-        ))
+        self._ws_client.on("authenticated", self._handle_authenticated)
+        self._ws_client.on("disconnected", self._handle_disconnected)
+        self._ws_client.on("reconnecting", self._handle_reconnecting)
+        self._ws_client.on("error", self._handle_error)
 
         handler = self._make_message_handler(on_message)
         # 监听通用 message 事件（SDK 对所有消息类型都会触发此事件）
@@ -116,24 +144,12 @@ class WeComChannel(ChannelPlugin):
         await self._ws_client.connect()
 
         try:
-            if abort_event:
-                await abort_event.wait()
-            else:
-                await asyncio.Event().wait()
+            await self._wait_until_stopped(abort_event)
         finally:
-            try:
-                await asyncio.wait_for(self._ws_client.disconnect(), timeout=3.0)
-            except (asyncio.TimeoutError, Exception):
-                pass
-            self._ws_client = None
+            await self._disconnect_ws_client()
 
     async def stop(self) -> None:
-        if self._ws_client:
-            try:
-                await asyncio.wait_for(self._ws_client.disconnect(), timeout=3.0)
-            except (asyncio.TimeoutError, Exception):
-                pass
-            self._ws_client = None
+        await self._disconnect_ws_client()
 
     # ------------------------------------------------------------------
     # Outbound
@@ -208,6 +224,104 @@ class WeComChannel(ChannelPlugin):
         self._frame_cache[msg_id] = frame
         while len(self._frame_cache) > _FRAME_CACHE_MAX:
             self._frame_cache.popitem(last=False)
+
+    async def _wait_until_stopped(
+        self,
+        abort_event: asyncio.Event | None,
+    ) -> None:
+        abort_waiter = asyncio.create_task(
+            abort_event.wait() if abort_event else asyncio.Event().wait()
+        )
+        reconnect_waiter = asyncio.create_task(self._reconnect_timeout_event.wait())
+        done, pending = await asyncio.wait(
+            {abort_waiter, reconnect_waiter},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if reconnect_waiter in done and self._reconnect_timeout_event.is_set():
+            raise RuntimeError(
+                "WeCom reconnect timed out after "
+                f"{self._reconnect_timeout_seconds:.1f}s"
+            )
+
+    def _handle_authenticated(self) -> None:
+        self.mark_connected()
+        self._reconnect_timeout_event.clear()
+        self._cancel_reconnect_watchdog()
+        log.info("wecom.ws.authenticated")
+
+    def _handle_disconnected(self, reason: str) -> None:
+        self.mark_disconnected()
+        log.warning("wecom.ws.disconnected", {"reason": reason})
+        self._start_reconnect_watchdog(reason=f"disconnected:{reason}")
+
+    def _handle_reconnecting(self, attempt: int) -> None:
+        self.mark_disconnected()
+        log.info("wecom.ws.reconnecting", {"attempt": attempt})
+        self._start_reconnect_watchdog(reason=f"reconnecting:{attempt}")
+
+    def _handle_error(self, error: Exception) -> None:
+        log.error("wecom.ws.error", {"error": str(error)})
+
+    def _start_reconnect_watchdog(self, reason: str) -> None:
+        if self._intentional_disconnect or self._ws_client is None:
+            return
+        if self._reconnect_timeout_event.is_set():
+            return
+        if self._reconnect_watchdog_task and not self._reconnect_watchdog_task.done():
+            return
+        self._reconnect_watchdog_task = asyncio.create_task(
+            self._reconnect_watchdog(reason)
+        )
+        log.warning(
+            "wecom.ws.reconnect_watchdog_started",
+            {
+                "reason": reason,
+                "timeout_seconds": self._reconnect_timeout_seconds,
+            },
+        )
+
+    async def _reconnect_watchdog(self, reason: str) -> None:
+        try:
+            await asyncio.sleep(self._reconnect_timeout_seconds)
+        except asyncio.CancelledError:
+            return
+
+        self._reconnect_timeout_event.set()
+        log.error(
+            "wecom.ws.reconnect_watchdog_expired",
+            {
+                "reason": reason,
+                "timeout_seconds": self._reconnect_timeout_seconds,
+            },
+        )
+
+    def _cancel_reconnect_watchdog(self) -> None:
+        if self._reconnect_watchdog_task and not self._reconnect_watchdog_task.done():
+            self._reconnect_watchdog_task.cancel()
+        self._reconnect_watchdog_task = None
+
+    async def _disconnect_ws_client(self) -> None:
+        ws_client = self._ws_client
+        if ws_client is None:
+            self._cancel_reconnect_watchdog()
+            return
+
+        self._intentional_disconnect = True
+        try:
+            self._cancel_reconnect_watchdog()
+            try:
+                await asyncio.wait_for(ws_client.disconnect(), timeout=3.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        finally:
+            if self._ws_client is ws_client:
+                self._ws_client = None
+            self._cancel_reconnect_watchdog()
+            self._intentional_disconnect = False
 
     def _make_message_handler(
         self,

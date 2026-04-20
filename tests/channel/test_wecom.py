@@ -8,7 +8,8 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -57,6 +58,32 @@ class TestWeComChannelMeta:
     def test_validate_config_ok(self):
         err = self.ch.validate_config({"botId": "b", "secret": "s"})
         assert err is None
+
+    def test_validate_config_normalizes_reconnect_timeout(self):
+        config = {
+            "botId": "b",
+            "secret": "s",
+            "reconnectTimeoutSeconds": "12",
+        }
+        err = self.ch.validate_config(config)
+        assert err is None
+        assert config["reconnectTimeoutSeconds"] == 12.0
+
+    def test_validate_config_rejects_invalid_reconnect_timeout(self):
+        err = self.ch.validate_config({
+            "botId": "b",
+            "secret": "s",
+            "reconnectTimeoutSeconds": "abc",
+        })
+        assert err == "reconnectTimeoutSeconds must be a positive number"
+
+    def test_validate_config_rejects_non_positive_reconnect_timeout(self):
+        err = self.ch.validate_config({
+            "botId": "b",
+            "secret": "s",
+            "reconnectTimeoutSeconds": 0,
+        })
+        assert err == "reconnectTimeoutSeconds must be a positive number"
 
     def test_validate_config_normalizes_group_trigger_all(self):
         """Legacy groupTrigger 'all' should be normalized to 'mention'."""
@@ -142,6 +169,113 @@ class TestWeComSendText:
         assert result.success is False
         assert result.retryable is True
         assert "timeout" in result.error
+
+
+# ------------------------------------------------------------------
+# reconnect watchdog
+# ------------------------------------------------------------------
+
+class TestWeComReconnectWatchdog:
+    async def test_watchdog_sets_timeout_event(self):
+        ch = WeComChannel()
+        ch._ws_client = object()
+        ch._reconnect_timeout_seconds = 0.01
+
+        ch._start_reconnect_watchdog("socket closed")
+
+        await asyncio.wait_for(ch._reconnect_timeout_event.wait(), timeout=0.2)
+        assert ch._reconnect_timeout_event.is_set() is True
+
+    async def test_authenticated_cancels_watchdog(self):
+        ch = WeComChannel()
+        ch._reconnect_timeout_seconds = 0.05
+
+        ch._start_reconnect_watchdog("socket closed")
+        ch._handle_authenticated()
+        await asyncio.sleep(0)
+
+        assert ch._reconnect_timeout_event.is_set() is False
+        assert ch._reconnect_watchdog_task is None
+
+    async def test_start_raises_when_sdk_reconnect_stalls(self):
+        class FakeWSClient:
+            last_instance = None
+
+            def __init__(self, *args, **kwargs):
+                self.handlers = {}
+                self.disconnect = AsyncMock()
+                FakeWSClient.last_instance = self
+
+            def on(self, event, handler):
+                self.handlers[event] = handler
+
+            async def connect(self):
+                self.handlers["disconnected"]("socket closed")
+
+        ch = WeComChannel()
+        abort_event = asyncio.Event()
+        config = {
+            "botId": "bot-1",
+            "secret": "secret-1",
+            "reconnectTimeoutSeconds": 0.01,
+        }
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            with pytest.raises(RuntimeError, match="reconnect timed out"):
+                await ch.start(config, AsyncMock(), abort_event)
+
+        FakeWSClient.last_instance.disconnect.assert_awaited_once()
+
+    async def test_stop_does_not_leave_watchdog_after_intentional_disconnect(self):
+        class FakeWSClient:
+            def __init__(self):
+                self.handlers = {}
+                self.disconnect = AsyncMock(side_effect=self._disconnect)
+
+            def on(self, event, handler):
+                self.handlers[event] = handler
+
+            async def _disconnect(self):
+                self.handlers["disconnected"]("manual stop")
+
+        ch = WeComChannel()
+        ch._ws_client = FakeWSClient()
+        ch._ws_client.on("disconnected", ch._handle_disconnected)
+
+        await ch.stop()
+
+        assert ch._reconnect_watchdog_task is None
+        assert ch._ws_client is None
+
+    async def test_start_finally_does_not_leave_watchdog_after_abort(self):
+        class FakeWSClient:
+            last_instance = None
+
+            def __init__(self, *args, **kwargs):
+                self.handlers = {}
+                self.disconnect = AsyncMock(side_effect=self._disconnect)
+                FakeWSClient.last_instance = self
+
+            def on(self, event, handler):
+                self.handlers[event] = handler
+
+            async def connect(self):
+                return None
+
+            async def _disconnect(self):
+                self.handlers["disconnected"]("abort shutdown")
+
+        ch = WeComChannel()
+        abort_event = asyncio.Event()
+        abort_event.set()
+        config = {"botId": "bot-1", "secret": "secret-1"}
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            await ch.start(config, AsyncMock(), abort_event)
+
+        FakeWSClient.last_instance.disconnect.assert_awaited_once()
+        assert ch._reconnect_watchdog_task is None
+        assert ch._ws_client is None
 
 
 # ------------------------------------------------------------------
