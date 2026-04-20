@@ -49,8 +49,8 @@ log = Log.create(service="session.compaction")
 #     in parallel.
 #   * The background task is wrapped in ``asyncio.wait_for`` so that a stuck
 #     provider call cannot hold ``chat_messages`` / ``provider`` references
-#     forever.  The timeout defaults to 600s and is tunable via
-#     ``FLOCKS_COMPACTION_FLUSH_TIMEOUT``.
+#     forever.  See ``_DEFAULT_FLUSH_TIMEOUT_SECONDS`` (currently 90s) and
+#     override per-deployment via ``FLOCKS_COMPACTION_FLUSH_TIMEOUT``.
 #
 # Set ``FLOCKS_COMPACTION_FLUSH_BACKGROUND=0`` to fall back to the legacy
 # synchronous behaviour (useful for tests or debugging).
@@ -86,6 +86,10 @@ def _flush_timeout_seconds() -> float:
         })
         return float(_DEFAULT_FLUSH_TIMEOUT_SECONDS)
     if value <= 0:
+        log.warn("compaction.flush.timeout_non_positive", {
+            "raw": raw,
+            "fallback": _DEFAULT_FLUSH_TIMEOUT_SECONDS,
+        })
         return float(_DEFAULT_FLUSH_TIMEOUT_SECONDS)
     return value
 

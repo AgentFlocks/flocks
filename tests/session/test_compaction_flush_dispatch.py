@@ -28,33 +28,38 @@ from flocks.session.lifecycle.compaction.compaction import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+async def _hard_reset() -> None:
+    """Cancel every pending flush task and clear the module-level registries.
+
+    The two registries (``_pending_flush_tasks`` and ``_session_flush_locks``)
+    are process-wide; without an aggressive reset, leftover tasks from a
+    previous test would either resolve mid-fixture (poisoning the next
+    test's invariants) or be destroyed mid-flight at loop tear-down,
+    triggering a noisy "Task was destroyed but it is pending!" warning.
+    """
+    for t in list(compaction_mod._pending_flush_tasks):
+        t.cancel()
+    if compaction_mod._pending_flush_tasks:
+        await asyncio.gather(
+            *compaction_mod._pending_flush_tasks, return_exceptions=True
+        )
+    compaction_mod._pending_flush_tasks.clear()
+    compaction_mod._session_flush_locks.clear()
+
+
 @pytest.fixture(autouse=True)
 async def _reset_flush_state(monkeypatch):
     """Cancel/reset any flush state so tests do not bleed into one another."""
-    # Pre-test: hard reset.
-    for t in list(compaction_mod._pending_flush_tasks):
-        t.cancel()
-    if compaction_mod._pending_flush_tasks:
-        await asyncio.gather(
-            *compaction_mod._pending_flush_tasks, return_exceptions=True
-        )
-    compaction_mod._pending_flush_tasks.clear()
-    compaction_mod._session_flush_locks.clear()
+    await _hard_reset()
     monkeypatch.delenv("FLOCKS_COMPACTION_FLUSH_BACKGROUND", raising=False)
     monkeypatch.delenv("FLOCKS_COMPACTION_FLUSH_TIMEOUT", raising=False)
-
     yield
-
-    # Post-test: cancel anything still alive before the loop tears down so
-    # we never trigger "Task was destroyed but it is pending!" warnings.
-    for t in list(compaction_mod._pending_flush_tasks):
-        t.cancel()
-    if compaction_mod._pending_flush_tasks:
-        await asyncio.gather(
-            *compaction_mod._pending_flush_tasks, return_exceptions=True
-        )
-    compaction_mod._pending_flush_tasks.clear()
-    compaction_mod._session_flush_locks.clear()
+    await _hard_reset()
 
 
 def _patch_flush(monkeypatch, fake):
@@ -63,6 +68,26 @@ def _patch_flush(monkeypatch, fake):
         SessionCompaction,
         "_flush_memory_to_daily",
         classmethod(lambda cls, **kwargs: fake(**kwargs)),
+    )
+
+
+async def _dispatch(session_id: str) -> None:
+    """Invoke the dispatcher with placeholder values for everything but session_id.
+
+    Almost every test in this module only varies ``session_id``; the other
+    six arguments are pure carrier values that the dispatcher forwards
+    verbatim into ``_flush_memory_to_daily`` (which the tests have stubbed
+    out).  Centralising the boilerplate here keeps each test focused on
+    the behaviour under test.
+    """
+    await SessionCompaction._dispatch_memory_flush(
+        session_id=session_id,
+        summary_text="x",
+        chat_messages=[],
+        model_id="m",
+        provider_client=object(),
+        ChatMessage=object,
+        policy=None,
     )
 
 
@@ -84,15 +109,7 @@ async def test_dispatch_returns_immediately_in_background_mode(monkeypatch):
     _patch_flush(monkeypatch, fake_flush)
 
     started = time.perf_counter()
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="sess-A",
-        summary_text="summary",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("sess-A")
     elapsed = time.perf_counter() - started
 
     # Background task should have been scheduled but not awaited.
@@ -117,15 +134,7 @@ async def test_inline_mode_when_env_disables_background(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="sess-inline",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("sess-inline")
 
     assert calls == ["sess-inline"]
     assert not compaction_mod._pending_flush_tasks
@@ -164,15 +173,7 @@ async def test_same_session_flushes_run_serially(monkeypatch):
     _patch_flush(monkeypatch, fake_flush)
 
     for _ in range(3):
-        await SessionCompaction._dispatch_memory_flush(
-            session_id="same-sess",
-            summary_text="x",
-            chat_messages=[],
-            model_id="m",
-            provider_client=object(),
-            ChatMessage=object,
-            policy=None,
-        )
+        await _dispatch("same-sess")
 
     await drain_pending_flush_tasks(timeout=5.0)
     assert max_in_flight == 1, (
@@ -199,15 +200,7 @@ async def test_different_sessions_flush_in_parallel(monkeypatch):
     _patch_flush(monkeypatch, fake_flush)
 
     for sid in ("a", "b", "c", "d"):
-        await SessionCompaction._dispatch_memory_flush(
-            session_id=sid,
-            summary_text="x",
-            chat_messages=[],
-            model_id="m",
-            provider_client=object(),
-            ChatMessage=object,
-            policy=None,
-        )
+        await _dispatch(sid)
 
     await drain_pending_flush_tasks(timeout=5.0)
     assert max_in_flight >= 2, (
@@ -230,15 +223,7 @@ async def test_background_flush_times_out(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="hangs",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("hangs")
 
     await drain_pending_flush_tasks(timeout=2.0)
     assert not compaction_mod._pending_flush_tasks
@@ -257,15 +242,7 @@ async def test_session_lock_released_after_completion(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="ephemeral-1",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("ephemeral-1")
     await drain_pending_flush_tasks(timeout=2.0)
 
     assert "ephemeral-1" not in compaction_mod._session_flush_locks
@@ -297,15 +274,7 @@ async def test_single_task_observes_itself_in_pending_set_during_flush(monkeypat
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="solo",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("solo")
     await drain_pending_flush_tasks(timeout=2.0)
 
     assert saw_self, "test premise broken: task did not observe itself in pending set"
@@ -328,27 +297,11 @@ async def test_session_lock_kept_while_other_task_pending(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="busy",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("busy")
     await asyncio.wait_for(seen_first.wait(), timeout=1.0)
 
     # Second dispatch is queued waiting on the per-session lock.
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="busy",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("busy")
 
     # While both tasks are alive the lock must still be registered.
     assert "busy" in compaction_mod._session_flush_locks
@@ -381,15 +334,7 @@ async def test_drain_reports_leftover_without_cancel(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="slow",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("slow")
 
     leftover = await drain_pending_flush_tasks(timeout=0.05)
     assert leftover == 1
@@ -408,15 +353,7 @@ async def test_drain_cancel_on_timeout_clears_pending(monkeypatch):
 
     _patch_flush(monkeypatch, fake_flush)
 
-    await SessionCompaction._dispatch_memory_flush(
-        session_id="hangs",
-        summary_text="x",
-        chat_messages=[],
-        model_id="m",
-        provider_client=object(),
-        ChatMessage=object,
-        policy=None,
-    )
+    await _dispatch("hangs")
 
     leftover = await drain_pending_flush_tasks(
         timeout=0.05, cancel_on_timeout=True,
