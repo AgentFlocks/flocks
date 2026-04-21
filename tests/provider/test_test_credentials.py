@@ -284,6 +284,130 @@ class TestTestCredentialsToolExecution:
             )
 
     @pytest.mark.asyncio
+    async def test_service_prefers_login_probe_over_action_dispatch_tool(self):
+        """When a parameter-free login tool exists (e.g. qingteng_login), it
+        should be tried before action-dispatch tools whose handler-side validation
+        requires extra fields beyond the JSON schema (e.g. qingteng_assets which
+        needs `resource` + `os_type` for `assets.refresh`).
+        """
+        from flocks.server.routes.provider import test_provider_credentials
+
+        login_tool = ToolInfo(
+            name="qingteng_login",
+            description="Qingteng login probe",
+            category=ToolCategory.CUSTOM,
+            parameters=[],
+            requires_confirmation=False,
+        )
+        assets_tool = ToolInfo(
+            name="qingteng_assets",
+            description="Qingteng assets dispatch",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Asset action",
+                    required=True,
+                    enum=["list", "refresh", "refresh_status", "delete_host"],
+                )
+            ],
+            requires_confirmation=True,
+        )
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "qingteng")),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            mock_tr.list_tools.return_value = [assets_tool, login_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.qingteng": ["qingteng_assets", "qingteng_login"],
+            }
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=True,
+                output={"jwt": "fake", "signKey": "fake", "comId": "1"},
+            ))
+
+            result = await test_provider_credentials("qingteng")
+
+            assert result["success"] is True, result
+            assert result["tool_tested"] == "qingteng_login"
+            mock_tr.execute.assert_awaited_once_with(tool_name="qingteng_login")
+
+    @pytest.mark.asyncio
+    async def test_failed_attempts_are_aggregated_in_message(self):
+        """When every tool/param combination fails, the response should expose
+        the per-attempt error log so the WebUI can show why each probe failed
+        instead of only the message of the last attempt.
+        """
+        from flocks.server.routes.provider import test_provider_credentials
+
+        assets_tool = ToolInfo(
+            name="qingteng_assets",
+            description="Qingteng assets dispatch",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Asset action",
+                    required=True,
+                    enum=["list", "refresh"],
+                )
+            ],
+            requires_confirmation=True,
+        )
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "qingteng")),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            mock_tr.list_tools.return_value = [assets_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.qingteng": ["qingteng_assets"],
+            }
+
+            errors_by_action = {
+                "list": "Missing required parameters for assets.list: resource, os_type",
+                "refresh": "Missing required parameters for assets.refresh: resource, os_type",
+            }
+
+            async def _execute(tool_name, **params):
+                action = params.get("action")
+                return ToolResult(success=False, error=errors_by_action[action])
+
+            mock_tr.execute = AsyncMock(side_effect=_execute)
+
+            result = await test_provider_credentials("qingteng")
+
+            assert result["success"] is False, result
+            assert "attempts" in result, result
+            attempted_actions = {a["params"].get("action") for a in result["attempts"]}
+            assert {"list", "refresh"}.issubset(attempted_actions), result["attempts"]
+            assert "assets.list" in result["message"]
+            assert "assets.refresh" in result["message"]
+
+    @pytest.mark.asyncio
     async def test_service_metadata_secret_is_used_for_hyphenated_service(self):
         """API services should prefer metadata-defined secret ids over provider_id defaults."""
         from flocks.server.routes.provider import test_provider_credentials
