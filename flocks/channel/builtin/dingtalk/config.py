@@ -4,10 +4,13 @@ DingTalk-specific configuration constants and helpers.
 Outbound is supported only via the **enterprise app robot OAPI** (sometimes
 called the *stream/app push* path):
 
-- Required: ``appKey`` + ``appSecret`` + ``robotCode``.
+- Required: ``appKey`` + ``appSecret``.
 - ``clientId`` / ``clientSecret`` are accepted as aliases for ``appKey`` /
   ``appSecret`` (the DingTalk Stream / DWClient docs use the former names but
   refer to the same credential pair).
+- ``robotCode`` defaults to ``appKey`` (DingTalk's standard "enterprise
+  internal app robot" setup uses the same string for both).  Override only
+  when one app hosts multiple robots and the console issues a distinct code.
 - Sends via the OAPI domain ``https://api.dingtalk.com``
   (``/v1.0/robot/oToMessages/batchSend`` for 1:1, ``/v1.0/robot/groupMessages/send``
   for groups).
@@ -128,18 +131,24 @@ def resolve_account_credentials(
     Falls back to top-level config when the named account omits a field.
     Accepts ``clientId`` / ``clientSecret`` as aliases for ``appKey`` /
     ``appSecret`` so that DingTalk Stream-style configs work unchanged.
+
+    ``robotCode`` defaults to the resolved ``appKey`` — for an enterprise
+    internal app robot DingTalk uses the same string for both.  Set
+    ``robotCode`` explicitly only when one app hosts multiple robots.
     """
     if account_id and account_id != "default":
         accounts = config.get("accounts", {}) or {}
         acc = accounts.get(account_id, {}) or {}
         app_key = _merged_app_key(acc) or _merged_app_key(config)
         app_secret = _merged_app_secret(acc) or _merged_app_secret(config)
-        robot_code = acc.get("robotCode") or config.get("robotCode", "")
+        robot_code = acc.get("robotCode") or config.get("robotCode") or app_key
         return app_key, app_secret, robot_code
+
+    app_key = _merged_app_key(config)
     return (
-        _merged_app_key(config),
+        app_key,
         _merged_app_secret(config),
-        config.get("robotCode", ""),
+        config.get("robotCode") or app_key,
     )
 
 

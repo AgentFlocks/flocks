@@ -189,6 +189,65 @@ async def record_inbound(channel_id: str):
     return {"ok": True}
 
 
+class BindSessionRequest(BaseModel):
+    """Body for ``POST /api/channel/{channel_id}/bind``."""
+    session_id: str
+    chat_id: str
+    chat_type: str = "direct"  # "direct" | "group"
+    account_id: Optional[str] = "default"
+    thread_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+@router.post("/{channel_id}/bind")
+async def bind_session(channel_id: str, req: BindSessionRequest):
+    """Register a (channel, conversation) → session mapping in ``channel_bindings``.
+
+    For Feishu/WeCom/Telegram this row is written automatically inside
+    ``InboundDispatcher`` → ``SessionBindingService.resolve_or_create``.  Out-
+    of-process bridges (e.g. DingTalk's ``runner.ts``) create their Flocks
+    session on their own and must call this endpoint after each session
+    creation so that ``channel_message`` / ``POST /session-send`` can route
+    outbound replies back.
+
+    Idempotent — re-binding the same conversation key replaces the prior row.
+    """
+    from flocks.channel.base import ChatType
+    from flocks.channel.inbound.session_binding import SessionBindingService
+
+    # Conversation-level bindings only — CHANNEL-broadcast style targets
+    # (e.g. Telegram channels) are not addressable by a single chat reply
+    # and would never be a legitimate ``channel_message`` destination.
+    if req.chat_type not in ("direct", "group"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chat_type '{req.chat_type}', expected 'direct' or 'group'",
+        )
+    chat_type = ChatType(req.chat_type)
+
+    svc = SessionBindingService()
+    try:
+        binding = await svc.bind_session(
+            session_id=req.session_id,
+            channel_id=channel_id,
+            account_id=req.account_id or "default",
+            chat_id=req.chat_id,
+            chat_type=chat_type,
+            thread_id=req.thread_id,
+            agent_id=req.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {
+        "ok": True,
+        "channel_id": binding.channel_id,
+        "session_id": binding.session_id,
+        "chat_id": binding.chat_id,
+        "chat_type": binding.chat_type.value,
+    }
+
+
 @router.post("/{channel_id}/restart")
 async def restart_channel(channel_id: str):
     """Restart a single channel connection with the latest config.

@@ -195,6 +195,59 @@ class SessionBindingService:
     ) -> Optional[SessionBinding]:
         return await self._find_binding(channel_id, account_id, chat_id, thread_id)
 
+    async def bind_session(
+        self,
+        *,
+        session_id: str,
+        channel_id: str,
+        account_id: str,
+        chat_id: str,
+        chat_type: ChatType,
+        thread_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> SessionBinding:
+        """Register a binding for an *already-created* session.
+
+        Used by out-of-process bridges (e.g. DingTalk's ``runner.ts``) that
+        create their Flocks session on their own and therefore bypass the
+        ``InboundDispatcher`` → :func:`resolve_or_create` path.  Calling this
+        explicitly keeps ``channel_bindings`` in sync so that the
+        ``channel_message`` tool / ``POST /api/channel/session-send`` can
+        route outbound replies back to the original conversation.
+
+        Idempotent: re-binding the same conversation key replaces the prior
+        row (the unique index is on
+        ``(channel_id, account_id, chat_id, COALESCE(thread_id, ''))``).
+
+        Raises:
+            ValueError: if *session_id* does not exist.
+        """
+        from flocks.session.session import Session as _Session
+        if not await _Session.get_by_id(session_id):
+            raise ValueError(f"Session '{session_id}' not found")
+
+        now = time.time()
+        binding = SessionBinding(
+            channel_id=channel_id,
+            account_id=account_id or "default",
+            chat_id=chat_id,
+            chat_type=chat_type,
+            thread_id=thread_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            created_at=now,
+            last_message_at=now,
+        )
+        await self._insert(binding)
+        log.info("channel.binding.registered", {
+            "channel": channel_id,
+            "account_id": binding.account_id,
+            "chat_id": chat_id,
+            "session_id": session_id,
+            "chat_type": chat_type.value,
+        })
+        return binding
+
     async def unbind(self, session_id: str) -> None:
         db = await _get_db()
         await db.execute(

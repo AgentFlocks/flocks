@@ -75,6 +75,58 @@ function buildSessionTitle(sessionKey: string): string {
   }
 }
 
+/**
+ * Register the (channel, conversation) → session mapping in flocks's
+ * channel_bindings table so that the channel_message tool /
+ * POST /api/channel/session-send can route outbound replies back to this
+ * DingTalk conversation.
+ *
+ * This mirrors what InboundDispatcher.binding_service.resolve_or_create
+ * does for Feishu / WeCom / Telegram — DingTalk creates its session
+ * out-of-process, so we have to register the binding explicitly.
+ *
+ * Best-effort: a failure here only means the channel_message tool will
+ * 404 for this session, the inbound reply path keeps working.
+ */
+async function registerChannelBinding(sessionKey: string, sessionId: string): Promise<void> {
+  let chatType = 'direct';
+  let chatId = sessionKey;
+
+  try {
+    const info = JSON.parse(sessionKey);
+    chatType = info.chatType === 'group' ? 'group' : 'direct';
+    chatId = info.peerId || info.chatId || sessionKey;
+  } catch {
+    // sessionKey is not JSON — keep the defaults.
+  }
+
+  // The flocks-side channel_id is "dingtalk" (see ChannelMeta.id).  Other
+  // values like "dingtalk-connector" are aliases declared on ChannelMeta and
+  // are accepted by the registry but the canonical binding row uses the id.
+  const url = `${FLOCKS_BASE}/api/channel/dingtalk/bind`;
+  const body = {
+    session_id: sessionId,
+    chat_id: chatId,
+    chat_type: chatType,
+    account_id: ACCOUNT_ID === '__default__' ? 'default' : ACCOUNT_ID,
+  };
+
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      console.warn(`[runner] bind failed: ${r.status} ${await r.text()}`);
+    } else if (DEBUG) {
+      console.log(`[runner] bind ok: chat_id=${chatId} chat_type=${chatType} session=${sessionId}`);
+    }
+  } catch (e: any) {
+    console.warn(`[runner] bind error: ${e?.message || e}`);
+  }
+}
+
 async function getOrCreateSession(sessionKey: string, agentName: string): Promise<string> {
   const existing = sessionMap.get(sessionKey);
   if (existing) {
@@ -100,6 +152,12 @@ async function getOrCreateSession(sessionKey: string, agentName: string): Promis
   const sessionId: string = data.id;
   sessionMap.set(sessionKey, sessionId);
   console.log(`[runner] session created: key=${sessionKey} id=${sessionId}`);
+
+  // Register the channel binding so outbound tools can reach this session.
+  // Done after the in-memory cache write so a slow/failing bind never
+  // forces a duplicate session on the next message.
+  await registerChannelBinding(sessionKey, sessionId);
+
   return sessionId;
 }
 

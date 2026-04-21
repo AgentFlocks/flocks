@@ -103,8 +103,11 @@ async def _send_app_one(
 
     _, _, robot_code = resolve_account_credentials(config, account_id)
     if not robot_code:
+        # robotCode defaults to appKey/clientId, so an empty value means the
+        # underlying credentials are missing — surface the actionable hint.
         raise ValueError(
-            "DingTalk robotCode not configured"
+            "DingTalk credentials not configured: provide appKey/clientId"
+            " (and appSecret/clientSecret) in the channel config"
             + (f" for account '{account_id}'" if account_id else "")
         )
 
