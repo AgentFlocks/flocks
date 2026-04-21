@@ -345,6 +345,87 @@ class TestTestCredentialsToolExecution:
             mock_tr.execute.assert_awaited_once_with(tool_name="qingteng_login")
 
     @pytest.mark.asyncio
+    async def test_login_probe_does_not_overmatch_business_tools(self):
+        """`_is_login_probe` must only match dedicated probes — not arbitrary
+        business tools whose names happen to contain ``login`` (e.g. TDP's
+        ``tdp_login_api_list`` / ``tdp_login_weakpwd_list``). Otherwise we
+        would prioritise an expensive query endpoint over the cheaper
+        connectivity-style tool that the sort key normally prefers.
+        """
+        from flocks.server.routes.provider import test_provider_credentials
+
+        login_business_tool = ToolInfo(
+            name="tdp_login_api_list",
+            description="TDP login entry list (business query, NOT a probe)",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="sub-action",
+                    required=False,
+                    enum=["summary", "category", "list"],
+                )
+            ],
+            requires_confirmation=False,
+        )
+        ip_query_tool = ToolInfo(
+            name="tdp_ip_query",
+            description="TDP IP query (preferred lightweight check)",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="ip",
+                    type=ParameterType.STRING,
+                    description="IP address",
+                    required=False,
+                )
+            ],
+            requires_confirmation=False,
+        )
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "tdp_api")),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            mock_tr.list_tools.return_value = [login_business_tool, ip_query_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.tdp_api": [
+                    "tdp_login_api_list",
+                    "tdp_ip_query",
+                ],
+            }
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=True,
+                output={"items": []},
+            ))
+
+            result = await test_provider_credentials("tdp_api")
+
+            assert result["success"] is True, result
+            assert result["tool_tested"] == "tdp_ip_query", (
+                "Expected the lightweight ip_query tool to be picked, but "
+                "got %r. This usually means _is_login_probe is doing a loose "
+                "substring match and mis-classifying tdp_login_api_list as a "
+                "probe." % result.get("tool_tested")
+            )
+            executed_tool = mock_tr.execute.await_args.kwargs["tool_name"]
+            assert executed_tool == "tdp_ip_query", (
+                "Only the lightweight ip_query tool should have been awaited; "
+                "got %r." % executed_tool
+            )
+
+    @pytest.mark.asyncio
     async def test_failed_attempts_are_aggregated_in_message(self):
         """When every tool/param combination fails, the response should expose
         the per-attempt error log so the WebUI can show why each probe failed

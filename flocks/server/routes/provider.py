@@ -2253,17 +2253,24 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             # to end without invoking business APIs that may need extra
             # required fields beyond the JSON schema (e.g. assets.refresh
             # which the handler validates needs `resource`/`os_type`).
+            # Match either the bare keyword (e.g. "login") or the conventional
+            # `<provider>_<keyword>` suffix (e.g. "qingteng_login"). A loose
+            # substring match would over-trigger on business tools whose names
+            # merely contain the word — for example tdp_login_api_list and
+            # tdp_login_weakpwd_list are query endpoints, not probes.
+            login_probe_keywords = ("login", "whoami", "ping", "health")
+
             def _is_login_probe(t: ToolInfo) -> bool:
                 if t.requires_confirmation:
                     return False
                 if any(p.required for p in t.parameters):
                     return False
                 name_lower = t.name.lower()
-                # Keep this list tight: each keyword must be substring-safe
-                # (no false positives on common business tool names) and
-                # describe a parameter-free probe by convention.
-                login_kw = ("login", "whoami", "ping", "health")
-                return any(kw in name_lower for kw in login_kw)
+                if name_lower in login_probe_keywords:
+                    return True
+                return any(
+                    name_lower.endswith(f"_{kw}") for kw in login_probe_keywords
+                )
 
             def _tool_sort_key(t: ToolInfo) -> tuple[int, int, str]:
                 required_count = sum(1 for p in t.parameters if p.required)
