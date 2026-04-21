@@ -75,6 +75,93 @@ function buildSessionTitle(sessionKey: string): string {
   }
 }
 
+/**
+ * Register the (channel, conversation) → session mapping in flocks's
+ * channel_bindings table so that the channel_message tool /
+ * POST /api/channel/session-send can route outbound replies back to this
+ * DingTalk conversation.
+ *
+ * This mirrors what InboundDispatcher.binding_service.resolve_or_create
+ * does for Feishu / WeCom / Telegram — DingTalk creates its session
+ * out-of-process, so we have to register the binding explicitly.
+ *
+ * IMPORTANT — chat_id resolution for groups:
+ *   plugin.ts builds `peerId` differently depending on groupSessionScope:
+ *     - `group` (default): peerId = conversationId              (routable)
+ *     - `group_sender`:    peerId = `${conversationId}:${senderId}`
+ *       A SESSION-ISOLATION composite, NOT a send target — OAPI expects the
+ *       bare `openConversationId`.
+ *   So for groups we must take `info.conversationId` and never fall back to
+ *   `peerId`.  `peerId` continues to drive session isolation on the
+ *   sessionKey side; the binding row only stores the outbound-routable id.
+ *
+ *   For direct chats peerId == senderId == staffId, which is the correct
+ *   user target for `/v1.0/robot/oToMessages/batchSend`.
+ *
+ * Edge case — `separateSessionByConversation=false` + group:
+ *   The connector omits `conversationId` from the sessionKey entirely and
+ *   uses `peerId = senderId`, so there is no way to recover the
+ *   openConversationId here.  We skip binding with a warn rather than write
+ *   a record that would resolve to the wrong target.
+ *
+ * Best-effort: a failure here only means the channel_message tool will 404
+ * for this session, the inbound reply path keeps working.
+ */
+async function registerChannelBinding(sessionKey: string, sessionId: string): Promise<void> {
+  let chatType: 'direct' | 'group' = 'direct';
+  let chatId = '';
+
+  try {
+    const info = JSON.parse(sessionKey);
+    chatType = info.chatType === 'group' ? 'group' : 'direct';
+
+    if (chatType === 'group') {
+      chatId = info.conversationId || '';
+    } else {
+      chatId = info.peerId || info.senderId || '';
+    }
+  } catch {
+    // sessionKey is not JSON (legacy plain string) — treat as an opaque
+    // direct id.
+    chatId = sessionKey;
+  }
+
+  if (!chatId) {
+    console.warn(
+      `[runner] bind skipped: no routable chat_id for sessionKey=${sessionKey} ` +
+      `(typical cause: separateSessionByConversation=false + group, where ` +
+      `the session cannot be mapped back to an openConversationId)`
+    );
+    return;
+  }
+
+  // The flocks-side channel_id is "dingtalk" (see ChannelMeta.id).  Other
+  // values like "dingtalk-connector" are aliases declared on ChannelMeta and
+  // are accepted by the registry but the canonical binding row uses the id.
+  const url = `${FLOCKS_BASE}/api/channel/dingtalk/bind`;
+  const body = {
+    session_id: sessionId,
+    chat_id: chatId,
+    chat_type: chatType,
+    account_id: ACCOUNT_ID === '__default__' ? 'default' : ACCOUNT_ID,
+  };
+
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      console.warn(`[runner] bind failed: ${r.status} ${await r.text()}`);
+    } else if (DEBUG) {
+      console.log(`[runner] bind ok: chat_id=${chatId} chat_type=${chatType} session=${sessionId}`);
+    }
+  } catch (e: any) {
+    console.warn(`[runner] bind error: ${e?.message || e}`);
+  }
+}
+
 async function getOrCreateSession(sessionKey: string, agentName: string): Promise<string> {
   const existing = sessionMap.get(sessionKey);
   if (existing) {
@@ -100,6 +187,12 @@ async function getOrCreateSession(sessionKey: string, agentName: string): Promis
   const sessionId: string = data.id;
   sessionMap.set(sessionKey, sessionId);
   console.log(`[runner] session created: key=${sessionKey} id=${sessionId}`);
+
+  // Register the channel binding so outbound tools can reach this session.
+  // Done after the in-memory cache write so a slow/failing bind never
+  // forces a duplicate session on the next message.
+  await registerChannelBinding(sessionKey, sessionId);
+
   return sessionId;
 }
 

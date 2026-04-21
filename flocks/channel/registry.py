@@ -77,11 +77,16 @@ class ChannelRegistry:
 
     def _register_builtin_channels(self) -> None:
         from flocks.channel.builtin.feishu.channel import FeishuChannel
-        from flocks.channel.builtin.wecom.channel import WeComChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
+        from flocks.channel.builtin.wecom.channel import WeComChannel
         self.register(FeishuChannel())
         self.register(WeComChannel())
         self.register(TelegramChannel())
+        # DingTalk: inbound is owned by the project-local plugin at
+        # .flocks/plugins/channels/dingtalk/dingtalk.py (Node.js connector).
+        # The outbound send library lives in flocks.channel.builtin.dingtalk
+        # and is consumed directly by that plugin's send_text — no builtin
+        # ChannelPlugin is registered here to avoid id collisions.
 
     def _register_plugin_extension_point(self) -> None:
         from flocks.plugin import PluginLoader, ExtensionPoint
