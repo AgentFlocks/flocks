@@ -15,6 +15,8 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
+from flocks.session.session import Session
 
 # ===========================================================================
 # CRUD
@@ -172,6 +174,84 @@ class TestSessionMessages:
             for m in messages
         )
 
+
+# ===========================================================================
+# Share permissions
+# ===========================================================================
+
+class TestSessionSharePermissions:
+    @pytest.mark.asyncio
+    async def test_only_owner_can_share_and_unshare(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        viewer = AuthUser(id="usr_viewer", username="viewer", role="admin", status="active")
+        session = await Session.create(
+            project_id="share_permissions",
+            directory="/tmp",
+            title="owner-only-share",
+            owner_user_id=owner.id,
+            owner_username=owner.username,
+        )
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+        forbidden_share = await client.post(f"/api/session/{session.id}/share")
+        assert forbidden_share.status_code == status.HTTP_403_FORBIDDEN
+        assert "仅会话创建者可共享会话" in forbidden_share.text
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        share_resp = await client.post(f"/api/session/{session.id}/share")
+        assert share_resp.status_code == status.HTTP_200_OK
+        assert share_resp.json()["visibility"] == "team_shared"
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+        forbidden_unshare = await client.delete(f"/api/session/{session.id}/share")
+        assert forbidden_unshare.status_code == status.HTTP_403_FORBIDDEN
+        assert "仅会话创建者可停止共享" in forbidden_unshare.text
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        unshare_resp = await client.delete(f"/api/session/{session.id}/share")
+        assert unshare_resp.status_code == status.HTTP_200_OK
+        assert unshare_resp.json()["visibility"] == "private"
+
+    @pytest.mark.asyncio
+    async def test_session_response_share_flags_follow_owner_only(self):
+        from flocks.server.routes.session import _session_to_response
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        viewer = AuthUser(id="usr_viewer", username="viewer", role="admin", status="active")
+        token = set_current_auth_user(owner)
+        try:
+            session = await Session.create(
+                project_id="share_flags",
+                directory="/tmp",
+                title="shared-session",
+            )
+            await Session.share("share_flags", session.id)
+            shared = await Session.get("share_flags", session.id)
+            assert shared is not None
+            owner_response = _session_to_response(shared)
+            assert owner_response.canShare is True
+            assert owner_response.canUnshare is True
+        finally:
+            reset_current_auth_user(token)
+
+        token = set_current_auth_user(viewer)
+        try:
+            shared = await Session.get("share_flags", session.id)
+            assert shared is not None
+            viewer_response = _session_to_response(shared)
+            assert viewer_response.canShare is False
+            assert viewer_response.canUnshare is False
+        finally:
+            reset_current_auth_user(token)
+
+
+class TestSessionMessagesRemaining:
     @pytest.mark.asyncio
     async def test_send_message_empty_parts_returns_success(
         self, client: AsyncClient, session_id: str

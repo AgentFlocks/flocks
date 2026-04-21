@@ -7,6 +7,7 @@ Based on Flocks' ported src/session/index.ts
 
 import contextvars
 import re
+import secrets
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -739,7 +740,7 @@ class Session:
         # For now, create a placeholder
         share_info = SessionShare(
             url=f"https://share.example.com/s/{session_id[:8]}",
-            secret=Identifier.ascending("secret")[:16],
+            secret=secrets.token_urlsafe(12),
         )
         
         await cls.update(project_id, session_id, share=share_info.model_dump())
@@ -787,7 +788,7 @@ class Session:
             await cls.update(
                 project_id,
                 session_id,
-                share=None,
+                share=_UNSET,
                 visibility="private",
                 shared_by=_UNSET,
                 shared_at=_UNSET,
@@ -812,7 +813,7 @@ class Session:
             ShareInfo or None
         """
         try:
-            data = await Storage.get(f"share:{session_id}", dict)
+            data = await Storage.get(f"share:{session_id}")
             return SessionShare(**data) if data else None
         except Exception as _e:
             log.debug("session.share.get_failed", {"session_id": session_id, "error": str(_e)})

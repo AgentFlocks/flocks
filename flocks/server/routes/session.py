@@ -110,6 +110,7 @@ class SessionResponse(BaseModel):
     visibility: str = Field("private", description="Session visibility: private or team_shared")
     sharedBy: Optional[str] = Field(None, description="User id who shared this session")
     sharedAt: Optional[int] = Field(None, description="Share timestamp")
+    canShare: bool = Field(False, description="Whether current user can share this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     canUnshare: bool = Field(False, description="Whether current user can stop sharing this session")
 
@@ -131,13 +132,10 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
 
     is_admin = bool(current_user and current_user.role == "admin")
     is_owner = bool(current_user and Session._is_owned_by_auth_user(session, current_user))
-    is_shared_operator = bool(current_user and session.shared_by and current_user.id == session.shared_by)
     can_delete = is_admin or is_owner
-    can_unshare = is_admin or is_shared_operator or is_owner
-    if session.visibility == "team_shared":
-        # Shared sessions can be managed by admin, the sharer, or the owner.
-        can_delete = is_admin or is_shared_operator or is_owner
-        can_unshare = is_admin or is_shared_operator or is_owner
+    # Share/unshare are intentionally restricted to the session creator/owner only.
+    can_share = is_owner
+    can_unshare = is_owner and session.visibility == "team_shared"
 
     return SessionResponse(
         id=session.id,
@@ -162,6 +160,7 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         visibility=session.visibility,
         sharedBy=session.shared_by,
         sharedAt=session.shared_at,
+        canShare=can_share,
         canDelete=can_delete,
         canUnshare=can_unshare,
     )
@@ -179,6 +178,10 @@ def _can_manage_shared_session(current_user, session: SessionModel) -> bool:
     if Session._is_owned_by_auth_user(session, current_user):
         return True
     return bool(session.shared_by and current_user.id == session.shared_by)
+
+
+def _can_toggle_session_share(current_user, session: SessionModel) -> bool:
+    return Session._is_owned_by_auth_user(session, current_user)
 
 
 # =============================================================================
@@ -699,8 +702,8 @@ async def share_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     
-    if current_user.role != "admin" and not Session._is_owned_by_auth_user(session, current_user) and not _can_manage_shared_session(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可共享会话")
+    if not _can_toggle_session_share(current_user, session):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可共享会话")
 
     await Session.share(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
@@ -764,8 +767,8 @@ async def unshare_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     
-    if not _can_manage_shared_session(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或共享发起人可停止共享")
+    if not _can_toggle_session_share(current_user, session):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可停止共享")
 
     await Session.unshare(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)

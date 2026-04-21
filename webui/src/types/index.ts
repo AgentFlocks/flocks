@@ -22,6 +22,7 @@ export interface Session {
   visibility?: 'private' | 'team_shared';
   sharedBy?: string;
   sharedAt?: number;
+  canShare?: boolean;
   canDelete?: boolean;
   canUnshare?: boolean;
 }

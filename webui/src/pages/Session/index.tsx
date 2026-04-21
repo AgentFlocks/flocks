@@ -530,11 +530,15 @@ export default function SessionPage() {
                                 void handleShareSession(session.id);
                               }
                             }}
-                            disabled={session.visibility === 'team_shared' && session.canUnshare === false}
+                            disabled={
+                              session.visibility === 'team_shared'
+                                ? session.canUnshare === false
+                                : session.canShare === false
+                            }
                             className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <Users className="w-3.5 h-3.5" />
-                            <span>{session.visibility === 'team_shared' ? '停止共享' : '共享会话'}</span>
+                            <span>{session.visibility === 'team_shared' ? '停止共享' : '共享给本地用户'}</span>
                           </button>
                           <button
                             onClick={(e) => {
