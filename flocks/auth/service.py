@@ -62,6 +62,8 @@ class AuditRecord(BaseModel):
     id: str
     operator_user_id: Optional[str] = None
     target_user_id: Optional[str] = None
+    operator_username: Optional[str] = None
+    target_username: Optional[str] = None
     action: str
     result: str
     ip: Optional[str] = None
@@ -70,33 +72,24 @@ class AuditRecord(BaseModel):
     created_at: str
 
 
-class CloudBinding(BaseModel):
-    provider: str
-    account_id: str
-    account_name: Optional[str] = None
-    token_masked: Optional[str] = None
-    mcp_quota: Optional[str] = None
-    api_quota: Optional[str] = None
-    balance: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    bound_by: str
-    bound_at: str
-    updated_at: str
-
-
 class AuthService:
-    """Account, auth session, audit and cloud binding service."""
+    """Account, auth session and audit service."""
 
     _initialized: bool = False
+    _initialized_db_path: Optional[str] = None
     _session_ttl_days: int = 7
     _temp_password_ttl_hours: int = 24
+    _role_limits: Dict[str, int] = {
+        "admin": 3,
+        "member": 20,
+    }
 
     @classmethod
     async def init(cls) -> None:
-        if cls._initialized:
-            return
         await Storage.init()
         db_path = Storage.get_db_path()
+        if cls._initialized and cls._initialized_db_path == str(db_path) and db_path.exists():
+            return
         async with aiosqlite.connect(db_path) as db:
             await db.executescript(
                 """
@@ -139,27 +132,32 @@ class AuthService:
 
                 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
                 CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
-
-                CREATE TABLE IF NOT EXISTS cloud_binding (
-                    singleton_key TEXT PRIMARY KEY CHECK (singleton_key = 'instance'),
-                    provider TEXT NOT NULL,
-                    account_id TEXT NOT NULL,
-                    account_name TEXT,
-                    token_masked TEXT,
-                    mcp_quota TEXT,
-                    api_quota TEXT,
-                    balance TEXT,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    bound_by TEXT NOT NULL,
-                    bound_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
                 """
             )
+            await cls._drop_legacy_tables(db)
             await db.commit()
 
         cls._initialized = True
+        cls._initialized_db_path = str(db_path)
         log.info("auth.initialized")
+
+    @classmethod
+    async def _drop_legacy_tables(cls, db: aiosqlite.Connection) -> None:
+        removed_tables = ("_".join(("cloud", "binding")),)
+        for table_name in removed_tables:
+            async with db.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name = ?
+                """,
+                (table_name,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row:
+                continue
+            await db.execute(f"DROP TABLE IF EXISTS {table_name}")
+            log.info("auth.legacy_table.dropped", {"table": table_name})
 
     @classmethod
     def _hash_password(cls, password: str) -> str:
@@ -261,8 +259,23 @@ class AuthService:
         return await cls.get_user_by_id(user_id)  # type: ignore[return-value]
 
     @classmethod
-    async def create_user(cls, username: str, password: str, role: str = "member") -> LocalUser:
-        return await cls._create_user_internal(username=username, password=password, role=role)
+    async def create_user(
+        cls,
+        username: str,
+        password: str,
+        role: str = "member",
+        *,
+        must_reset_password: bool = False,
+        temp_password_expires_at: Optional[str] = None,
+    ) -> LocalUser:
+        await cls._ensure_role_capacity(role)
+        return await cls._create_user_internal(
+            username=username,
+            password=password,
+            role=role,
+            must_reset_password=must_reset_password,
+            temp_expires_at=temp_password_expires_at,
+        )
 
     @classmethod
     async def get_user_by_id(cls, user_id: str) -> Optional[LocalUser]:
@@ -390,6 +403,94 @@ class AuthService:
             async with db.execute(query, params) as cursor:
                 row = await cursor.fetchone()
                 return int(row[0] if row else 0)
+
+    @classmethod
+    async def count_users_by_role(cls, role: str, exclude_user_id: Optional[str] = None) -> int:
+        if role not in {"admin", "member"}:
+            raise ValueError("无效角色")
+        await cls.init()
+        db_path = Storage.get_db_path()
+        query = "SELECT COUNT(1) FROM users WHERE role = ?"
+        params: tuple[Any, ...] = (role,)
+        if exclude_user_id:
+            query += " AND id != ?"
+            params = (role, exclude_user_id)
+        async with aiosqlite.connect(db_path) as db:
+            async with db.execute(query, params) as cursor:
+                row = await cursor.fetchone()
+                return int(row[0] if row else 0)
+
+    @classmethod
+    async def _ensure_role_capacity(cls, role: str, exclude_user_id: Optional[str] = None) -> None:
+        if role not in cls._role_limits:
+            raise ValueError("无效角色")
+        current_count = await cls.count_users_by_role(role, exclude_user_id=exclude_user_id)
+        if current_count >= cls._role_limits[role]:
+            role_label = "管理员" if role == "admin" else "普通用户"
+            raise ValueError(f"{role_label}账号最多 {cls._role_limits[role]} 个")
+
+    @classmethod
+    async def update_user_role(cls, user_id: str, role: str) -> LocalUser:
+        if role not in {"admin", "member"}:
+            raise ValueError("无效角色")
+        await cls.init()
+        user = await cls.get_user_by_id(user_id)
+        if not user:
+            raise ValueError("用户不存在")
+        if user.role == role:
+            return user
+
+        await cls._ensure_role_capacity(role, exclude_user_id=user_id)
+        if user.role == "admin" and user.status == "active":
+            remaining_admins = await cls.count_active_admins(exclude_user_id=user_id)
+            if remaining_admins == 0:
+                raise ValueError("不能调整最后一个管理员账号的角色")
+
+        now = _iso_now()
+        db_path = Storage.get_db_path()
+        async with aiosqlite.connect(db_path) as db:
+            cursor = await db.execute(
+                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                (role, now, user_id),
+            )
+            await db.commit()
+            if cursor.rowcount == 0:
+                raise ValueError("用户不存在")
+        updated_user = await cls.get_user_by_id(user_id)
+        if not updated_user:
+            raise ValueError("用户不存在")
+        return updated_user
+
+    @classmethod
+    async def revoke_user_sessions(cls, user_id: str) -> None:
+        await cls.init()
+        db_path = Storage.get_db_path()
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            await db.commit()
+
+    @classmethod
+    async def delete_user(cls, user_id: str) -> Tuple[LocalUser, int]:
+        await cls.init()
+        user = await cls.get_user_by_id(user_id)
+        if not user:
+            raise ValueError("用户不存在")
+        if user.role == "admin" and user.status == "active":
+            remaining_admins = await cls.count_active_admins(exclude_user_id=user_id)
+            if remaining_admins == 0:
+                raise ValueError("不能删除最后一个管理员账号")
+
+        from flocks.session.session import Session
+
+        retained_sessions = await Session.retain_deleted_user_sessions(user.id, user.username)
+        db_path = Storage.get_db_path()
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
+            cursor = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            await db.commit()
+            if cursor.rowcount == 0:
+                raise ValueError("用户不存在")
+        return user, retained_sessions
 
     @classmethod
     async def _create_session(cls, user_id: str) -> str:
@@ -696,9 +797,22 @@ class AuthService:
         async with aiosqlite.connect(db_path) as db:
             async with db.execute(
                 """
-                SELECT id, operator_user_id, target_user_id, action, result, ip, user_agent, metadata, created_at
+                SELECT
+                    audit_logs.id,
+                    audit_logs.operator_user_id,
+                    audit_logs.target_user_id,
+                    operator_user.username,
+                    target_user.username,
+                    audit_logs.action,
+                    audit_logs.result,
+                    audit_logs.ip,
+                    audit_logs.user_agent,
+                    audit_logs.metadata,
+                    audit_logs.created_at
                 FROM audit_logs
-                ORDER BY created_at DESC
+                LEFT JOIN users AS operator_user ON operator_user.id = audit_logs.operator_user_id
+                LEFT JOIN users AS target_user ON target_user.id = audit_logs.target_user_id
+                ORDER BY audit_logs.created_at DESC
                 LIMIT ? OFFSET ?
                 """,
                 (limit, offset),
@@ -711,116 +825,17 @@ class AuthService:
                     id=row[0],
                     operator_user_id=row[1],
                     target_user_id=row[2],
-                    action=row[3],
-                    result=row[4],
-                    ip=row[5],
-                    user_agent=row[6],
-                    metadata=json.loads(row[7] or "{}"),
-                    created_at=row[8],
+                    operator_username=row[3],
+                    target_username=row[4],
+                    action=row[5],
+                    result=row[6],
+                    ip=row[7],
+                    user_agent=row[8],
+                    metadata=json.loads(row[9] or "{}"),
+                    created_at=row[10],
                 )
             )
         return records
-
-    @classmethod
-    async def get_cloud_binding(cls) -> Optional[CloudBinding]:
-        await cls.init()
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute(
-                """
-                SELECT provider, account_id, account_name, token_masked, mcp_quota, api_quota, balance,
-                       metadata, bound_by, bound_at, updated_at
-                FROM cloud_binding WHERE singleton_key = 'instance'
-                """
-            ) as cursor:
-                row = await cursor.fetchone()
-        if not row:
-            return None
-        return CloudBinding(
-            provider=row[0],
-            account_id=row[1],
-            account_name=row[2],
-            token_masked=row[3],
-            mcp_quota=row[4],
-            api_quota=row[5],
-            balance=row[6],
-            metadata=json.loads(row[7] or "{}"),
-            bound_by=row[8],
-            bound_at=row[9],
-            updated_at=row[10],
-        )
-
-    @classmethod
-    async def bind_cloud_account(
-        cls,
-        *,
-        operator: AuthUser,
-        provider: str,
-        account_id: str,
-        account_name: Optional[str] = None,
-        token: Optional[str] = None,
-        mcp_quota: Optional[str] = None,
-        api_quota: Optional[str] = None,
-        balance: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> CloudBinding:
-        await cls.init()
-        if not provider.strip() or not account_id.strip():
-            raise ValueError("云账号信息不完整")
-        now = _iso_now()
-        token_masked = None
-        if token:
-            token_masked = (token[:3] + "***" + token[-3:]) if len(token) >= 8 else "***"
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO cloud_binding(
-                    singleton_key, provider, account_id, account_name, token_masked,
-                    mcp_quota, api_quota, balance, metadata, bound_by, bound_at, updated_at
-                )
-                VALUES('instance', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(singleton_key) DO UPDATE SET
-                    provider=excluded.provider,
-                    account_id=excluded.account_id,
-                    account_name=excluded.account_name,
-                    token_masked=excluded.token_masked,
-                    mcp_quota=excluded.mcp_quota,
-                    api_quota=excluded.api_quota,
-                    balance=excluded.balance,
-                    metadata=excluded.metadata,
-                    bound_by=excluded.bound_by,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    provider.strip(),
-                    account_id.strip(),
-                    (account_name or "").strip() or None,
-                    token_masked,
-                    mcp_quota,
-                    api_quota,
-                    balance,
-                    json.dumps(metadata or {}, ensure_ascii=True),
-                    operator.id,
-                    now,
-                    now,
-                ),
-            )
-            await db.commit()
-        await cls.record_audit(
-            action="cloud.bind",
-            result="success",
-            operator_user_id=operator.id,
-            metadata={
-                "provider": provider,
-                "account_id": account_id,
-                "rebind": True,
-            },
-        )
-        binding = await cls.get_cloud_binding()
-        if not binding:
-            raise ValueError("云账号绑定失败")
-        return binding
 
     @classmethod
     async def migrate_legacy_sessions_to_admin(cls, admin_user_id: str) -> None:
@@ -832,6 +847,8 @@ class AuthService:
         try:
             from flocks.session.session import Session
 
+            admin_user = await cls.get_user_by_id(admin_user_id)
+            admin_username = admin_user.username if admin_user else None
             sessions = await Session.list_all()
             migrated = 0
             for session in sessions:
@@ -841,6 +858,7 @@ class AuthService:
                     project_id=session.project_id,
                     session_id=session.id,
                     owner_user_id=admin_user_id,
+                    owner_username=admin_username,
                     visibility="private",
                 )
                 migrated += 1

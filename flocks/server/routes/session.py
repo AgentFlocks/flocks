@@ -130,14 +130,14 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         current_user = None
 
     is_admin = bool(current_user and current_user.role == "admin")
-    is_owner = bool(current_user and session.owner_user_id and current_user.id == session.owner_user_id)
+    is_owner = bool(current_user and Session._is_owned_by_auth_user(session, current_user))
     is_shared_operator = bool(current_user and session.shared_by and current_user.id == session.shared_by)
     can_delete = is_admin or is_owner
-    can_unshare = is_admin or is_shared_operator or (is_owner and session.visibility != "team_shared")
+    can_unshare = is_admin or is_shared_operator or is_owner
     if session.visibility == "team_shared":
-        # Shared sessions can only be deleted/unshared by admin or the sharer.
-        can_delete = is_admin or is_shared_operator
-        can_unshare = is_admin or is_shared_operator
+        # Shared sessions can be managed by admin, the sharer, or the owner.
+        can_delete = is_admin or is_shared_operator or is_owner
+        can_unshare = is_admin or is_shared_operator or is_owner
 
     return SessionResponse(
         id=session.id,
@@ -175,6 +175,8 @@ def _is_hidden_from_session_manager(session: SessionModel) -> bool:
 
 def _can_manage_shared_session(current_user, session: SessionModel) -> bool:
     if current_user.role == "admin":
+        return True
+    if Session._is_owned_by_auth_user(session, current_user):
         return True
     return bool(session.shared_by and current_user.id == session.shared_by)
 
@@ -483,7 +485,7 @@ async def delete_session(sessionID: str, request: Request) -> bool:
         if not _can_manage_shared_session(current_user, session):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或共享发起人可删除共享会话")
     else:
-        if current_user.role != "admin" and session.owner_user_id != current_user.id:
+        if current_user.role != "admin" and not Session._is_owned_by_auth_user(session, current_user):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
 
     await Session.delete(session.project_id, sessionID)
@@ -697,7 +699,7 @@ async def share_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     
-    if current_user.role != "admin" and session.owner_user_id != current_user.id and not _can_manage_shared_session(current_user, session):
+    if current_user.role != "admin" and not Session._is_owned_by_auth_user(session, current_user) and not _can_manage_shared_session(current_user, session):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可共享会话")
 
     await Session.share(session.project_id, sessionID)

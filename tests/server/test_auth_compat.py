@@ -2,6 +2,7 @@ from starlette.requests import Request
 from fastapi import HTTPException
 import pytest
 
+from flocks.auth.context import AuthUser
 from flocks.server import auth as auth_module
 
 
@@ -11,6 +12,20 @@ class _FakeSecrets:
 
     def get(self, key: str):
         return self.values.get(key)
+
+
+class _FakeLocalUser:
+    def __init__(self, *, must_reset_password: bool = False):
+        self.must_reset_password = must_reset_password
+
+    def to_auth_user(self) -> AuthUser:
+        return AuthUser(
+            id="usr_test",
+            username="test-user",
+            role="member",
+            status="active",
+            must_reset_password=self.must_reset_password,
+        )
 
 
 def _make_request(
@@ -109,3 +124,56 @@ async def test_apply_auth_for_request_non_browser_remote_rejects_when_no_stored_
         await auth_module.apply_auth_for_request(request)
     assert exc_info.value.status_code == 401
     assert auth_module.API_TOKEN_SECRET_ID in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_requires_password_reset_before_access(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=True)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+
+    request = _make_request(
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "origin": "http://localhost:5173",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        path="/api/session",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+
+    assert exc_info.value.status_code == 403
+    assert "必须先修改密码" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_allows_password_reset_endpoints_when_required(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=True)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+
+    request = _make_request(
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "origin": "http://localhost:5173",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        path="/api/auth/change-password",
+    )
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is not None
+        assert user.must_reset_password is True
+    finally:
+        auth_module.clear_auth_context(token)

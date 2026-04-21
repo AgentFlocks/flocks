@@ -94,6 +94,7 @@ class SessionInfo(BaseModel):
 
     # Local account ownership and visibility
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
+    owner_username: Optional[str] = Field(None, alias="ownerUsername", description="Owner local username")
     visibility: str = Field("private", description="Session visibility: private or team_shared")
     shared_by: Optional[str] = Field(None, alias="sharedBy", description="User id who enabled sharing")
     shared_at: Optional[int] = Field(None, alias="sharedAt", description="Share timestamp (ms)")
@@ -166,10 +167,21 @@ class Session:
             return True
 
         # private session: owner-only
-        if session.owner_user_id:
-            return session.owner_user_id == auth_user.id
+        if Session._is_owned_by_auth_user(session, auth_user):
+            return True
 
         # Legacy sessions without owner should not be exposed to members.
+        return False
+
+    @staticmethod
+    def _is_owned_by_auth_user(session: SessionInfo, auth_user) -> bool:
+        """Match session ownership by stable user id or retained username."""
+        if auth_user is None:
+            return False
+        if session.owner_user_id and session.owner_user_id == auth_user.id:
+            return True
+        if session.owner_username and session.owner_username == auth_user.username:
+            return True
         return False
 
     @classmethod
@@ -257,13 +269,14 @@ class Session:
                 log.warn("session.memory.default.error", {"error": str(e)})
 
         # Bind ownership from current auth context unless explicitly provided.
-        if "owner_user_id" not in kwargs:
+        if "owner_user_id" not in kwargs or "owner_username" not in kwargs:
             try:
                 from flocks.auth.context import get_current_auth_user
 
                 current_user = get_current_auth_user()
                 if current_user:
-                    kwargs["owner_user_id"] = current_user.id
+                    kwargs.setdefault("owner_user_id", current_user.id)
+                    kwargs.setdefault("owner_username", current_user.username)
             except Exception:
                 pass
         
@@ -500,6 +513,7 @@ class Session:
             "project_id": "projectID",
             "parent_id": "parentID",
             "owner_user_id": "ownerUserID",
+            "owner_username": "ownerUsername",
             "shared_by": "sharedBy",
             "shared_at": "sharedAt",
         }
@@ -621,6 +635,32 @@ class Session:
             log.warn("session.deleted.event_error", {"error": str(e)})
         
         return True
+
+    @classmethod
+    async def retain_deleted_user_sessions(cls, user_id: str, username: str) -> int:
+        """
+        Detach session ownership from a deleted user id while preserving username ownership.
+
+        This allows a newly created account with the same username to regain access
+        to historical private sessions.
+        """
+        entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
+        migrated = 0
+
+        for _key, session in entries:
+            if session.status == "deleted":
+                continue
+            if session.owner_user_id != user_id:
+                continue
+            await cls.update(
+                project_id=session.project_id,
+                session_id=session.id,
+                owner_user_id=_UNSET,
+                owner_username=username,
+            )
+            migrated += 1
+
+        return migrated
     
     @classmethod
     async def archive(cls, project_id: str, session_id: str) -> bool:

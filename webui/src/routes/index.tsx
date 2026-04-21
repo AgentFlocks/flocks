@@ -7,9 +7,9 @@ import SessionPage from '@/pages/Session';
 import AgentPage from '@/pages/Agent';
 import LoginPage from '@/pages/Login';
 import SetupAdminPage from '@/pages/SetupAdmin';
+import ForceChangePasswordPage from '@/pages/ForceChangePassword';
 import AdminUsersPage from '@/pages/AdminUsers';
 import AuditLogsPage from '@/pages/AuditLogs';
-import CloudAccountPage from '@/pages/CloudAccount';
 import { useAuth } from '@/contexts/AuthContext';
 
 const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
@@ -35,10 +35,30 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 }
 
 export function Routes() {
-  const { loading, bootstrapped, user } = useAuth();
+  const { loading, bootstrapped, error, user, refresh } = useAuth();
 
   if (loading) {
     return <RoutePageSkeleton />;
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+        <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900">无法确认当前系统状态</h1>
+            <p className="text-sm text-gray-500 mt-1">{error}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800"
+          >
+            重试
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (!bootstrapped) {
@@ -59,8 +79,14 @@ export function Routes() {
     );
   }
 
+  if (user.must_reset_password) {
+    return <ForceChangePasswordPage />;
+  }
+
   return (
     <RouterRoutes>
+      <Route path="/login" element={<Navigate to="/" replace />} />
+      <Route path="/setup-admin" element={<Navigate to="/" replace />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         
@@ -81,15 +107,24 @@ export function Routes() {
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
         
-        {/* 系统管理 */}
-        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
+        {/* 系统配置 */}
+        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>}>
+          <Route index element={<Navigate to="accounts" replace />} />
+          <Route path="accounts" element={<LazyRoute><AdminUsersPage /></LazyRoute>} />
+          <Route
+            path="audit-logs"
+            element={user?.role === 'admin'
+              ? <LazyRoute><AuditLogsPage /></LazyRoute>
+              : <Navigate to="/config/accounts" replace />}
+          />
+        </Route>
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
-        <Route path="cloud-account" element={<LazyRoute><CloudAccountPage /></LazyRoute>} />
-        <Route path="admin/users" element={<LazyRoute><AdminUsersPage /></LazyRoute>} />
-        <Route path="admin/audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
+        <Route path="admin/users" element={<Navigate to="/config/accounts" replace />} />
+        <Route path="admin/audit-logs" element={<Navigate to="/config/audit-logs" replace />} />
       </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>
   );
 }

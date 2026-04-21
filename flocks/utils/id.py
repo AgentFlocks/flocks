@@ -17,6 +17,7 @@ IdPrefix = Literal[
     "message",    # msg
     "permission", # per
     "question",   # que
+    "audit",      # aud
     "user",       # usr
     "part",       # prt
     "pty",        # pty
@@ -46,6 +47,7 @@ class Identifier:
         "message": "msg",
         "permission": "per",
         "question": "que",
+        "audit": "aud",
         "user": "usr",
         "part": "prt",
         "pty": "pty",

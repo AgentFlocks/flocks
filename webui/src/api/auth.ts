@@ -10,6 +10,15 @@ export interface LocalUser {
   role: 'admin' | 'member';
   status: 'active' | 'disabled';
   must_reset_password: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_login_at?: string | null;
+}
+
+export interface ResetPasswordResult {
+  success: boolean;
+  temporary_password?: string | null;
+  must_reset_password: boolean;
 }
 
 export const authApi = {
@@ -39,5 +48,10 @@ export const authApi = {
 
   changePassword: async (payload: { current_password: string; new_password: string }): Promise<void> => {
     await client.post('/api/auth/change-password', payload);
+  },
+
+  resetPassword: async (): Promise<ResetPasswordResult> => {
+    const response = await client.post('/api/auth/reset-password');
+    return response.data;
   },
 };

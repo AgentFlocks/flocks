@@ -550,7 +550,6 @@ from flocks.server.routes.update import router as update_router
 from flocks.server.routes.logs import router as logs_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
-from flocks.server.routes.cloud_account import router as cloud_account_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -603,7 +602,6 @@ app.include_router(update_router, prefix="/api/update", tags=["Update"])
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
-app.include_router(cloud_account_router, prefix="/api/cloud-account", tags=["CloudAccount"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -666,7 +664,6 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
-app.include_router(cloud_account_router, prefix="/cloud-account", tags=["CloudAccount"])
 
 
 @app.get("/", tags=["Root"])

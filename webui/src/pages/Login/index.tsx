@@ -59,8 +59,20 @@ export default function LoginPage() {
         >
           {submitting ? '登录中...' : '登录'}
         </button>
-        <div className="text-xs text-gray-500 border-t border-gray-100 pt-3">
-          管理员忘记密码请在服务器执行：`flocks admin generate-one-time-password`
+        <div className="space-y-2 text-xs text-gray-500 border-t border-gray-100 pt-3">
+          <div>
+            普通用户忘记密码：请联系管理员在系统中执行密码重置。
+          </div>
+          <div>
+            管理员忘记账号名：请登录 Flocks 所在机器后执行
+            {' '}
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin list-users</code>
+          </div>
+          <div>
+            管理员召回密码：确认账号名后执行
+            {' '}
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin generate-one-time-password --username admin_user_name</code>
+          </div>
         </div>
       </form>
     </div>

@@ -3,7 +3,8 @@ import { authApi, type LocalUser } from '@/api/auth';
 
 interface AuthContextValue {
   loading: boolean;
-  bootstrapped: boolean;
+  bootstrapped: boolean | null;
+  error: string | null;
   user: LocalUser | null;
   refresh: () => Promise<void>;
   login: (username: string, password: string) => Promise<void>;
@@ -16,7 +17,8 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
-  const [bootstrapped, setBootstrapped] = useState(false);
+  const [bootstrapped, setBootstrapped] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<LocalUser | null>(null);
 
   const refresh = useCallback(async () => {
@@ -24,14 +26,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       const status = await authApi.bootstrapStatus();
       setBootstrapped(status.bootstrapped);
+      setError(null);
       if (!status.bootstrapped) {
         setUser(null);
         return;
       }
-      const me = await authApi.me();
-      setUser(me);
-    } catch {
+      try {
+        const me = await authApi.me();
+        setUser(me);
+      } catch (err: any) {
+        if (err?.response?.status === 401) {
+          setUser(null);
+          return;
+        }
+        setUser(null);
+        setError(err?.response?.data?.message || err?.response?.data?.detail || err?.message || '无法获取登录状态，请稍后重试');
+      }
+    } catch (err: any) {
+      setBootstrapped(null);
       setUser(null);
+      setError(err?.response?.data?.message || err?.response?.data?.detail || err?.message || '无法连接后端，请稍后重试');
     } finally {
       setLoading(false);
     }
@@ -43,6 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const onAuthExpired = () => {
+      setError(null);
       setUser(null);
     };
     window.addEventListener('flocks:auth-expired', onAuthExpired);
@@ -52,17 +67,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = useCallback(async (username: string, password: string) => {
     const me = await authApi.login({ username, password });
     setBootstrapped(true);
+    setError(null);
     setUser(me);
   }, []);
 
   const bootstrapAdmin = useCallback(async (username: string, password: string) => {
     const me = await authApi.bootstrapAdmin({ username, password });
     setBootstrapped(true);
+    setError(null);
     setUser(me);
   }, []);
 
   const logout = useCallback(async () => {
     await authApi.logout();
+    setError(null);
     setUser(null);
   }, []);
 
@@ -77,13 +95,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<AuthContextValue>(() => ({
     loading,
     bootstrapped,
+    error,
     user,
     refresh,
     login,
     bootstrapAdmin,
     logout,
     changePassword,
-  }), [loading, bootstrapped, user, refresh, login, bootstrapAdmin, logout, changePassword]);
+  }), [loading, bootstrapped, error, user, refresh, login, bootstrapAdmin, logout, changePassword]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

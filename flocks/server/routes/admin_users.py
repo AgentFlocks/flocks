@@ -28,8 +28,13 @@ class UserResponse(BaseModel):
 
 class CreateUserRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=64)
-    password: str = Field(..., min_length=8, max_length=128)
+    password: Optional[str] = Field(None, min_length=8, max_length=128)
     role: str = Field("member", description="admin or member")
+    force_reset: bool = True
+
+
+class CreateUserResponse(UserResponse):
+    temporary_password: Optional[str] = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -41,10 +46,16 @@ class UpdateUserStatusRequest(BaseModel):
     status: str = Field(..., description="active or disabled")
 
 
+class UpdateUserRoleRequest(BaseModel):
+    role: str = Field(..., description="admin or member")
+
+
 class AuditResponse(BaseModel):
     id: str
     operator_user_id: Optional[str] = None
     target_user_id: Optional[str] = None
+    operator_username: Optional[str] = None
+    target_username: Optional[str] = None
     action: str
     result: str
     ip: Optional[str] = None
@@ -60,14 +71,26 @@ async def list_users(request: Request) -> List[UserResponse]:
     return [UserResponse(**u.model_dump()) for u in users]
 
 
-@router.post("/users", response_model=UserResponse, summary="管理员创建用户")
-async def create_user(payload: CreateUserRequest, request: Request) -> UserResponse:
+@router.post("/users", response_model=CreateUserResponse, summary="管理员创建用户")
+async def create_user(payload: CreateUserRequest, request: Request) -> CreateUserResponse:
     admin = require_admin(request)
+    password = payload.password
+    if not password:
+        import secrets
+
+        password = secrets.token_urlsafe(10)
+    expires_at = None
+    if payload.force_reset:
+        from datetime import UTC, datetime, timedelta
+
+        expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
     try:
         user = await AuthService.create_user(
             username=payload.username,
-            password=payload.password,
+            password=password,
             role=payload.role,
+            must_reset_password=payload.force_reset,
+            temp_password_expires_at=expires_at,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -81,9 +104,12 @@ async def create_user(payload: CreateUserRequest, request: Request) -> UserRespo
         target_user_id=user.id,
         ip=get_request_ip(request),
         user_agent=get_request_user_agent(request),
-        metadata={"username": user.username, "role": user.role},
+        metadata={"username": user.username, "role": user.role, "must_reset_password": payload.force_reset},
     )
-    return UserResponse(**user.model_dump())
+    return CreateUserResponse(
+        **user.model_dump(),
+        temporary_password=password if payload.force_reset else None,
+    )
 
 
 @router.post("/users/{user_id}/reset-password", summary="管理员重置密码")
@@ -129,6 +155,8 @@ async def reset_user_password(user_id: str, payload: ResetPasswordRequest, reque
 @router.patch("/users/{user_id}/status", response_model=UserResponse, summary="管理员禁用/启用用户")
 async def update_user_status(user_id: str, payload: UpdateUserStatusRequest, request: Request) -> UserResponse:
     admin = require_admin(request)
+    if admin.id == user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能修改当前登录账号状态")
     try:
         user = await AuthService.update_user_status(user_id, payload.status)
     except ValueError as exc:
@@ -143,6 +171,53 @@ async def update_user_status(user_id: str, payload: UpdateUserStatusRequest, req
         metadata={"status": payload.status},
     )
     return UserResponse(**user.model_dump())
+
+
+@router.patch("/users/{user_id}/role", response_model=UserResponse, summary="管理员修改账号角色")
+async def update_user_role(user_id: str, payload: UpdateUserRoleRequest, request: Request) -> UserResponse:
+    admin = require_admin(request)
+    if admin.id == user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能修改当前登录账号角色")
+    try:
+        user = await AuthService.update_user_role(user_id, payload.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await AuthService.record_audit(
+        action="admin.update_user_role",
+        result="success",
+        operator_user_id=admin.id,
+        target_user_id=user.id,
+        ip=get_request_ip(request),
+        user_agent=get_request_user_agent(request),
+        metadata={"role": payload.role, "username": user.username},
+    )
+    return UserResponse(**user.model_dump())
+
+
+@router.delete("/users/{user_id}", summary="管理员删除用户")
+async def delete_user(user_id: str, request: Request) -> dict:
+    admin = require_admin(request)
+    if admin.id == user_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="不能删除当前登录账号")
+    try:
+        deleted_user, retained_sessions = await AuthService.delete_user(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await AuthService.record_audit(
+        action="admin.delete_user",
+        result="success",
+        operator_user_id=admin.id,
+        target_user_id=deleted_user.id,
+        ip=get_request_ip(request),
+        user_agent=get_request_user_agent(request),
+        metadata={
+            "username": deleted_user.username,
+            "role": deleted_user.role,
+            "status": deleted_user.status,
+            "retained_sessions": retained_sessions,
+        },
+    )
+    return {"success": True, "retained_sessions": retained_sessions}
 
 
 @router.get("/audit-logs", response_model=List[AuditResponse], summary="管理员查看全量审计日志")

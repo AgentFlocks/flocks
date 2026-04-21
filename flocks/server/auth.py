@@ -38,7 +38,6 @@ PROTECTED_PREFIXES = (
     "/channel",
     "/auth",
     "/admin",
-    "/cloud-account",
     "/event",
     "/logs",
     "/update",
@@ -120,6 +119,18 @@ def auth_middleware_exempt(path: str) -> bool:
         "/auth/bootstrap-admin",
     }
     return any(path == prefix or path.startswith(prefix + "/") for prefix in public_prefixes)
+
+
+def password_reset_exempt(path: str) -> bool:
+    allowed_paths = {
+        "/api/auth/me",
+        "/api/auth/change-password",
+        "/api/auth/logout",
+        "/auth/me",
+        "/auth/change-password",
+        "/auth/logout",
+    }
+    return any(path == allowed or path.startswith(allowed + "/") for allowed in allowed_paths)
 
 
 def is_protected_backend_path(path: str) -> bool:
@@ -268,6 +279,11 @@ async def apply_auth_for_request(request: Request):
     auth_user = user.to_auth_user()
     request.state.auth_user = auth_user
     token = set_current_auth_user(auth_user)
+    if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前账号必须先修改密码后才能继续使用",
+        )
     return None, token, auth_user
 
 

@@ -1,6 +1,22 @@
 import { useEffect, useState } from 'react';
 import { adminApi, type AuditLog } from '@/api/admin';
 
+function formatAuditTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString('zh-CN', {
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
 export default function AuditLogsPage() {
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,8 +42,8 @@ export default function AuditLogsPage() {
   return (
     <div className="space-y-4">
       <div>
-        <h1 className="text-xl font-semibold text-gray-900">审计日志</h1>
-        <p className="text-sm text-gray-500 mt-1">仅管理员可查看全量账号/密码/共享/云绑定审计日志。</p>
+        <h2 className="text-xl font-semibold text-gray-900">审计日志</h2>
+        <p className="text-sm text-gray-500 mt-1">仅管理员可查看全量账号、密码和共享相关审计日志。</p>
       </div>
       {error && <div className="text-sm text-red-600">{error}</div>}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
@@ -45,11 +61,11 @@ export default function AuditLogsPage() {
           <tbody>
             {logs.map((item) => (
               <tr key={item.id} className="border-t border-gray-100">
-                <td className="px-4 py-2 whitespace-nowrap">{item.created_at}</td>
+                <td className="px-4 py-2 whitespace-nowrap">{formatAuditTime(item.created_at)}</td>
                 <td className="px-4 py-2">{item.action}</td>
                 <td className="px-4 py-2">{item.result}</td>
-                <td className="px-4 py-2">{item.operator_user_id || '-'}</td>
-                <td className="px-4 py-2">{item.target_user_id || '-'}</td>
+                <td className="px-4 py-2">{item.operator_username || '-'}</td>
+                <td className="px-4 py-2">{item.target_username || '-'}</td>
                 <td className="px-4 py-2">{item.ip || '-'}</td>
               </tr>
             ))}

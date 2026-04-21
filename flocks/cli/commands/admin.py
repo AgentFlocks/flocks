@@ -9,6 +9,7 @@ import secrets
 
 import typer
 from rich.console import Console
+from rich.table import Table
 
 from flocks.auth.service import AuthService
 from flocks.config.config import Config
@@ -17,6 +18,43 @@ from flocks.server.auth import API_TOKEN_SECRET_ID
 
 admin_app = typer.Typer(help="管理员账号与安全维护命令")
 console = Console()
+
+
+@admin_app.command("list-users")
+def list_users():
+    """
+    列出本机已创建的账号，便于管理员找回账号名。
+    """
+
+    async def _run():
+        await AuthService.init()
+        return await AuthService.list_users()
+
+    try:
+        users = asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]获取账号列表失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not users:
+        console.print("[yellow]当前未创建任何账号[/yellow]")
+        return
+
+    table = Table(title="账号列表")
+    table.add_column("用户名", style="bold")
+    table.add_column("角色")
+    table.add_column("状态")
+    table.add_column("最近登录")
+
+    for user in users:
+        table.add_row(
+            user.username,
+            user.role,
+            user.status,
+            user.last_login_at or "-",
+        )
+
+    console.print(table)
 
 
 @admin_app.command("generate-api-token")
