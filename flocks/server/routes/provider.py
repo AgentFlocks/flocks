@@ -2200,7 +2200,7 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
         else:
             # This is an API service (not a registered provider)
             # Try to test connectivity by calling a simple tool
-            from flocks.tool.registry import ToolRegistry, ToolCategory
+            from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
             
             ToolRegistry.init()
@@ -2246,11 +2246,42 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             # Prefer simpler tools for connectivity testing.
             # Rank tools by required-parameter count (fewer = simpler);
             # prefer lightweight query/scan tools and avoid file/upload handlers.
-            def _tool_sort_key(t):
+            #
+            # NOTE: For services that expose a dedicated login/auth probe
+            # (e.g. qingteng_login, skyeye_login), we want it tried *first* —
+            # it is parameter-free and exercises the credential pipeline end
+            # to end without invoking business APIs that may need extra
+            # required fields beyond the JSON schema (e.g. assets.refresh
+            # which the handler validates needs `resource`/`os_type`).
+            # Match either the bare keyword (e.g. "login") or the conventional
+            # `<provider>_<keyword>` suffix (e.g. "qingteng_login"). A loose
+            # substring match would over-trigger on business tools whose names
+            # merely contain the word — for example tdp_login_api_list and
+            # tdp_login_weakpwd_list are query endpoints, not probes.
+            login_probe_keywords = ("login", "whoami", "ping", "health")
+
+            def _is_login_probe(t: ToolInfo) -> bool:
+                if t.requires_confirmation:
+                    return False
+                if any(p.required for p in t.parameters):
+                    return False
+                name_lower = t.name.lower()
+                if name_lower in login_probe_keywords:
+                    return True
+                return any(
+                    name_lower.endswith(f"_{kw}") for kw in login_probe_keywords
+                )
+
+            def _tool_sort_key(t: ToolInfo) -> tuple[int, int, str]:
                 required_count = sum(1 for p in t.parameters if p.required)
                 name_lower = t.name.lower()
+                # Highest priority: dedicated login/health probes. These are the
+                # safest connectivity test because they have no required params
+                # and only exercise the auth/sign-in flow.
+                if _is_login_probe(t):
+                    priority = -1
                 # Prefer query/scan style tools first, and push upload/file tools last.
-                if "ip" in name_lower:
+                elif "ip" in name_lower:
                     priority = 0
                 elif "url" in name_lower or "scan" in name_lower or "query" in name_lower:
                     priority = 1
@@ -2379,7 +2410,17 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                     param_sets = next_sets or param_sets
                 return param_sets or [{}]
 
-            last_response = None
+            def _short_repr(value: object, limit: int = 80) -> str:
+                """Compact repr for params, capped to *limit* chars to keep
+                the failure summary message readable (and the cached status
+                payload small)."""
+                text = repr(value)
+                if len(text) <= limit:
+                    return text
+                return text[: limit - 3] + "..."
+
+            attempts: list[dict[str, object]] = []
+            last_response: Optional[dict[str, object]] = None
             for test_tool in service_tools[:5]:
                 for test_params in _build_param_sets(test_tool):
                     try:
@@ -2398,11 +2439,23 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                                 "message": f"✅ API 连通性测试成功！使用工具 '{test_tool.name}' 进行测试。",
                                 "latency_ms": latency,
                                 "tool_tested": test_tool.name,
+                                "attempts": attempts,
                             }
                             await _save_api_service_status(provider_id, response)
                             return response
 
                         error_detail = result.error or "Unknown error"
+                        log.warning("testing.api.connectivity.failed", {
+                            "service": provider_id,
+                            "tool": test_tool.name,
+                            "params": test_params,
+                            "error": error_detail,
+                        })
+                        attempts.append({
+                            "tool": test_tool.name,
+                            "params": test_params,
+                            "error": error_detail,
+                        })
                         last_response = {
                             "success": False,
                             "message": f"❌ API 调用失败: {error_detail}",
@@ -2412,6 +2465,18 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                         }
                     except Exception as tool_error:
                         latency = int((time.time() - start) * 1000)
+                        log.warning("testing.api.connectivity.failed", {
+                            "service": provider_id,
+                            "tool": test_tool.name,
+                            "params": test_params,
+                            "error": str(tool_error),
+                            "exception": True,
+                        })
+                        attempts.append({
+                            "tool": test_tool.name,
+                            "params": test_params,
+                            "error": str(tool_error),
+                        })
                         last_response = {
                             "success": False,
                             "message": f"❌ API 连通性测试失败: {str(tool_error)}",
@@ -2426,6 +2491,21 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 "error": "No executable connectivity test candidate",
                 "latency_ms": int((time.time() - start) * 1000),
             }
+            # Attach all attempts so the WebUI/log can show why every probe
+            # failed, instead of only the message of the very last attempt.
+            response["attempts"] = attempts
+            if attempts:
+                # Keep message single-line so any UI (toast/popover) renders
+                # consistently regardless of whitespace handling. Per-attempt
+                # params are truncated to avoid blowing up the cached message.
+                detail = "; ".join(
+                    f"{a['tool']}({_short_repr(a.get('params') or {})})→{a['error']}"
+                    for a in attempts
+                )
+                response["message"] = (
+                    f"❌ API 连通性测试失败（共尝试 {len(attempts)} 次）。"
+                    f"最后一次错误: {response.get('error', 'unknown')}｜尝试明细: {detail}"
+                )
             await _save_api_service_status(provider_id, response)
             return response
     except Exception as e:
