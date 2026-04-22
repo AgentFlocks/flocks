@@ -66,22 +66,24 @@ def _calculate_aes_secret(builders: list[str]) -> bytes:
 
 
 def _aes_cbc_decrypt(cipher_text: str, key: bytes) -> str:
+    """Decrypt one AK/SK ciphertext slot from the auth_code.
+
+    Mirrors the official Sangfor demo (``aksk_py3.Signature.__aes_cbc_decrypt``)
+    which uses AES-CBC **decryption** with a zero IV.  An earlier version of
+    this file accidentally used ``cipher.encryptor()`` which silently produced
+    garbage AK/SK and made every signed request fail with
+    ``access key not exist`` / ``Full ak/sk authentication is required``.
+    """
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.backends import default_backend
+
     backend = default_backend()
     cipher = Cipher(algorithms.AES(key), modes.CBC(bytearray(16)), backend=backend)
-    encryptor = cipher.encryptor()
-    ct = encryptor.update(bytes.fromhex(cipher_text)) + encryptor.finalize()
-    # Strip both NUL padding and any other trailing non-printable bytes that
-    # the Sangfor SDK historically appends.  ``decode("utf-8")`` would raise
-    # on stray 0x80-0xFF bytes that occasionally leak through after the
-    # ciphertext alignment, so fall back to ``errors="ignore"`` to keep the
-    # AK/SK printable hex characters.
-    plain = ct.rstrip(b"\x00")
-    try:
-        return plain.decode("utf-8")
-    except UnicodeDecodeError:
-        return plain.decode("utf-8", errors="ignore")
+    decryptor = cipher.decryptor()
+    pt = decryptor.update(bytes.fromhex(cipher_text)) + decryptor.finalize()
+    # Sangfor SDK pads ciphertext with NUL bytes; the AK/SK plaintext is
+    # always ASCII hex once decrypted correctly.
+    return pt.rstrip(b"\x00").decode("utf-8")
 
 
 def _decode_auth_code(auth_code: str) -> tuple[str, str]:
@@ -182,12 +184,20 @@ def _sign_request(
     header_str = "".join(f"{k}:{v}\n" for k, v in header_keys)
     sign_header_keys = ";".join(k for k, _ in header_keys)
 
+    # Match the official demo's ``__query_str_transform``: keys are sorted
+    # before urlencoding so the canonical request is deterministic regardless
+    # of the dict iteration order on the client side.
+    canonical_query = ""
+    if params:
+        sorted_items = sorted(params.items(), key=lambda kv: kv[0])
+        canonical_query = urlencode(sorted_items)
+
     canonical_parts = [
         method.upper(),
         "\n",
         _url_transform(url),
         "\n",
-        urlencode(params) if params else "",
+        canonical_query,
         "\n",
         header_str,
         sign_header_keys,

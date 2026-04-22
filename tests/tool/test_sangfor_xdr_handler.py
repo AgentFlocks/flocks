@@ -150,6 +150,79 @@ def test_parse_response_body_does_not_leak_unicode_decode_error(handler):
     assert not isinstance(exc.value, UnicodeDecodeError)
 
 
+# ---------------------------------------------------------------------------
+# AES-CBC decryption (regression: must use decryptor, not encryptor)
+# ---------------------------------------------------------------------------
+
+def test_aes_cbc_decrypt_round_trips_against_reference_encryption(handler):
+    """Guard against the historical regression where ``_aes_cbc_decrypt`` was
+    implemented with ``cipher.encryptor()`` instead of ``cipher.decryptor()``.
+
+    The bug silently returned a re-encrypted blob in place of the AK/SK,
+    which the XDR server then rejected with ``access key not exist`` /
+    ``Full ak/sk authentication is required``.  We assert that the helper
+    matches the canonical AES-CBC behaviour from the official Sangfor demo
+    (``aksk_py3.Signature.__aes_cbc_decrypt``): zero IV, NUL padding, and a
+    real *decrypt* operation.
+    """
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    key = b"0123456789abcdef"  # 16-byte AES key
+    plaintext = b"AKSK_TEST_VALUE\x00"  # 16 bytes, NUL-padded like the SDK
+    cipher = Cipher(algorithms.AES(key), modes.CBC(bytearray(16)), backend=default_backend())
+    encryptor = cipher.encryptor()
+    cipher_bytes = encryptor.update(plaintext) + encryptor.finalize()
+    cipher_hex = cipher_bytes.hex()
+
+    decoded = handler._aes_cbc_decrypt(cipher_hex, key)
+
+    assert decoded == "AKSK_TEST_VALUE", (
+        "AES decrypt regressed: handler is no longer reversing the SDK's "
+        "AES-CBC encryption (likely encryptor() was reintroduced)."
+    )
+
+
+def test_sign_request_sorts_query_params(handler, monkeypatch):
+    """Demo (``aksk_py3.__query_str_transform``) sorts query params by key
+    before signing.  Two requests with the same params in different dict
+    orders must therefore produce identical signatures."""
+    headers_a = {handler.CONTENT_TYPE_KEY: handler.DEFAULT_CONTENT_TYPE}
+    headers_b = {handler.CONTENT_TYPE_KEY: handler.DEFAULT_CONTENT_TYPE}
+
+    fixed = "20260101T000000Z"
+
+    class _FixedDT:
+        @staticmethod
+        def now(tz=None):  # noqa: ARG004 - signature compatibility
+            class _D:
+                @staticmethod
+                def strftime(_fmt):
+                    return fixed
+
+            return _D()
+
+    monkeypatch.setattr(handler, "datetime", _FixedDT)
+
+    signed_a = handler._sign_request(
+        ak="ak",
+        sk="sk",
+        method="GET",
+        url="https://10.0.0.1/api/v1/alerts",
+        headers=headers_a,
+        params={"b": "2", "a": "1", "c": "3"},
+    )
+    signed_b = handler._sign_request(
+        ak="ak",
+        sk="sk",
+        method="GET",
+        url="https://10.0.0.1/api/v1/alerts",
+        headers=headers_b,
+        params={"c": "3", "a": "1", "b": "2"},
+    )
+    assert signed_a[handler.AUTH_HEADER_KEY] == signed_b[handler.AUTH_HEADER_KEY]
+
+
 def test_parse_response_body_empty_raises(handler):
     with pytest.raises(RuntimeError) as exc:
         handler._parse_response_body(b"", 502)
