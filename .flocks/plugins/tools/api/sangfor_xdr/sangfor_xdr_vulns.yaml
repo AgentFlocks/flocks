@@ -19,7 +19,7 @@ inputSchema:
       description: >
         脆弱性操作类型：
         - `baseline`      ：获取基线合规数据
-        - `vuln_list`     ：获取漏洞列表
+        - `vuln_list`     ：获取漏洞、弱密码数据（POST /vuls/risk/list）
         - `update_status` ：修改漏洞修复状态
         - `source_device` ：获取数据源设备列表
       enum: [baseline, vuln_list, update_status, source_device]

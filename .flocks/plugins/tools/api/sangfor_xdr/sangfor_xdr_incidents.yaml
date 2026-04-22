@@ -7,6 +7,8 @@ description_cn: >
   管理深信服 XDR 安全事件。支持按时间范围查询事件列表、
   批量修改事件处置状态、获取事件举证信息，以及查询事件关联实体
   （主机、内外网IP、文件、进程、DNS），是安全事件响应的核心工具。
+  （注：标准开放接口列表中没有 incidents/:uuid/detail，事件详情请使用 list
+  并按 uuId 过滤获取。）
 category: custom
 enabled: true
 requires_confirmation: false
@@ -22,10 +24,9 @@ inputSchema:
         - `list`           ：查询安全事件列表
         - `update_status`   ：批量修改事件处置状态
         - `status_list`     ：查询事件处置状态枚举列表
-        - `get_proof`       ：根据事件 UUID 获取举证信息
-        - `get_entities`    ：根据事件 UUID 获取处置实体（需指定 entity_type）
-        - `get_detail`      ：根据事件 UUID 获取事件详情
-      enum: [list, update_status, status_list, get_proof, get_entities, get_detail]
+        - `get_proof`       ：根据事件 UUID 获取举证信息（GET /incidents/:uuid/proof）
+        - `get_entities`    ：根据事件 UUID 获取处置实体（GET /incidents/:uuid/entities/{type}，需指定 entity_type）
+      enum: [list, update_status, status_list, get_proof, get_entities]
       default: list
     start_time:
       type: integer
@@ -43,7 +44,7 @@ inputSchema:
       default: 1
     uuid:
       type: string
-      description: 事件唯一ID（get_proof / get_entities / get_detail 时必填）。
+      description: 事件唯一ID（get_proof / get_entities 时必填）。
     uuids:
       type: array
       description: 事件 UUID 数组（update_status 时必填）。

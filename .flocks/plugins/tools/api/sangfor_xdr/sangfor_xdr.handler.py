@@ -450,16 +450,20 @@ async def run_alerts(ctx: ToolContext) -> ToolResult:
         uuid = params.get("uuid", "")
         if not uuid:
             return ToolResult(success=False, error="uuid is required for get_proof")
-        return await _run_request("POST", f"/api/xdr/v1/alerts/{uuid}/proof", data={})
-
-    elif action == "get_detail":
-        uuid = params.get("uuid", "")
-        if not uuid:
-            return ToolResult(success=False, error="uuid is required for get_detail")
-        return await _run_request("POST", f"/api/xdr/v1/alerts/{uuid}/detail", data={})
+        # Spec: GET /api/xdr/v1/alerts/:uuid/proof  (开放接口列表 v1，
+        # apiRequestType=1 即 GET).  Earlier versions sent POST and were
+        # silently ignored / 404'd by the appliance.
+        return await _run_request("GET", f"/api/xdr/v1/alerts/{uuid}/proof")
 
     else:
-        return ToolResult(success=False, error=f"Unknown alert action: {action}. Use: list, update_status, status_list, get_proof, get_detail")
+        return ToolResult(
+            success=False,
+            error=(
+                f"Unknown alert action: {action}. Use: list, update_status, "
+                "status_list, get_proof. (注：标准开放列表中没有 alerts/:uuid/detail "
+                "接口，如需查看告警详情请使用 list 并按 uuId 过滤。)"
+            ),
+        )
 
 
 # ── Incidents ────────────────────────────────────────────────────────────────
@@ -496,7 +500,8 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
         uuid = params.get("uuid", "")
         if not uuid:
             return ToolResult(success=False, error="uuid is required for get_proof")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/proof", data={})
+        # Spec: GET /api/xdr/v1/incidents/:uuid/proof
+        return await _run_request("GET", f"/api/xdr/v1/incidents/{uuid}/proof")
 
     elif action == "get_entities":
         uuid = params.get("uuid", "")
@@ -506,16 +511,22 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
         valid_types = ("host", "dns", "innerip", "ip", "file", "process")
         if entity_type not in valid_types:
             return ToolResult(success=False, error=f"entity_type must be one of {valid_types}")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/entities/{entity_type}", data={})
-
-    elif action == "get_detail":
-        uuid = params.get("uuid", "")
-        if not uuid:
-            return ToolResult(success=False, error="uuid is required for get_detail")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/detail", data={})
+        # Spec: GET /api/xdr/v1/incidents/:uuid/entities/{dns,file,host,
+        # innerip,ip,process}.  All six entity sub-paths are GET in the
+        # 开放接口列表; POST returns 405 / signature mismatch.
+        return await _run_request(
+            "GET", f"/api/xdr/v1/incidents/{uuid}/entities/{entity_type}"
+        )
 
     else:
-        return ToolResult(success=False, error=f"Unknown incident action: {action}. Use: list, update_status, status_list, get_proof, get_entities, get_detail")
+        return ToolResult(
+            success=False,
+            error=(
+                f"Unknown incident action: {action}. Use: list, update_status, "
+                "status_list, get_proof, get_entities. (注：标准开放列表中没有 "
+                "incidents/:uuid/detail 接口，事件详情请通过 list 按 uuId 过滤获取。)"
+            ),
+        )
 
 
 # ── Responses (Isolate / Unisolate) ─────────────────────────────────────────
@@ -664,7 +675,10 @@ async def run_vulns(ctx: ToolContext) -> ToolResult:
             body["pageSize"] = int(params["page_size"])
         if params.get("page_num"):
             body["pageNum"] = int(params["page_num"])
-        return await _run_request("POST", "/api/xdr/v1/vuls/list", data=body)
+        # Spec: POST /api/xdr/v1/vuls/risk/list (获取漏洞、弱密码数据).
+        # The legacy ``/api/xdr/v1/vuls/list`` path does not exist in the
+        # 开放接口列表 and was returning 404 / signature failures.
+        return await _run_request("POST", "/api/xdr/v1/vuls/risk/list", data=body)
 
     else:
         return ToolResult(success=False, error=f"Unknown vuln action: {action}. Use: baseline, update_status, source_device, vuln_list")
