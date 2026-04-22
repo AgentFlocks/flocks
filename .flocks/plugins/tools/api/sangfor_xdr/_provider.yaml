@@ -35,13 +35,11 @@ credential_fields:
     input_type: text
     required: false
     default: "443"
-  - key: verify_ssl
-    label: Verify SSL
-    storage: config
-    config_key: verify_ssl
-    input_type: text
-    required: false
-    default: "false"
+  # NOTE: ``verify_ssl`` was previously declared here as a free-text
+  # credential field, which duplicated the generic "SSL 验证" toggle that
+  # ServiceDetailPanel renders for every API service (both write to the
+  # same ``raw_config["verify_ssl"]`` key).  The duplicate text input has
+  # been removed — use the toggle below the credential form instead.
 defaults:
   timeout: 60
   category: custom
@@ -52,4 +50,5 @@ notes: |
   3. 将联动码填入 Auth Code 字段
   4. 联动码内部包含 AK/SK，Handler 会自动解密并使用 HMAC-SHA256 签名
   5. 签名完成后不可修改请求的任何内容
-  6. 内网部署环境可将 Verify SSL 设为 false
+  6. 内网部署环境请通过下方『SSL 验证』开关关闭证书校验
+     （与原 Verify SSL 输入框等价，已统一收敛到通用开关）
