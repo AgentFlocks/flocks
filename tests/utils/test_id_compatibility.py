@@ -17,7 +17,6 @@ class TestIdentifierCompatibility:
             "message": "msg",
             "permission": "per",
             "question": "que",
-            "audit": "aud",
             "user": "usr",
             "part": "prt",
             "pty": "pty",
@@ -29,10 +28,8 @@ class TestIdentifierCompatibility:
             "agent": "agt",
             "subtask": "stk",
             "event": "evt",
-            "tqref": "tqr",
             "task": "tsk",
             "texec": "txe",
-            "chbind": "chb",
         }
         
         assert Identifier._prefixes == expected_prefixes

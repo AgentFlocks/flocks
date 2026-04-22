@@ -10,15 +10,13 @@ import asyncio
 import json
 import time
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
-from fastapi import APIRouter, HTTPException, status, Query, Request
+from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
-from flocks.server.auth import require_user
-from flocks.auth.service import AuthService
 
 
 router = APIRouter()
@@ -106,13 +104,6 @@ class SessionResponse(BaseModel):
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
-    ownerUserID: Optional[str] = Field(None, description="Session owner user id")
-    visibility: str = Field("private", description="Session visibility: private or team_shared")
-    sharedBy: Optional[str] = Field(None, description="User id who shared this session")
-    sharedAt: Optional[int] = Field(None, description="Share timestamp")
-    canShare: bool = Field(False, description="Whether current user can share this session")
-    canDelete: bool = Field(False, description="Whether current user can delete this session")
-    canUnshare: bool = Field(False, description="Whether current user can stop sharing this session")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -122,21 +113,6 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     Note: agent/model/provider are NOT included at session level.
     They are retrieved from the latest user message in the session.
     """
-    current_user = None
-    try:
-        from flocks.auth.context import get_current_auth_user
-
-        current_user = get_current_auth_user()
-    except Exception:
-        current_user = None
-
-    is_admin = bool(current_user and current_user.role == "admin")
-    is_owner = bool(current_user and Session._is_owned_by_auth_user(session, current_user))
-    can_delete = is_admin or is_owner
-    # Share/unshare are intentionally restricted to the session creator/owner only.
-    can_share = is_owner
-    can_unshare = is_owner and session.visibility == "team_shared"
-
     return SessionResponse(
         id=session.id,
         slug=session.slug,
@@ -156,13 +132,6 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
-        ownerUserID=session.owner_user_id,
-        visibility=session.visibility,
-        sharedBy=session.shared_by,
-        sharedAt=session.shared_at,
-        canShare=can_share,
-        canDelete=can_delete,
-        canUnshare=can_unshare,
     )
 
 
@@ -170,18 +139,6 @@ def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
     return bool(metadata.get("hideFromSessionManager"))
-
-
-def _can_manage_shared_session(current_user, session: SessionModel) -> bool:
-    if current_user.role == "admin":
-        return True
-    if Session._is_owned_by_auth_user(session, current_user):
-        return True
-    return bool(session.shared_by and current_user.id == session.shared_by)
-
-
-def _can_toggle_session_share(current_user, session: SessionModel) -> bool:
-    return Session._is_owned_by_auth_user(session, current_user)
 
 
 # =============================================================================
@@ -226,7 +183,6 @@ async def get_session_status() -> Dict[str, Any]:
     description="Get a list of all sessions, sorted by most recently updated",
 )
 async def list_sessions(
-    request: Request,
     directory: Optional[str] = Query(None, description="Filter by project directory"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
@@ -235,7 +191,6 @@ async def list_sessions(
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
 ) -> List[SessionResponse]:
     """List all sessions with optional filters"""
-    _current_user = require_user(request)
     all_sessions = await Session.list_all()
     
     filtered = []
@@ -274,9 +229,8 @@ async def list_sessions(
     summary="Create session",
     description="Create a new session",
 )
-async def create_session(http_request: Request, request: Optional[SessionCreateRequest] = None) -> SessionResponse:
+async def create_session(request: Optional[SessionCreateRequest] = None) -> SessionResponse:
     """Create a new session"""
-    current_user = require_user(http_request)
     import os
     
     if request is None:
@@ -339,18 +293,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
-        owner_user_id=current_user.id,
         **({"category": request.category} if request.category else {}),
-    )
-
-    await AuthService.record_audit(
-        action="session.create",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=current_user.id,
-        ip=http_request.client.host if http_request.client else None,
-        user_agent=http_request.headers.get("user-agent"),
-        metadata={"session_id": session.id},
     )
     
     log.info("session.created", {"session_id": session.id})
@@ -365,9 +308,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     summary="Get session",
     description="Get session by ID",
 )
-async def get_session(sessionID: str, request: Request) -> SessionResponse:
+async def get_session(sessionID: str) -> SessionResponse:
     """Get session by ID"""
-    _current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -414,17 +356,10 @@ class TodoInfo(BaseModel):
     summary="Get session todos",
     description="Get the todo list for a session",
 )
-async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
+async def get_session_todos(sessionID: str) -> List[TodoInfo]:
     """Get session todos"""
     from flocks.storage.storage import Storage
-    _current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-
+    
     try:
         todos = await Storage.read(["todo", sessionID])
         if todos is None:
@@ -441,18 +376,11 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     summary="Update session todos",
     description="Update the todo list for a session",
 )
-async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: Request) -> List[TodoInfo]:
+async def update_session_todos(sessionID: str, todos: List[TodoInfo]) -> List[TodoInfo]:
     """Update session todos"""
     from flocks.storage.storage import Storage
     from flocks.server.routes.event import publish_event
-    _current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-
+    
     try:
         await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
         
@@ -473,9 +401,8 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
     summary="Delete session",
     description="Delete session by ID",
 )
-async def delete_session(sessionID: str, request: Request) -> bool:
+async def delete_session(sessionID: str) -> bool:
     """Delete session by ID (returns true)"""
-    current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -484,23 +411,7 @@ async def delete_session(sessionID: str, request: Request) -> bool:
             detail=f"Session {sessionID} not found"
         )
     
-    if session.visibility == "team_shared":
-        if not _can_manage_shared_session(current_user, session):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或共享发起人可删除共享会话")
-    else:
-        if current_user.role != "admin" and not Session._is_owned_by_auth_user(session, current_user):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
-
     await Session.delete(session.project_id, sessionID)
-    await AuthService.record_audit(
-        action="session.delete",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID, "visibility": session.visibility},
-    )
     log.info("session.deleted", {"session_id": sessionID})
     return True
 
@@ -692,9 +603,8 @@ async def fork_session(sessionID: str, request: Optional[ForkRequest] = None) ->
     summary="Share session",
     description="Create a shareable link for the session",
 )
-async def share_session(sessionID: str, request: Request) -> SessionResponse:
+async def share_session(sessionID: str) -> SessionResponse:
     """Share session"""
-    current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     if not session:
         raise HTTPException(
@@ -702,20 +612,8 @@ async def share_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     
-    if not _can_toggle_session_share(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可共享会话")
-
     await Session.share(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    await AuthService.record_audit(
-        action="session.share",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID},
-    )
     
     log.info("session.shared", {"session_id": sessionID})
     return _session_to_response(updated)
@@ -757,9 +655,8 @@ async def get_session_diff(
     summary="Unshare session",
     description="Remove the shareable link for the session",
 )
-async def unshare_session(sessionID: str, request: Request) -> SessionResponse:
+async def unshare_session(sessionID: str) -> SessionResponse:
     """Unshare session"""
-    current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     if not session:
         raise HTTPException(
@@ -767,20 +664,8 @@ async def unshare_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     
-    if not _can_toggle_session_share(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可停止共享")
-
     await Session.unshare(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    await AuthService.record_audit(
-        action="session.unshare",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID},
-    )
     
     log.info("session.unshared", {"session_id": sessionID})
     return _session_to_response(updated)
