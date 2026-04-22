@@ -2004,6 +2004,25 @@ function ToggleField({ label, checked, onChange }: {
   );
 }
 
+function getDefaultReasoningToggleValue(providerId: string, modelId: string): boolean {
+  const lowered = modelId.toLowerCase();
+
+  if (providerId === 'threatbook-cn-llm') return true;
+
+  if (lowered.includes('claude')) return true;
+  if (providerId === 'openai' && ['o1', 'o3', 'gpt-5'].some(tag => lowered.includes(tag))) return true;
+  if (providerId === 'google' && lowered.includes('gemini') && (lowered.includes('2.5') || lowered.includes('gemini-3'))) return true;
+  if (providerId === 'groq') return true;
+  if (providerId === 'amazon-bedrock' && (lowered.includes('anthropic') || lowered.includes('nova'))) return true;
+
+  if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
+    if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
+    if (lowered.includes('kimi-k2.5') || lowered.includes('kimi-k2.6')) return false;
+  }
+
+  return false;
+}
+
 // ==================== Configure Dialog ====================
 
 function ConfigureProviderDialog({ provider, existingCredentials, models, onClose, onConfigured, onTestResult, onDelete }: {
@@ -2394,25 +2413,42 @@ function ModelDetailSheet({
   const toast = useToast();
   const { t } = useTranslation('model');
   const features = model.capabilities?.features || [];
+  const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
   const [supportsTools, setSupportsTools] = useState(features.includes('tool_call') || !!model.capabilities?.supports_tools);
   const [supportsVision, setSupportsVision] = useState(features.includes('vision') || !!model.capabilities?.supports_vision);
   const [supportsStreaming, setSupportsStreaming] = useState(!!model.capabilities?.supports_streaming);
-  const [supportsReasoning, setSupportsReasoning] = useState(features.includes('reasoning') || !!model.capabilities?.supports_reasoning);
+  const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
   const [inputPrice, setInputPrice] = useState(model.pricing ? String(model.pricing.input) : '0');
   const [outputPrice, setOutputPrice] = useState(model.pricing ? String(model.pricing.output) : '0');
   const [currency, setCurrency] = useState(model.pricing?.currency ?? 'USD');
   const [enabled, setEnabled] = useState(true);
+  const [defaultParameters, setDefaultParameters] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(true);
 
   useEffect(() => {
     modelSettingsAPI.get(provider.id, model.id).then(r => {
       setEnabled(r.data.enabled !== false);
-    }).catch(() => setEnabled(true)).finally(() => setLoadingSettings(false));
-  }, [provider.id, model.id]);
+      setDefaultParameters(r.data.default_parameters || {});
+      if (modelSupportsReasoning) {
+        const configured = r.data.default_parameters?.enable_thinking;
+        setSupportsReasoning(
+          typeof configured === 'boolean'
+            ? configured
+            : getDefaultReasoningToggleValue(provider.id, model.id)
+        );
+      }
+    }).catch(() => {
+      setEnabled(true);
+      setDefaultParameters({});
+      if (modelSupportsReasoning) {
+        setSupportsReasoning(getDefaultReasoningToggleValue(provider.id, model.id));
+      }
+    }).finally(() => setLoadingSettings(false));
+  }, [model.id, modelSupportsReasoning, provider.id]);
 
   const handleSave = async () => {
     setLoading(true);
@@ -2426,12 +2462,20 @@ function ModelDetailSheet({
           supports_vision: supportsVision,
           supports_tools: supportsTools,
           supports_streaming: supportsStreaming,
-          supports_reasoning: supportsReasoning,
+          supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
           input_price: parseFloat(inputPrice) || 0,
           output_price: parseFloat(outputPrice) || 0,
           currency,
         }),
-        modelSettingsAPI.update(provider.id, model.id, { enabled }),
+        modelSettingsAPI.update(provider.id, model.id, {
+          enabled,
+          default_parameters: modelSupportsReasoning
+            ? {
+              ...defaultParameters,
+              enable_thinking: supportsReasoning,
+            }
+            : undefined,
+        }),
       ]);
       toast.success(t('credentialsSaved'));
       onSaved();
