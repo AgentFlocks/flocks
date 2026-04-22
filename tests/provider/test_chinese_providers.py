@@ -165,9 +165,16 @@ class TestCuratedCatalogModels:
         models = get_provider_model_definitions("moonshot")
         assert {m.id for m in models} == {
             "kimi-k2.5",
+            "kimi-k2.6",
             "kimi-k2-thinking",
             "kimi-k2",
         }
+
+        k26 = next(m for m in models if m.id == "kimi-k2.6")
+        assert k26.capabilities.supports_reasoning is True
+        assert k26.pricing.currency == "CNY"
+        assert k26.pricing.cache_read == 1.3
+        assert k26.limits.context_window == 256000
 
         thinking = next(m for m in models if m.id == "kimi-k2-thinking")
         assert thinking.capabilities.supports_reasoning is True
