@@ -247,3 +247,121 @@ def test_parse_response_body_undecodable_raises(handler):
     with pytest.raises(RuntimeError) as exc:
         handler._parse_response_body(raw, 200)
     assert "could not decode" in str(exc.value).lower() or "parse" in str(exc.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# _request body serialisation
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, body: bytes, status: int = 200):
+        self._body = body
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def read(self):
+        return self._body
+
+
+class _FakeSession:
+    """Minimal stand-in for ``aiohttp.ClientSession`` that captures the
+    keyword arguments passed to ``session.request`` so tests can assert on
+    the wire-level body the handler actually transmits."""
+
+    def __init__(self, response_body: bytes = b'{"code":"Success","data":null}'):
+        self.calls: list[dict[str, Any]] = []
+        self._response_body = response_body
+
+    def request(self, method: str, url: str, **kwargs):
+        self.calls.append({"method": method, "url": url, **kwargs})
+        return _FakeResponse(self._response_body)
+
+
+@pytest.mark.parametrize(
+    "data, expected_body",
+    [
+        # The historical bug: ``if data`` treats {} as falsy and therefore
+        # transmits an empty string body — the XDR appliance then rejects
+        # it with "参数解析异常".  After the fix, an empty dict serialises
+        # to the canonical JSON literal ``{}``.
+        ({}, "{}"),
+        ({"foo": "bar"}, '{"foo": "bar"}'),
+        # ``alerts/dealstatus/list`` and ``incidents/dealstatus/list``
+        # require a JSON *array* body; an empty list must NOT degrade to
+        # an empty string either.
+        ([], "[]"),
+        (["alert-uuid-1"], '["alert-uuid-1"]'),
+        # ``data=None`` is the only case allowed to send a truly empty
+        # body (e.g. for plain GET endpoints with no payload).
+        (None, ""),
+    ],
+)
+def test_request_serialises_body_for_empty_containers(handler, data, expected_body):
+    """Regression for the wire-level body sent to the XDR appliance.
+
+    Empty ``{}`` / ``[]`` containers must serialise to the canonical
+    JSON literals so that:
+
+      1.  The signed payload hash matches what the server computes
+          (otherwise we get signature mismatches even when the body is
+          accepted), and
+      2.  The server's strict JSON parser does not reject the request
+          with "参数解析异常 / 请求参数校验失败 / 参数不合法".
+    """
+    import asyncio
+
+    cfg = handler.RuntimeConfig(
+        base_url="https://10.0.0.1",
+        timeout=5,
+        auth_code="deadbeef",
+        verify_ssl=False,
+    )
+
+    session = _FakeSession()
+
+    with (
+        patch.object(handler, "_decode_auth_code", return_value=("AK", "SK")),
+        # Don't actually compute HMAC headers — we only care about body.
+        patch.object(handler, "_sign_request", side_effect=lambda *a, **kw: kw.get("headers") or a[4]),
+    ):
+        result = asyncio.run(
+            handler._request(cfg, session, "POST", "/api/xdr/v1/whitelists/list", data=data)
+        )
+
+    assert result == {"code": "Success", "data": None}
+    assert len(session.calls) == 1
+    sent_body = session.calls[0].get("data")
+    assert sent_body == expected_body, (
+        f"_request transmitted {sent_body!r} for data={data!r}; "
+        f"expected {expected_body!r}.  Empty containers must round-trip "
+        "as JSON literals so the XDR signature & body parser both succeed."
+    )
+
+
+def test_request_get_does_not_transmit_body_but_signs_canonical_payload(handler):
+    """GET requests must not put a body on the wire, but the signed payload
+    hash should still reflect ``""`` (not ``{}``) for null ``data``."""
+    import asyncio
+
+    cfg = handler.RuntimeConfig(
+        base_url="https://10.0.0.1",
+        timeout=5,
+        auth_code="deadbeef",
+        verify_ssl=False,
+    )
+    session = _FakeSession()
+
+    with (
+        patch.object(handler, "_decode_auth_code", return_value=("AK", "SK")),
+        patch.object(handler, "_sign_request", side_effect=lambda *a, **kw: kw.get("headers") or a[4]),
+    ):
+        asyncio.run(
+            handler._request(cfg, session, "GET", "/api/xdr/v1/alerts/uuid/proof")
+        )
+
+    assert "data" not in session.calls[0], "GET requests must omit body kwarg"

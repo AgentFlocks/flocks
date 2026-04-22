@@ -312,12 +312,22 @@ async def _request(
     session: aiohttp.ClientSession,
     method: str,
     path: str,
-    data: Optional[dict[str, Any]] = None,
+    data: Optional[Any] = None,
     params: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     ak, sk = _decode_auth_code(cfg.auth_code)
     url = f"{cfg.base_url}{path}"
-    payload = json.dumps(data) if data else ""
+    # IMPORTANT: ``data`` may legitimately be an empty container (``{}`` or
+    # ``[]``) — many XDR ``/list`` endpoints accept an empty filter object
+    # but still require a *parsable* JSON body, otherwise return
+    # "参数解析异常" / "参数不合法".  Using ``if data`` would treat an empty
+    # dict as falsy and send an empty string body, which both breaks JSON
+    # parsing and changes the signed payload hash from
+    # ``SHA256("{}")`` to ``SHA256("")``.
+    if data is None:
+        payload = ""
+    else:
+        payload = json.dumps(data, ensure_ascii=False)
     headers = {CONTENT_TYPE_KEY: DEFAULT_CONTENT_TYPE}
     headers = _sign_request(ak, sk, method, url, headers, params=params, payload=payload)
     # Ask the server not to compress the response — some XDR appliances ignore
@@ -378,7 +388,7 @@ def _parse_response_body(raw: bytes, status: int) -> dict[str, Any]:
 async def _run_request(
     method: str,
     path: str,
-    data: Optional[dict[str, Any]] = None,
+    data: Optional[Any] = None,
     params: Optional[dict[str, Any]] = None,
 ) -> ToolResult:
     try:
@@ -451,7 +461,17 @@ async def run_alerts(ctx: ToolContext) -> ToolResult:
         return await _run_request("POST", "/api/xdr/v1/alerts/dealstatus", data=body)
 
     elif action == "status_list":
-        return await _run_request("POST", "/api/xdr/v1/alerts/dealstatus/list", data={})
+        # Spec: POST /api/xdr/v1/alerts/dealstatus/list with a JSON *array*
+        # body (apiRequestParamType=1, demo body: ``["alert-uuid"]``).  The
+        # endpoint returns the current dealStatus for the supplied alert
+        # UUIDs; previously we sent ``{}`` which made the appliance reply
+        # with "参数解析异常" because a list was expected.
+        uuids = params.get("uuids") or []
+        if isinstance(uuids, str):
+            uuids = [u.strip() for u in uuids.split(",") if u.strip()]
+        return await _run_request(
+            "POST", "/api/xdr/v1/alerts/dealstatus/list", data=list(uuids)
+        )
 
     elif action == "get_proof":
         uuid = params.get("uuid", "")
@@ -501,7 +521,16 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
         return await _run_request("POST", "/api/xdr/v1/incidents/dealstatus", data=body)
 
     elif action == "status_list":
-        return await _run_request("POST", "/api/xdr/v1/incidents/dealstatus/list", data={})
+        # Spec: POST /api/xdr/v1/incidents/dealstatus/list — like the alerts
+        # counterpart this expects a JSON *array* of incident UUIDs and
+        # returns ``[{"uuId": ..., "dealStatus": ...}]``.  Sending ``{}``
+        # produced "参数解析异常".
+        uuids = params.get("uuids") or []
+        if isinstance(uuids, str):
+            uuids = [u.strip() for u in uuids.split(",") if u.strip()]
+        return await _run_request(
+            "POST", "/api/xdr/v1/incidents/dealstatus/list", data=list(uuids)
+        )
 
     elif action == "get_proof":
         uuid = params.get("uuid", "")
