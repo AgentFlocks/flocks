@@ -69,7 +69,7 @@ export default function LoginPage() {
             <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin list-users</code>
           </div>
           <div>
-            管理员召回密码：确认账号名后执行
+            管理员找回密码：确认账号名后执行
             {' '}
             <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin generate-one-time-password --username admin_user_name</code>
           </div>
