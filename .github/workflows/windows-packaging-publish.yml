@@ -100,19 +100,3 @@ jobs:
           fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  sync-gitee:
-    name: Sync GitHub Release to Gitee
-    runs-on: ubuntu-latest
-    needs: release-asset
-    steps:
-      - name: Sync GitHub Release to Gitee
-        uses: trustedinster/sync-release-gitee@v1.3
-        with:
-          gitee_owner: flocks
-          gitee_repo: flocks
-          gitee_token: ${{ secrets.GITEE_TOKEN }}
-          github_owner: AgentFlocks
-          github_repo: flocks
-          gitee_upload_retry_times: 3
-          debug: false
