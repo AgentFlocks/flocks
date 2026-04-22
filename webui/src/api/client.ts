@@ -1,7 +1,39 @@
 import axios from 'axios';
 
-// 部署时前后端同域，使用相对路径即可;开发时通过 .env 或 vite proxy 配置
-const baseURL = import.meta.env.VITE_API_BASE_URL || '';
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
+export function resolveApiBaseURL(configuredBaseURL: string, currentOrigin?: string): string {
+  if (!configuredBaseURL || !currentOrigin) {
+    return configuredBaseURL;
+  }
+
+  try {
+    const configuredUrl = new URL(configuredBaseURL);
+    const currentUrl = new URL(currentOrigin);
+
+    if (
+      configuredUrl.origin !== currentUrl.origin &&
+      isLoopbackHostname(configuredUrl.hostname) &&
+      isLoopbackHostname(currentUrl.hostname)
+    ) {
+      configuredUrl.hostname = currentUrl.hostname;
+      return configuredUrl.toString().replace(/\/$/, '');
+    }
+
+    return configuredBaseURL;
+  } catch {
+    return configuredBaseURL;
+  }
+}
+
+// 部署时前后端同域，使用相对路径即可；本地开发若混用 localhost/127.0.0.1，
+// 这里会自动对齐到当前页面主机名，避免浏览器把登录 cookie 当成跨站请求。
+const baseURL = resolveApiBaseURL(
+  import.meta.env.VITE_API_BASE_URL || '',
+  typeof window !== 'undefined' ? window.location.origin : undefined,
+);
 
 export const apiClient = axios.create({
   baseURL,
