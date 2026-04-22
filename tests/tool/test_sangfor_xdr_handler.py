@@ -445,3 +445,141 @@ def test_request_get_does_not_transmit_body_but_signs_canonical_payload(handler)
         )
 
     assert "data" not in session.calls[0], "GET requests must omit body kwarg"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the 各工具功能测试 session
+# ---------------------------------------------------------------------------
+
+def test_run_request_returns_payload_via_output_field(handler):
+    """The handler historically called ``ToolResult(success=True, data=...)``.
+
+    ``ToolResult`` declares ``output`` (not ``data``) as its payload
+    field; pydantic silently dropped the unknown kwarg, so every call —
+    even successful ones — surfaced ``output=None`` to the LLM agent
+    which then reported "认证后请求恢复内容都是空的".  This test pins
+    the field name so the regression cannot recur.
+    """
+    import asyncio
+
+    captured = {"called": False}
+
+    async def _fake_request(cfg, session, method, path, data=None, params=None):
+        captured["called"] = True
+        return {"code": "Success", "data": {"item": [{"uuId": "abc"}], "total": 1}}
+
+    cfg = handler.RuntimeConfig(
+        base_url="https://10.0.0.1",
+        timeout=5,
+        auth_code="deadbeef",
+        verify_ssl=False,
+    )
+    with (
+        patch.object(handler, "_resolve_runtime_config", return_value=cfg),
+        patch.object(handler, "_request", side_effect=_fake_request),
+    ):
+        result = asyncio.run(handler._run_request("POST", "/api/xdr/v1/alerts/list"))
+
+    assert captured["called"]
+    assert result.success is True
+    assert result.error is None
+    # MUST be on .output (not .data) — see ToolResult class definition.
+    assert result.output == {
+        "code": "Success",
+        "data": {"item": [{"uuId": "abc"}], "total": 1},
+    }, (
+        "ToolResult payload must arrive on the `output` attribute. "
+        "If this assertion fails, the handler is constructing "
+        "ToolResult(data=...) again — pydantic silently drops the kwarg "
+        "and downstream consumers see output=None."
+    )
+
+
+@pytest.mark.parametrize(
+    # 2026-04-21 00:00:00 UTC == 1776729600 (verified via:
+    #   datetime(2026,4,21,tzinfo=timezone.utc).timestamp())
+    "raw, expected_seconds_utc",
+    [
+        ("2026-04-21T00:00:00Z", 1776729600),
+        ("2026-04-21T00:00:00.000Z", 1776729600),
+        ("2026-04-21T00:00:00", 1776729600),
+        ("2026-04-21 00:00:00", 1776729600),
+        ("2026-04-21", 1776729600),
+        # 2026-04-21 08:30:00 +08:00 == 2026-04-21 00:30:00 UTC
+        ("2026-04-21T08:30:00+08:00", 1776729600 + 1800),
+        ("1776729600", 1776729600),
+        (1776729600, 1776729600),
+    ],
+)
+def test_to_ts_handles_iso8601_with_z_suffix(handler, raw, expected_seconds_utc):
+    """The first 各工具功能测试 attempt failed with
+    ``Cannot parse time value: '2026-04-21T00:00:00Z'`` because the
+    trailing ``Z`` was unsupported.  Accept ISO-8601 in all the shapes
+    a JS ``Date.toISOString()`` (and reasonable LLM guesses) can emit.
+    """
+    assert handler._to_ts(raw) == expected_seconds_utc
+
+
+def test_assets_list_uses_page_not_pageNum(handler):
+    """Spec rejects ``{'pageSize': 5, 'pageNum': 1}`` with
+    ``参数: ... 不合法``; the assets list endpoint is a sibling of
+    whitelists/list and uses the same ``page`` / ``pageSize`` keys."""
+    captured = _run_action(handler, handler.run_assets, {"action": "list"})
+    assert captured["path"] == "/api/xdr/v1/assets/list"
+    body = captured["data"]
+    assert "page" in body and "pageSize" in body, body
+    assert "pageNum" not in body, f"pageNum must not appear, got {body!r}"
+    assert body["page"] == 1
+    assert body["pageSize"] == 20
+
+
+def test_assets_list_honours_explicit_paging(handler):
+    captured = _run_action(
+        handler,
+        handler.run_assets,
+        {"action": "list", "page_num": 2, "page_size": 30},
+    )
+    assert captured["data"] == {"page": 2, "pageSize": 30}
+
+
+@pytest.mark.parametrize(
+    "alias, canonical, run_fn_name, expected_path",
+    [
+        # alerts: query → list (1st 各工具功能测试 round had every tool
+        # default to action="query" and got "Unknown ... action")
+        ("query", "list", "run_alerts", "/api/xdr/v1/alerts/list"),
+        ("search", "list", "run_alerts", "/api/xdr/v1/alerts/list"),
+        ("get", "list", "run_incidents", "/api/xdr/v1/incidents/list"),
+        ("fetch", "list", "run_whitelists", "/api/xdr/v1/whitelists/list"),
+        # vulns: agent guessed "query_baseline" then "query_vuln"
+        ("query_baseline", "baseline", "run_vulns", "/api/xdr/v1/vuls/baseline/list"),
+        ("query_vuln", "vuln_list", "run_vulns", "/api/xdr/v1/vuls/risk/list"),
+        ("query", "list", "run_assets", "/api/xdr/v1/assets/list"),
+        # responses default
+        ("isolate", "isolate_list", "run_responses",
+         "/api/xdr/v1/responses/host/isolate/list"),
+    ],
+)
+def test_action_alias_normalisation(handler, alias, canonical, run_fn_name, expected_path):
+    """LLM agents observed to emit synonyms instead of canonical action
+    names.  The handler now maps the most common ones back so the
+    request still goes through (vs. surfacing ``Unknown ... action``)."""
+    run_fn = getattr(handler, run_fn_name)
+    captured = _run_action(handler, run_fn, {"action": alias})
+    assert captured["path"] == expected_path, (
+        f"alias {alias!r} should route to {canonical!r} "
+        f"({expected_path}) but went to {captured['path']!r}"
+    )
+
+
+def test_normalise_action_default_when_missing(handler):
+    """``None`` / empty / unknown all fall through gracefully."""
+    assert handler._normalise_action(None, "list") == "list"
+    assert handler._normalise_action("", "baseline") == "baseline"
+    assert handler._normalise_action("   ", "list") == "list"
+    # Unknown but non-empty values pass through unchanged so the per-action
+    # ``Unknown ... action`` error message can still guide the caller.
+    assert handler._normalise_action("unknown_op", "list") == "unknown_op"
+    # Case folding: agents sometimes capitalise.
+    assert handler._normalise_action("LIST", "list") == "list"
+    assert handler._normalise_action("Query", "list") == "list"
