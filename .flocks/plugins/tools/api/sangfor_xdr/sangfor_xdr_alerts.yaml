@@ -22,7 +22,8 @@ inputSchema:
         告警操作类型：
         - `list`          ：查询安全告警列表（按时间范围分页查询）
         - `update_status`  ：批量修改告警处置状态
-        - `status_list`    ：查询告警处置状态枚举列表
+        - `status_list`    ：根据告警 UUID 数组批量查询告警当前处置状态
+                           （POST /alerts/dealstatus/list，body 为 `["alert-uuid1", ...]`）
         - `get_proof`      ：根据告警 UUID 获取举证信息（GET /alerts/:uuid/proof）
       enum: [list, update_status, status_list, get_proof]
       default: list
@@ -47,7 +48,9 @@ inputSchema:
       description: 告警唯一ID（get_proof 时必填）。
     uuids:
       type: array
-      description: 告警 UUID 数组（update_status 时必填）。
+      description: >
+        告警 UUID 数组（update_status 必填；status_list 时为查询主体，
+        留空则发送 `[]`，部分 XDR 版本会返回"参数不合法"，建议显式提供至少一个 UUID）。
       items:
         type: string
     deal_status:

@@ -23,7 +23,8 @@ inputSchema:
         事件操作类型：
         - `list`           ：查询安全事件列表
         - `update_status`   ：批量修改事件处置状态
-        - `status_list`     ：查询事件处置状态枚举列表
+        - `status_list`     ：根据事件 UUID 数组批量查询事件当前处置状态
+                            （POST /incidents/dealstatus/list，body 为 `["incident-uuid1", ...]`）
         - `get_proof`       ：根据事件 UUID 获取举证信息（GET /incidents/:uuid/proof）
         - `get_entities`    ：根据事件 UUID 获取处置实体（GET /incidents/:uuid/entities/{type}，需指定 entity_type）
       enum: [list, update_status, status_list, get_proof, get_entities]
@@ -47,7 +48,9 @@ inputSchema:
       description: 事件唯一ID（get_proof / get_entities 时必填）。
     uuids:
       type: array
-      description: 事件 UUID 数组（update_status 时必填）。
+      description: >
+        事件 UUID 数组（update_status 必填；status_list 时为查询主体，
+        留空则发送 `[]`，部分 XDR 版本会返回"参数不合法"，建议显式提供至少一个 UUID）。
       items:
         type: string
     deal_status:
