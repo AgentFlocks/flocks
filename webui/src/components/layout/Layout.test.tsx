@@ -165,7 +165,7 @@ describe('Layout onboarding entry', () => {
     defaultModelAPI.getResolved.mockResolvedValue({
       data: {
         provider_id: 'threatbook-cn-llm',
-        model_id: 'qwen3.6-plus',
+        model_id: 'minimax-m2.7',
       },
     });
 
@@ -173,10 +173,12 @@ describe('Layout onboarding entry', () => {
       data: {
         providers: [
           makeProvider('threatbook-cn-llm', 'ThreatBook CN', [
+            { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
             { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus' },
             { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('threatbook-io-llm', 'ThreatBook Global', [
+            { id: 'minimax-m2.7', name: 'MiniMax M2.7' },
             { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus' },
             { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
