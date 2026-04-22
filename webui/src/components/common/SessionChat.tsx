@@ -30,7 +30,7 @@ import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
 import { sessionApi } from '@/api/session';
-import client, { getApiBase } from '@/api/client';
+import client from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { workspaceAPI } from '@/api/workspace';
 import { copyText } from '@/utils/clipboard';
@@ -591,7 +591,7 @@ export default function SessionChat({
   );
 
   const { status: sseStatus } = useSSE({
-    url: `${getApiBase()}/api/event`,
+    url: `${import.meta.env.VITE_API_BASE_URL || ''}/api/event`,
     onEvent: handleSSEEvent,
     onReconnect: () => {
       if (!sessionId) return;

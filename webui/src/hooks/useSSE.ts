@@ -11,8 +11,6 @@ export interface UseSSEOptions {
   onError?: (error: Event) => void;
   onReconnect?: () => void;
   enabled?: boolean;
-  /** 是否携带凭据（cookie），默认 true 以支持受保护 SSE 接口 */
-  withCredentials?: boolean;
   /** 重连配置 */
   reconnect?: {
     /** 是否启用自动重连，默认 true */
@@ -34,7 +32,6 @@ export function useSSE({
   onError, 
   onReconnect,
   enabled = true,
-  withCredentials = true,
   reconnect = {},
 }: UseSSEOptions) {
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -91,7 +88,7 @@ export function useSSE({
       console.log('[SSE] Creating EventSource connection to:', url);
     }
     setStatus('connecting');
-    const eventSource = new EventSource(url, { withCredentials });
+    const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
     
     eventSource.onopen = () => {
@@ -166,7 +163,7 @@ export function useSSE({
         }, 30000); // 30秒后重试
       }
     };
-  }, [url, enabled, withCredentials, reconnectEnabled, maxRetries, getReconnectDelay, clearReconnectTimeout]);
+  }, [url, enabled, reconnectEnabled, maxRetries, getReconnectDelay, clearReconnectTimeout]);
 
   // 主 effect
   useEffect(() => {

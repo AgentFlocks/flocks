@@ -72,16 +72,6 @@ export const sessionApi = {
     return response.data;
   },
 
-  share: async (sessionId: string) => {
-    const response = await client.post(`/api/session/${sessionId}/share`);
-    return response.data;
-  },
-
-  unshare: async (sessionId: string) => {
-    const response = await client.delete(`/api/session/${sessionId}/share`);
-    return response.data;
-  },
-
   /**
    * 清空会话消息
    */
