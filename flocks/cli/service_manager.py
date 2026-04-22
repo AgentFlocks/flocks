@@ -704,7 +704,10 @@ def wait_for_http(
 ) -> None:
     """Wait until any URL passes the provided startup validator."""
     response_validator = validator or _is_reachable_response
-    with httpx.Client(timeout=2.0) as client:
+    # Local startup probes must never be routed through system proxy settings;
+    # otherwise localhost/127.0.0.1 checks can time out even when the service
+    # is already healthy.
+    with httpx.Client(timeout=2.0, trust_env=False) as client:
         for _ in range(attempts):
             for url in urls:
                 try:

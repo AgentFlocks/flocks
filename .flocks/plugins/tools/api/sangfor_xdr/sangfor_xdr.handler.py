@@ -66,23 +66,55 @@ def _calculate_aes_secret(builders: list[str]) -> bytes:
 
 
 def _aes_cbc_decrypt(cipher_text: str, key: bytes) -> str:
+    """Decrypt one AK/SK ciphertext slot from the auth_code.
+
+    Mirrors the official Sangfor demo (``aksk_py3.Signature.__aes_cbc_decrypt``)
+    which uses AES-CBC **decryption** with a zero IV.  An earlier version of
+    this file accidentally used ``cipher.encryptor()`` which silently produced
+    garbage AK/SK and made every signed request fail with
+    ``access key not exist`` / ``Full ak/sk authentication is required``.
+    """
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     from cryptography.hazmat.backends import default_backend
+
     backend = default_backend()
     cipher = Cipher(algorithms.AES(key), modes.CBC(bytearray(16)), backend=backend)
-    encryptor = cipher.encryptor()
-    ct = encryptor.update(bytes.fromhex(cipher_text)) + encryptor.finalize()
-    return ct.rstrip(b"\x00").decode("utf-8")
+    decryptor = cipher.decryptor()
+    pt = decryptor.update(bytes.fromhex(cipher_text)) + decryptor.finalize()
+    # Sangfor SDK pads ciphertext with NUL bytes; the AK/SK plaintext is
+    # always ASCII hex once decrypted correctly.
+    return pt.rstrip(b"\x00").decode("utf-8")
 
 
 def _decode_auth_code(auth_code: str) -> tuple[str, str]:
     cached = _AK_SK_CACHE.get(auth_code)
     if cached:
         return cached
-    builder_str = _reverse_hex(auth_code)
-    builders = builder_str.decode("utf-8").split("|")
+    if not auth_code:
+        raise ValueError("auth_code is empty")
+    cleaned = auth_code.strip()
+    # Reject obviously non-hex inputs early with a clear message instead of
+    # the cryptic ``binascii.Error: Non-hexadecimal digit found``.
+    try:
+        builder_bytes = _reverse_hex(cleaned)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(
+            "auth_code is not a valid hex string. Please copy the 联动码 "
+            "from XDR (配置管理 → 系统设置 → 开放性 → 联动码管理)."
+        ) from exc
+    try:
+        builder_str = builder_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "auth_code decoded bytes are not valid UTF-8 — likely a wrong or "
+            "truncated 联动码."
+        ) from exc
+    builders = builder_str.split("|")
     if len(builders) != AUTH_CODE_PARAMS_NUM:
-        raise ValueError(f"auth_code decode error: expected {AUTH_CODE_PARAMS_NUM} parts, got {len(builders)}")
+        raise ValueError(
+            f"auth_code decode error: expected {AUTH_CODE_PARAMS_NUM} parts, "
+            f"got {len(builders)}"
+        )
     aes_secret = _calculate_aes_secret(builders)
     ak = _aes_cbc_decrypt(builders[9], aes_secret)
     sk = _aes_cbc_decrypt(builders[10], aes_secret)
@@ -152,12 +184,20 @@ def _sign_request(
     header_str = "".join(f"{k}:{v}\n" for k, v in header_keys)
     sign_header_keys = ";".join(k for k, _ in header_keys)
 
+    # Match the official demo's ``__query_str_transform``: keys are sorted
+    # before urlencoding so the canonical request is deterministic regardless
+    # of the dict iteration order on the client side.
+    canonical_query = ""
+    if params:
+        sorted_items = sorted(params.items(), key=lambda kv: kv[0])
+        canonical_query = urlencode(sorted_items)
+
     canonical_parts = [
         method.upper(),
         "\n",
         _url_transform(url),
         "\n",
-        urlencode(params) if params else "",
+        canonical_query,
         "\n",
         header_str,
         sign_header_keys,
@@ -204,14 +244,35 @@ def _resolve_runtime_config() -> RuntimeConfig:
     raw = ConfigWriter.get_api_service_raw(SERVICE_ID)
     raw = raw if isinstance(raw, dict) else {}
 
-    host = (_resolve_ref(raw.get("host")) or os.getenv("SANGFOR_XDR_HOST") or "").strip()
-    port_raw = raw.get("port") or DEFAULT_PORT
+    raw_host = (_resolve_ref(raw.get("host")) or os.getenv("SANGFOR_XDR_HOST") or "").strip()
+    # Tolerate users pasting any URL form into the WebUI ``host`` field —
+    # ``10.0.0.1``, ``https://10.0.0.1``, ``https://10.0.0.1:8443/api/?x=1``
+    # all collapse to a clean scheme://host[:port] base.  Without this we
+    # produced things like ``https://https://10.0.0.1`` (double scheme) or
+    # ``https://10.0.0.1/api/api/xdr/v1/...`` (leaked path component) and
+    # every signed request silently routed to nowhere.
+    candidate = raw_host if "://" in raw_host else f"https://{raw_host}"
+    parsed_host = urlparse(candidate)
+    hostname = (parsed_host.hostname or "").strip()
+    inline_port: Optional[int] = parsed_host.port
+
+    # Preserve IPv6 literal brackets when re-assembling the URL.
+    if hostname and ":" in hostname and not hostname.startswith("["):
+        hostname_for_url = f"[{hostname}]"
+    else:
+        hostname_for_url = hostname
+
+    port_raw = raw.get("port") or inline_port or DEFAULT_PORT
     try:
         port = int(str(port_raw).strip())
     except (TypeError, ValueError):
         port = DEFAULT_PORT
 
-    base_url = f"https://{host}:{port}" if port != 443 else f"https://{host}"
+    base_url = (
+        f"https://{hostname_for_url}:{port}"
+        if port != 443
+        else f"https://{hostname_for_url}"
+    )
 
     timeout_raw = raw.get("timeout", DEFAULT_TIMEOUT)
     try:
@@ -234,7 +295,7 @@ def _resolve_runtime_config() -> RuntimeConfig:
     else:
         verify_ssl = str(verify_ssl_raw).strip().lower() in {"1", "true", "yes", "on"}
 
-    if not host:
+    if not hostname:
         raise ValueError("Sangfor XDR host not configured. Set api_services.sangfor_xdr.host or SANGFOR_XDR_HOST.")
     if not auth_code:
         raise ValueError(
@@ -251,14 +312,29 @@ async def _request(
     session: aiohttp.ClientSession,
     method: str,
     path: str,
-    data: Optional[dict[str, Any]] = None,
+    data: Optional[Any] = None,
     params: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     ak, sk = _decode_auth_code(cfg.auth_code)
     url = f"{cfg.base_url}{path}"
-    payload = json.dumps(data) if data else ""
+    # IMPORTANT: ``data`` may legitimately be an empty container (``{}`` or
+    # ``[]``) — many XDR ``/list`` endpoints accept an empty filter object
+    # but still require a *parsable* JSON body, otherwise return
+    # "参数解析异常" / "参数不合法".  Using ``if data`` would treat an empty
+    # dict as falsy and send an empty string body, which both breaks JSON
+    # parsing and changes the signed payload hash from
+    # ``SHA256("{}")`` to ``SHA256("")``.
+    if data is None:
+        payload = ""
+    else:
+        payload = json.dumps(data, ensure_ascii=False)
     headers = {CONTENT_TYPE_KEY: DEFAULT_CONTENT_TYPE}
     headers = _sign_request(ak, sk, method, url, headers, params=params, payload=payload)
+    # Ask the server not to compress the response — some XDR appliances ignore
+    # ``Accept-Encoding`` negotiation and ship gzip bytes that aiohttp cannot
+    # transparently decode on every code path, surfacing as
+    # ``'utf-8' codec can't decode byte 0x8d in position 0``.
+    headers.setdefault("Accept-Encoding", "identity")
 
     kwargs: dict[str, Any] = {"headers": headers}
     if method.upper() in ("POST", "PUT", "PATCH", "DELETE"):
@@ -267,11 +343,8 @@ async def _request(
         kwargs["params"] = params
 
     async with session.request(method, url, **kwargs) as resp:
-        try:
-            result = await resp.json(content_type=None)
-        except Exception:
-            text = await resp.text()
-            raise RuntimeError(f"XDR response parse error (HTTP {resp.status}): {text[:500]}")
+        raw_bytes = await resp.read()
+        result = _parse_response_body(raw_bytes, resp.status)
 
     code = result.get("code")
     if code == "Success" or code == 0:
@@ -279,10 +352,43 @@ async def _request(
     raise RuntimeError(f"XDR API error: code={code}, message={result.get('message', '')}")
 
 
+def _parse_response_body(raw: bytes, status: int) -> dict[str, Any]:
+    """Decode an XDR response body with broad encoding tolerance.
+
+    The Sangfor XDR appliance has been observed returning JSON encoded as
+    UTF-8, GBK or even raw bytes that fail strict UTF-8 validation
+    (``0x8d`` in position 0).  ``aiohttp`` defaults to UTF-8, which made
+    every connectivity probe surface a misleading
+    ``'utf-8' codec can't decode byte 0x8d`` error.
+    """
+    if not raw:
+        raise RuntimeError(f"XDR returned empty body (HTTP {status})")
+    last_error: Optional[Exception] = None
+    for encoding in ("utf-8", "utf-8-sig", "gbk", "gb18030", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        return {"code": "Success", "data": parsed}
+    snippet = raw[:120].hex()
+    raise RuntimeError(
+        f"XDR response parse error (HTTP {status}): could not decode body "
+        f"(first bytes hex={snippet}, last={last_error})"
+    )
+
+
 async def _run_request(
     method: str,
     path: str,
-    data: Optional[dict[str, Any]] = None,
+    data: Optional[Any] = None,
     params: Optional[dict[str, Any]] = None,
 ) -> ToolResult:
     try:
@@ -355,22 +461,36 @@ async def run_alerts(ctx: ToolContext) -> ToolResult:
         return await _run_request("POST", "/api/xdr/v1/alerts/dealstatus", data=body)
 
     elif action == "status_list":
-        return await _run_request("POST", "/api/xdr/v1/alerts/dealstatus/list", data={})
+        # Spec: POST /api/xdr/v1/alerts/dealstatus/list with a JSON *array*
+        # body (apiRequestParamType=1, demo body: ``["alert-uuid"]``).  The
+        # endpoint returns the current dealStatus for the supplied alert
+        # UUIDs; previously we sent ``{}`` which made the appliance reply
+        # with "参数解析异常" because a list was expected.
+        uuids = params.get("uuids") or []
+        if isinstance(uuids, str):
+            uuids = [u.strip() for u in uuids.split(",") if u.strip()]
+        return await _run_request(
+            "POST", "/api/xdr/v1/alerts/dealstatus/list", data=list(uuids)
+        )
 
     elif action == "get_proof":
         uuid = params.get("uuid", "")
         if not uuid:
             return ToolResult(success=False, error="uuid is required for get_proof")
-        return await _run_request("POST", f"/api/xdr/v1/alerts/{uuid}/proof", data={})
-
-    elif action == "get_detail":
-        uuid = params.get("uuid", "")
-        if not uuid:
-            return ToolResult(success=False, error="uuid is required for get_detail")
-        return await _run_request("POST", f"/api/xdr/v1/alerts/{uuid}/detail", data={})
+        # Spec: GET /api/xdr/v1/alerts/:uuid/proof  (开放接口列表 v1，
+        # apiRequestType=1 即 GET).  Earlier versions sent POST and were
+        # silently ignored / 404'd by the appliance.
+        return await _run_request("GET", f"/api/xdr/v1/alerts/{uuid}/proof")
 
     else:
-        return ToolResult(success=False, error=f"Unknown alert action: {action}. Use: list, update_status, status_list, get_proof, get_detail")
+        return ToolResult(
+            success=False,
+            error=(
+                f"Unknown alert action: {action}. Use: list, update_status, "
+                "status_list, get_proof. (注：标准开放列表中没有 alerts/:uuid/detail "
+                "接口，如需查看告警详情请使用 list 并按 uuId 过滤。)"
+            ),
+        )
 
 
 # ── Incidents ────────────────────────────────────────────────────────────────
@@ -401,13 +521,23 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
         return await _run_request("POST", "/api/xdr/v1/incidents/dealstatus", data=body)
 
     elif action == "status_list":
-        return await _run_request("POST", "/api/xdr/v1/incidents/dealstatus/list", data={})
+        # Spec: POST /api/xdr/v1/incidents/dealstatus/list — like the alerts
+        # counterpart this expects a JSON *array* of incident UUIDs and
+        # returns ``[{"uuId": ..., "dealStatus": ...}]``.  Sending ``{}``
+        # produced "参数解析异常".
+        uuids = params.get("uuids") or []
+        if isinstance(uuids, str):
+            uuids = [u.strip() for u in uuids.split(",") if u.strip()]
+        return await _run_request(
+            "POST", "/api/xdr/v1/incidents/dealstatus/list", data=list(uuids)
+        )
 
     elif action == "get_proof":
         uuid = params.get("uuid", "")
         if not uuid:
             return ToolResult(success=False, error="uuid is required for get_proof")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/proof", data={})
+        # Spec: GET /api/xdr/v1/incidents/:uuid/proof
+        return await _run_request("GET", f"/api/xdr/v1/incidents/{uuid}/proof")
 
     elif action == "get_entities":
         uuid = params.get("uuid", "")
@@ -417,16 +547,22 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
         valid_types = ("host", "dns", "innerip", "ip", "file", "process")
         if entity_type not in valid_types:
             return ToolResult(success=False, error=f"entity_type must be one of {valid_types}")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/entities/{entity_type}", data={})
-
-    elif action == "get_detail":
-        uuid = params.get("uuid", "")
-        if not uuid:
-            return ToolResult(success=False, error="uuid is required for get_detail")
-        return await _run_request("POST", f"/api/xdr/v1/incidents/{uuid}/detail", data={})
+        # Spec: GET /api/xdr/v1/incidents/:uuid/entities/{dns,file,host,
+        # innerip,ip,process}.  All six entity sub-paths are GET in the
+        # 开放接口列表; POST returns 405 / signature mismatch.
+        return await _run_request(
+            "GET", f"/api/xdr/v1/incidents/{uuid}/entities/{entity_type}"
+        )
 
     else:
-        return ToolResult(success=False, error=f"Unknown incident action: {action}. Use: list, update_status, status_list, get_proof, get_entities, get_detail")
+        return ToolResult(
+            success=False,
+            error=(
+                f"Unknown incident action: {action}. Use: list, update_status, "
+                "status_list, get_proof, get_entities. (注：标准开放列表中没有 "
+                "incidents/:uuid/detail 接口，事件详情请通过 list 按 uuId 过滤获取。)"
+            ),
+        )
 
 
 # ── Responses (Isolate / Unisolate) ─────────────────────────────────────────
@@ -455,11 +591,17 @@ async def run_whitelists(ctx: ToolContext) -> ToolResult:
     action = params.pop("action", "list")
 
     if action == "list":
-        body: dict[str, Any] = {}
-        if params.get("page_size"):
-            body["pageSize"] = int(params["page_size"])
-        if params.get("page_num"):
-            body["pageNum"] = int(params["page_num"])
+        # Spec (开放接口列表 → POST /api/xdr/v1/whitelists/list) defines the
+        # paging keys as ``page`` and ``pageSize`` (NOT ``pageNum``).  This
+        # XDR build hard-rejects ``pageNum`` with
+        # ``param page cannot be null`` because it never finds the expected
+        # key.  Always default page=1 / pageSize=20 so the WebUI
+        # connectivity probe (which sends no params) still satisfies the
+        # appliance's strict validator.
+        body: dict[str, Any] = {
+            "page": int(params.get("page_num") or params.get("page") or 1),
+            "pageSize": int(params.get("page_size") or 20),
+        }
         return await _run_request("POST", "/api/xdr/v1/whitelists/list", data=body)
 
     elif action == "create":
@@ -552,11 +694,12 @@ async def run_vulns(ctx: ToolContext) -> ToolResult:
     action = params.pop("action", "baseline")
 
     if action == "baseline":
-        body: dict[str, Any] = {}
-        if params.get("page_size"):
-            body["pageSize"] = int(params["page_size"])
-        if params.get("page_num"):
-            body["pageNum"] = int(params["page_num"])
+        # Spec uses ``page`` / ``pageSize``; we tolerate the legacy
+        # ``page_num`` alias for backwards compatibility.
+        body: dict[str, Any] = {
+            "page": int(params.get("page_num") or params.get("page") or 1),
+            "pageSize": int(params.get("page_size") or 20),
+        }
         return await _run_request("POST", "/api/xdr/v1/vuls/baseline/list", data=body)
 
     elif action == "update_status":
@@ -570,12 +713,19 @@ async def run_vulns(ctx: ToolContext) -> ToolResult:
         return await _run_request("GET", "/api/xdr/v1/vuls/sourcedevice")
 
     elif action == "vuln_list":
-        body = {}
-        if params.get("page_size"):
-            body["pageSize"] = int(params["page_size"])
-        if params.get("page_num"):
-            body["pageNum"] = int(params["page_num"])
-        return await _run_request("POST", "/api/xdr/v1/vuls/list", data=body)
+        # Spec: POST /api/xdr/v1/vuls/risk/list (获取漏洞、弱密码数据).
+        # The 开放接口列表 marks ``dataType`` as the *only* paramNotNull=0
+        # (i.e. required) request field; the appliance returns
+        # "请求参数校验失败" if it is missing.  Default to ``loophole``
+        # (vulnerabilities) and let callers override with ``weakpwd`` when
+        # they want weak-password records instead.
+        data_type = params.get("data_type") or "loophole"
+        body: dict[str, Any] = {
+            "dataType": data_type,
+            "page": int(params.get("page_num") or params.get("page") or 1),
+            "pageSize": int(params.get("page_size") or 20),
+        }
+        return await _run_request("POST", "/api/xdr/v1/vuls/risk/list", data=body)
 
     else:
         return ToolResult(success=False, error=f"Unknown vuln action: {action}. Use: baseline, update_status, source_device, vuln_list")
