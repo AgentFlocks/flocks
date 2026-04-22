@@ -398,7 +398,13 @@ async def _run_request(
         timeout_obj = aiohttp.ClientTimeout(total=cfg.timeout)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout_obj) as session:
             result = await _request(cfg, session, method, path, data=data, params=params)
-        return ToolResult(success=True, data=result)
+        # CRITICAL: ``ToolResult`` declares ``output`` (not ``data``) as the
+        # payload field.  Earlier versions of this handler returned
+        # ``ToolResult(success=True, data=result)`` — pydantic silently
+        # dropped the unknown kwarg, so callers (LLM agents) received
+        # ``output=None`` and reported "返回内容都是空的" even though
+        # authentication and the API call had both succeeded.
+        return ToolResult(success=True, output=result)
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
 
@@ -406,14 +412,48 @@ async def _run_request(
 # ── Time helpers ─────────────────────────────────────────────────────────────
 
 def _to_ts(v: Any) -> int:
+    """Coerce ``v`` to a Unix-second timestamp.
+
+    Accepts ints/floats (already epoch seconds — milliseconds are *not*
+    auto-detected; callers should normalise first), all-digit strings,
+    and a wide variety of human-readable timestamp formats.  In
+    particular ISO-8601 strings produced by JS ``Date.toISOString()``
+    (``"2026-04-21T00:00:00Z"`` / ``"2026-04-21T00:00:00.000Z"``) used
+    to crash with ``Cannot parse time value`` because the trailing
+    ``Z`` was not declared in any of the strptime formats — and the
+    LLM agent has been observed handing exactly that shape over from
+    the user's natural-language window ("过去 24 小时").
+    """
     if v is None:
         return 0
     if isinstance(v, (int, float)):
         return int(v)
     s = str(v).strip()
+    if not s:
+        return 0
     if s.isdigit():
         return int(s)
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    # ``datetime.fromisoformat`` (Py3.11+) handles trailing ``Z`` natively;
+    # for broader compatibility we strip ``Z`` and force UTC ourselves.
+    iso_candidate = s
+    if iso_candidate.endswith("Z"):
+        iso_candidate = iso_candidate[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(iso_candidate)
+    except ValueError:
+        dt = None
+    if dt is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
         try:
             dt = datetime.strptime(s, fmt)
             return int(dt.replace(tzinfo=timezone.utc).timestamp())
@@ -429,6 +469,52 @@ def _resolve_time_range(params: dict[str, Any], default_hours: int = 24) -> tupl
     return from_ts, to_ts
 
 
+# ── Action alias normalisation ───────────────────────────────────────────────
+
+# LLM agents observed to emit synonyms like ``query`` / ``search`` / ``get``
+# instead of the canonical ``list`` declared in the YAML schema's ``enum``
+# (the 各工具功能测试 session shows the agent's first attempt across all
+# six tools used ``action="query"`` / ``"query_baseline"``).  Returning a
+# hard ``Unknown action`` error wastes round-trips and makes the agent give
+# up before recovering.  We map the most common misnomers to their canonical
+# action so the request still goes through.
+_ACTION_ALIASES: dict[str, str] = {
+    "query": "list",
+    "search": "list",
+    "get": "list",
+    "fetch": "list",
+    "find": "list",
+    "query_list": "list",
+    "query_baseline": "baseline",
+    "fetch_baseline": "baseline",
+    "get_baseline": "baseline",
+    "query_vuln": "vuln_list",
+    "query_vulns": "vuln_list",
+    "list_vulns": "vuln_list",
+    "vuls_list": "vuln_list",
+    "fix_status": "update_status",
+    "update_fix_status": "update_status",
+    "isolate": "isolate_list",
+    "list_isolate": "isolate_list",
+    "host_isolate_list": "isolate_list",
+}
+
+
+def _normalise_action(value: Any, default: str) -> str:
+    """Return a canonical action name, mapping common LLM aliases.
+
+    ``None`` / empty / non-string values fall back to ``default`` so a
+    missing ``action`` key always picks the most useful default for the
+    tool (typically ``list``).
+    """
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if not s:
+        return default
+    return _ACTION_ALIASES.get(s, s)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # Tool entry points
 # ═════════════════════════════════════════════════════════════════════════════
@@ -437,7 +523,7 @@ def _resolve_time_range(params: dict[str, Any], default_hours: int = 24) -> tupl
 
 async def run_alerts(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "list")
+    action = _normalise_action(params.pop("action", None), default="list")
 
     if action == "list":
         from_ts, to_ts = _resolve_time_range(params)
@@ -497,7 +583,7 @@ async def run_alerts(ctx: ToolContext) -> ToolResult:
 
 async def run_incidents(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "list")
+    action = _normalise_action(params.pop("action", None), default="list")
 
     if action == "list":
         from_ts, to_ts = _resolve_time_range(params)
@@ -569,7 +655,7 @@ async def run_incidents(ctx: ToolContext) -> ToolResult:
 
 async def run_responses(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "isolate_list")
+    action = _normalise_action(params.pop("action", None), default="isolate_list")
 
     if action == "isolate_list":
         return await _run_request("POST", "/api/xdr/v1/responses/host/isolate/list", data={})
@@ -588,7 +674,7 @@ async def run_responses(ctx: ToolContext) -> ToolResult:
 
 async def run_whitelists(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "list")
+    action = _normalise_action(params.pop("action", None), default="list")
 
     if action == "list":
         # Spec (开放接口列表 → POST /api/xdr/v1/whitelists/list) defines the
@@ -644,14 +730,19 @@ async def run_whitelists(ctx: ToolContext) -> ToolResult:
 
 async def run_assets(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "list")
+    action = _normalise_action(params.pop("action", "list"), default="list")
 
     if action == "list":
-        body: dict[str, Any] = {}
-        if params.get("page_size"):
-            body["pageSize"] = int(params["page_size"])
-        if params.get("page_num"):
-            body["pageNum"] = int(params["page_num"])
+        # Like ``whitelists/list``, the assets list endpoint validates
+        # paging keys as ``page`` / ``pageSize`` (NOT ``pageNum`` /
+        # ``pageSize``).  Sending the legacy pair triggers
+        # ``参数: {'pageSize': 5, 'pageNum': 1} 不合法，请确认后重新添加``
+        # observed in the 各工具功能测试 session.  Provide defaults so
+        # callers that omit paging still satisfy the strict validator.
+        body: dict[str, Any] = {
+            "page": int(params.get("page_num") or params.get("page") or 1),
+            "pageSize": int(params.get("page_size") or params.get("pageSize") or 20),
+        }
         return await _run_request("POST", "/api/xdr/v1/assets/list", data=body)
 
     elif action == "ip_segment_tree":
@@ -691,7 +782,7 @@ async def run_assets(ctx: ToolContext) -> ToolResult:
 
 async def run_vulns(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
-    action = params.pop("action", "baseline")
+    action = _normalise_action(params.pop("action", None), default="baseline")
 
     if action == "baseline":
         # Spec uses ``page`` / ``pageSize``; we tolerate the legacy
