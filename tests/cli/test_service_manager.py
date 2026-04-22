@@ -339,7 +339,11 @@ def test_wait_for_http_rejects_non_flocks_health_payload(monkeypatch) -> None:
         def get(self, _url):
             return next(responses)
 
-    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
     monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
 
     with pytest.raises(service_manager.ServiceError, match="启动超时"):
@@ -368,7 +372,11 @@ def test_wait_for_http_accepts_flocks_health_response(monkeypatch) -> None:
         def get(self, _url):
             return next(responses)
 
-    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
     monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
 
     service_manager.wait_for_http(
@@ -396,10 +404,45 @@ def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
         def get(self, _url):
             return next(responses)
 
-    monkeypatch.setattr(service_manager.httpx, "Client", lambda timeout: _FakeClient())
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
     monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
 
     service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
+
+
+def test_wait_for_http_ignores_proxy_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return httpx.Response(200, json={"status": "healthy", "version": "v1"})
+
+    def _client_factory(*, timeout, trust_env):
+        captured["timeout"] = timeout
+        captured["trust_env"] = trust_env
+        return _FakeClient()
+
+    monkeypatch.setattr(service_manager.httpx, "Client", _client_factory)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000/api/health"],
+        "后端服务",
+        attempts=1,
+        delay=0.0,
+        validator=service_manager._is_expected_health_response,
+    )
+
+    assert captured == {"timeout": 2.0, "trust_env": False}
 
 
 def test_resolve_python_subprocess_command_prefers_venv(
