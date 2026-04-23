@@ -925,6 +925,279 @@ class TestStreamHelpers:
 
 
 # ------------------------------------------------------------------
+# Resilience regressions: R1 (silent stall) + R3 (back-pressure)
+# ------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("dingtalk_stream") is None,
+    reason="dingtalk-stream SDK not installed",
+)
+class TestStreamRunnerResilience:
+    """End-to-end tests for the runner's failure-mode safeguards.
+
+    These exercise the loop in :meth:`DingTalkStreamRunner._run_with_reconnect`
+    by patching :meth:`DingTalkStreamClient.start` so we can drive
+    ``clean return`` / ``raised`` / ``slow`` scenarios deterministically
+    without touching the network.  The pre-flight HTTP check is also
+    short-circuited.
+    """
+
+    def _make_runner(self, *, on_message=None, account_overrides=None):
+        from flocks.channel.builtin.dingtalk.stream import DingTalkStreamRunner
+
+        config = {
+            "_account_id": "default",
+            "appKey": "key",
+            "appSecret": "secret",
+        }
+        if account_overrides:
+            config.update(account_overrides)
+        runner = DingTalkStreamRunner(
+            account_config=config,
+            on_message=on_message or AsyncMock(),
+        )
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_stall_detection_escalates_after_consecutive_short_clean_returns(
+        self, monkeypatch,
+    ):
+        """R1 regression: SDK ``start()`` returning instantly with zero
+        messages, repeated N times, MUST raise
+        :class:`DingTalkStreamStallError` so the channel layer pauses
+        reconnects on this account.
+
+        Production symptom (without this guard): the runner burns one
+        preflight + one reconnect cycle every ~2-60s forever, never
+        delivering a message and never surfacing a permanent error.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        # Skip pre-flight; we're testing the SDK's own behaviour.
+        async def _ok_preflight(**_kw):
+            return None
+
+        monkeypatch.setattr(
+            stream_mod, "_preflight_open_connection", _ok_preflight
+        )
+        # Collapse backoff so the test runs in milliseconds, not minutes.
+        monkeypatch.setattr(stream_mod, "_RECONNECT_BACKOFF", [0])
+
+        runner = self._make_runner()
+
+        # Fake stream client whose ``start()`` returns immediately every
+        # time — the exact pathology we want to detect.
+        class _ImmediateStartClient:
+            def __init__(self, *_a, **_kw):
+                self.start_calls = 0
+                self.websocket = None
+
+            def register_callback_handler(self, *_a, **_kw):
+                pass
+
+            async def start(self):
+                self.start_calls += 1
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            stream_mod.dingtalk_stream, "DingTalkStreamClient",
+            _ImmediateStartClient,
+        )
+
+        with pytest.raises(stream_mod.DingTalkStreamStallError) as exc_info:
+            await asyncio.wait_for(runner.run(), timeout=2.0)
+
+        # Threshold is 5 — confirm we escalate exactly at the boundary
+        # rather than after some larger arbitrary number of retries.
+        assert exc_info.value.consecutive_short_runs == 5
+        # And it MUST be a subclass of DingTalkPermanentError so
+        # channel.py's ``_classify_and_raise`` will swallow it (no
+        # retry) instead of re-raising for the gateway.
+        assert isinstance(exc_info.value, stream_mod.DingTalkPermanentError)
+
+    @pytest.mark.asyncio
+    async def test_stall_counter_resets_after_inbound_message(self, monkeypatch):
+        """A single healthy run (with messages delivered) MUST reset
+        the short-run counter — otherwise a busy account that
+        occasionally has a < 30s reconnect window would slowly
+        accumulate strikes and eventually be killed wrongly.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        async def _ok_preflight(**_kw):
+            return None
+
+        monkeypatch.setattr(
+            stream_mod, "_preflight_open_connection", _ok_preflight
+        )
+        monkeypatch.setattr(stream_mod, "_RECONNECT_BACKOFF", [0])
+
+        runner = self._make_runner()
+        # Pre-load a few "short runs" — half of the threshold.
+        runner._consecutive_short_runs = 3
+
+        call_count = {"n": 0}
+
+        class _MixedClient:
+            def __init__(self, *_a, **_kw):
+                self.websocket = None
+
+            def register_callback_handler(self, *_a, **_kw):
+                pass
+
+            async def start(self):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # Simulate a healthy run: deliver one message,
+                    # then return cleanly.  The runner counts
+                    # ``_messages_received`` directly, so we bump it
+                    # before returning to mimic an inbound frame.
+                    runner._messages_received += 1
+                    return
+                # On the 2nd call, stop the runner so the loop exits
+                # without further iterations.
+                runner._running = False
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            stream_mod.dingtalk_stream, "DingTalkStreamClient",
+            _MixedClient,
+        )
+
+        await asyncio.wait_for(runner.run(), timeout=2.0)
+        # Counter MUST have reset after the run that delivered a message.
+        assert runner._consecutive_short_runs == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_queue_drops_overflow_without_blocking(
+        self, monkeypatch,
+    ):
+        """R3 regression: when the dispatch queue saturates, new
+        messages MUST be dropped (not blocked, not stacked as
+        unbounded tasks) so the SDK's ``process()`` ack path stays
+        non-blocking and heartbeats keep flowing.
+
+        We size the queue + worker pool down to 1 each and pin the
+        single worker on a slow ``on_message`` so we can deterministically
+        push the queue into the QueueFull branch.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        # The on_message handler hangs until released — guarantees the
+        # single worker is busy when we enqueue the second message.
+        release = asyncio.Event()
+        first_received = asyncio.Event()
+        seen: list = []
+
+        async def _slow_on_message(msg):
+            seen.append(msg)
+            first_received.set()
+            await release.wait()
+
+        runner = self._make_runner(
+            on_message=_slow_on_message,
+            account_overrides={
+                "dispatchWorkers": 1,
+                "dispatchQueueSize": 1,
+            },
+        )
+
+        # We don't want to actually open a websocket, so manually
+        # bootstrap just the queue + worker pool — same setup the
+        # ``run()`` entry point performs.  This keeps the test focused
+        # on the back-pressure invariant.
+        runner._dispatch_queue = asyncio.Queue(
+            maxsize=runner._dispatch_queue_size,
+        )
+        runner._worker_tasks = [
+            asyncio.create_task(runner._dispatch_worker(0))
+        ]
+
+        try:
+            # Build three "messages" that pass the gate trivially.  We
+            # use bare SimpleNamespace because the gate happily accepts
+            # any object exposing the expected attributes.
+            def _msg(text):
+                return SimpleNamespace(
+                    text=SimpleNamespace(content=text),
+                    conversation_id="cid_dm",
+                    conversation_type="1",  # DM → unconditionally accepted
+                    sender_id="u1",
+                    sender_staff_id="staff_001",
+                    sender_nick="Alice",
+                    message_id=f"m_{text}",
+                    is_in_at_list=False,
+                )
+
+            runner._enqueue_dispatch(_msg("a"))   # consumed by worker
+            await first_received.wait()
+            runner._enqueue_dispatch(_msg("b"))   # parked in queue (size=1)
+            runner._enqueue_dispatch(_msg("c"))   # MUST be dropped
+
+            # _messages_received counts EVERY frame the SDK delivered —
+            # that's the right metric for stall detection (R1) even when
+            # back-pressure is sheding.
+            assert runner._messages_received == 3
+            # The third message was dropped, not blocked, not crashed.
+            assert runner._dropped_messages == 1
+
+            release.set()
+            # Drain whatever the worker can finish before we cancel.
+            for _ in range(20):
+                if len(seen) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            # Worker processed exactly the 2 that fit (a + b); c was dropped.
+            assert len(seen) == 2
+        finally:
+            for task in runner._worker_tasks:
+                task.cancel()
+            await asyncio.gather(
+                *runner._worker_tasks, return_exceptions=True,
+            )
+
+    @pytest.mark.asyncio
+    async def test_enqueue_before_pool_started_does_not_crash(self):
+        """Calling ``_enqueue_dispatch`` before ``run()`` initialises
+        the queue (or after ``_shutdown()`` tore it down) must not
+        raise — we just log + drop.  Guards against rare ordering bugs
+        where the SDK pushes a frame during teardown.
+        """
+        runner = self._make_runner()
+        assert runner._dispatch_queue is None
+
+        runner._enqueue_dispatch(SimpleNamespace(text="orphan"))
+
+        # Counter ticks even though we shed — preserves the R1 stall
+        # signal in case a frame slips through during shutdown.
+        assert runner._messages_received == 1
+        assert runner._dropped_messages == 0  # no QueueFull, just no queue
+
+    def test_permanent_error_hierarchy(self):
+        """``DingTalkStreamStallError`` MUST inherit from
+        ``DingTalkPermanentError`` so :meth:`DingTalkChannel._classify_and_raise`
+        treats stalls the same as auth failures (drop the account from
+        the schedule rather than letting the gateway retry forever).
+        """
+        from flocks.channel.builtin.dingtalk.stream import (
+            DingTalkPermanentAuthError,
+            DingTalkPermanentError,
+            DingTalkStreamStallError,
+        )
+
+        assert issubclass(DingTalkPermanentAuthError, DingTalkPermanentError)
+        assert issubclass(DingTalkStreamStallError, DingTalkPermanentError)
+        # Belt-and-braces: make sure both still descend from RuntimeError
+        # so any generic ``except RuntimeError`` in calling code
+        # continues to work.
+        assert issubclass(DingTalkPermanentError, RuntimeError)
+
+
+# ------------------------------------------------------------------
 # SessionBindingService.bind_session — used by runner.ts → /bind
 # ------------------------------------------------------------------
 

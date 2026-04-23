@@ -157,10 +157,14 @@ class DingTalkChannel(ChannelPlugin):
 
         Blocks until *abort_event* fires or every runner task exits.
 
-        * Permanent auth failures (4xx from the gateway) are logged per
-          account and that account is dropped from the schedule, but
-          they do **not** propagate to the gateway — retrying with the
-          same bad credentials would be pointless.
+        * Permanent failures (subclasses of ``DingTalkPermanentError``)
+          are logged per account and that account is dropped from the
+          schedule, but they do **not** propagate to the gateway —
+          retrying would be pointless.  Today this covers:
+          - ``DingTalkPermanentAuthError`` (bad credentials / app
+            revoked / Stream Mode subscription disabled)
+          - ``DingTalkStreamStallError`` (SDK keeps returning instantly
+            with no inbound traffic — gateway is silently blocking us)
         * Other (transient) runner exceptions DO propagate so the
           gateway's exponential-backoff reconnect policy can take over.
         """
@@ -240,7 +244,7 @@ class DingTalkChannel(ChannelPlugin):
         permanently disconnected.
         """
         from flocks.channel.builtin.dingtalk.stream import (
-            DingTalkPermanentAuthError,
+            DingTalkPermanentError,
         )
 
         if abort_event is None:
@@ -249,7 +253,7 @@ class DingTalkChannel(ChannelPlugin):
             )
             self._classify_and_raise(
                 results,
-                permanent_exc_type=DingTalkPermanentAuthError,
+                permanent_exc_type=DingTalkPermanentError,
                 abort_set=False,
             )
             return
@@ -280,7 +284,7 @@ class DingTalkChannel(ChannelPlugin):
             results = runners_waiter.result()
             self._classify_and_raise(
                 results,
-                permanent_exc_type=DingTalkPermanentAuthError,
+                permanent_exc_type=DingTalkPermanentError,
                 abort_set=abort_event.is_set(),
             )
 

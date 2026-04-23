@@ -33,6 +33,7 @@ import asyncio
 import json
 import platform
 import re
+import time
 import uuid
 from typing import Any, Awaitable, Callable, Optional
 
@@ -85,8 +86,39 @@ _PERMANENT_AUTH_CODES = frozenset({
     "unauthorizedclient",
 })
 
+# ── Stall detection (R1) ────────────────────────────────────────────
+# The dingtalk-stream SDK's ``start()`` swallows every error from
+# ``open_connection`` and silently returns when, e.g., the gateway
+# accepts the ticket but the WebSocket is closed immediately by the
+# server (rate limit, app suspended, region block, …).  Without
+# escalation the runner would burn ~1 reconnect/min forever without
+# ever surfacing the problem.  We treat N consecutive "clean returns
+# in < THRESHOLD seconds, with zero inbound messages" as a stall and
+# raise :class:`DingTalkStreamStallError` so the channel layer pauses
+# reconnects on this account.
+_STALL_RUN_DURATION_THRESHOLD_SECONDS = 30.0
+_STALL_MAX_CONSECUTIVE_SHORT_RUNS = 5
 
-class DingTalkPermanentAuthError(RuntimeError):
+# ── Inbound back-pressure (R3) ──────────────────────────────────────
+# SDK's ``ChatbotHandler.process()`` MUST ack quickly so heartbeats
+# keep flowing — we cannot block on a semaphore there.  Instead we
+# enqueue the parsed message into a bounded queue drained by a fixed
+# worker pool; queue overflow drops the *new* message and logs a
+# warning so operators can size the queue / workers from telemetry.
+_DEFAULT_DISPATCH_WORKERS = 8
+_DEFAULT_DISPATCH_QUEUE_SIZE = 256
+
+
+class DingTalkPermanentError(RuntimeError):
+    """Base for permanent (non-retryable) DingTalk runner failures.
+
+    Anything inheriting from this signals the channel layer to drop
+    the offending account from the reconnect schedule — retrying
+    with the same configuration will not succeed.
+    """
+
+
+class DingTalkPermanentAuthError(DingTalkPermanentError):
     """Raised when the DingTalk gateway rejects the credentials with a
     4xx status that retrying cannot fix (bad clientId/clientSecret, app
     revoked, Stream Mode subscription not enabled, …).
@@ -102,6 +134,26 @@ class DingTalkPermanentAuthError(RuntimeError):
         super().__init__(message)
         self.code = code
         self.http_status = http_status
+
+
+class DingTalkStreamStallError(DingTalkPermanentError):
+    """Raised when the SDK keeps returning immediately from ``start()``
+    without ever delivering a message — strong indicator that the
+    gateway is silently rejecting our connection (rate limit, region
+    block, app suspended, …).  See ``_STALL_*`` constants for the
+    detection thresholds.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        consecutive_short_runs: int,
+        last_run_duration: float,
+    ) -> None:
+        super().__init__(message)
+        self.consecutive_short_runs = consecutive_short_runs
+        self.last_run_duration = last_run_duration
 
 
 OnMessage = Callable[[InboundMessage], Awaitable[None]]
@@ -480,11 +532,44 @@ class DingTalkStreamRunner:
         self._stream_client: Any = None
         self._stream_task: Optional[asyncio.Task] = None
         self._running = False
-        self._dispatch_tasks: set[asyncio.Task] = set()
-        # Set by ``_run_with_reconnect`` when the gateway rejects the
-        # credentials with a 4xx — surfaced from ``run()`` after shutdown
-        # so the channel layer can stop retrying that account.
-        self._permanent_error: Optional[DingTalkPermanentAuthError] = None
+
+        # ── R3: bounded inbound dispatch queue + worker pool ─────────
+        # Both knobs are tunable per-account so noisy tenants can lift
+        # their own caps without affecting siblings.
+        self._dispatch_workers = max(
+            1,
+            int(
+                account_config.get("dispatchWorkers")
+                or account_config.get("dispatch_workers")
+                or _DEFAULT_DISPATCH_WORKERS
+            ),
+        )
+        self._dispatch_queue_size = max(
+            self._dispatch_workers,
+            int(
+                account_config.get("dispatchQueueSize")
+                or account_config.get("dispatch_queue_size")
+                or _DEFAULT_DISPATCH_QUEUE_SIZE
+            ),
+        )
+        self._dispatch_queue: Optional[asyncio.Queue[Any]] = None
+        self._worker_tasks: list[asyncio.Task] = []
+        self._dropped_messages = 0
+
+        # ── R1: stall detection state ────────────────────────────────
+        # ``_messages_received`` is incremented by ``_enqueue_dispatch``
+        # so it reflects what the SDK actually delivered (not what
+        # workers eventually processed) — that's the right signal for
+        # "is the gateway still pushing us anything?".
+        self._messages_received = 0
+        self._consecutive_short_runs = 0
+
+        # Set by ``_run_with_reconnect`` when the runner hits a permanent
+        # failure (bad credentials → :class:`DingTalkPermanentAuthError`,
+        # silent stall → :class:`DingTalkStreamStallError`).  Surfaced
+        # from ``run()`` after shutdown so the channel layer can stop
+        # retrying that account.
+        self._permanent_error: Optional[DingTalkPermanentError] = None
 
     def is_configured(self) -> bool:
         return bool(self.client_id and self.client_secret)
@@ -510,6 +595,23 @@ class DingTalkStreamRunner:
             dingtalk_stream.ChatbotMessage.TOPIC, handler
         )
 
+        # R3: spin up the dispatch queue + worker pool BEFORE the SDK
+        # starts pushing messages, so the very first inbound frame has
+        # somewhere to go.
+        self._dispatch_queue = asyncio.Queue(maxsize=self._dispatch_queue_size)
+        self._worker_tasks = [
+            asyncio.create_task(
+                self._dispatch_worker(idx),
+                name=f"dingtalk-dispatch-{self.account_id}-{idx}",
+            )
+            for idx in range(self._dispatch_workers)
+        ]
+        log.info("dingtalk.stream.dispatch_pool_started", {
+            "account": self.account_id,
+            "workers": self._dispatch_workers,
+            "queue_size": self._dispatch_queue_size,
+        })
+
         self._running = True
         self._stream_task = asyncio.create_task(self._run_with_reconnect())
         try:
@@ -520,8 +622,10 @@ class DingTalkStreamRunner:
         finally:
             await self._shutdown()
 
-        # Surface permanent auth failure AFTER cleanup so the channel
-        # can drop this account from the reconnect schedule.
+        # Surface permanent failures AFTER cleanup so the channel can
+        # drop this account from the reconnect schedule.  Covers both
+        # bad credentials (DingTalkPermanentAuthError) and silent
+        # gateway rejection (DingTalkStreamStallError).
         if self._permanent_error is not None:
             raise self._permanent_error
 
@@ -566,6 +670,17 @@ class DingTalkStreamRunner:
                     "account": self.account_id, "error": str(exc),
                 })
 
+            # ── R1: stall accounting ─────────────────────────────────
+            # Snapshot inbound counters around the SDK's ``start()`` so
+            # we can later tell apart:
+            #   (a) healthy long-lived connection (duration ≫ threshold)
+            #   (b) connection torn down by an exception → backoff path
+            #   (c) silent gateway rejection (clean return, < threshold,
+            #       zero messages delivered) → escalate after N in a row
+            run_started_at = time.monotonic()
+            messages_at_start = self._messages_received
+            clean_return = False
+
             # INFO (not DEBUG): channel startup is a low-frequency,
             # high-signal event — losing it in production logs makes it
             # essentially impossible to tell whether the SDK ever even
@@ -573,6 +688,7 @@ class DingTalkStreamRunner:
             try:
                 log.info("dingtalk.stream.starting", {"account": self.account_id})
                 await self._stream_client.start()
+                clean_return = True
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -581,18 +697,75 @@ class DingTalkStreamRunner:
                 log.warning("dingtalk.stream.error", {
                     "account": self.account_id, "error": str(exc),
                 })
-            else:
-                # The SDK's ``start()`` returned *without* raising.  In
-                # practice this only happens when the long-running
-                # websocket loop exited cleanly (e.g. server-initiated
-                # close, token refresh edge case).  Log it so operators
-                # can correlate the upcoming reconnect with the silent
-                # close, instead of seeing a bare "reconnecting" line.
-                if self._running:
-                    log.info("dingtalk.stream.stopped", {
+
+            run_duration = time.monotonic() - run_started_at
+            messages_during_run = self._messages_received - messages_at_start
+
+            # Only "clean return + short + zero messages" counts as a
+            # stall signal.  An exception (case b) is a normal recovery
+            # path — DingTalk tears down idle sockets, the network
+            # flakes, etc.; counting those as stalls would falsely
+            # disable healthy accounts after a few WiFi blips.
+            if (
+                clean_return
+                and self._running
+                and run_duration < _STALL_RUN_DURATION_THRESHOLD_SECONDS
+                and messages_during_run == 0
+            ):
+                self._consecutive_short_runs += 1
+                log.warning("dingtalk.stream.short_run_detected", {
+                    "account": self.account_id,
+                    "duration_seconds": round(run_duration, 2),
+                    "consecutive_short_runs": self._consecutive_short_runs,
+                    "max_allowed": _STALL_MAX_CONSECUTIVE_SHORT_RUNS,
+                    "hint": (
+                        "SDK start() returned cleanly in <"
+                        f"{_STALL_RUN_DURATION_THRESHOLD_SECONDS:.0f}s "
+                        "without delivering any messages — gateway may "
+                        "be silently rejecting the connection"
+                    ),
+                })
+                if self._consecutive_short_runs >= _STALL_MAX_CONSECUTIVE_SHORT_RUNS:
+                    err = DingTalkStreamStallError(
+                        f"DingTalk stream returned immediately "
+                        f"{self._consecutive_short_runs} times in a row "
+                        f"without receiving any messages "
+                        f"(last run: {run_duration:.2f}s); pausing "
+                        f"reconnects on this account",
+                        consecutive_short_runs=self._consecutive_short_runs,
+                        last_run_duration=run_duration,
+                    )
+                    log.error("dingtalk.stream.stall_detected", {
                         "account": self.account_id,
-                        "hint": "SDK start() returned without exception; will reconnect",
+                        "consecutive_short_runs": self._consecutive_short_runs,
+                        "last_run_duration": round(run_duration, 2),
                     })
+                    self._permanent_error = err
+                    return
+            else:
+                # Healthy connection, or a non-clean exit — reset the
+                # counter so a single bad streak doesn't accumulate
+                # across hours of normal operation.
+                if self._consecutive_short_runs:
+                    log.info("dingtalk.stream.short_run_counter_reset", {
+                        "account": self.account_id,
+                        "previous_count": self._consecutive_short_runs,
+                        "duration_seconds": round(run_duration, 2),
+                        "messages_during_run": messages_during_run,
+                    })
+                self._consecutive_short_runs = 0
+
+            if clean_return and self._running:
+                # Log every clean return (not just stall candidates) so
+                # operators can correlate the upcoming reconnect with
+                # the silent close, instead of seeing a bare
+                # "reconnecting" line.
+                log.info("dingtalk.stream.stopped", {
+                    "account": self.account_id,
+                    "duration_seconds": round(run_duration, 2),
+                    "messages_during_run": messages_during_run,
+                    "hint": "SDK start() returned without exception; will reconnect",
+                })
 
             if not self._running:
                 return
@@ -623,7 +796,17 @@ class DingTalkStreamRunner:
         if self._stream_task:
             if client is not None and hasattr(client, "close"):
                 try:
-                    await asyncio.to_thread(client.close)
+                    # ``client.close()`` is a synchronous teardown that
+                    # may issue a blocking HTTP call; bound it so a
+                    # hanging socket can't stall the channel restart.
+                    await asyncio.wait_for(
+                        asyncio.to_thread(client.close),
+                        timeout=5.0,
+                    )
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    log.warning("dingtalk.stream.client_close_timeout", {
+                        "account": self.account_id,
+                    })
                 except Exception:
                     pass
             self._stream_task.cancel()
@@ -633,11 +816,16 @@ class DingTalkStreamRunner:
                 pass
             self._stream_task = None
 
-        for task in list(self._dispatch_tasks):
-            task.cancel()
-        if self._dispatch_tasks:
-            await asyncio.gather(*self._dispatch_tasks, return_exceptions=True)
-            self._dispatch_tasks.clear()
+        # Tear down the dispatch pool (R3): cancel workers, then drain.
+        # Cancelling first guarantees workers wake up out of ``queue.get()``
+        # even if no producer is around to push a sentinel.
+        for task in self._worker_tasks:
+            if not task.done():
+                task.cancel()
+        if self._worker_tasks:
+            await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+            self._worker_tasks = []
+        self._dispatch_queue = None
 
         self._stream_client = None
 
@@ -680,10 +868,73 @@ class DingTalkStreamRunner:
                 "account": self.account_id,
             })
 
-    def _spawn_dispatch(self, chatbot_msg: Any) -> None:
-        task = asyncio.create_task(self._dispatch(chatbot_msg))
-        self._dispatch_tasks.add(task)
-        task.add_done_callback(self._dispatch_tasks.discard)
+    async def _dispatch_worker(self, idx: int) -> None:
+        """Drain :attr:`_dispatch_queue` until cancelled.
+
+        One worker = one in-flight ``on_message`` call at a time, so
+        ``_dispatch_workers`` directly caps inbound concurrency per
+        account.  Errors inside ``_dispatch`` are already logged there;
+        we only catch here to keep the worker alive across them.
+        """
+        queue = self._dispatch_queue
+        if queue is None:
+            return
+        while True:
+            try:
+                chatbot_msg = await queue.get()
+            except asyncio.CancelledError:
+                return
+            try:
+                await self._dispatch(chatbot_msg)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("dingtalk.stream.worker_error", {
+                    "account": self.account_id,
+                    "worker": idx,
+                })
+            finally:
+                try:
+                    queue.task_done()
+                except ValueError:
+                    pass
+
+    def _enqueue_dispatch(self, chatbot_msg: Any) -> None:
+        """Hand off *chatbot_msg* to the worker pool.
+
+        Called from the SDK's ``ChatbotHandler.process()`` which MUST
+        return its ack quickly — so we use ``put_nowait`` and drop the
+        new message on overflow rather than blocking the heartbeat
+        path.  Burst load (group floods) sheds gracefully instead of
+        spinning unbounded background tasks (R3).
+        """
+        # ``_messages_received`` powers the stall-detection counter
+        # (R1); count what the SDK actually delivered, even if we end
+        # up shedding the message due to back-pressure.
+        self._messages_received += 1
+
+        queue = self._dispatch_queue
+        if queue is None:
+            log.warning("dingtalk.stream.dispatch_queue_missing", {
+                "account": self.account_id,
+                "hint": "message received before runner started or after shutdown",
+            })
+            return
+        try:
+            queue.put_nowait(chatbot_msg)
+        except asyncio.QueueFull:
+            self._dropped_messages += 1
+            log.warning("dingtalk.stream.dispatch_queue_full", {
+                "account": self.account_id,
+                "queue_size": self._dispatch_queue_size,
+                "workers": self._dispatch_workers,
+                "dropped_total": self._dropped_messages,
+                "hint": (
+                    "increase dispatchWorkers / dispatchQueueSize for "
+                    "this account, or investigate slow on_message "
+                    "handler"
+                ),
+            })
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +980,7 @@ class _IncomingHandler(
                 if data.get("isInAtList"):
                     chatbot_msg.is_in_at_list = True
 
-            self._runner._spawn_dispatch(chatbot_msg)
+            self._runner._enqueue_dispatch(chatbot_msg)
         except Exception:
             log.exception("dingtalk.stream.handler_error")
             return AckMessage.STATUS_SYSTEM_EXCEPTION, "error"
@@ -739,6 +990,8 @@ class _IncomingHandler(
 __all__ = [
     "DINGTALK_STREAM_AVAILABLE",
     "DingTalkPermanentAuthError",
+    "DingTalkPermanentError",
     "DingTalkStreamRunner",
+    "DingTalkStreamStallError",
     "chatbot_message_to_inbound",
 ]
