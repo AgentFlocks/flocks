@@ -484,15 +484,13 @@ class TestFeishuNativeCommands:
                 )
             ),
         )
-        monkeypatch.setattr(
-            "flocks.session.session.Session.create",
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    id="session_new",
-                    agent="rex",
-                )
-            ),
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
         )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
 
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
@@ -505,7 +503,100 @@ class TestFeishuNativeCommands:
         assert handled is True
         dispatcher.binding_service.rebind.assert_awaited_once()
         assert dispatcher.binding_service.rebind.await_args.kwargs["scope_override"] == "group_topic"
+        create_kwargs = create_mock.await_args.kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Feishu] oc_group"
         assert "session_new" in delivered[0]
+        assert "已开始全新对话。" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_reset_alias_matches_new_semantics(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="wecom",
+                account_id="default",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/reset",
+            mention_text="/reset",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                )
+            ),
+        )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/reset",
+            scope_override=None,
+        )
+
+        assert handled is True
+        create_kwargs = create_mock.await_args.kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Wecom] DM — user_1"
+        dispatcher._trigger_command_hook.assert_awaited_once()
+        assert dispatcher._trigger_command_hook.await_args.args[0] == "new"
+        assert "已开始全新对话。" in delivered[0]
 
     @pytest.mark.asyncio
     async def test_help_command_works_for_non_feishu_channel(self, monkeypatch):

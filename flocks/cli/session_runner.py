@@ -367,11 +367,6 @@ class CLISessionRunner:
                         dispatch_commands=False,
                     ),
                     clear_screen=self._clear_screen,
-                    restart_session=lambda: self._restart_session(
-                        agent.name,
-                        provider_id,
-                        model_id,
-                    ),
                 ),
             )
             if handled.handled:
@@ -521,24 +516,6 @@ class CLISessionRunner:
 
     async def _clear_screen(self) -> None:
         self.console.clear()
-
-    async def _restart_session(
-        self,
-        agent_name: str,
-        provider_id: str,
-        model_id: str,
-    ) -> None:
-        from flocks.session.message import Message
-        from flocks.session.features.todo import Todo
-        from flocks.session.core.status import SessionStatus
-
-        await Message.clear(self._session.id)
-        await Todo.clear(self._session.id)
-        SessionStatus.clear(self._session.id)
-        self._content_buffer = []
-        self._has_content = False
-        self.console.clear()
-        await self._emit_assistant_text("会话已重置。", agent_name, provider_id, model_id)
 
     
     def _flush_content(self) -> None:
@@ -800,7 +777,6 @@ class CLISessionRunner:
   /skills list     List skills
   /skills refresh  Refresh skills
   /clear           Clear screen
-  /restart         Restart session
   /exit            Exit session
   /quit            Exit session
   /q               Exit session

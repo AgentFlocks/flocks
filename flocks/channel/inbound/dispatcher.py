@@ -628,7 +628,6 @@ class InboundDispatcher:
                     msg=msg,
                     callbacks=callbacks,
                     scope_override=scope_override,
-                    action=parsed.command_name,
                 )
                 return True
             return False
@@ -762,20 +761,19 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
-        action: str,
     ) -> None:
         from flocks.session.session import Session
+        from flocks.channel.inbound.session_binding import _build_title
 
         session = await Session.get_by_id(binding.session_id)
         if not session:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
-        parent_id = session.id if action == "new" else None
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
-            parent_id=parent_id,
+            title=_build_title(msg),
             agent=session.agent,
             provider=session.provider,
             model=session.model,
@@ -787,7 +785,7 @@ class InboundDispatcher:
             scope_override=scope_override,
         )
         await self._trigger_command_hook(
-            action,
+            "new",
             session.id,
             {
                 "previous_session_id": session.id,
@@ -797,11 +795,10 @@ class InboundDispatcher:
             },
         )
         new_callbacks = self._build_callbacks(new_binding, msg)
-        action_text = "已创建新会话。" if action == "new" else "已重置当前会话。"
         await new_callbacks.deliver_text(
             "\n".join(
                 [
-                    action_text,
+                    "已开始全新对话。",
                     f"Session: `{new_session.id}`",
                     f"Agent: `{new_session.agent or 'default'}`",
                 ]

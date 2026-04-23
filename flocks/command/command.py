@@ -216,7 +216,7 @@ class Command:
             CommandDef(
                 name="new",
                 description="Start a fresh conversation session",
-                template="Start a fresh session.",
+                template="Start a fresh conversation.",
                 execution_kind="session_control",
                 allow_attachments=False,
                 hidden=False,
@@ -236,15 +236,7 @@ class Command:
             CommandDef(
                 name="clear",
                 description="Clear screen output",
-                template="Clear the conversation history and start fresh.",
-                execution_kind="direct",
-                allow_attachments=False,
-            ),
-            CommandDef(
-                name="restart",
-                description="Restart agent session",
-                template="Restart the current session and clear history.",
-                agent="rex",
+                template="Clear the current UI output only.",
                 execution_kind="direct",
                 allow_attachments=False,
             ),

@@ -14,7 +14,6 @@ from flocks.skill.skill import Skill
 SendText = Callable[[str], Awaitable[None]]
 SendPrompt = Callable[[str], Awaitable[None]]
 ClearScreen = Callable[[], Awaitable[None]]
-RestartSession = Callable[[], Awaitable[None]]
 
 
 async def handle_slash_command(
@@ -23,7 +22,6 @@ async def handle_slash_command(
     send_text: SendText,
     send_prompt: SendPrompt,
     clear_screen: Optional[ClearScreen] = None,
-    restart_session: Optional[RestartSession] = None,
     surface: Optional[CommandSurface] = None,
 ) -> bool:
     """
@@ -58,7 +56,6 @@ async def handle_slash_command(
             "",
             "Tips:",
             "- /clear clears the screen",
-            "- /restart resets the session",
             "- /tools [list|refresh|info <name>|create <requirement>]",
             "- /skills [list|refresh]",
             "- /workflows — list all available workflows",
@@ -72,13 +69,6 @@ async def handle_slash_command(
             await clear_screen()
         else:
             await send_text("Screen cleared.")
-        return True
-
-    if name == "restart":
-        if restart_session:
-            await restart_session()
-        else:
-            await send_text("This environment does not support /restart.")
         return True
 
     if name == "tools":

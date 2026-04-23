@@ -111,7 +111,6 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
             send_text=_collect_text,
             send_prompt=_collect_prompt,
             clear_screen=sink.clear_screen,
-            restart_session=sink.restart_session,
             surface=sink.surface,
         )
         if handled:

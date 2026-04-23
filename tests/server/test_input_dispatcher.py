@@ -19,6 +19,12 @@ class TestParseSlashCommand:
         assert parsed.command_name == "reset"
         assert parsed.canonical_name == "new"
 
+    def test_removed_restart_command_no_longer_resolves(self):
+        parsed = parse_slash_command("/restart")
+        assert parsed is not None
+        assert parsed.command_name == "restart"
+        assert parsed.command_def is None
+
 
 class TestDispatchUserInput:
     @pytest.mark.asyncio
@@ -63,6 +69,28 @@ class TestDispatchUserInput:
 
         assert result.action == "llm"
         assert llm == [("/plan investigate routing", "/plan investigate routing")]
+        assert not direct
+
+    @pytest.mark.asyncio
+    async def test_removed_restart_command_falls_back_to_llm(self):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/restart",
+            parts=[{"type": "text", "text": "/restart"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "llm"
+        assert llm == [("/restart", "/restart")]
         assert not direct
 
     @pytest.mark.asyncio

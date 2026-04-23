@@ -507,7 +507,7 @@ When it would help the user, you may suggest these commands proactively.
 - Suggest `/plan` when the user wants to design before implementing
 - Suggest `/ask` when the user wants read-only analysis without changes
 - Suggest `/tools` or `/skills` when the user asks what capabilities are available
-- Suggest `/clear` or `/restart` when the user wants a fresh start
+- Suggest `/clear` when the user wants to clear the current UI output
 </Slash_Commands>"""
     except Exception:
         return ""

@@ -2729,7 +2729,7 @@ async def send_session_command(sessionID: str, request: CommandRequest):
     """
     Execute a slash command.
 
-    Direct commands (/tools, /skills, /help, /mcp, /clear, /restart) are handled
+    Direct commands (/tools, /skills, /help, /mcp, /clear) are handled
     without calling the LLM.  Their output is pushed as an assistant message
     directly via SSE.
 
