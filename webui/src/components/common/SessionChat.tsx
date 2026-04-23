@@ -765,7 +765,7 @@ export default function SessionChat({
           ...attachment,
           name: result.name || attachment.name,
           status: 'success',
-          workspacePath: result.path,
+          workspacePath: result.abs_path ?? result.path,
           error: undefined,
         };
       }));
