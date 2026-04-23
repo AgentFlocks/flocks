@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
-
+from flocks.server.auth import require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -295,7 +295,7 @@ async def create_session(request: Optional[SessionCreateRequest] = None) -> Sess
         permission=permission,
         **({"category": request.category} if request.category else {}),
     )
-    
+
     log.info("session.created", {"session_id": session.id})
     return _session_to_response(session)
 
@@ -614,7 +614,6 @@ async def share_session(sessionID: str) -> SessionResponse:
     
     await Session.share(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    
     log.info("session.shared", {"session_id": sessionID})
     return _session_to_response(updated)
 
@@ -666,7 +665,6 @@ async def unshare_session(sessionID: str) -> SessionResponse:
     
     await Session.unshare(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    
     log.info("session.unshared", {"session_id": sessionID})
     return _session_to_response(updated)
 
