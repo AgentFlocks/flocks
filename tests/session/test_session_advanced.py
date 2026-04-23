@@ -78,26 +78,18 @@ class TestShareUnshare:
     @pytest.mark.asyncio
     async def test_share_creates_share_info(self):
         session = await _create(project_id="proj_share_1")
-        # Session.share() calls Identifier.ascending("secret") internally
-        # Mock or allow potential errors gracefully
-        try:
-            share_info = await Session.share("proj_share_1", session.id)
-            assert share_info is not None
-            assert isinstance(share_info, SessionShare)
-            assert share_info.url
-            assert len(share_info.url) > 5
-        except (KeyError, Exception) as e:
-            if "secret" in str(e).lower() or "identifier" in str(type(e).__name__).lower():
-                pytest.skip(f"Identifier namespace issue: {e}")
-            raise
+        share_info = await Session.share("proj_share_1", session.id)
+        assert share_info is not None
+        assert isinstance(share_info, SessionShare)
+        assert share_info.url
+        assert len(share_info.url) > 5
+        assert share_info.secret
+        assert len(share_info.secret) >= 16
 
     @pytest.mark.asyncio
     async def test_shared_session_has_share_field(self):
         session = await _create(project_id="proj_share_2")
-        try:
-            await Session.share("proj_share_2", session.id)
-        except KeyError:
-            pytest.skip("Identifier namespace issue with 'secret'")
+        await Session.share("proj_share_2", session.id)
         updated = await Session.get("proj_share_2", session.id)
         assert updated is not None
         assert updated.share is not None
@@ -105,10 +97,7 @@ class TestShareUnshare:
     @pytest.mark.asyncio
     async def test_unshare_clears_share_info(self):
         session = await _create(project_id="proj_share_3")
-        try:
-            await Session.share("proj_share_3", session.id)
-        except KeyError:
-            pytest.skip("Identifier namespace issue with 'secret'")
+        await Session.share("proj_share_3", session.id)
         await Session.unshare("proj_share_3", session.id)
         updated = await Session.get("proj_share_3", session.id)
         assert updated is not None
@@ -117,10 +106,7 @@ class TestShareUnshare:
     @pytest.mark.asyncio
     async def test_get_share_returns_share_info(self):
         session = await _create(project_id="proj_share_4")
-        try:
-            await Session.share("proj_share_4", session.id)
-        except KeyError:
-            pytest.skip("Identifier namespace issue with 'secret'")
+        await Session.share("proj_share_4", session.id)
         share = await Session.get_share("proj_share_4", session.id)
         assert share is not None
         assert share.url

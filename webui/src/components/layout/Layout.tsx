@@ -16,6 +16,7 @@ import {
   FolderOpen,
   Sparkles,
   ArrowUpCircle,
+  Settings,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -41,7 +42,6 @@ export default function Layout() {
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
-
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -153,6 +153,12 @@ export default function Layout() {
         { name: t('channels'), href: '/channels', icon: Radio },
       ],
     },
+    {
+      name: '系统配置',
+      items: [
+        { name: '系统配置', href: '/config', icon: Settings },
+      ],
+    },
   ];
 
   const isFullScreenPage =
@@ -228,7 +234,8 @@ export default function Layout() {
                 {collapsed && <div className="mb-1 border-t border-gray-100 first:border-none" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
-                    const isActive = location.pathname === item.href;
+                    const isActive = location.pathname === item.href
+                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
                     return (
                       <Link
                         key={item.href}
@@ -266,35 +273,23 @@ export default function Layout() {
                 {hasUpdate ? (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="w-full mt-3 rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+                    className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
                   >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm">
-                            <ArrowUpCircle className="h-4 w-4" />
-                          </span>
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-amber-900">
-                              {t('updateAvailable')}
-                            </div>
-                            <div className="text-xs text-amber-700">
-                              {latestVersion ? `v${latestVersion}` : t('newVersion')}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2.5 py-1 text-xs font-semibold text-white shadow-sm">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="min-w-0 flex-1 truncate font-semibold text-amber-900">
+                        {t('newVersion')} {latestVersion ? `v${latestVersion}` : ''}
+                      </span>
+                      <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm">
                         {t('updateNow')}
                       </span>
                     </div>
-                    <div className="mt-3 flex items-center justify-between border-t border-amber-200/80 pt-2 text-xs">
-                      <span className="text-amber-700">
-                        {currentVersion
-                          ? t('currentVersionLabel', { version: currentVersion })
-                          : 'Flocks'}
-                      </span>
-                      <span className="font-medium text-amber-900">AI Native SecOps Platform</span>
+                    <div className="mt-1 text-xs text-amber-700">
+                      {currentVersion
+                        ? t('currentVersionLabel', { version: currentVersion })
+                        : 'Flocks'}
+                    </div>
+                    <div className="mt-0.5 text-xs font-medium text-amber-900">
+                      AI Native SecOps Platform
                     </div>
                   </button>
                 ) : (

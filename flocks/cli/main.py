@@ -17,6 +17,7 @@ from rich.panel import Panel
 
 from flocks import __version__
 from flocks.cli.commands import (
+    admin_app,
     export_app,
     import_app,
     mcp_app,
@@ -57,6 +58,7 @@ app.add_typer(import_app, name="import")
 app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
+app.add_typer(admin_app, name="admin")
 
 app.command(name="update")(update_command)
 

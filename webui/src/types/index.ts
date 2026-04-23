@@ -18,6 +18,13 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  ownerUserID?: string;
+  visibility?: 'private' | 'team_shared';
+  sharedBy?: string;
+  sharedAt?: number;
+  canShare?: boolean;
+  canDelete?: boolean;
+  canUnshare?: boolean;
 }
 
 export interface SessionTime {
