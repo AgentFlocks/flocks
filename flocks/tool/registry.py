@@ -303,6 +303,60 @@ def _coerce_params(
     return coerced
 
 
+def _normalize_param_key(name: str) -> str:
+    """Normalize parameter keys for conservative alias matching."""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _remap_schema_kwargs(
+    kwargs: Dict[str, Any],
+    declared_param_names: List[str],
+) -> tuple[Dict[str, Any], Dict[str, str]]:
+    """Remap guessed argument keys to declared schema keys when unambiguous.
+
+    Only applies conservative normalization (case / separators), and only when
+    a normalized key maps to exactly one declared parameter name.
+    """
+    declared_lookup: Dict[str, List[str]] = {}
+    for name in declared_param_names:
+        declared_lookup.setdefault(_normalize_param_key(name), []).append(name)
+
+    remapped: Dict[str, Any] = {}
+    aliases: Dict[str, str] = {}
+
+    for key, value in kwargs.items():
+        if key in declared_param_names:
+            remapped[key] = value
+            continue
+        normalized = _normalize_param_key(key)
+        candidates = declared_lookup.get(normalized, [])
+        if len(candidates) == 1:
+            target = candidates[0]
+            if target not in remapped:
+                remapped[target] = value
+                aliases[key] = target
+                continue
+        remapped[key] = value
+
+    return remapped, aliases
+
+
+def _schema_hint_from_properties(
+    declared_param_names: List[str],
+    required: List[str],
+    *,
+    max_items: int = 20,
+) -> str:
+    """Build a compact schema hint string for argument-validation errors."""
+    allowed_preview = ", ".join(declared_param_names[:max_items]) or "(none)"
+    if len(declared_param_names) > max_items:
+        allowed_preview += ", ..."
+    required_preview = ", ".join(required[:max_items]) or "(none)"
+    if len(required) > max_items:
+        required_preview += ", ..."
+    return f"Allowed parameters: {allowed_preview}. Required: {required_preview}."
+
+
 class Tool:
     """Tool wrapper class"""
 
@@ -325,21 +379,83 @@ class Tool:
                 "params": list(kwargs.keys()),
             })
 
-            # Validate required parameters
             schema = self.info.get_schema()
+            schema_properties = schema.properties if isinstance(schema.properties, dict) else {}
+            declared_param_names = list(schema_properties.keys())
+
+            # Strict schema precheck: remap obvious aliases first, then validate.
+            # This reduces first-call failures caused by case/separator drift
+            # (e.g. file_path -> filePath) without allowing speculative params.
+            remap_aliases: Dict[str, str] = {}
+            effective_kwargs = dict(kwargs)
+            if declared_param_names:
+                effective_kwargs, remap_aliases = _remap_schema_kwargs(
+                    effective_kwargs,
+                    declared_param_names,
+                )
+                if remap_aliases:
+                    log.info("tool.execute.param_remapped", {
+                        "tool": self.info.name,
+                        "aliases": remap_aliases,
+                    })
+
+                unknown = sorted(
+                    key for key in effective_kwargs.keys() if key not in schema_properties
+                )
+                if unknown:
+                    schema_hint = _schema_hint_from_properties(
+                        declared_param_names,
+                        list(schema.required),
+                    )
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Invalid arguments for {self.info.name}: unknown parameters: "
+                            f"{', '.join(unknown)}. {schema_hint}"
+                        ),
+                        metadata={
+                            "schema_precheck": {
+                                "tool": self.info.name,
+                                "source": self.info.source,
+                                "unknown": unknown,
+                                "allowed": declared_param_names,
+                                "required": list(schema.required),
+                                "aliases": remap_aliases,
+                            }
+                        },
+                    )
+
+            # Validate required parameters
             for required_param in schema.required:
-                if required_param not in kwargs:
+                if required_param not in effective_kwargs:
                     log.error("tool.execute.missing_param", {
                         "tool": self.info.name,
                         "missing": required_param,
-                        "provided": list(kwargs.keys()),
+                        "provided": list(effective_kwargs.keys()),
                     })
+                    schema_hint = _schema_hint_from_properties(
+                        declared_param_names,
+                        list(schema.required),
+                    )
                     return ToolResult(
                         success=False,
-                        error=f"Missing required parameter: {required_param}"
+                        error=(
+                            f"Missing required parameter: {required_param}. "
+                            f"{schema_hint}"
+                        ),
+                        metadata={
+                            "schema_precheck": {
+                                "tool": self.info.name,
+                                "source": self.info.source,
+                                "provided": sorted(effective_kwargs.keys()),
+                                "allowed": declared_param_names,
+                                "required": list(schema.required),
+                                "aliases": remap_aliases,
+                            }
+                        },
                     )
 
-            coerced_kwargs = _coerce_params(kwargs, self.info.parameters, self.info.name)
+            coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
             # Execute handler
             result = await self.handler(ctx, **coerced_kwargs)

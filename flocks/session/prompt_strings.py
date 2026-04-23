@@ -249,6 +249,9 @@ IMPORTANT RULES:
 - After calling a tool, wait for its result before proceeding
 - After receiving a tool result, respond to the user with a direct answer
 - Do not repeat tool calls just to explain what you're doing - call the tool once and explain after
+- Schema precheck before calling a tool: read the callable schema for that tool and copy parameter names EXACTLY (including case).
+- Never guess parameter names from semantics. If uncertain, use `tool_search` first, then call only with names shown in the callable schema.
+- For all tools, treat schema as strict: unknown parameter names will fail.
 {windows_rules}- On Windows, any Python command that reads text files must explicitly specify encoding. Never generate commands like `yaml.safe_load(open(path))`, `json.load(open(path))`, or `open(path).read()` without `encoding=...`; prefer `Path(path).read_text(encoding="utf-8-sig")`.
 
 CRITICAL - TOOL CALLING FORMAT:

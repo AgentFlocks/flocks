@@ -967,6 +967,19 @@ class TestErrorHandling:
         
         assert not result.success
         assert "not found" in result.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_builtin_tool_rejects_unknown_parameter(self, tool_context, temp_dir):
+        """Built-in tools should reject unknown parameters via schema precheck."""
+        result = await ToolRegistry.execute(
+            "read",
+            ctx=tool_context,
+            filePath=os.path.join(temp_dir, "no-file.txt"),
+            unknownParam="x",
+        )
+        assert not result.success
+        assert "unknown parameters" in (result.error or "").lower()
+        assert "allowed parameters" in (result.error or "").lower()
     
     @pytest.mark.asyncio
     async def test_tool_handles_exceptions(self, tool_context, temp_dir):
@@ -980,6 +993,87 @@ class TestErrorHandling:
         
         # Should return error, not raise exception
         assert not result.success
+
+    @pytest.mark.asyncio
+    async def test_schema_param_alias_remap_accepts_case_separator_variants(self, tool_context):
+        """All tools should remap obvious key variants (file_path -> filePath)."""
+        async def _handler(ctx: ToolContext, filePath: str) -> ToolResult:
+            return ToolResult(success=True, output=filePath)
+
+        tool_name = "test_schema_precheck_alias"
+        ToolRegistry.register(
+            Tool(
+                info=ToolInfo(
+                    name=tool_name,
+                    description="Test schema alias remap",
+                    category=ToolCategory.CUSTOM,
+                    parameters=[
+                        ToolParameter(
+                            name="filePath",
+                            type=ParameterType.STRING,
+                            description="Path",
+                            required=True,
+                        )
+                    ],
+                    source="plugin_py",
+                    native=True,
+                    enabled=True,
+                ),
+                handler=_handler,
+            )
+        )
+        try:
+            result = await ToolRegistry.execute(
+                tool_name,
+                ctx=tool_context,
+                file_path="/tmp/demo.txt",
+            )
+            assert result.success
+            assert result.output == "/tmp/demo.txt"
+        finally:
+            ToolRegistry.unregister(tool_name)
+
+    @pytest.mark.asyncio
+    async def test_unknown_params_returns_schema_hint_for_all_tools(self, tool_context):
+        """All tools should reject unknown params with schema guidance."""
+        async def _handler(ctx: ToolContext, query: str) -> ToolResult:
+            return ToolResult(success=True, output=query)
+
+        tool_name = "test_schema_precheck_unknown"
+        ToolRegistry.register(
+            Tool(
+                info=ToolInfo(
+                    name=tool_name,
+                    description="Test unknown parameter handling",
+                    category=ToolCategory.CUSTOM,
+                    parameters=[
+                        ToolParameter(
+                            name="query",
+                            type=ParameterType.STRING,
+                            description="Query",
+                            required=True,
+                        )
+                    ],
+                    source="plugin_py",
+                    native=True,
+                    enabled=True,
+                ),
+                handler=_handler,
+            )
+        )
+        try:
+            result = await ToolRegistry.execute(
+                tool_name,
+                ctx=tool_context,
+                keyword="abc",
+            )
+            assert not result.success
+            assert "Invalid arguments" in (result.error or "")
+            assert "Allowed parameters: query" in (result.error or "")
+            assert isinstance(result.metadata, dict)
+            assert "schema_precheck" in result.metadata
+        finally:
+            ToolRegistry.unregister(tool_name)
 
 
 # =============================================================================
