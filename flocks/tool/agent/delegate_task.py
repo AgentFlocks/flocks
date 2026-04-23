@@ -411,6 +411,7 @@ async def delegate_task_tool(
                 parent_message_id=ctx.message_id,
                 parent_agent=ctx.agent,
                 model=category_model,
+                model_pinned=False,
                 category=category,
             )
         )
@@ -436,8 +437,6 @@ async def delegate_task_tool(
         title=f"{description} (@{agent_to_use} subagent)",
         parent_id=parent_session.id,
         agent=agent_to_use,
-        model=(category_model or {}).get("modelID"),
-        provider=(category_model or {}).get("providerID"),
         permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
         category="task",
     )
@@ -457,6 +456,8 @@ async def delegate_task_tool(
     ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
     result = await SessionLoop.run(
         created.id,
+        provider_id=(category_model or {}).get("providerID"),
+        model_id=(category_model or {}).get("modelID"),
         callbacks=forwarder.build_callbacks(
             event_publish_callback=ctx.event_publish_callback,
         ),

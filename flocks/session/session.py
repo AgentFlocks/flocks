@@ -88,6 +88,13 @@ class SessionInfo(BaseModel):
     agent: Optional[str] = Field("hephaestus", description="Agent type: hephaestus, build, plan, rex, …")
     model: Optional[str] = Field(None, description="Model ID")
     provider: Optional[str] = Field(None, description="Provider ID")
+    model_pinned: bool = Field(
+        False,
+        description=(
+            "Whether provider/model were explicitly locked for this session. "
+            "Unpinned sessions follow the normal default-model resolution chain."
+        ),
+    )
     
     # Session hierarchy
     parent_id: Optional[str] = Field(None, alias="parentID", description="Parent session for branching")
@@ -153,6 +160,36 @@ class Session:
         """Clear in-memory indexes when the underlying storage changes."""
         cls._id_index.clear()
         cls._all_sessions_cache = None
+
+    @staticmethod
+    def has_pinned_model(session: Optional[SessionInfo]) -> bool:
+        """Return whether a session has an explicit model lock."""
+        return bool(
+            session
+            and getattr(session, "model_pinned", False)
+            and getattr(session, "provider", None)
+            and getattr(session, "model", None)
+        )
+
+    @staticmethod
+    def explicit_model_updates(provider_id: str, model_id: str) -> Dict[str, Any]:
+        """Build update kwargs for explicitly pinning a session model."""
+        return {
+            "provider": provider_id,
+            "model": model_id,
+            "model_pinned": True,
+        }
+
+    @classmethod
+    def inherited_model_kwargs(cls, session: Optional[SessionInfo]) -> Dict[str, Any]:
+        """Return pinned model kwargs that should propagate to a child session."""
+        if not cls.has_pinned_model(session):
+            return {}
+        return {
+            "provider": session.provider,
+            "model": session.model,
+            "model_pinned": True,
+        }
     
     @classmethod
     def is_default_title(cls, title: str) -> bool:
