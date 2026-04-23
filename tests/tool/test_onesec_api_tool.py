@@ -731,3 +731,70 @@ async def test_onesec_software_query_agent_list_validates_name_and_publisher():
     assert result.error == (
         "Missing required parameters for software_query_agent_list: name, publisher"
     )
+
+
+@pytest.mark.asyncio
+async def test_onesec_edr_delete_registry_startup_validates_registry_type():
+    tool = _load_tool("onesec_edr.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="edr_delete_registry_startup",
+        agent_list=["umid-1"],
+        registry_path=1,
+    )
+
+    assert result.success is False
+    assert result.error == (
+        "Missing required parameters for edr_delete_registry_startup: registry_type"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_edr_delete_registry_startup_uses_doc_field_names():
+    tool = _load_tool("onesec_edr.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "response_code": 200,
+                    "verbose_msg": "success",
+                    "data": {"items": [{"task_id": 1}]},
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="edr_delete_registry_startup",
+            agent_list=["umid-1"],
+            registry_path=1,
+            registry_type=r"HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Demo",
+        )
+
+    assert result.success is True
+
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert url == "https://console.onesec.net/api/saasedr/api/client/v1/actions/deleteRegistryStartup"
+    assert kwargs["json"] == {
+        "task_scope": {"agent_list": ["umid-1"]},
+        "task_content_req": [
+            {
+                "registry_path": 1,
+                "registry_type": r"HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Demo",
+            }
+        ],
+    }

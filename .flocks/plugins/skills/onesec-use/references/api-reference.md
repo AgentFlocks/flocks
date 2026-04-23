@@ -6,7 +6,7 @@ OneSEC 当前优先复用 grouped tool，而不是直接从页面做数据获取
 
 | 用户意图 | 推荐 tool | 推荐 action | 最小参数 |
 |---|---|---|---|
-| 查威胁事件 | `onesec_edr` | `edr_get_incidents` / `edr_get_recent_incidents` | 常见至少带 `time_from`、`time_to` |
+| 查威胁事件 | `onesec_edr` | `edr_get_incidents`（默认） / `edr_get_recent_incidents`（仅最近 24 小时增量） | 建议显式带 `time_from`、`time_to` |
 | 查终端告警 | `onesec_edr` | `edr_get_endpoint_alerts` / `edr_get_recent_endpoint_alerts` | 常见至少带 `time_from`、`time_to` |
 | 查恶意文件 / 威胁行为 / 时间线 / IOC | `onesec_edr` | 对应 `edr_get_*` action | 时间范围、分页、筛选字段 |
 | 查 DNS 拦截 / 解析日志 / 受威胁终端 | `onesec_dns` | `dns_search_blocked_queries` / `dns_search_queries` / `dns_search_threatened_endpoint` | 多数需要 `time_from`、`time_to` |
@@ -32,6 +32,10 @@ OneSEC 高频查询动作通常使用：
 
 - 秒级时间戳，不是毫秒
 
+- 分页接口建议显式传 `time_from`、`time_to`
+- `recent` 系列只适合最近 24 小时的增量查询
+- 未传时间时，返回范围由服务端默认窗口决定，仅作兜底，不推荐依赖
+
 示例：
 
 ```json
@@ -43,6 +47,25 @@ OneSEC 高频查询动作通常使用：
   "page_size": 20
 }
 ```
+
+## 时间窗口选择表
+
+| 查询目标 | 推荐 action | 时间参数策略 | 备注 |
+|---|---|---|---|
+| 查本周事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 默认做法 |
+| 查最近 7 天事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 适合历史回溯 |
+| 查最近 30 天事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 适合历史回溯 |
+| 查最近 24 小时增量 | `edr_get_recent_incidents` | 显式传 `time_from`、`time_to`，且跨度不超过 24 小时 | 仅增量同步 |
+| 未传时间兜底查询 | `edr_get_incidents` | 不传时间 | 返回范围由服务端默认窗口决定，不推荐依赖 |
+
+## 标准时间模板
+
+以下模板仅用于给 agent 组装请求时参考：
+
+- 时间戳单位一律是秒
+- 以下示例按 `Asia/Shanghai` 计算
+- 以下示例假设当前时间是 `2026-04-23 10:00:00 +08:00`
+- 实际调用时，应按执行当时的业务时区重新计算
 
 ## 先区分事件、告警、DNS 和资产
 
@@ -70,6 +93,9 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 
 - `onesec_edr`
 - `action=edr_get_incidents`
+- 历史回溯场景显式传 `time_from` + `time_to`
+- 仅最近 24 小时增量才使用 `edr_get_recent_incidents`
+- 未传时间只作为兜底，不要把它当成稳定窗口
 
 最小示例：
 

@@ -605,7 +605,7 @@ def _validate_action_params(action: str, params: dict[str, Any]) -> Optional[str
         missing.extend(_require_fields(params, "task_id"))
     elif action == "edr_delete_registry_startup":
         missing.extend(_validate_non_empty_aliases(params, ("agent_list", "umid_list"), "agent_list"))
-        missing.extend(_require_fields(params, "registry_path"))
+        missing.extend(_require_fields(params, "registry_path", "registry_type"))
     elif action == "edr_delete_ioc":
         missing.extend(_require_fields(params, "iocs"))
     elif action == "edr_add_ioc":

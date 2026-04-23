@@ -1,14 +1,14 @@
 name: onesec_edr
 description: >
   OneSEC EDR grouped tool. Use the `action` parameter to access endpoint
-  detection, response, IOC, and action-status APIs. Credentials note: enter
-  `api_key|secret` in the API Key field of the service configuration.
+  detection, response, IOC, and action-status APIs. Configure the OneSEC
+  service with separate API Key and Secret credentials.
 description_cn: >
   OneSEC EDR 分组工具。通过 `action` 参数调用终端检测与响应、IOC 和动作状态相关接口。
-  【选用原则】通用告警/事件查询首选分页接口（edr_get_endpoint_alerts、edr_get_threat_files 等），
-  不传时间参数即可获取最新数据；`edr_get_recent_*` 系列接口仅适用于增量同步场景，
-  且严格限制只能查询最近 24 小时内的数据，超出范围会被服务器拒绝。
-  配置时请在服务的 API Key 输入框填写 `api_key|secret`。
+  【选用原则】通用事件/告警查询优先使用分页接口，并显式传 `time_from`、`time_to`；
+  若不传时间，返回范围由服务端默认窗口决定，仅作兜底，不建议依赖。
+  `edr_get_recent_*` 系列接口仅适用于最近 24 小时内的增量查询。
+  请在 OneSEC 服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
 category: custom
 enabled: true
 requires_confirmation: true
@@ -21,7 +21,7 @@ inputSchema:
       description: |
         EDR 分组动作名，可选值：
         - edr_get_threat_files
-          用途: 分页查询恶意文件（通用查询首选，不传时间参数可获取最新数据）
+          用途: 分页查询恶意文件（通用查询首选，适合历史回溯）
           必填: 无
           常用: `time_from`、`time_to`、`group_list`、`umid_list`、`cur_page`、`page_size`
           风险提示: 更适合全量回溯；如需排序扩展需结合后端实现
@@ -34,7 +34,7 @@ inputSchema:
           ⚠️ 推荐: 通用查询请优先使用 `edr_get_threat_files`
           是否任务型: 否
         - edr_get_threat_activities
-          用途: 分页查询威胁行为（通用查询首选，不传时间参数可获取最新数据）
+          用途: 分页查询威胁行为（通用查询首选，适合历史回溯）
           必填: 无
           常用: `time_from`、`time_to`、`group_list`、`threat_phase_list`、`cur_page`、`page_size`
           风险提示: 行为筛选条件较多，优先显式传时间范围
@@ -47,7 +47,7 @@ inputSchema:
           ⚠️ 推荐: 通用查询请优先使用 `edr_get_threat_activities`
           是否任务型: 否
         - edr_get_incidents
-          用途: 分页查询威胁事件（通用查询首选，不传时间参数可获取最新数据）
+          用途: 分页查询威胁事件（通用查询首选，适合历史回溯）
           必填: 无
           常用: `time_from`、`time_to`、`params`、`cur_page`、`page_size`
           风险提示: 返回事件对象较复杂，后续常用于提取 `incident_id`
@@ -60,7 +60,7 @@ inputSchema:
           ⚠️ 推荐: 通用查询请优先使用 `edr_get_incidents`
           是否任务型: 否
         - edr_get_endpoint_alerts
-          用途: 分页查询终端告警日志（通用查询首选，不传时间参数可获取最新数据）
+          用途: 分页查询终端告警日志（通用查询首选，适合历史回溯）
           必填: 无
           常用: `time_from`、`time_to`、`sql`、`search_fields`、`cur_page`、`page_size`
           风险提示: 若返回字段过多可能导致接口耗时增加
@@ -70,7 +70,7 @@ inputSchema:
           必填: 无
           常用: `time_from`、`time_to`、`sql`、`search_fields`
           ⚠️ 限制: 仅支持最近 24 小时的数据；time_from 距当前时间超过 24 小时将被服务器拒绝
-          ⚠️ 推荐: 通用查询请优先使用 `edr_get_endpoint_alerts`（无需时间参数）
+          ⚠️ 推荐: 通用查询请优先使用 `edr_get_endpoint_alerts`，并显式传 `time_from`、`time_to`
           是否任务型: 否
         - edr_get_threat_disposals
           用途: 分页查询威胁处置清单
@@ -85,7 +85,7 @@ inputSchema:
           风险提示: 实网通常要求 `incident_id` 与 `umid` 一起传
           是否任务型: 否
         - edr_get_threat_timeline
-          用途: 分页查询威胁事件时间线（通用查询首选，不传时间参数可获取最新数据）
+          用途: 分页查询威胁事件时间线（通用查询首选，适合历史回溯）
           必填: 无
           常用: `time_from`、`time_to`、`cur_page`、`page_size`
           风险提示: 建议限定时间范围避免结果过大
@@ -165,8 +165,8 @@ inputSchema:
           是否任务型: 否
         - edr_delete_registry_startup
           用途: 下发删除注册表启动项任务
-          必填: `agent_list`、`registry_path`
-          常用: `registry_type`
+          必填: `agent_list`、`registry_path`、`registry_type`
+          常用: `registry_path`、`registry_type`
           风险提示: 高风险写操作；会修改终端启动项
           是否任务型: 是
         - edr_delete_ioc
@@ -214,13 +214,12 @@ inputSchema:
         开始时间戳，Unix 秒级时间戳。
         注意：传入前请确认 time_from < time_to；对于 recent 系列接口，
         time_from 距当前时间不能超过 24 小时，否则服务器会拒绝请求。可以使用python datetime动态计算。
-        对于分页接口（如 edr_get_endpoint_alerts），time_from 可不传，
-        不传时服务器默认返回最新数据。
+        分页接口可不传，但此时返回范围由服务端默认窗口决定，仅作兜底，不建议依赖。
     time_to:
       type: integer
       description: >
         结束时间戳，Unix 秒级时间戳。必须大于 time_from。可以使用python datetime动态计算。
-        对于分页接口，time_to 可不传，不传时服务器默认返回最新数据。
+        分页接口可不传，但此时返回范围由服务端默认窗口决定，仅作兜底，不建议依赖。
     group_list:
       type: array
       items:
@@ -331,11 +330,11 @@ inputSchema:
       type: integer
       description: 任务状态排序
     registry_path:
-      type: string
-      description: 注册表路径
-    registry_type:
       type: integer
-      description: 注册表类型
+      description: 注册表类型，`1` 表示注册表项，`2` 表示注册表值
+    registry_type:
+      type: string
+      description: 注册表项或注册表值的完整路径
     iocs:
       type: array
       items:
