@@ -18,8 +18,6 @@ from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.server.auth import require_user
-from flocks.auth.service import AuthService
-
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -343,16 +341,6 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         **({"category": request.category} if request.category else {}),
     )
 
-    await AuthService.record_audit(
-        action="session.create",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=current_user.id,
-        ip=http_request.client.host if http_request.client else None,
-        user_agent=http_request.headers.get("user-agent"),
-        metadata={"session_id": session.id},
-    )
-    
     log.info("session.created", {"session_id": session.id})
     return _session_to_response(session)
 
@@ -492,15 +480,6 @@ async def delete_session(sessionID: str, request: Request) -> bool:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
 
     await Session.delete(session.project_id, sessionID)
-    await AuthService.record_audit(
-        action="session.delete",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID, "visibility": session.visibility},
-    )
     log.info("session.deleted", {"session_id": sessionID})
     return True
 
@@ -707,16 +686,6 @@ async def share_session(sessionID: str, request: Request) -> SessionResponse:
 
     await Session.share(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    await AuthService.record_audit(
-        action="session.share",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID},
-    )
-    
     log.info("session.shared", {"session_id": sessionID})
     return _session_to_response(updated)
 
@@ -772,16 +741,6 @@ async def unshare_session(sessionID: str, request: Request) -> SessionResponse:
 
     await Session.unshare(session.project_id, sessionID)
     updated = await Session.get_by_id(sessionID)
-    await AuthService.record_audit(
-        action="session.unshare",
-        result="success",
-        operator_user_id=current_user.id,
-        target_user_id=session.owner_user_id,
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        metadata={"session_id": sessionID},
-    )
-    
     log.info("session.unshared", {"session_id": sessionID})
     return _session_to_response(updated)
 

@@ -9,7 +9,6 @@ import LoginPage from '@/pages/Login';
 import SetupAdminPage from '@/pages/SetupAdmin';
 import ForceChangePasswordPage from '@/pages/ForceChangePassword';
 import AdminUsersPage from '@/pages/AdminUsers';
-import AuditLogsPage from '@/pages/AuditLogs';
 import { useAuth } from '@/contexts/AuthContext';
 
 const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
@@ -111,18 +110,11 @@ export function Routes() {
         <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>}>
           <Route index element={<Navigate to="accounts" replace />} />
           <Route path="accounts" element={<LazyRoute><AdminUsersPage /></LazyRoute>} />
-          <Route
-            path="audit-logs"
-            element={user?.role === 'admin'
-              ? <LazyRoute><AuditLogsPage /></LazyRoute>
-              : <Navigate to="/config/accounts" replace />}
-          />
         </Route>
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
         <Route path="admin/users" element={<Navigate to="/config/accounts" replace />} />
-        <Route path="admin/audit-logs" element={<Navigate to="/config/audit-logs" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>

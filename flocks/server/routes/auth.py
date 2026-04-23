@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field
 from flocks.auth.service import AuthService
 from flocks.server.auth import (
     clear_session_cookie,
-    get_request_ip,
-    get_request_user_agent,
     require_user,
     set_session_cookie,
     should_use_secure_cookie,
@@ -82,8 +80,6 @@ async def bootstrap_admin(payload: BootstrapAdminRequest, response: Response, re
         user, session_id = await AuthService.login(
             payload.username,
             payload.password,
-            ip=get_request_ip(request),
-            user_agent=get_request_user_agent(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -98,8 +94,6 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
         user, session_id = await AuthService.login(
             payload.username,
             payload.password,
-            ip=get_request_ip(request),
-            user_agent=get_request_user_agent(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -110,19 +104,11 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
 
 @router.post("/logout", summary="退出登录")
 async def logout(response: Response, request: Request) -> dict:
-    user = require_user(request)
+    require_user(request)
     session_id = request.cookies.get("flocks_session")
     if session_id:
         await AuthService.revoke_session(session_id)
     clear_session_cookie(response)
-    await AuthService.record_audit(
-        action="auth.logout",
-        result="success",
-        operator_user_id=user.id,
-        target_user_id=user.id,
-        ip=get_request_ip(request),
-        user_agent=get_request_user_agent(request),
-    )
     return {"success": True}
 
 
@@ -141,14 +127,10 @@ async def change_password(payload: ChangePasswordRequest, response: Response, re
             user=user,
             current_password=payload.current_password,
             new_password=payload.new_password,
-            ip=get_request_ip(request),
-            user_agent=get_request_user_agent(request),
         )
         _, session_id = await AuthService.login(
             user.username,
             payload.new_password,
-            ip=get_request_ip(request),
-            user_agent=get_request_user_agent(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -166,14 +148,10 @@ async def reset_own_password(response: Response, request: Request) -> ResetOwnPa
     expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
     try:
         await AuthService.set_password(
-            operator_user=user,
             target_user_id=user.id,
             new_password=new_password,
             must_reset_password=True,
             temp_password_expires_at=expires_at,
-            action="auth.reset_password",
-            ip=get_request_ip(request),
-            user_agent=get_request_user_agent(request),
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

@@ -7,10 +7,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import aiosqlite
 from pydantic import BaseModel, Field
@@ -58,31 +57,13 @@ class LocalUser(BaseModel):
         )
 
 
-class AuditRecord(BaseModel):
-    id: str
-    operator_user_id: Optional[str] = None
-    target_user_id: Optional[str] = None
-    operator_username: Optional[str] = None
-    target_username: Optional[str] = None
-    action: str
-    result: str
-    ip: Optional[str] = None
-    user_agent: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    created_at: str
-
-
 class AuthService:
-    """Account, auth session and audit service."""
+    """Single-admin account and session service."""
 
     _initialized: bool = False
     _initialized_db_path: Optional[str] = None
     _session_ttl_days: int = 7
     _temp_password_ttl_hours: int = 24
-    _role_limits: Dict[str, int] = {
-        "admin": 3,
-        "member": 20,
-    }
 
     @classmethod
     async def init(cls) -> None:
@@ -118,20 +99,6 @@ class AuthService:
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_user_sessions_expires ON user_sessions(expires_at);
 
-                CREATE TABLE IF NOT EXISTS audit_logs (
-                    id TEXT PRIMARY KEY,
-                    operator_user_id TEXT,
-                    target_user_id TEXT,
-                    action TEXT NOT NULL,
-                    result TEXT NOT NULL,
-                    ip TEXT,
-                    user_agent TEXT,
-                    metadata TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
-                CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
                 """
             )
             await cls._drop_legacy_tables(db)
@@ -203,13 +170,6 @@ class AuthService:
             role="admin",
             must_reset_password=False,
         )
-        await cls.record_audit(
-            action="auth.bootstrap_admin",
-            result="success",
-            operator_user_id=user.id,
-            target_user_id=user.id,
-            metadata={"username": username},
-        )
         await cls.migrate_legacy_sessions_to_admin(user.id)
         return user
 
@@ -257,25 +217,6 @@ class AuthService:
             )
             await db.commit()
         return await cls.get_user_by_id(user_id)  # type: ignore[return-value]
-
-    @classmethod
-    async def create_user(
-        cls,
-        username: str,
-        password: str,
-        role: str = "member",
-        *,
-        must_reset_password: bool = False,
-        temp_password_expires_at: Optional[str] = None,
-    ) -> LocalUser:
-        await cls._ensure_role_capacity(role)
-        return await cls._create_user_internal(
-            username=username,
-            password=password,
-            role=role,
-            must_reset_password=must_reset_password,
-            temp_expires_at=temp_password_expires_at,
-        )
 
     @classmethod
     async def get_user_by_id(cls, user_id: str) -> Optional[LocalUser]:
@@ -362,137 +303,6 @@ class AuthService:
         return users
 
     @classmethod
-    async def update_user_status(cls, user_id: str, status: str) -> LocalUser:
-        if status not in {"active", "disabled"}:
-            raise ValueError("无效账号状态")
-        await cls.init()
-        user = await cls.get_user_by_id(user_id)
-        if not user:
-            raise ValueError("用户不存在")
-
-        if status == "disabled" and user.role == "admin" and user.status == "active":
-            remaining_admins = await cls.count_active_admins(exclude_user_id=user_id)
-            if remaining_admins == 0:
-                raise ValueError("不能禁用最后一个管理员账号")
-
-        now = _iso_now()
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            cursor = await db.execute(
-                "UPDATE users SET status = ?, updated_at = ? WHERE id = ?",
-                (status, now, user_id),
-            )
-            await db.commit()
-            if cursor.rowcount == 0:
-                raise ValueError("用户不存在")
-        updated_user = await cls.get_user_by_id(user_id)
-        if not updated_user:
-            raise ValueError("用户不存在")
-        return updated_user
-
-    @classmethod
-    async def count_active_admins(cls, exclude_user_id: Optional[str] = None) -> int:
-        await cls.init()
-        db_path = Storage.get_db_path()
-        query = "SELECT COUNT(1) FROM users WHERE role = 'admin' AND status = 'active'"
-        params: tuple[Any, ...] = ()
-        if exclude_user_id:
-            query += " AND id != ?"
-            params = (exclude_user_id,)
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute(query, params) as cursor:
-                row = await cursor.fetchone()
-                return int(row[0] if row else 0)
-
-    @classmethod
-    async def count_users_by_role(cls, role: str, exclude_user_id: Optional[str] = None) -> int:
-        if role not in {"admin", "member"}:
-            raise ValueError("无效角色")
-        await cls.init()
-        db_path = Storage.get_db_path()
-        query = "SELECT COUNT(1) FROM users WHERE role = ?"
-        params: tuple[Any, ...] = (role,)
-        if exclude_user_id:
-            query += " AND id != ?"
-            params = (role, exclude_user_id)
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute(query, params) as cursor:
-                row = await cursor.fetchone()
-                return int(row[0] if row else 0)
-
-    @classmethod
-    async def _ensure_role_capacity(cls, role: str, exclude_user_id: Optional[str] = None) -> None:
-        if role not in cls._role_limits:
-            raise ValueError("无效角色")
-        current_count = await cls.count_users_by_role(role, exclude_user_id=exclude_user_id)
-        if current_count >= cls._role_limits[role]:
-            role_label = "管理员" if role == "admin" else "普通用户"
-            raise ValueError(f"{role_label}账号最多 {cls._role_limits[role]} 个")
-
-    @classmethod
-    async def update_user_role(cls, user_id: str, role: str) -> LocalUser:
-        if role not in {"admin", "member"}:
-            raise ValueError("无效角色")
-        await cls.init()
-        user = await cls.get_user_by_id(user_id)
-        if not user:
-            raise ValueError("用户不存在")
-        if user.role == role:
-            return user
-
-        await cls._ensure_role_capacity(role, exclude_user_id=user_id)
-        if user.role == "admin" and user.status == "active":
-            remaining_admins = await cls.count_active_admins(exclude_user_id=user_id)
-            if remaining_admins == 0:
-                raise ValueError("不能调整最后一个管理员账号的角色")
-
-        now = _iso_now()
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            cursor = await db.execute(
-                "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
-                (role, now, user_id),
-            )
-            await db.commit()
-            if cursor.rowcount == 0:
-                raise ValueError("用户不存在")
-        updated_user = await cls.get_user_by_id(user_id)
-        if not updated_user:
-            raise ValueError("用户不存在")
-        return updated_user
-
-    @classmethod
-    async def revoke_user_sessions(cls, user_id: str) -> None:
-        await cls.init()
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
-            await db.commit()
-
-    @classmethod
-    async def delete_user(cls, user_id: str) -> Tuple[LocalUser, int]:
-        await cls.init()
-        user = await cls.get_user_by_id(user_id)
-        if not user:
-            raise ValueError("用户不存在")
-        if user.role == "admin" and user.status == "active":
-            remaining_admins = await cls.count_active_admins(exclude_user_id=user_id)
-            if remaining_admins == 0:
-                raise ValueError("不能删除最后一个管理员账号")
-
-        from flocks.session.session import Session
-
-        retained_sessions = await Session.retain_deleted_user_sessions(user.id, user.username)
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (user_id,))
-            cursor = await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
-            await db.commit()
-            if cursor.rowcount == 0:
-                raise ValueError("用户不存在")
-        return user, retained_sessions
-
-    @classmethod
     async def _create_session(cls, user_id: str) -> str:
         await cls.init()
         session_id = secrets.token_urlsafe(32)
@@ -559,59 +369,22 @@ class AuthService:
         cls,
         username: str,
         password: str,
-        *,
-        ip: Optional[str] = None,
-        user_agent: Optional[str] = None,
     ) -> Tuple[LocalUser, str]:
         user_with_hash = await cls.get_user_by_username(username)
         if not user_with_hash:
-            await cls.record_audit(
-                action="auth.login",
-                result="failed",
-                metadata={"reason": "user_not_found", "username": username},
-                ip=ip,
-                user_agent=user_agent,
-            )
             raise ValueError("用户名或密码错误")
 
         user, password_hash, temp_expires_at = user_with_hash
         if user.status != "active":
-            await cls.record_audit(
-                action="auth.login",
-                result="failed",
-                operator_user_id=user.id,
-                target_user_id=user.id,
-                metadata={"reason": "user_disabled"},
-                ip=ip,
-                user_agent=user_agent,
-            )
             raise ValueError("账号已被禁用")
 
         valid = cls._verify_password(password, password_hash)
         if not valid:
-            await cls.record_audit(
-                action="auth.login",
-                result="failed",
-                operator_user_id=user.id,
-                target_user_id=user.id,
-                metadata={"reason": "password_mismatch"},
-                ip=ip,
-                user_agent=user_agent,
-            )
             raise ValueError("用户名或密码错误")
 
         if temp_expires_at:
             expiry = _parse_iso(temp_expires_at)
             if _utc_now() > expiry:
-                await cls.record_audit(
-                    action="auth.login",
-                    result="failed",
-                    operator_user_id=user.id,
-                    target_user_id=user.id,
-                    metadata={"reason": "temp_password_expired"},
-                    ip=ip,
-                    user_agent=user_agent,
-                )
                 raise ValueError("一次性密码已过期，请联系管理员重置")
 
         session_id = await cls._create_session(user.id)
@@ -625,14 +398,6 @@ class AuthService:
         if not updated_user:
             raise ValueError("登录失败")
 
-        await cls.record_audit(
-            action="auth.login",
-            result="success",
-            operator_user_id=user.id,
-            target_user_id=user.id,
-            ip=ip,
-            user_agent=user_agent,
-        )
         return updated_user, session_id
 
     @classmethod
@@ -642,47 +407,28 @@ class AuthService:
         *,
         current_password: str,
         new_password: str,
-        ip: Optional[str] = None,
-        user_agent: Optional[str] = None,
     ) -> None:
         existing = await cls.get_user_by_username(user.username)
         if not existing:
             raise ValueError("用户不存在")
         _, password_hash, _ = existing
         if not cls._verify_password(current_password, password_hash):
-            await cls.record_audit(
-                action="auth.change_password",
-                result="failed",
-                operator_user_id=user.id,
-                target_user_id=user.id,
-                metadata={"reason": "current_password_invalid"},
-                ip=ip,
-                user_agent=user_agent,
-            )
             raise ValueError("当前密码错误")
         await cls.set_password(
-            operator_user=user,
             target_user_id=user.id,
             new_password=new_password,
             must_reset_password=False,
             temp_password_expires_at=None,
-            action="auth.change_password",
-            ip=ip,
-            user_agent=user_agent,
         )
 
     @classmethod
     async def set_password(
         cls,
         *,
-        operator_user: AuthUser,
         target_user_id: str,
         new_password: str,
         must_reset_password: bool,
         temp_password_expires_at: Optional[str] = None,
-        action: str = "admin.reset_password",
-        ip: Optional[str] = None,
-        user_agent: Optional[str] = None,
     ) -> None:
         if len(new_password) < 8:
             raise ValueError("密码长度至少 8 位")
@@ -711,20 +457,10 @@ class AuthService:
             # Security hardening: revoke all active sessions after password change/reset.
             await db.execute("DELETE FROM user_sessions WHERE user_id = ?", (target_user_id,))
             await db.commit()
-        await cls.record_audit(
-            action=action,
-            result="success",
-            operator_user_id=operator_user.id,
-            target_user_id=target_user_id,
-            ip=ip,
-            user_agent=user_agent,
-            metadata={"must_reset_password": must_reset_password},
-        )
 
     @classmethod
     async def generate_admin_temp_password(
         cls,
-        operator: Optional[AuthUser] = None,
         *,
         username: str = "admin",
     ) -> str:
@@ -736,106 +472,13 @@ class AuthService:
             raise ValueError("目标账号不是管理员")
         temp_password = secrets.token_urlsafe(12)
         expires = (_utc_now() + timedelta(hours=cls._temp_password_ttl_hours)).isoformat()
-        if operator is None:
-            operator = AuthUser(
-                id="system",
-                username="system",
-                role="admin",
-                status="active",
-            )
         await cls.set_password(
-            operator_user=operator,
             target_user_id=user.id,
             new_password=temp_password,
             must_reset_password=True,
             temp_password_expires_at=expires,
-            action="admin.generate_one_time_password",
         )
         return temp_password
-
-    @classmethod
-    async def record_audit(
-        cls,
-        *,
-        action: str,
-        result: str,
-        operator_user_id: Optional[str] = None,
-        target_user_id: Optional[str] = None,
-        ip: Optional[str] = None,
-        user_agent: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        await cls.init()
-        db_path = Storage.get_db_path()
-        payload = metadata or {}
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO audit_logs(
-                    id, operator_user_id, target_user_id, action, result, ip, user_agent, metadata, created_at
-                )
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    Identifier.ascending("audit"),
-                    operator_user_id,
-                    target_user_id,
-                    action,
-                    result,
-                    ip,
-                    user_agent,
-                    json.dumps(payload, ensure_ascii=True),
-                    _iso_now(),
-                ),
-            )
-            await db.commit()
-
-    @classmethod
-    async def list_audits(cls, *, limit: int = 200, offset: int = 0) -> List[AuditRecord]:
-        await cls.init()
-        db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
-            async with db.execute(
-                """
-                SELECT
-                    audit_logs.id,
-                    audit_logs.operator_user_id,
-                    audit_logs.target_user_id,
-                    operator_user.username,
-                    target_user.username,
-                    audit_logs.action,
-                    audit_logs.result,
-                    audit_logs.ip,
-                    audit_logs.user_agent,
-                    audit_logs.metadata,
-                    audit_logs.created_at
-                FROM audit_logs
-                LEFT JOIN users AS operator_user ON operator_user.id = audit_logs.operator_user_id
-                LEFT JOIN users AS target_user ON target_user.id = audit_logs.target_user_id
-                ORDER BY audit_logs.created_at DESC
-                LIMIT ? OFFSET ?
-                """,
-                (limit, offset),
-            ) as cursor:
-                rows = await cursor.fetchall()
-        records: List[AuditRecord] = []
-        for row in rows:
-            records.append(
-                AuditRecord(
-                    id=row[0],
-                    operator_user_id=row[1],
-                    target_user_id=row[2],
-                    operator_username=row[3],
-                    target_username=row[4],
-                    action=row[5],
-                    result=row[6],
-                    ip=row[7],
-                    user_agent=row[8],
-                    metadata=json.loads(row[9] or "{}"),
-                    created_at=row[10],
-                )
-            )
-        return records
 
     @classmethod
     async def migrate_legacy_sessions_to_admin(cls, admin_user_id: str) -> None:
@@ -866,12 +509,6 @@ class AuthService:
                 marker_key,
                 {"done": True, "migrated": migrated, "updated_at": _iso_now()},
                 "json",
-            )
-            await cls.record_audit(
-                action="auth.migrate_legacy_sessions",
-                result="success",
-                operator_user_id=admin_user_id,
-                metadata={"migrated": migrated},
             )
         except Exception as exc:
             log.warn("auth.migrate_legacy_sessions.failed", {"error": str(exc)})
