@@ -47,6 +47,49 @@ class TestDelegateTaskTolerance:
         launch_input = manager.launch.await_args.args[0]
         assert launch_input.description == "Investigate threatbook.cn assets"
 
+    @pytest.mark.asyncio
+    async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
+        manager = SimpleNamespace(
+            launch=AsyncMock(return_value=SimpleNamespace(
+                id="task-2",
+                description="quick task",
+                agent="rex-junior",
+                status="running",
+                session_id="ses-quick",
+            ))
+        )
+        cfg = SimpleNamespace(categories={
+            "quick": {
+                "model": "anthropic/claude-haiku-4-5",
+                "prompt_append": None,
+            }
+        })
+
+        with patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)), \
+             patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=cfg)), \
+             patch("flocks.tool.agent.delegate_task._validate_category_model", return_value={
+                 "providerID": "anthropic",
+                 "modelID": "claude-haiku-4-5",
+             }), \
+             patch("flocks.tool.agent.delegate_task.get_background_manager", return_value=manager):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=_make_ctx(),
+                category="quick",
+                prompt="Summarize the diff",
+                description="quick task",
+                run_in_background=True,
+            )
+
+        assert result.success is True
+        manager.launch.assert_awaited_once()
+        launch_input = manager.launch.await_args.args[0]
+        assert launch_input.model == {
+            "providerID": "anthropic",
+            "modelID": "claude-haiku-4-5",
+        }
+        assert launch_input.model_pinned is False
+
 
 class TestBatchCompatibility:
     def test_batch_schema_allows_legacy_commands_alias(self):

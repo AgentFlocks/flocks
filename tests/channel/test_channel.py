@@ -414,6 +414,7 @@ class TestFeishuNativeCommands:
                 {
                     "provider": "anthropic",
                     "model": "claude-sonnet-4-20250514",
+                    "model_pinned": True,
                 },
             )
         ]
@@ -481,17 +482,19 @@ class TestFeishuNativeCommands:
                     agent="rex",
                     provider="anthropic",
                     model="claude-sonnet-4-20250514",
+                    model_pinned=True,
                 )
             ),
         )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
         monkeypatch.setattr(
             "flocks.session.session.Session.create",
-            AsyncMock(
-                return_value=SimpleNamespace(
-                    id="session_new",
-                    agent="rex",
-                )
-            ),
+            create_mock,
         )
 
         handled = await dispatcher._handle_feishu_native_command(
@@ -504,8 +507,98 @@ class TestFeishuNativeCommands:
 
         assert handled is True
         dispatcher.binding_service.rebind.assert_awaited_once()
+        create_kwargs = create_mock.await_args.kwargs
+        assert create_kwargs["provider"] == "anthropic"
+        assert create_kwargs["model"] == "claude-sonnet-4-20250514"
+        assert create_kwargs["model_pinned"] is True
         assert dispatcher.binding_service.rebind.await_args.kwargs["scope_override"] == "group_topic"
         assert "session_new" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_new_command_does_not_inherit_unpinned_model(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="feishu",
+                account_id="default",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                thread_id="root_1",
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="feishu",
+            account_id="default",
+            chat_id="oc_group",
+            chat_type=ChatType.GROUP,
+            thread_id="root_1",
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="oc_group",
+            chat_type=ChatType.GROUP,
+            text="/new",
+            mention_text="/new",
+            thread_id="root_1",
+        )
+
+        async def fake_deliver(ctx, session_id=None):
+            return None
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="stale-model",
+                    model_pinned=False,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/new",
+            scope_override="group_topic",
+        )
+
+        assert handled is True
+        create_kwargs = create_mock.await_args.kwargs
+        assert "provider" not in create_kwargs
+        assert "model" not in create_kwargs
+        assert "model_pinned" not in create_kwargs
 
     @pytest.mark.asyncio
     async def test_append_user_message_stores_feishu_media_part(self, monkeypatch):
@@ -701,9 +794,8 @@ class TestMultimodalInput:
             ),
         )
         monkeypatch.setattr(
-            SessionRunner,
-            "_extract_pdf_text_from_bytes",
-            classmethod(lambda cls, data, max_pages=20, max_chars=12000: "PDF body text"),
+            "flocks.session.utils.file_extractor.extract_pdf_text_from_bytes",
+            lambda data, *, max_pages=20, max_chars=12000: "PDF body text",
         )
 
         chat_messages = await runner._to_chat_messages(

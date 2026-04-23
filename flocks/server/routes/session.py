@@ -2050,6 +2050,19 @@ async def _process_session_message(
         "model_id": model_id,
         "source": model_source,
     })
+
+    if request.model:
+        pinned_session = await Session.update(
+            session.project_id,
+            sessionID,
+            **Session.explicit_model_updates(provider_id, model_id),
+        )
+        if pinned_session is not None:
+            session = pinned_session
+        else:
+            session.provider = provider_id
+            session.model = model_id
+            session.model_pinned = True
     
     # Ensure providers are initialized and configured
     Provider._ensure_initialized()
@@ -2314,13 +2327,17 @@ async def _process_session_message(
 
 async def _resolve_model(request, agent, sessionID: str):
     """
-    Resolve model with 5-level priority:
+    Resolve model using the same explicit-pinning semantics as SessionLoop.
+
+    Priority:
     1. request.model (explicit in request)
-    2. agent model override (storage) or agent.model (AgentInfo field)
-    3. config model (flocks.json)
-    4. lastModel(sessionID) (last used model)
-    5. environment variables (final fallback)
-    
+    2. session pinned model
+    3. agent model override (storage) or agent.model (AgentInfo field)
+    4. parent session pinned model
+    5. config model (flocks.json)
+    6. lastModel(sessionID) (last used model)
+    7. environment variables (final fallback)
+
     Returns (provider_id, model_id, source).
     """
     import os
@@ -2334,8 +2351,17 @@ async def _resolve_model(request, agent, sessionID: str):
         provider_id = request.model.providerID
         model_id = request.model.modelID
         source = "request"
-    
-    # Priority 2: Agent model (override from storage, then AgentInfo.model)
+
+    # Priority 2: Session explicit pin
+    session = None
+    if not provider_id or not model_id:
+        session = await Session.get_by_id(sessionID)
+        if Session.has_pinned_model(session):
+            provider_id = session.provider
+            model_id = session.model
+            source = "session"
+
+    # Priority 3: Agent model (override from storage, then AgentInfo.model)
     if not provider_id or not model_id:
         # 2a: Check model overrides from storage (set via UI for native agents)
         from flocks.storage.storage import Storage
@@ -2366,8 +2392,20 @@ async def _resolve_model(request, agent, sessionID: str):
                     model_id = getattr(agent.model, 'model_id', None) or getattr(agent.model, 'modelID', None)
                 if provider_id and model_id:
                     source = "agent"
-    
-    # Priority 3: System default from config (default_models.llm -> config.model fallback)
+
+    # Priority 4: Parent session explicit model
+    if not provider_id or not model_id:
+        if session is None:
+            session = await Session.get_by_id(sessionID)
+        parent_id = getattr(session, "parent_id", None) if session else None
+        if parent_id:
+            parent = await Session.get_by_id(parent_id)
+            if Session.has_pinned_model(parent):
+                provider_id = parent.provider
+                model_id = parent.model
+                source = "parent_session"
+
+    # Priority 5: System default from config (default_models.llm -> config.model fallback)
     if not provider_id or not model_id:
         try:
             from flocks.config.config import Config
@@ -2378,8 +2416,8 @@ async def _resolve_model(request, agent, sessionID: str):
                 source = "config"
         except Exception:
             pass
-    
-    # Priority 4: Last model used in session
+
+    # Priority 6: Last model used in session
     if not provider_id or not model_id:
         last_model = await _get_last_model(sessionID)
         if last_model:
@@ -2389,8 +2427,8 @@ async def _resolve_model(request, agent, sessionID: str):
                 provider_id = last_provider
                 model_id = last_model_id
                 source = "lastModel"
-    
-    # Priority 5: Fallback to environment variables
+
+    # Priority 7: Fallback to environment variables
     if not provider_id or not model_id:
         provider_id = os.environ.get("LLM_PROVIDER", "openai")
         model_id = os.environ.get("LLM_MODEL", "gpt-4-turbo-preview")
