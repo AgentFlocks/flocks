@@ -1442,7 +1442,7 @@ export default function SessionChat({
       {/* Follow-up input */}
       {!hideInput && (
         <div className={`flex-shrink-0 border-t border-gray-200 bg-white ${compact ? 'px-4 py-3' : 'px-6 py-4'}`}>
-          <div className={`flex items-end gap-2 ${!compact ? 'max-w-3xl mx-auto w-full gap-3' : ''}`}>
+          <div className={`flex min-w-0 items-end gap-2 ${!compact ? 'max-w-3xl mx-auto w-full gap-3' : ''}`}>
             <input
               ref={fileInputRef}
               type="file"
@@ -1465,7 +1465,7 @@ export default function SessionChat({
             >
               <Plus className="w-4 h-4" />
             </button>
-            <div className="relative flex-1">
+            <div className="relative min-w-0 flex-1">
               <CommandDropdown
                 visible={showCommandDropdown}
                 query={commandQuery}
