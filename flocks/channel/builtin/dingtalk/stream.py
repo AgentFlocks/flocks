@@ -46,14 +46,13 @@ log = Log.create(service="channel.dingtalk.stream")
 try:
     import dingtalk_stream
     from dingtalk_stream import ChatbotMessage
-    from dingtalk_stream.frames import AckMessage, CallbackMessage
+    from dingtalk_stream.frames import AckMessage
 
     DINGTALK_STREAM_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised when the optional dep is missing
     DINGTALK_STREAM_AVAILABLE = False
     dingtalk_stream = None  # type: ignore[assignment]
     ChatbotMessage = None  # type: ignore[assignment]
-    CallbackMessage = None  # type: ignore[assignment]
     AckMessage = type(
         "AckMessage",
         (),
@@ -367,6 +366,39 @@ class _MessageGate:
 # ---------------------------------------------------------------------------
 
 
+def _is_group_message(message: Any) -> bool:
+    conversation_type = str(getattr(message, "conversation_type", "1") or "1")
+    return conversation_type == _CONVERSATION_TYPE_GROUP
+
+
+def _resolve_chat_id(message: Any, *, is_group: bool) -> str:
+    """Compute the routing ``chat_id`` for an inbound DingTalk message.
+
+    DingTalk delivers a ``conversation_id`` (``cid…``) for *both* DMs
+    and group chats — but only group chats can be replied to via
+    ``/v1.0/robot/groupMessages/send``.  DMs MUST be sent to the user's
+    ``staffId`` via ``/v1.0/robot/oToMessages/batchSend``; routing a DM
+    through the group endpoint fails with ``robot 不存在``.
+
+    :func:`flocks.channel.builtin.dingtalk.config.resolve_target_kind`
+    infers the outbound route from the ``chat_id`` prefix
+    (``cid`` → group, otherwise → user), so picking the right id here is
+    what keeps outbound replies routed correctly.
+
+    Both :func:`chatbot_message_to_inbound` (which builds the
+    ``InboundMessage`` the gateway dispatches) and
+    :meth:`DingTalkStreamRunner._dispatch` (which gates the message
+    against ``free_response_chats`` etc.) call this helper so the two
+    code paths can never disagree on what counts as "the chat".
+    """
+    conversation_id = str(getattr(message, "conversation_id", "") or "")
+    sender_id = str(getattr(message, "sender_id", "") or "")
+    sender_staff_id = str(getattr(message, "sender_staff_id", "") or "")
+    if is_group:
+        return conversation_id or sender_staff_id or sender_id
+    return sender_staff_id or sender_id or conversation_id
+
+
 def chatbot_message_to_inbound(
     message: Any,
     *,
@@ -383,27 +415,12 @@ def chatbot_message_to_inbound(
     if not text and not media_url:
         return None
 
-    conversation_id = str(getattr(message, "conversation_id", "") or "")
-    conversation_type = str(getattr(message, "conversation_type", "1") or "1")
-    is_group = conversation_type == _CONVERSATION_TYPE_GROUP
-
+    is_group = _is_group_message(message)
     sender_id = str(getattr(message, "sender_id", "") or "")
     sender_staff_id = str(getattr(message, "sender_staff_id", "") or "")
     sender_nick = str(getattr(message, "sender_nick", "") or sender_id)
 
-    # DingTalk delivers a ``conversation_id`` (cid…) for *both* DMs and
-    # group chats — but only group chats can be replied to via
-    # ``/v1.0/robot/groupMessages/send``.  DMs MUST be sent to the
-    # user's ``staffId`` via ``/v1.0/robot/oToMessages/batchSend``;
-    # routing a DM through the group endpoint fails with
-    # ``robot 不存在``.  ``resolve_target_kind`` infers the route from
-    # the ``chat_id`` prefix (``cid`` → group, otherwise → user), so
-    # picking the right id here is what keeps outbound replies routed
-    # correctly.
-    if is_group:
-        chat_id = conversation_id or sender_staff_id or sender_id
-    else:
-        chat_id = sender_staff_id or sender_id or conversation_id
+    chat_id = _resolve_chat_id(message, is_group=is_group)
     chat_type = ChatType.GROUP if is_group else ChatType.DIRECT
     mentioned = bool(getattr(message, "is_in_at_list", False)) if is_group else False
 
@@ -549,8 +566,12 @@ class DingTalkStreamRunner:
                     "account": self.account_id, "error": str(exc),
                 })
 
+            # INFO (not DEBUG): channel startup is a low-frequency,
+            # high-signal event — losing it in production logs makes it
+            # essentially impossible to tell whether the SDK ever even
+            # tried to open a websocket.
             try:
-                log.debug("dingtalk.stream.starting", {"account": self.account_id})
+                log.info("dingtalk.stream.starting", {"account": self.account_id})
                 await self._stream_client.start()
             except asyncio.CancelledError:
                 return
@@ -560,6 +581,18 @@ class DingTalkStreamRunner:
                 log.warning("dingtalk.stream.error", {
                     "account": self.account_id, "error": str(exc),
                 })
+            else:
+                # The SDK's ``start()`` returned *without* raising.  In
+                # practice this only happens when the long-running
+                # websocket loop exited cleanly (e.g. server-initiated
+                # close, token refresh edge case).  Log it so operators
+                # can correlate the upcoming reconnect with the silent
+                # close, instead of seeing a bare "reconnecting" line.
+                if self._running:
+                    log.info("dingtalk.stream.stopped", {
+                        "account": self.account_id,
+                        "hint": "SDK start() returned without exception; will reconnect",
+                    })
 
             if not self._running:
                 return
@@ -624,11 +657,8 @@ class DingTalkStreamRunner:
                 })
                 return
 
-            conversation_type = str(
-                getattr(chatbot_msg, "conversation_type", "1") or "1"
-            )
-            is_group = conversation_type == _CONVERSATION_TYPE_GROUP
-            chat_id = str(getattr(chatbot_msg, "conversation_id", "") or "") or sender_id
+            is_group = _is_group_message(chatbot_msg)
+            chat_id = _resolve_chat_id(chatbot_msg, is_group=is_group)
 
             if not self._gate.should_process(chatbot_msg, text, is_group, chat_id):
                 log.debug("dingtalk.stream.gate_dropped", {

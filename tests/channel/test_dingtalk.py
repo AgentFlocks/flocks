@@ -820,6 +820,92 @@ class TestStreamHelpers:
         assert inbound.chat_id == "cidGROUP123"
         assert resolve_target_kind(inbound.chat_id) == "group"
 
+    def test_resolve_chat_id_dm_prefers_staff_id(self):
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="$:LWCP_v1:$opaque",
+            sender_staff_id="2250583914922119",
+        )
+        assert _resolve_chat_id(msg, is_group=False) == "2250583914922119"
+
+    def test_resolve_chat_id_dm_falls_back_when_no_staff_id(self):
+        """When DingTalk omits ``sender_staff_id`` (rare but possible
+        for external/unverified users) we fall back to ``sender_id`` —
+        and only as a last resort to ``conversation_id``.
+        """
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="user_42",
+            sender_staff_id="",
+        )
+        assert _resolve_chat_id(msg, is_group=False) == "user_42"
+
+        msg2 = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="",
+            sender_staff_id="",
+        )
+        assert _resolve_chat_id(msg2, is_group=False) == "cidABC"
+
+    def test_resolve_chat_id_group_uses_conversation_id(self):
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidGROUP123",
+            sender_id="u1",
+            sender_staff_id="staff_001",
+        )
+        assert _resolve_chat_id(msg, is_group=True) == "cidGROUP123"
+
+    def test_dispatch_and_inbound_agree_on_chat_id(self):
+        """Regression: ``_dispatch`` (used for gating) and
+        ``chatbot_message_to_inbound`` (used for routing) MUST agree on
+        the ``chat_id`` for the same message — otherwise an admin who
+        whitelists a chat in ``free_response_chats`` could see gating
+        accept the message but the reply land in a different chat (or
+        worse, fail with ``robot 不存在``).
+        """
+        from flocks.channel.builtin.dingtalk.stream import (
+            _is_group_message,
+            _resolve_chat_id,
+            chatbot_message_to_inbound,
+        )
+        dm = SimpleNamespace(
+            text=SimpleNamespace(content="hello"),
+            conversation_id="cidDM",
+            conversation_type="1",
+            sender_id="u_dm",
+            sender_staff_id="staff_dm",
+            sender_nick="Bob",
+            message_id="m_dm",
+        )
+        inbound_dm = chatbot_message_to_inbound(
+            dm, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound_dm is not None
+        assert inbound_dm.chat_id == _resolve_chat_id(
+            dm, is_group=_is_group_message(dm),
+        )
+
+        group = SimpleNamespace(
+            text=SimpleNamespace(content="@bot hi"),
+            conversation_id="cidGRP",
+            conversation_type="2",
+            sender_id="u_g",
+            sender_staff_id="staff_g",
+            sender_nick="Carol",
+            message_id="m_g",
+            is_in_at_list=True,
+        )
+        inbound_group = chatbot_message_to_inbound(
+            group, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound_group is not None
+        assert inbound_group.chat_id == _resolve_chat_id(
+            group, is_group=_is_group_message(group),
+        )
+
     def test_chatbot_message_to_inbound_returns_none_when_empty(self):
         from flocks.channel.builtin.dingtalk.stream import (
             chatbot_message_to_inbound,
