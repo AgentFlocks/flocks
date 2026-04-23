@@ -511,6 +511,120 @@ async def test_onesec_edr_get_threat_disposals_uses_incident_and_sort_payload():
 
 
 @pytest.mark.asyncio
+async def test_onesec_edr_recent_incidents_rejects_window_over_24_hours():
+    tool = _load_tool("onesec_edr.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="edr_get_recent_incidents",
+        time_from=1699395200,
+        time_to=1700000000,
+    )
+
+    assert result.success is False
+    assert "仅支持最近 24 小时的数据" in result.error
+    assert "`edr_get_incidents`" in result.error
+
+
+@pytest.mark.asyncio
+async def test_onesec_edr_threat_timeline_requires_incident_id():
+    tool = _load_tool("onesec_edr.yaml")
+
+    paged_result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="edr_get_threat_timeline",
+        time_from=1699990000,
+        time_to=1700000000,
+        cur_page=1,
+        page_size=20,
+    )
+    recent_result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="edr_get_recent_threat_timeline",
+    )
+
+    assert paged_result.success is False
+    assert paged_result.error == (
+        "Missing required parameters for edr_get_threat_timeline: incident_id"
+    )
+    assert recent_result.success is False
+    assert recent_result.error == (
+        "Missing required parameters for edr_get_recent_threat_timeline: incident_id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_edr_threat_timeline_uses_incident_id_payload():
+    tool = _load_tool("onesec_edr.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "response_code": 200,
+                    "verbose_msg": "success",
+                    "data": {"total": 1, "cur_page": 1, "tbBaseLogList": [{"event_time": "1"}]},
+                }
+            ),
+            _FakeResponse(
+                json_payload={
+                    "response_code": 200,
+                    "verbose_msg": "success",
+                    "data": {"tbBaseLogList": [{"event_time": "1"}]},
+                }
+            ),
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        paged_result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="edr_get_threat_timeline",
+            incident_id="incident-1",
+            time_from=1699990000,
+            time_to=1700000000,
+            cur_page=1,
+            page_size=20,
+        )
+        recent_result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="edr_get_recent_threat_timeline",
+            incident_id="incident-1",
+            time_from=1699990000,
+            time_to=1700000000,
+        )
+
+    assert paged_result.success is True
+    assert recent_result.success is True
+
+    paged_call = fake_session.calls[0]
+    assert paged_call[1] == "https://console.onesec.net/api/saasedr/api/client/v1/getThreatTimeline"
+    assert paged_call[2]["json"] == {
+        "incident_id": "incident-1",
+        "time_from": 1699990000,
+        "time_to": 1700000000,
+        "page": {"cur_page": 1, "page_size": 20},
+    }
+
+    recent_call = fake_session.calls[1]
+    assert recent_call[1] == "https://console.onesec.net/api/saasedr/api/client/v1/getRecentThreatTimeline"
+    assert recent_call[2]["json"] == {
+        "incident_id": "incident-1",
+        "time_from": 1699990000,
+        "time_to": 1700000000,
+    }
+
+
+@pytest.mark.asyncio
 async def test_onesec_software_query_page_list_uses_sort_object_payload():
     tool = _load_tool("onesec_software.yaml")
     fake_session = _FakeSession(

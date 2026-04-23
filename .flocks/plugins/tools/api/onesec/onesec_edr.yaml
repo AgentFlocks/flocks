@@ -57,7 +57,7 @@ inputSchema:
           必填: 无
           常用: `time_from`、`time_to`、`params`
           ⚠️ 限制: 仅支持最近 24 小时的数据；超出范围将被服务器拒绝
-          ⚠️ 推荐: 通用查询请优先使用 `edr_get_incidents`
+          ⚠️ 推荐: 仅最近 24 小时增量才使用；若用户请求本周、最近 7 天或更长时间窗，应改用 `edr_get_incidents`
           是否任务型: 否
         - edr_get_endpoint_alerts
           用途: 分页查询终端告警日志（通用查询首选，适合历史回溯）
@@ -85,17 +85,17 @@ inputSchema:
           风险提示: 实网通常要求 `incident_id` 与 `umid` 一起传
           是否任务型: 否
         - edr_get_threat_timeline
-          用途: 分页查询威胁事件时间线（通用查询首选，适合历史回溯）
-          必填: 无
-          常用: `time_from`、`time_to`、`cur_page`、`page_size`
-          风险提示: 建议限定时间范围避免结果过大
+          用途: 分页查询指定威胁事件的时间线
+          必填: `incident_id`
+          常用: `incident_id`、`time_from`、`time_to`、`cur_page`、`page_size`
+          风险提示: 需要先拿到 `incident_id`；若只知道事件列表，应先调用 `edr_get_incidents`
           是否任务型: 否
         - edr_get_recent_threat_timeline
-          用途: 查询近期威胁事件时间线（仅适用于增量同步，有严格时间限制）
-          必填: 无
-          常用: `time_from`、`time_to`
+          用途: 查询指定威胁事件的近期时间线（仅适用于增量同步，有严格时间限制）
+          必填: `incident_id`
+          常用: `incident_id`、`time_from`、`time_to`
           ⚠️ 限制: 仅支持最近 24 小时的数据；超出范围将被服务器拒绝
-          ⚠️ 推荐: 通用查询请优先使用 `edr_get_threat_timeline`
+          ⚠️ 推荐: 需要先拿到 `incident_id`；若时间窗超过 24 小时或需要历史回溯，请改用 `edr_get_threat_timeline`
           是否任务型: 否
         - edr_get_ioc_list
           用途: 分页查询 IOC 名单

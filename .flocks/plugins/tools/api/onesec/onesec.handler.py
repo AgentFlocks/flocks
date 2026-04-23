@@ -612,6 +612,8 @@ def _validate_action_params(action: str, params: dict[str, Any]) -> Optional[str
         missing.extend(_require_fields(params, "iocs", "severity", "threatName"))
     elif action in {"edr_get_threat_disposals", "edr_get_recent_threat_disposals"}:
         missing.extend(_require_fields(params, "incident_id", "umid"))
+    elif action in {"edr_get_threat_timeline", "edr_get_recent_threat_timeline"}:
+        missing.extend(_require_fields(params, "incident_id"))
     elif action == "ops_edit_agent_info":
         if not _has_value(params.get("umid")) and not _has_value(params.get("mac")):
             missing.append("umid/mac")
@@ -763,12 +765,12 @@ ACTION_SPECS: dict[str, ActionSpec] = {
     "edr_get_threat_timeline": ActionSpec(
         "POST",
         "/api/saasedr/api/client/v1/getThreatTimeline",
-        lambda p: {**_pick(p, "time_from", "time_to"), "page": _page(p)},
+        lambda p: {**_pick(p, "incident_id", "time_from", "time_to"), "page": _page(p)},
     ),
     "edr_get_recent_threat_timeline": ActionSpec(
         "POST",
         "/api/saasedr/api/client/v1/getRecentThreatTimeline",
-        lambda p: _pick(p, "time_from", "time_to"),
+        lambda p: _pick(p, "incident_id", "time_from", "time_to"),
     ),
     "edr_get_ioc_list": ActionSpec(
         "POST",

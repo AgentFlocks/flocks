@@ -58,6 +58,11 @@ OneSEC 高频查询动作通常使用：
 | 查最近 24 小时增量 | `edr_get_recent_incidents` | 显式传 `time_from`、`time_to`，且跨度不超过 24 小时 | 仅增量同步 |
 | 未传时间兜底查询 | `edr_get_incidents` | 不传时间 | 返回范围由服务端默认窗口决定，不推荐依赖 |
 
+补充规则：
+
+- 若用户说“recent 事件”但时间范围是本周、最近 7 天、最近 30 天，agent 应主动改用 `edr_get_incidents`
+- `edr_get_recent_incidents` 只用于最近 24 小时增量，不要拿它做历史回溯
+
 ## 标准时间模板
 
 以下模板仅用于给 agent 组装请求时参考：
@@ -190,6 +195,13 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 - `edr_get_recent_threat_files`
 - `edr_get_recent_threat_activities`
 - `edr_get_recent_threat_timeline`
+
+其中时间线类 action 需要额外注意：
+
+- `edr_get_threat_timeline` 需要 `incident_id`
+- `edr_get_recent_threat_timeline` 也需要 `incident_id`
+- 如果还没有 `incident_id`，应先调用 `edr_get_incidents`
+- `edr_get_recent_threat_timeline` 仅适合最近 24 小时内的增量时间线查询
 
 ### 4. 查询威胁处置清单
 
