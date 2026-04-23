@@ -61,12 +61,12 @@ export default function LoginPage() {
         </button>
         <div className="space-y-2 text-xs text-gray-500 border-t border-gray-100 pt-3">
           <div>
-            管理员忘记账号名：请登录 Flocks 所在机器后执行
+            忘记账号名：请登录 Flocks 所在机器后执行
             {' '}
             <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin list-users</code>
           </div>
           <div>
-            管理员找回密码：确认账号名后执行
+            找回密码：确认账号名后执行
             {' '}
             <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin generate-one-time-password --username admin_user_name</code>
           </div>
