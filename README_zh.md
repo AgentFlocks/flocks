@@ -44,9 +44,9 @@ Flocks 支持两种部署方式，请**任选其一**：
 
 如果安装过程中自动安装 `npm` 失败，请手动安装 `npm`，并使用 `22.+` 或更高版本。
 
-#### 3.1.2 安装（二选一）
+#### 3.1.2 安装
 
-> 以下提供两种安装方式，**选择其中一种**完成安装后，继续执行 3.1.3 启动服务。
+> 支持以下安装方式，**选择其中一种**完成安装后，继续执行 3.1.3 启动服务。
 
 ---
 
@@ -78,13 +78,25 @@ cd flocks
 
 macOS / Linux
 ```bash
-./scripts/install_zh.sh
+sh ./scripts/install_zh.sh
 ```
 
 Windows PowerShell (Administrator)
 ```powershell
 powershell -ep Bypass -File .\scripts\install_zh.ps1
 ```
+
+
+**选项 C: Windows 安装包（EXE，BETA）** 
+
+Flocks 提供 **Windows x64** 下的 **Inno Setup 安装向导**（`.exe`）。请从 [GitHub Releases](https://github.com/AgentFlocks/flocks/releases) 页面下载对应版本的安装包。
+
+| 平台 | 下载文件 |
+| --- | --- |
+| Windows (x64) | `FlocksSetup-<tag>.exe` |
+
+安装完成后，可通过 **开始菜单** 或可选的 **桌面快捷方式** 启动；或在**新开**的终端中执行 `flocks start`，以便新的 `PATH` 等环境变量生效。更多说明见 [`packaging/README.md`](packaging/README.md)。
+
 
 ---
 

@@ -44,9 +44,9 @@ By default, the project install scripts will try to ensure the requirements abov
 
 If automatic `npm` installation fails during setup, please install `npm` manually and use version `22.+` or newer.
 
-#### 3.1.2 Install (choose one)
+#### 3.1.2 Install
 
-> The following provides two installation methods. **Choose one** to complete the installation, then proceed to 3.1.3 Start service.
+> The following installation options are supported. **Choose one** to complete the installation, then proceed to 3.1.3 Start service.
 
 ---
 
@@ -79,13 +79,25 @@ cd flocks
 
 macOS / Linux
 ```bash
-./scripts/install.sh
+sh ./scripts/install.sh
 ```
 
 Windows PowerShell (Administrator)
 ```powershell
 powershell -ep Bypass -File .\scripts\install.ps1
 ```
+
+---
+
+**Option C: Windows installer (EXE, BETA)**
+
+Flocks provides an **Inno Setup** wizard (`.exe`) for **Windows x64**. Download the installer for your version from the [GitHub Releases](https://github.com/AgentFlocks/flocks/releases) page.
+
+| Platform | Download |
+| --- | --- |
+| Windows (x64) | `FlocksSetup-<tag>.exe` |
+
+After installation, use the **Start menu** or optional **desktop** shortcut, or open a **new** terminal and run `flocks start` so updated `PATH` and related environment variables take effect. For more details, see [`packaging/README.md`](packaging/README.md).
 
 ---
 
