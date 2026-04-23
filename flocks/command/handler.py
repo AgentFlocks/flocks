@@ -6,7 +6,7 @@ Provides shared, code-driven handling for /help, /tools, /skills.
 
 from typing import Awaitable, Callable, Optional
 
-from flocks.command.command import Command
+from flocks.command.command import API_SURFACES, Command, CommandSurface
 from flocks.tool.registry import ToolRegistry
 from flocks.skill.skill import Skill
 
@@ -24,6 +24,7 @@ async def handle_slash_command(
     send_prompt: SendPrompt,
     clear_screen: Optional[ClearScreen] = None,
     restart_session: Optional[RestartSession] = None,
+    surface: Optional[CommandSurface] = None,
 ) -> bool:
     """
     Handle supported slash commands.
@@ -38,11 +39,18 @@ async def handle_slash_command(
     if not cmd_parts:
         return False
 
-    name = cmd_parts[0].lower()
+    resolved = Command.resolve(cmd_parts[0].lower())
+    if not resolved or resolved.execution_kind != "direct":
+        return False
+
+    name = resolved.name
     args = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
 
     if name == "help":
-        commands = Command.list()
+        if surface:
+            commands = Command.list(surface=surface)
+        else:
+            commands = Command.list_for_surfaces(API_SURFACES)
         lines = ["Available / commands:", ""]
         for command in commands:
             lines.append(f"- /{command.name}: {command.description}")

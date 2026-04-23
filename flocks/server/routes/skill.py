@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.skill.installer import SkillInstaller, SkillInstallResult, DepInstallResult
-from flocks.command.command import Command, CommandInfo
+from flocks.command.command import API_SURFACES, Command, CommandInfo
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -148,12 +148,38 @@ class DepInstallRequest(BaseModel):
 class CommandResponse(BaseModel):
     """Command response"""
     name: str = Field(..., description="Command name")
+    canonical_name: str = Field(..., description="Canonical command name")
     description: str = Field(..., description="Command description")
     template: str = Field(..., description="Command template")
     agent: Optional[str] = Field(None, description="Preferred agent")
     model: Optional[str] = Field(None, description="Preferred model")
     subtask: Optional[bool] = Field(None, description="Run as subtask")
     hidden: bool = Field(False, description="Hidden from UI")
+    aliases: List[str] = Field(default_factory=list, description="Alternate slash aliases")
+    visible_surfaces: List[str] = Field(default_factory=list, description="Surfaces where the command is visible")
+    execution_kind: str = Field(..., description="Execution mode: direct, llm, or session_control")
+    allow_attachments: bool = Field(False, description="Whether command accepts attachments")
+    requires_existing_session: bool = Field(True, description="Whether command requires an existing session")
+    channel_safe: bool = Field(False, description="Whether the command is safe to expose on channel surfaces")
+
+
+def _command_to_response(cmd: CommandInfo) -> CommandResponse:
+    return CommandResponse(
+        name=cmd.name,
+        canonical_name=cmd.canonical_name,
+        description=cmd.description,
+        template=cmd.template,
+        agent=cmd.agent,
+        model=cmd.model,
+        subtask=cmd.subtask,
+        hidden=cmd.hidden,
+        aliases=list(cmd.aliases),
+        visible_surfaces=list(cmd.visible_surfaces),
+        execution_kind=cmd.execution_kind,
+        allow_attachments=cmd.allow_attachments,
+        requires_existing_session=cmd.requires_existing_session,
+        channel_safe=cmd.channel_safe,
+    )
 
 
 # =============================================================================
@@ -507,19 +533,11 @@ async def list_commands():
     Returns list of all registered slash commands.
     """
     try:
-        commands = Command.list()
+        commands = Command.list_for_surfaces(API_SURFACES)
 
         result = []
         for cmd in commands:
-            result.append(CommandResponse(
-                name=cmd.name,
-                description=cmd.description,
-                template=cmd.template,
-                agent=cmd.agent,
-                model=cmd.model,
-                subtask=cmd.subtask,
-                hidden=cmd.hidden,
-            ))
+            result.append(_command_to_response(cmd))
 
         log.info("commands.list", {"count": len(result)})
         return result
@@ -540,15 +558,7 @@ async def get_command(name: str):
         if not cmd:
             raise HTTPException(status_code=404, detail=f"Command not found: {name}")
 
-        return CommandResponse(
-            name=cmd.name,
-            description=cmd.description,
-            template=cmd.template,
-            agent=cmd.agent,
-            model=cmd.model,
-            subtask=cmd.subtask,
-            hidden=cmd.hidden,
-        )
+        return _command_to_response(cmd)
     except HTTPException:
         raise
     except Exception as e:

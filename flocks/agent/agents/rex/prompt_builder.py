@@ -483,7 +483,7 @@ def _build_slash_commands_section() -> str:
     try:
         from flocks.command.command import Command
 
-        commands = Command.list()
+        commands = Command.list_for_surfaces(("webui", "tui"))
         if not commands:
             return ""
 

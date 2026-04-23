@@ -298,7 +298,13 @@ class CLISessionRunner:
             except EOFError:
                 break
     
-    async def _process_message(self, content: str) -> None:
+    async def _process_message(
+        self,
+        content: str,
+        *,
+        display_text: Optional[str] = None,
+        dispatch_commands: bool = True,
+    ) -> None:
         """Process a user message using unified SessionLoop."""
         stripped = content.strip()
         # Parse model: CLI flag > default_models.llm > config.model > env vars > defaults
@@ -331,26 +337,44 @@ class CLISessionRunner:
         agent_name = self.agent_name or await Agent.default_agent()
         agent = await Agent.get(agent_name) or await Agent.get("rex")
 
-        if stripped.startswith("/"):
-            from flocks.command.handler import handle_slash_command
+        if dispatch_commands and stripped.startswith("/"):
+            from flocks.input.dispatcher import dispatch_user_input
+            from flocks.input.events import UserInputEvent
+            from flocks.input.output import CliOutputSink
 
-            handled = await handle_slash_command(
-                stripped,
-                send_text=lambda text: self._emit_assistant_text(
-                    text,
-                    agent.name,
-                    provider_id,
-                    model_id,
-                ),
-                send_prompt=lambda prompt: self._process_message(prompt),
-                clear_screen=self._clear_screen,
-                restart_session=lambda: self._restart_session(
-                    agent.name,
-                    provider_id,
-                    model_id,
+            event = UserInputEvent(
+                source_type="cli",
+                sessionID=self._session.id,
+                text=stripped,
+                parts=[{"type": "text", "text": stripped}],
+                agent=agent.name,
+                model={"providerID": provider_id, "modelID": model_id},
+                display_text=stripped,
+            )
+            handled = await dispatch_user_input(
+                event,
+                CliOutputSink(
+                    "cli",
+                    direct_response=lambda _event, text: self._emit_assistant_text(
+                        text,
+                        agent.name,
+                        provider_id,
+                        model_id,
+                    ),
+                    run_llm=lambda _event, prompt, dispatch_display_text: self._process_message(
+                        prompt,
+                        display_text=dispatch_display_text,
+                        dispatch_commands=False,
+                    ),
+                    clear_screen=self._clear_screen,
+                    restart_session=lambda: self._restart_session(
+                        agent.name,
+                        provider_id,
+                        model_id,
+                    ),
                 ),
             )
-            if handled:
+            if handled.handled:
                 return
         
         # Check provider configuration
@@ -369,7 +393,7 @@ class CLISessionRunner:
         await Message.create(
             session_id=self._session.id,
             role=MessageRole.USER,
-            content=content,
+            content=display_text or content,
             agent=agent.name,
             model={"providerID": provider_id, "modelID": model_id},
         )

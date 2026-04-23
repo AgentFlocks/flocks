@@ -547,14 +547,7 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
-    } else if (
-      inputText.startsWith("/") &&
-      iife(() => {
-        const command = inputText.split(" ")[0].slice(1)
-        console.log(command)
-        return sync.data.command.some((x) => x.name === command)
-      })
-    ) {
+    } else if (inputText.startsWith("/")) {
       let [command, ...args] = inputText.split(" ")
       sdk.client.session.command({
         sessionID,

@@ -2399,6 +2399,211 @@ async def _resolve_model(request, agent, sessionID: str):
     return provider_id, model_id, source
 
 
+def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
+    return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
+
+
+def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> List[Dict[str, Any]]:
+    updated_parts: List[Dict[str, Any]] = []
+    replaced = False
+    for part in parts or []:
+        if part.get("type") == "text" and not replaced:
+            next_part = dict(part)
+            next_part["text"] = text
+            updated_parts.append(next_part)
+            replaced = True
+            continue
+        if part.get("type") == "text":
+            continue
+        updated_parts.append(dict(part))
+
+    if not replaced:
+        updated_parts.insert(0, {"type": "text", "text": text})
+    return updated_parts
+
+
+def _coerce_model_for_prompt_request(model: Any):
+    import types
+
+    if not model:
+        return None
+    if isinstance(model, str):
+        if "/" not in model:
+            return None
+        provider_id, model_id = model.split("/", 1)
+        return types.SimpleNamespace(providerID=provider_id, modelID=model_id)
+    if isinstance(model, dict):
+        provider_id = model.get("providerID") or model.get("provider_id")
+        model_id = model.get("modelID") or model.get("model_id")
+        if provider_id and model_id:
+            return types.SimpleNamespace(providerID=provider_id, modelID=model_id)
+        return None
+    return model
+
+
+def _build_prompt_request_from_event(event, prompt_text: str, display_text: Optional[str] = None):
+    import types
+
+    return types.SimpleNamespace(
+        parts=_replace_text_parts(event.parts, prompt_text),
+        display_text=display_text,
+        agent=event.agent,
+        model=_coerce_model_for_prompt_request(event.model),
+        variant=event.variant,
+        messageID=event.message_id,
+        mockReply=event.mock_reply,
+        noReply=event.no_reply,
+        tools=event.tools,
+        system=event.system,
+    )
+
+
+async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
+    import time as _time
+
+    from flocks.input.dispatcher import dispatch_user_input
+    from flocks.input.output import SSEOutputSink
+    from flocks.server.routes.event import publish_event
+    from flocks.session.message import Message, MessageRole
+    from flocks.utils.id import Identifier
+
+    agent_name = event.agent or "rex"
+
+    async def _create_user_message(
+        user_text: str,
+        model_info: Optional[Dict[str, str]] = None,
+        *,
+        agent_override: Optional[str] = None,
+    ) -> str:
+        now_ms = int(_time.time() * 1000)
+        user_msg_id = event.message_id or Identifier.create("message")
+        user_part_id = Identifier.create("part")
+        message_agent = agent_override or agent_name
+        await Message.create(
+            session_id=sessionID,
+            role=MessageRole.USER,
+            content=user_text,
+            id=user_msg_id,
+            time={"created": now_ms},
+            agent=message_agent,
+            **({"model": model_info} if model_info else {}),
+            part_id=user_part_id,
+        )
+        await publish_event("message.updated", {
+            "info": {
+                "id": user_msg_id,
+                "sessionID": sessionID,
+                "role": "user",
+                "time": {"created": now_ms},
+                "agent": message_agent,
+                **({"model": model_info} if model_info else {}),
+            }
+        })
+        await publish_event("message.part.updated", {
+            "part": {
+                "id": user_part_id,
+                "messageID": user_msg_id,
+                "sessionID": sessionID,
+                "type": "text",
+                "text": user_text,
+                "time": {"start": now_ms},
+            }
+        })
+        return user_msg_id
+
+    async def _publish_direct_response(output_event, text: str) -> None:
+        user_text = output_event.user_visible_text
+        parent_msg_id = await _create_user_message(user_text)
+        asst_now = int(_time.time() * 1000)
+        asst_msg_id = Identifier.ascending("message")
+        asst_part_id = Identifier.ascending("part")
+        await Message.create(
+            session_id=sessionID,
+            role=MessageRole.ASSISTANT,
+            content=text,
+            id=asst_msg_id,
+            time={"created": asst_now, "completed": asst_now},
+            parentID=parent_msg_id,
+            modelID="command",
+            providerID="builtin",
+            agent=agent_name,
+            finish="stop",
+            part_id=asst_part_id,
+        )
+        await publish_event("message.updated", {
+            "info": {
+                "id": asst_msg_id,
+                "sessionID": sessionID,
+                "role": "assistant",
+                "time": {"created": asst_now, "completed": asst_now},
+                "parentID": parent_msg_id,
+                "modelID": "command",
+                "providerID": "builtin",
+                "agent": agent_name,
+                "mode": agent_name,
+                "finish": "stop",
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
+            }
+        })
+        await publish_event("message.part.updated", {
+            "part": {
+                "id": asst_part_id,
+                "messageID": asst_msg_id,
+                "sessionID": sessionID,
+                "type": "text",
+                "text": text,
+                "time": {"start": asst_now, "end": asst_now},
+            }
+        })
+
+    async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+        request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
+        await _process_session_message(sessionID, session, request, working_directory)
+
+    async def _run_session_control(output_event, parsed) -> bool:
+        if parsed.canonical_name != "compact":
+            return False
+
+        focus_instruction = parsed.args.strip() or None
+        compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
+            sessionID,
+            requested_agent=output_event.agent,
+            requested_model=output_event.model,
+        )
+        parent_msg_id = await _create_user_message(
+            output_event.user_visible_text,
+            {
+                "providerID": compact_provider_id,
+                "modelID": compact_model_id,
+            },
+            agent_override=compact_agent,
+        )
+        await _run_session_compaction(
+            sessionID,
+            requested_agent=compact_agent,
+            explicit_provider_id=compact_provider_id,
+            explicit_model_id=compact_model_id,
+            parent_message_id=parent_msg_id,
+            auto=False,
+            event_publish_callback=publish_event,
+            focus_instruction=focus_instruction,
+        )
+        return True
+
+    sink = SSEOutputSink(
+        "webui",
+        direct_response=_publish_direct_response,
+        run_llm=_run_llm,
+        session_control=_run_session_control,
+    )
+    await dispatch_user_input(event, sink)
+
+
 @router.post(
     "/{sessionID}/prompt_async",
     status_code=status.HTTP_202_ACCEPTED,
@@ -2411,7 +2616,8 @@ async def send_session_message_async(
 ):
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
-    
+    from flocks.input.events import UserInputEvent
+
     session = await Session.get_by_id(sessionID)
     if not session:
         raise HTTPException(
@@ -2425,6 +2631,23 @@ async def send_session_message_async(
         "sessionID": sessionID,
         "directory": working_directory,
     })
+
+    event = UserInputEvent(
+        source_type="webui",
+        sessionID=sessionID,
+        text=_extract_text_from_parts(request.parts),
+        parts=[dict(part) for part in request.parts],
+        agent=request.agent,
+        model=request.model.model_dump(by_alias=True) if request.model else None,
+        variant=request.variant,
+        display_text=None,
+        messageID=request.messageID,
+        noReply=request.noReply,
+        mockReply=request.mockReply,
+        tools=request.tools,
+        system=request.system,
+        working_directory=working_directory,
+    )
     
     # Use the same synchronous processing path as send_session_message
     # but run it as a background task via asyncio.ensure_future
@@ -2444,9 +2667,7 @@ async def send_session_message_async(
             await Instance.provide(
                 directory=working_directory,
                 init=instance_bootstrap,
-                fn=lambda: _process_session_message(
-                    sessionID, session, request, working_directory
-                ),
+                fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
             )
             log.info("session.prompt_async.processing_complete", {
                 "sessionID": sessionID,
@@ -2521,12 +2742,9 @@ async def send_session_command(sessionID: str, request: CommandRequest):
     that is replaced as soon as the real SSE event arrives.
     """
     import asyncio
-    import time as _time
     import os
-    from flocks.session.message import Message, MessageRole
-    from flocks.server.routes.event import publish_event
-    from flocks.utils.id import Identifier
-    from flocks.command.handler import handle_slash_command
+
+    from flocks.input.events import UserInputEvent
 
     session = await Session.get_by_id(sessionID)
     if not session:
@@ -2536,228 +2754,41 @@ async def send_session_command(sessionID: str, request: CommandRequest):
         )
 
     working_directory = session.directory or os.getcwd()
-    agent_name = request.agent or "rex"
 
     # The text the user typed, shown verbatim in the chat bubble
     slash_text = f"/{request.command}"
     if request.arguments:
         slash_text += f" {request.arguments}"
 
-    # ── Helper: create user message + publish SSE ───────────────────────────
-    async def _create_user_message(
-        model_info: Optional[Dict[str, str]] = None,
-        *,
-        agent_override: Optional[str] = None,
-    ) -> str:
-        now_ms = int(_time.time() * 1000)
-        user_msg_id = Identifier.create("message")
-        user_part_id = Identifier.create("part")
-        message_agent = agent_override or agent_name
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.USER,
-            content=slash_text,
-            id=user_msg_id,
-            time={"created": now_ms},
-            agent=message_agent,
-            **({"model": model_info} if model_info else {}),
-            part_id=user_part_id,
-        )
-        await publish_event("message.updated", {
-            "info": {
-                "id": user_msg_id,
-                "sessionID": sessionID,
-                "role": "user",
-                "time": {"created": now_ms},
-                "agent": message_agent,
-                **({"model": model_info} if model_info else {}),
-            }
-        })
-        await publish_event("message.part.updated", {
-            "part": {
-                "id": user_part_id,
-                "messageID": user_msg_id,
-                "sessionID": sessionID,
-                "type": "text",
-                "text": slash_text,
-                "time": {"start": now_ms},
-            }
-        })
-        return user_msg_id
-
-    # ── Helper: publish a direct (non-LLM) assistant message ────────────────
-    async def _publish_direct_response(text: str, parent_msg_id: str) -> None:
-        asst_now = int(_time.time() * 1000)
-        asst_msg_id = Identifier.ascending("message")
-        asst_part_id = Identifier.ascending("part")
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.ASSISTANT,
-            content=text,
-            id=asst_msg_id,
-            time={"created": asst_now, "completed": asst_now},
-            parentID=parent_msg_id,
-            modelID="command",
-            providerID="builtin",
-            agent=agent_name,
-            finish="stop",
-            part_id=asst_part_id,
-        )
-        await publish_event("message.updated", {
-            "info": {
-                "id": asst_msg_id,
-                "sessionID": sessionID,
-                "role": "assistant",
-                "time": {"created": asst_now, "completed": asst_now},
-                "parentID": parent_msg_id,
-                "modelID": "command",
-                "providerID": "builtin",
-                "agent": agent_name,
-                "mode": agent_name,
-                "finish": "stop",
-                "tokens": {"input": 0, "output": 0, "reasoning": 0,
-                           "cache": {"read": 0, "write": 0}},
-            }
-        })
-        await publish_event("message.part.updated", {
-            "part": {
-                "id": asst_part_id,
-                "messageID": asst_msg_id,
-                "sessionID": sessionID,
-                "type": "text",
-                "text": text,
-                "time": {"start": asst_now, "end": asst_now},
-            }
-        })
-
-    # ── Helper: run a prompt through the LLM (session loop) ─────────────────
-    async def _run_via_llm(prompt_text: str, display_text: str | None = None) -> None:
-        """
-        Route a prompt through the LLM pipeline via _process_session_message.
-        This creates its own user message, so call ONLY when no user message
-        has been created yet for this command invocation.
-
-        display_text: optional override for the user-visible message bubble.
-        When provided (e.g. "/tools create foo"), the user message stored in
-        the DB and shown in the chat shows display_text, while the LLM still
-        receives the full prompt_text (e.g. the tool-builder skill content).
-        """
-        import types
-        from flocks.project.instance import Instance
-        from flocks.project.bootstrap import instance_bootstrap
-
-        cmd_request = types.SimpleNamespace(
-            parts=[{"type": "text", "text": prompt_text}],
-            display_text=display_text,
+    # ── Background task ──────────────────────────────────────────────────────
+    async def _handle_command() -> None:
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID=sessionID,
+            text=slash_text,
+            parts=[dict(part) for part in (request.parts or [])],
             agent=request.agent,
             model=request.model,
             variant=request.variant,
-            messageID=None,
-            mockReply=None,
-            noReply=False,
+            display_text=slash_text,
+            messageID=request.messageID,
+            working_directory=working_directory,
         )
-
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _process_session_message(
-                sessionID, session, cmd_request, working_directory
-            ),
-        )
-
-    async def _run_compaction_command(
-        parent_msg_id: str,
-        *,
-        agent_for_compaction: Optional[str],
-        provider_id: str,
-        model_id: str,
-        focus_instruction: Optional[str] = None,
-    ) -> None:
-        from flocks.project.bootstrap import instance_bootstrap
-        from flocks.project.instance import Instance
-
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _run_session_compaction(
-                sessionID,
-                requested_agent=agent_for_compaction,
-                explicit_provider_id=provider_id,
-                explicit_model_id=model_id,
-                parent_message_id=parent_msg_id,
-                auto=False,
-                event_publish_callback=publish_event,
-                focus_instruction=focus_instruction,
-            ),
-        )
-
-    # ── Background task ──────────────────────────────────────────────────────
-    async def _handle_command() -> None:
-        result_texts: list[str] = []
-        llm_prompts: list[str] = []
-
-        async def _send_text(text: str) -> None:
-            result_texts.append(text)
-
-        async def _send_prompt(prompt: str) -> None:
-            llm_prompts.append(prompt)
 
         try:
-            if request.command.lower() == "compact":
-                # Manual compaction trigger.  ``request.arguments`` is
-                # treated as a free-form "focus instruction" appended to
-                # the summarisation prompt — e.g. ``/compact focus on
-                # unresolved decisions``.  Empty arguments preserve the
-                # legacy default-prompt behaviour.
-                focus_instruction = request.arguments.strip() or None
-                compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
-                    sessionID,
-                    requested_agent=request.agent,
-                    requested_model=request.model,
-                )
-                user_msg_id = await _create_user_message(
-                    {
-                        "providerID": compact_provider_id,
-                        "modelID": compact_model_id,
-                    },
-                    agent_override=compact_agent,
-                )
-                await _run_compaction_command(
-                    user_msg_id,
-                    agent_for_compaction=compact_agent,
-                    provider_id=compact_provider_id,
-                    model_id=compact_model_id,
-                    focus_instruction=focus_instruction,
-                )
-                return
+            from flocks.project.instance import Instance
+            from flocks.project.bootstrap import instance_bootstrap
 
-            handled = await handle_slash_command(
-                slash_text,
-                send_text=_send_text,
-                send_prompt=_send_prompt,
+            await Instance.provide(
+                directory=working_directory,
+                init=instance_bootstrap,
+                fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
             )
-
-            if handled:
-                if llm_prompts:
-                    # Command collected a prompt to run through LLM
-                    # (e.g., "/tools create <requirement>" → tool-builder skill).
-                    # display_text=slash_text ensures the user bubble shows the
-                    # original slash command, while the LLM receives the full
-                    # skill/tool prompt.
-                    await _run_via_llm(llm_prompts[0], display_text=slash_text)
-                elif result_texts:
-                    # Direct text response — create the user+assistant pair now
-                    user_msg_id = await _create_user_message()
-                    await _publish_direct_response("\n".join(result_texts), user_msg_id)
-                # else: handled but produced nothing (rare edge case)
-            else:
-                # Not handled directly (e.g. /plan, /ask, /init, /compact …)
-                # _process_session_message creates the user message; pass the raw
-                # slash text so Rex can interpret it via its slash-command knowledge.
-                await _run_via_llm(slash_text)
 
         except Exception as exc:
             import traceback
+            from flocks.server.routes.event import publish_event
+
             log.error("session.command.error", {
                 "sessionID": sessionID,
                 "command": request.command,
