@@ -1,11 +1,11 @@
 name: onesec_software
 description: >
   OneSEC software grouped tool. Use the `action` parameter to access installed
-  software inventory APIs. Credentials note: enter `api_key|secret` in the API
-  Key field of the service configuration.
+  software inventory APIs. Configure the OneSEC service with separate API Key
+  and Secret credentials.
 description_cn: >
-  OneSEC 软件管理分组工具。通过 `action` 参数调用软件资产相关接口。配置时请在
-  服务的 API Key 输入框填写 `api_key|secret`。
+  OneSEC 软件管理分组工具。通过 `action` 参数调用软件资产相关接口。请在 OneSEC
+  服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -20,7 +20,7 @@ inputSchema:
         - software_query_page_list
           用途: 分页查询已安装软件列表
           必填: 无
-          常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`name`、`publisher`、`agent_group_list`
+          常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`fuzzy`、`condition`、`agent_group_list`
           风险提示: 分页接口通常要求排序对象，建议显式传 `sort_by` + `sort_order`
           是否任务型: 否
         - software_query_agent_list
