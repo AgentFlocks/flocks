@@ -154,9 +154,9 @@ export default function Layout() {
       ],
     },
     {
-      name: '管理',
+      name: t('management'),
       items: [
-        { name: '账号管理', href: '/config', icon: UserCog },
+        { name: t('accountManagement'), href: '/config', icon: UserCog },
       ],
     },
   ];

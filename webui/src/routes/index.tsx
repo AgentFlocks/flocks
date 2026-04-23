@@ -1,7 +1,9 @@
 import { Suspense, lazy } from 'react';
 import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
+import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
 import SessionPage from '@/pages/Session';
 import AgentPage from '@/pages/Agent';
@@ -33,6 +35,7 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 }
 
 export function Routes() {
+  const { t } = useTranslation('auth');
   const { loading, bootstrapped, error, user, refresh } = useAuth();
 
   if (loading) {
@@ -41,10 +44,10 @@ export function Routes() {
 
   if (error) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+      <AuthLayout>
         <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4">
           <div>
-            <h1 className="text-xl font-semibold text-gray-900">无法确认当前系统状态</h1>
+            <h1 className="text-xl font-semibold text-gray-900">{t('error.systemUnknownTitle')}</h1>
             <p className="text-sm text-gray-500 mt-1">{error}</p>
           </div>
           <button
@@ -52,10 +55,10 @@ export function Routes() {
             onClick={() => void refresh()}
             className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800"
           >
-            重试
+            {t('error.retry')}
           </button>
         </div>
-      </div>
+      </AuthLayout>
     );
   }
 

@@ -1,16 +1,18 @@
 import { UserCog } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { useAuth } from '@/contexts/AuthContext';
 import AdminUsersPage from '@/pages/AdminUsers';
 
 export default function ConfigPage() {
+  const { t } = useTranslation('auth');
   const { logout } = useAuth();
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title="账号管理"
-        description="管理本地账号与密码。"
+        title={t('admin.pageTitle')}
+        description={t('admin.pageDescription')}
         icon={<UserCog className="w-8 h-8" />}
         action={(
           <button
@@ -18,7 +20,7 @@ export default function ConfigPage() {
             onClick={() => void logout()}
             className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
           >
-            退出登录
+            {t('actions.logout')}
           </button>
         )}
       />

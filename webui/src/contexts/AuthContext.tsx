@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import i18n from '@/i18n';
 import { authApi, type LocalUser } from '@/api/auth';
 
 interface AuthContextValue {
@@ -40,12 +41,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           return;
         }
         setUser(null);
-        setError(err?.response?.data?.message || err?.response?.data?.detail || err?.message || '无法获取登录状态，请稍后重试');
+        setError(
+          err?.response?.data?.message ||
+            err?.response?.data?.detail ||
+            err?.message ||
+            i18n.t('auth:error.defaultMeError'),
+        );
       }
     } catch (err: any) {
       setBootstrapped(null);
       setUser(null);
-      setError(err?.response?.data?.message || err?.response?.data?.detail || err?.message || '无法连接后端，请稍后重试');
+      setError(
+        err?.response?.data?.message ||
+          err?.response?.data?.detail ||
+          err?.message ||
+          i18n.t('auth:error.defaultBackendError'),
+      );
     } finally {
       setLoading(false);
     }

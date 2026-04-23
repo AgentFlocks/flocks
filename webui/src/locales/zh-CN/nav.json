@@ -12,6 +12,8 @@
   "tools": "工具清单",
   "models": "模型清单",
   "channels": "通道配置",
+  "management": "管理",
+  "accountManagement": "账号管理",
   "expandNav": "展开导航",
   "collapseNav": "收起导航",
   "switchLanguage": "切换语言",

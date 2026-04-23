@@ -7,6 +7,7 @@ import {
   MoreHorizontal, PencilLine, Download,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import i18n from '@/i18n';
 import { useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -172,7 +173,7 @@ export default function SessionPage() {
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
     if (target?.canDelete === false) {
-      toast.error(t('deleteFailed'), '你没有权限删除该会话');
+      toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
       return;
     }
     if (!confirm(t('confirmDelete'))) return;
