@@ -92,12 +92,17 @@ async def lifespan(app: FastAPI):
     log.info("auth.initialized")
 
     # Best-effort migration: old sessions default to admin ownership.
+    # The migration itself is idempotent (guarded by a persisted marker),
+    # but we still skip loading users when the marker is already set
+    # to avoid unnecessary DB + session scans on every startup.
     try:
-        if await AuthService.has_users():
-            users = await AuthService.list_users()
-            admin = next((u for u in users if u.role == "admin"), None)
-            if admin:
-                await AuthService.migrate_legacy_sessions_to_admin(admin.id)
+        marker = await Storage.get("auth:migration:legacy_session_owner_to_admin", dict)
+        if not (marker and marker.get("done")):
+            if await AuthService.has_users():
+                users = await AuthService.list_users()
+                admin = next((u for u in users if u.role == "admin"), None)
+                if admin:
+                    await AuthService.migrate_legacy_sessions_to_admin(admin.id)
     except Exception as e:
         log.warning("auth.legacy_sessions.migration_failed", {"error": str(e)})
     
@@ -506,9 +511,13 @@ async def auth_guard_middleware(request: Request, call_next):
             content={"error": "AuthError", "message": exc.detail},
         )
     except Exception as exc:
+        log.error("auth.middleware.unexpected", {
+            "path": request.url.path,
+            "error": repr(exc),
+        })
         return JSONResponse(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"error": "AuthError", "message": str(exc)},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
         )
 
     try:

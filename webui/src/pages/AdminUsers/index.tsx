@@ -13,7 +13,7 @@ function formatDateTime(value?: string | null) {
 }
 
 export default function AdminUsersPage() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const toast = useToast();
   const confirm = useConfirm();
   const [resetCredential, setResetCredential] = useState<{
@@ -23,9 +23,7 @@ export default function AdminUsersPage() {
 
   const closeResetCredentialModal = () => {
     setResetCredential(null);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new Event('flocks:auth-expired'));
-    }
+    void logout();
   };
 
   const resetOwnPassword = async () => {
@@ -45,9 +43,7 @@ export default function AdminUsersPage() {
         });
       } else {
         toast.success('密码已重置');
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new Event('flocks:auth-expired'));
-        }
+        await logout();
       }
     } catch (err: any) {
       toast.error('重置失败', err?.response?.data?.detail || err?.message || '重置失败');

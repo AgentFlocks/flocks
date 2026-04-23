@@ -8,7 +8,6 @@ import AgentPage from '@/pages/Agent';
 import LoginPage from '@/pages/Login';
 import SetupAdminPage from '@/pages/SetupAdmin';
 import ForceChangePasswordPage from '@/pages/ForceChangePassword';
-import AdminUsersPage from '@/pages/AdminUsers';
 import { useAuth } from '@/contexts/AuthContext';
 
 const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
@@ -106,15 +105,13 @@ export function Routes() {
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
         
-        {/* 系统配置 */}
-        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>}>
-          <Route index element={<Navigate to="accounts" replace />} />
-          <Route path="accounts" element={<LazyRoute><AdminUsersPage /></LazyRoute>} />
-        </Route>
+        {/* 账号管理 */}
+        <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
+        <Route path="config/*" element={<Navigate to="/config" replace />} />
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
-        <Route path="admin/users" element={<Navigate to="/config/accounts" replace />} />
+        <Route path="admin/users" element={<Navigate to="/config" replace />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>

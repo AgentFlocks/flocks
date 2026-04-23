@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Users,
+  MoreHorizontal, PencilLine, Download,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
@@ -186,24 +186,6 @@ export default function SessionPage() {
       toast.error(t('deleteFailed'), err.message);
     }
   }, [selectedSessionId, removeSession, toast, t]);
-
-  const handleShareSession = useCallback(async (sessionId: string) => {
-    try {
-      await sessionApi.share(sessionId);
-      await refetchSessions();
-    } catch (err: any) {
-      toast.error(t('shareFailed', '共享失败'), err.message);
-    }
-  }, [refetchSessions, t, toast]);
-
-  const handleUnshareSession = useCallback(async (sessionId: string) => {
-    try {
-      await sessionApi.unshare(sessionId);
-      await refetchSessions();
-    } catch (err: any) {
-      toast.error(t('unshareFailed', '停止共享失败'), err.message);
-    }
-  }, [refetchSessions, t, toast]);
 
   const handleStartRename = useCallback((sessionId: string, currentTitle: string) => {
     setOpenMenuSessionId(null);
@@ -465,12 +447,6 @@ export default function SessionPage() {
                       ) : (
                         <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
                           <span className="truncate">{session.title}</span>
-                          {session.visibility === 'team_shared' && (
-                            <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 flex-shrink-0">
-                              <Users className="w-3 h-3" />
-                              Shared
-                            </span>
-                          )}
                         </h3>
                       )}
                     </div>
@@ -520,26 +496,6 @@ export default function SessionPage() {
                             <span>{t('downloadJson')}</span>
                           </button>
                           <div className="mx-2.5 my-1 border-t border-gray-100" />
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setOpenMenuSessionId(null);
-                              if (session.visibility === 'team_shared') {
-                                void handleUnshareSession(session.id);
-                              } else {
-                                void handleShareSession(session.id);
-                              }
-                            }}
-                            disabled={
-                              session.visibility === 'team_shared'
-                                ? session.canUnshare === false
-                                : session.canShare === false
-                            }
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-blue-700 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Users className="w-3.5 h-3.5" />
-                            <span>{session.visibility === 'team_shared' ? '停止共享' : '共享给本地用户'}</span>
-                          </button>
                           <button
                             onClick={(e) => {
                               e.stopPropagation();

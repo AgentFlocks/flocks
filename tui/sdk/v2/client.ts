@@ -1,6 +1,6 @@
 export * from "./gen/types.gen.js"
 
-import { readFileSync } from "fs"
+import { readFileSync, statSync } from "fs"
 import os from "os"
 import path from "path"
 import { createClient } from "./gen/client/client.gen.js"
@@ -10,16 +10,29 @@ export { type Config as FlocksClientConfig, FlocksClient }
 
 const API_TOKEN_SECRET_ID = "server_api_token"
 
+let tokenCache: { path: string; mtimeMs: number; value: string | undefined } | undefined
+
 function getStoredApiToken(): string | undefined {
   if (typeof process === "undefined") return undefined
   const configDir = process.env.FLOCKS_CONFIG_DIR || path.join(os.homedir(), ".flocks", "config")
   const secretFile = path.join(configDir, ".secret.json")
+
   try {
+    const stat = statSync(secretFile)
+    if (
+      tokenCache &&
+      tokenCache.path === secretFile &&
+      tokenCache.mtimeMs === stat.mtimeMs
+    ) {
+      return tokenCache.value
+    }
     const parsed = JSON.parse(readFileSync(secretFile, "utf-8")) as Record<string, unknown>
-    const value = parsed[API_TOKEN_SECRET_ID]
-    if (typeof value !== "string") return undefined
-    return value.trim() || undefined
+    const raw = parsed[API_TOKEN_SECRET_ID]
+    const value = typeof raw === "string" && raw.trim() ? raw.trim() : undefined
+    tokenCache = { path: secretFile, mtimeMs: stat.mtimeMs, value }
+    return value
   } catch {
+    tokenCache = undefined
     return undefined
   }
 }

@@ -1,7 +1,7 @@
-import { Outlet } from 'react-router-dom';
-import { Settings } from 'lucide-react';
+import { UserCog } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import { useAuth } from '@/contexts/AuthContext';
+import AdminUsersPage from '@/pages/AdminUsers';
 
 export default function ConfigPage() {
   const { logout } = useAuth();
@@ -9,9 +9,9 @@ export default function ConfigPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="系统配置"
-        description="在这里管理账号与密码。"
-        icon={<Settings className="w-8 h-8" />}
+        title="账号管理"
+        description="管理本地账号与密码。"
+        icon={<UserCog className="w-8 h-8" />}
         action={(
           <button
             type="button"
@@ -23,10 +23,8 @@ export default function ConfigPage() {
         )}
       />
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-        <div className="p-6">
-          <Outlet />
-        </div>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+        <AdminUsersPage />
       </div>
     </div>
   );

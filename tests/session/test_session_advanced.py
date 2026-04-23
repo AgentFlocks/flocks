@@ -3,7 +3,6 @@ Tests for advanced Session operations in flocks/session/session.py
 
 Covers:
 - Session.archive() / unarchive()
-- Session.share() / unshare() / get_share()
 - Session.fork()
 - Session.children()
 - Session.set_revert() / clear_revert()
@@ -19,7 +18,6 @@ from flocks.session.session import (
     Session,
     SessionInfo,
     SessionRevert,
-    SessionShare,
     SessionTime,
 )
 
@@ -68,54 +66,6 @@ class TestArchiveUnarchive:
     async def test_unarchive_nonexistent_returns_false(self):
         result = await Session.unarchive("proj_x", "ses_does_not_exist")
         assert result is False
-
-
-# ---------------------------------------------------------------------------
-# Share / Unshare
-# ---------------------------------------------------------------------------
-
-class TestShareUnshare:
-    @pytest.mark.asyncio
-    async def test_share_creates_share_info(self):
-        session = await _create(project_id="proj_share_1")
-        share_info = await Session.share("proj_share_1", session.id)
-        assert share_info is not None
-        assert isinstance(share_info, SessionShare)
-        assert share_info.url
-        assert len(share_info.url) > 5
-        assert share_info.secret
-        assert len(share_info.secret) >= 16
-
-    @pytest.mark.asyncio
-    async def test_shared_session_has_share_field(self):
-        session = await _create(project_id="proj_share_2")
-        await Session.share("proj_share_2", session.id)
-        updated = await Session.get("proj_share_2", session.id)
-        assert updated is not None
-        assert updated.share is not None
-
-    @pytest.mark.asyncio
-    async def test_unshare_clears_share_info(self):
-        session = await _create(project_id="proj_share_3")
-        await Session.share("proj_share_3", session.id)
-        await Session.unshare("proj_share_3", session.id)
-        updated = await Session.get("proj_share_3", session.id)
-        assert updated is not None
-        assert updated.share is None
-
-    @pytest.mark.asyncio
-    async def test_get_share_returns_share_info(self):
-        session = await _create(project_id="proj_share_4")
-        await Session.share("proj_share_4", session.id)
-        share = await Session.get_share("proj_share_4", session.id)
-        assert share is not None
-        assert share.url
-
-    @pytest.mark.asyncio
-    async def test_get_share_without_share_returns_none(self):
-        session = await _create(project_id="proj_share_5")
-        share = await Session.get_share("proj_share_5", session.id)
-        assert share is None
 
 
 # ---------------------------------------------------------------------------
@@ -259,21 +209,8 @@ class TestPermissionRule:
 
 
 # ---------------------------------------------------------------------------
-# SessionShare / SessionRevert models
+# SessionRevert model
 # ---------------------------------------------------------------------------
-
-class TestSessionShare:
-    def test_url_required(self):
-        with pytest.raises(Exception):
-            SessionShare()
-
-    def test_secret_optional(self):
-        share = SessionShare(url="https://share.example.com/abc")
-        assert share.secret is None
-
-    def test_with_secret(self):
-        share = SessionShare(url="https://share.example.com/abc", secret="mysecret")
-        assert share.secret == "mysecret"
 
 
 class TestSessionRevert:

@@ -7,7 +7,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
-from flocks.auth.service import AuthService
+from flocks.auth.service import AuthService, TEMP_PASSWORD_TTL_HOURS
 from flocks.server.auth import (
     clear_session_cookie,
     require_user,
@@ -145,7 +145,7 @@ async def reset_own_password(response: Response, request: Request) -> ResetOwnPa
     from datetime import UTC, datetime, timedelta
 
     new_password = secrets.token_urlsafe(10)
-    expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+    expires_at = (datetime.now(UTC) + timedelta(hours=TEMP_PASSWORD_TTL_HOURS)).isoformat()
     try:
         await AuthService.set_password(
             target_user_id=user.id,

@@ -22,6 +22,13 @@ from flocks.utils.log import Log
 log = Log.create(service="auth.service")
 
 
+# Hours that an admin-issued one-time / reset password remains valid.
+# Centralize here so CLI, HTTP routes and the service itself stay in sync.
+TEMP_PASSWORD_TTL_HOURS: int = 24
+# Days that a browser login session cookie stays valid.
+SESSION_TTL_DAYS: int = 7
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -62,8 +69,12 @@ class AuthService:
 
     _initialized: bool = False
     _initialized_db_path: Optional[str] = None
-    _session_ttl_days: int = 7
-    _temp_password_ttl_hours: int = 24
+    _session_ttl_days: int = SESSION_TTL_DAYS
+    _temp_password_ttl_hours: int = TEMP_PASSWORD_TTL_HOURS
+    # Once the system has any user, it can't transition back to the
+    # "no users" state (there is no full-wipe flow). Cache the True result
+    # so the hot path in apply_auth_for_request avoids hitting SQLite.
+    _has_users_cached: bool = False
 
     @classmethod
     async def init(cls) -> None:
@@ -108,23 +119,23 @@ class AuthService:
         cls._initialized_db_path = str(db_path)
         log.info("auth.initialized")
 
+    # Patterns matching tables from the removed cloud-account subsystem;
+    # any table matching these patterns is dropped on first init so new
+    # installs and upgrades converge on the same schema without having to
+    # enumerate every historical table name.
+    _LEGACY_TABLE_PATTERNS: Tuple[str, ...] = ("cloud\\_%",)
+
     @classmethod
     async def _drop_legacy_tables(cls, db: aiosqlite.Connection) -> None:
-        removed_tables = ("_".join(("cloud", "binding")),)
-        for table_name in removed_tables:
+        for pattern in cls._LEGACY_TABLE_PATTERNS:
             async with db.execute(
-                """
-                SELECT name
-                FROM sqlite_master
-                WHERE type = 'table' AND name = ?
-                """,
-                (table_name,),
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? ESCAPE '\\'",
+                (pattern,),
             ) as cursor:
-                row = await cursor.fetchone()
-            if not row:
-                continue
-            await db.execute(f"DROP TABLE IF EXISTS {table_name}")
-            log.info("auth.legacy_table.dropped", {"table": table_name})
+                rows = await cursor.fetchall()
+            for (table_name,) in rows:
+                await db.execute(f"DROP TABLE IF EXISTS {table_name}")
+                log.info("auth.legacy_table.dropped", {"table": table_name})
 
     @classmethod
     def _hash_password(cls, password: str) -> str:
@@ -147,12 +158,17 @@ class AuthService:
 
     @classmethod
     async def has_users(cls) -> bool:
+        if cls._has_users_cached:
+            return True
         await cls.init()
         db_path = Storage.get_db_path()
         async with aiosqlite.connect(db_path) as db:
             async with db.execute("SELECT COUNT(1) FROM users") as cursor:
                 row = await cursor.fetchone()
-                return bool(row and row[0] > 0)
+                result = bool(row and row[0] > 0)
+        if result:
+            cls._has_users_cached = True
+        return result
 
     @classmethod
     async def get_bootstrap_status(cls) -> Dict[str, bool]:
@@ -216,6 +232,7 @@ class AuthService:
                 ),
             )
             await db.commit()
+        cls._has_users_cached = True
         return await cls.get_user_by_id(user_id)  # type: ignore[return-value]
 
     @classmethod
@@ -502,7 +519,6 @@ class AuthService:
                     session_id=session.id,
                     owner_user_id=admin_user_id,
                     owner_username=admin_username,
-                    visibility="private",
                 )
                 migrated += 1
             await Storage.set(

@@ -5,6 +5,7 @@ FastAPI auth dependencies and cookie helpers.
 from __future__ import annotations
 
 import hmac
+import os
 from typing import Optional
 
 from fastapi import HTTPException, Request, Response, status
@@ -16,38 +17,31 @@ from flocks.security import get_secret_manager
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
 
-PROTECTED_PREFIXES = (
-    "/api",
-    "/session",
-    "/provider",
-    "/config",
-    "/project",
-    "/file",
-    "/mcp",
-    "/agent",
-    "/app/agent",
-    "/pty",
-    "/lsp",
-    "/path",
-    "/vcs",
-    "/find",
-    "/permission",
-    "/question",
-    "/tui",
-    "/global",
-    "/channel",
-    "/auth",
-    "/admin",
-    "/event",
-    "/logs",
-    "/update",
-    "/workspace",
+# Paths that never require auth. Everything else is protected by default.
+PUBLIC_PATHS = frozenset({
+    "/",
+    "/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/favicon.ico",
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/bootstrap-status",
+    "/api/auth/bootstrap-admin",
+    "/auth/login",
+    "/auth/bootstrap-status",
+    "/auth/bootstrap-admin",
+})
+
+# Static asset prefixes never require auth (WebUI / favicon / etc.)
+PUBLIC_PREFIXES = (
+    "/assets/",
+    "/static/",
 )
 
 
 def should_use_secure_cookie(request: Request) -> bool:
-    import os
-
     forced = os.getenv("FLOCKS_COOKIE_SECURE", "").strip().lower()
     if forced in {"1", "true", "yes", "on"}:
         return True
@@ -105,51 +99,49 @@ def require_admin(request: Request) -> AuthUser:
 
 
 def auth_middleware_exempt(path: str) -> bool:
-    public_prefixes = {
-        "/health",
-        "/api/health",
-        "/docs",
-        "/redoc",
-        "/openapi.json",
-        "/api/auth/login",
-        "/api/auth/bootstrap-status",
-        "/api/auth/bootstrap-admin",
-        "/auth/login",
-        "/auth/bootstrap-status",
-        "/auth/bootstrap-admin",
-    }
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in public_prefixes)
+    """Return True if the path is public (no auth required)."""
+    if path in PUBLIC_PATHS:
+        return True
+    return any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES)
+
+
+_PASSWORD_RESET_ALLOWED = frozenset({
+    "/api/auth/me",
+    "/api/auth/change-password",
+    "/api/auth/logout",
+    "/auth/me",
+    "/auth/change-password",
+    "/auth/logout",
+})
 
 
 def password_reset_exempt(path: str) -> bool:
-    allowed_paths = {
-        "/api/auth/me",
-        "/api/auth/change-password",
-        "/api/auth/logout",
-        "/auth/me",
-        "/auth/change-password",
-        "/auth/logout",
-    }
-    return any(path == allowed or path.startswith(allowed + "/") for allowed in allowed_paths)
-
-
-def is_protected_backend_path(path: str) -> bool:
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in PROTECTED_PREFIXES)
+    return path in _PASSWORD_RESET_ALLOWED
 
 
 def _is_browser_like_request(request: Request) -> bool:
     """
     Identify browser-originated traffic (must keep strict login checks).
 
-    We rely on standard browser headers, then fall back to User-Agent.
+    Modern browsers always send `sec-fetch-*` fetch-metadata headers on
+    same-origin and cross-origin fetches. We rely on those, plus `origin`
+    (covers older Chromium/Safari on some same-origin cases) and `referer`.
+    This is strict: non-browser clients (curl/SDKs/TUI) don't send any of these.
     """
     headers = request.headers
-    if headers.get("origin"):
-        return True
     if headers.get("sec-fetch-site") or headers.get("sec-fetch-mode") or headers.get("sec-fetch-dest"):
         return True
-    user_agent = (headers.get("user-agent") or "").lower()
-    return "mozilla/" in user_agent
+    if headers.get("origin"):
+        return True
+    return False
+
+
+def _loopback_hosts() -> frozenset[str]:
+    hosts = {"127.0.0.1", "::1", "localhost"}
+    # FastAPI TestClient reports client host as "testclient"; only trust it in tests.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        hosts.add("testclient")
+    return frozenset(hosts)
 
 
 def _is_loopback_direct_request(request: Request) -> bool:
@@ -159,7 +151,7 @@ def _is_loopback_direct_request(request: Request) -> bool:
     if request.headers.get("x-forwarded-for"):
         return False
     client_host = request.client.host if request.client else None
-    return client_host in {"127.0.0.1", "::1", "localhost", "testclient"}
+    return client_host in _loopback_hosts()
 
 
 def _read_api_token_from_request(request: Request) -> Optional[str]:
@@ -221,11 +213,10 @@ async def apply_auth_for_request(request: Request):
     """
     Resolve user from cookie and bind context var.
     Returns (response_if_blocked, token, user).
-    """
-    if not is_protected_backend_path(request.url.path):
-        token = set_current_auth_user(None)
-        return None, token, None
 
+    Policy: every path is protected by default; only whitelisted public paths
+    (see `PUBLIC_PATHS` / `PUBLIC_PREFIXES`) bypass auth.
+    """
     if auth_middleware_exempt(request.url.path):
         token = set_current_auth_user(None)
         return None, token, None

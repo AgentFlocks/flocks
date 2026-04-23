@@ -7,7 +7,6 @@ Based on Flocks' ported src/session/index.ts
 
 import contextvars
 import re
-import secrets
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -15,6 +14,7 @@ from pydantic import BaseModel, Field, ConfigDict
 # Sentinel for explicitly setting a field to None via Session.update()
 _UNSET = object()
 
+from flocks.auth.context import get_current_auth_user
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -37,12 +37,6 @@ class SessionChangeStats(BaseModel):
 
 # Backwards-compatible alias
 SessionSummary = SessionChangeStats
-
-
-class SessionShare(BaseModel):
-    """Session share information"""
-    url: str = Field(..., description="Share URL")
-    secret: Optional[str] = Field(None, description="Share secret for management")
 
 
 class SessionRevert(BaseModel):
@@ -100,17 +94,14 @@ class SessionInfo(BaseModel):
     # Session hierarchy
     parent_id: Optional[str] = Field(None, alias="parentID", description="Parent session for branching")
 
-    # Local account ownership and visibility
+    # Local account ownership (single-admin mode: session is private to its owner;
+    # admins can see all sessions; there is no cross-user sharing).
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
     owner_username: Optional[str] = Field(None, alias="ownerUsername", description="Owner local username")
-    visibility: str = Field("private", description="Session visibility: private or team_shared")
-    shared_by: Optional[str] = Field(None, alias="sharedBy", description="User id who enabled sharing")
-    shared_at: Optional[int] = Field(None, alias="sharedAt", description="Share timestamp (ms)")
-    
-    # Summary and share
+
+    # File change summary
     summary: Optional[SessionChangeStats] = Field(None, description="File change summary")
-    share: Optional[SessionShare] = Field(None, description="Share information")
-    
+
     # Revert state
     revert: Optional[SessionRevert] = Field(None, description="Revert state")
     
@@ -154,43 +145,17 @@ class Session:
 
     @staticmethod
     def _is_accessible_to_current_user(session: SessionInfo) -> bool:
-        """
-        Check session visibility against request auth context.
+        """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
+        from flocks.session.policy import SessionPolicy
 
-        If no auth context exists (CLI/internal runtime), keep backward-compatible behavior.
-        """
-        try:
-            from flocks.auth.context import get_current_auth_user
-
-            auth_user = get_current_auth_user()
-        except Exception:
-            auth_user = None
-
-        if auth_user is None:
-            return True
-        if auth_user.role == "admin":
-            return True
-
-        if session.visibility == "team_shared":
-            return True
-
-        # private session: owner-only
-        if Session._is_owned_by_auth_user(session, auth_user):
-            return True
-
-        # Legacy sessions without owner should not be exposed to members.
-        return False
+        return SessionPolicy.can_read(session)
 
     @staticmethod
     def _is_owned_by_auth_user(session: SessionInfo, auth_user) -> bool:
-        """Match session ownership by stable user id or retained username."""
-        if auth_user is None:
-            return False
-        if session.owner_user_id and session.owner_user_id == auth_user.id:
-            return True
-        if session.owner_username and session.owner_username == auth_user.username:
-            return True
-        return False
+        """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
+        from flocks.session.policy import SessionPolicy
+
+        return SessionPolicy.is_owner(session, auth_user)
 
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
@@ -308,15 +273,10 @@ class Session:
 
         # Bind ownership from current auth context unless explicitly provided.
         if "owner_user_id" not in kwargs or "owner_username" not in kwargs:
-            try:
-                from flocks.auth.context import get_current_auth_user
-
-                current_user = get_current_auth_user()
-                if current_user:
-                    kwargs.setdefault("owner_user_id", current_user.id)
-                    kwargs.setdefault("owner_username", current_user.username)
-            except Exception:
-                pass
+            current_user = get_current_auth_user()
+            if current_user:
+                kwargs.setdefault("owner_user_id", current_user.id)
+                kwargs.setdefault("owner_username", current_user.username)
         
         session = SessionInfo(
             project_id=project_id,
@@ -552,8 +512,6 @@ class Session:
             "parent_id": "parentID",
             "owner_user_id": "ownerUserID",
             "owner_username": "ownerUsername",
-            "shared_by": "sharedBy",
-            "shared_at": "sharedAt",
         }
         
         # Update fields.
@@ -571,17 +529,12 @@ class Session:
                 continue
 
             if value is not None:
-                # Handle nested updates for summary, share, revert, time
+                # Handle nested updates for summary, revert, time
                 if key == "summary" and isinstance(value, dict):
                     if update_data.get("summary"):
                         update_data["summary"].update(value)
                     else:
                         update_data["summary"] = value
-                elif key == "share" and isinstance(value, dict):
-                    if update_data.get("share"):
-                        update_data["share"].update(value)
-                    else:
-                        update_data["share"] = value
                 elif key == "revert" and isinstance(value, dict):
                     update_data["revert"] = value
                 else:
@@ -631,11 +584,7 @@ class Session:
         children = await cls.children(project_id, session_id)
         for child in children:
             await cls.delete(project_id, child.id)
-        
-        # Unshare if shared
-        if session.share:
-            await cls.unshare(project_id, session_id)
-        
+
         # Soft delete
         await cls.update(project_id, session_id, status="deleted")
         cls._id_index.pop(session_id, None)
@@ -760,102 +709,7 @@ class Session:
         })
         
         return True
-    
-    @classmethod
-    async def share(cls, project_id: str, session_id: str) -> Optional[SessionShare]:
-        """
-        Create a share link for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            ShareInfo or None if failed
-        """
-        # In production, this would create an actual share URL
-        # For now, create a placeholder
-        share_info = SessionShare(
-            url=f"https://share.example.com/s/{session_id[:8]}",
-            secret=secrets.token_urlsafe(12),
-        )
-        
-        await cls.update(project_id, session_id, share=share_info.model_dump())
-        shared_by = None
-        try:
-            from flocks.auth.context import get_current_auth_user
 
-            current_user = get_current_auth_user()
-            shared_by = current_user.id if current_user else None
-        except Exception:
-            shared_by = None
-
-        await cls.update(
-            project_id,
-            session_id,
-            visibility="team_shared",
-            shared_by=shared_by,
-            shared_at=int(datetime.now().timestamp() * 1000),
-        )
-        
-        # Store share secret separately
-        await Storage.set(f"share:{session_id}", share_info.model_dump(), "share")
-        
-        log.info("session.shared", {
-            "id": session_id,
-            "url": share_info.url,
-        })
-        
-        return share_info
-    
-    @classmethod
-    async def unshare(cls, project_id: str, session_id: str) -> bool:
-        """
-        Remove share link for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            True if unshared
-        """
-        try:
-            await Storage.delete(f"share:{session_id}")
-            await cls.update(
-                project_id,
-                session_id,
-                share=_UNSET,
-                visibility="private",
-                shared_by=_UNSET,
-                shared_at=_UNSET,
-            )
-            
-            log.info("session.unshared", {"id": session_id})
-            return True
-        except Exception as e:
-            log.warn("session.unshare.error", {"error": str(e)})
-            return False
-    
-    @classmethod
-    async def get_share(cls, project_id: str, session_id: str) -> Optional[SessionShare]:
-        """
-        Get share info for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            ShareInfo or None
-        """
-        try:
-            data = await Storage.get(f"share:{session_id}")
-            return SessionShare(**data) if data else None
-        except Exception as _e:
-            log.debug("session.share.get_failed", {"session_id": session_id, "error": str(_e)})
-            return None
-    
     @classmethod
     async def children(cls, project_id: str, parent_id: str) -> List[SessionInfo]:
         """

@@ -17,7 +17,6 @@ class TestIdentifierCompatibility:
             "message": "msg",
             "permission": "per",
             "question": "que",
-            "audit": "aud",
             "user": "usr",
             "part": "prt",
             "pty": "pty",

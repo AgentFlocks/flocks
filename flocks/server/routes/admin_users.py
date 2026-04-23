@@ -9,7 +9,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from flocks.auth.service import AuthService
+from flocks.auth.service import AuthService, TEMP_PASSWORD_TTL_HOURS
 from flocks.server.auth import require_admin
 
 router = APIRouter()
@@ -54,7 +54,7 @@ async def reset_user_password(user_id: str, payload: ResetPasswordRequest, reque
     if payload.force_reset:
         from datetime import UTC, datetime, timedelta
 
-        expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
+        expires_at = (datetime.now(UTC) + timedelta(hours=TEMP_PASSWORD_TTL_HOURS)).isoformat()
 
     try:
         await AuthService.set_password(

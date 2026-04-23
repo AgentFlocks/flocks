@@ -4,6 +4,15 @@ import pytest
 from httpx import AsyncClient
 
 
+@pytest.fixture(autouse=True)
+async def _bootstrap_admin():
+    """Every test in this module needs a bootstrapped admin user."""
+    from flocks.auth.service import AuthService
+
+    if not await AuthService.has_users():
+        await AuthService.bootstrap_admin(username="admin", password="Password123!")
+
+
 @pytest.mark.asyncio
 async def test_admin_routes_list_users(client: AsyncClient):
     response = await client.get("/api/admin/users")

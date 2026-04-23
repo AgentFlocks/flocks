@@ -31,6 +31,11 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
     Storage._db_path = None
     Storage._initialized = False
 
+    from flocks.auth.service import AuthService
+    AuthService._initialized = False
+    AuthService._initialized_db_path = None
+    AuthService._has_users_cached = False
+
     original_cache = dict(Instance._cache)
     Instance._cache.clear()
     for key in list(_state_manager._states.keys()):
@@ -59,6 +64,9 @@ async def _server_isolated_env(tmp_path: Path, monkeypatch):
     Config._cached_config = None
     Storage._db_path = None
     Storage._initialized = False
+    AuthService._initialized = False
+    AuthService._initialized_db_path = None
+    AuthService._has_users_cached = False
     Instance._cache.clear()
     Instance._cache.update(original_cache)
     for key in list(_state_manager._states.keys()):

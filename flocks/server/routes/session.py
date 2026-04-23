@@ -14,7 +14,9 @@ from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.auth.context import get_current_auth_user
 from flocks.session.session import Session, SessionInfo as SessionModel
+from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.server.auth import require_user
@@ -97,7 +99,6 @@ class SessionResponse(BaseModel):
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
-    share: Optional[Dict[str, Any]] = Field(None, description="Share information")
     title: str = Field(..., description="Session title")
     version: str = Field("1.0.0", description="Session version")
     time: SessionTime = Field(..., description="Session timestamps")
@@ -105,12 +106,7 @@ class SessionResponse(BaseModel):
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
-    visibility: str = Field("private", description="Session visibility: private or team_shared")
-    sharedBy: Optional[str] = Field(None, description="User id who shared this session")
-    sharedAt: Optional[int] = Field(None, description="Share timestamp")
-    canShare: bool = Field(False, description="Whether current user can share this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
-    canUnshare: bool = Field(False, description="Whether current user can stop sharing this session")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -120,20 +116,8 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     Note: agent/model/provider are NOT included at session level.
     They are retrieved from the latest user message in the session.
     """
-    current_user = None
-    try:
-        from flocks.auth.context import get_current_auth_user
-
-        current_user = get_current_auth_user()
-    except Exception:
-        current_user = None
-
-    is_admin = bool(current_user and current_user.role == "admin")
-    is_owner = bool(current_user and Session._is_owned_by_auth_user(session, current_user))
-    can_delete = is_admin or is_owner
-    # Share/unshare are intentionally restricted to the session creator/owner only.
-    can_share = is_owner
-    can_unshare = is_owner and session.visibility == "team_shared"
+    current_user = get_current_auth_user()
+    can_delete = SessionPolicy.can_delete(session, current_user)
 
     return SessionResponse(
         id=session.id,
@@ -150,17 +134,11 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
             archived=session.time.archived,
         ),
         summary=session.summary.model_dump() if session.summary else None,
-        share=session.share.model_dump() if session.share else None,
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
         ownerUserID=session.owner_user_id,
-        visibility=session.visibility,
-        sharedBy=session.shared_by,
-        sharedAt=session.shared_at,
-        canShare=can_share,
         canDelete=can_delete,
-        canUnshare=can_unshare,
     )
 
 
@@ -168,18 +146,6 @@ def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
     return bool(metadata.get("hideFromSessionManager"))
-
-
-def _can_manage_shared_session(current_user, session: SessionModel) -> bool:
-    if current_user.role == "admin":
-        return True
-    if Session._is_owned_by_auth_user(session, current_user):
-        return True
-    return bool(session.shared_by and current_user.id == session.shared_by)
-
-
-def _can_toggle_session_share(current_user, session: SessionModel) -> bool:
-    return Session._is_owned_by_auth_user(session, current_user)
 
 
 # =============================================================================
@@ -472,12 +438,8 @@ async def delete_session(sessionID: str, request: Request) -> bool:
             detail=f"Session {sessionID} not found"
         )
     
-    if session.visibility == "team_shared":
-        if not _can_manage_shared_session(current_user, session):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或共享发起人可删除共享会话")
-    else:
-        if current_user.role != "admin" and not Session._is_owned_by_auth_user(session, current_user):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
+    if not SessionPolicy.can_delete(session, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
 
     await Session.delete(session.project_id, sessionID)
     log.info("session.deleted", {"session_id": sessionID})
@@ -665,31 +627,6 @@ async def fork_session(sessionID: str, request: Optional[ForkRequest] = None) ->
     return _session_to_response(forked)
 
 
-@router.post(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Share session",
-    description="Create a shareable link for the session",
-)
-async def share_session(sessionID: str, request: Request) -> SessionResponse:
-    """Share session"""
-    current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    if not _can_toggle_session_share(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可共享会话")
-
-    await Session.share(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    log.info("session.shared", {"session_id": sessionID})
-    return _session_to_response(updated)
-
-
 @router.get(
     "/{sessionID}/diff",
     response_model=List[FileDiff],
@@ -718,31 +655,6 @@ async def get_session_diff(
     except Exception as e:
         log.warn("session.diff.read_error", {"sessionID": sessionID, "error": str(e)})
         return []
-
-
-@router.delete(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Unshare session",
-    description="Remove the shareable link for the session",
-)
-async def unshare_session(sessionID: str, request: Request) -> SessionResponse:
-    """Unshare session"""
-    current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    if not _can_toggle_session_share(current_user, session):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话创建者可停止共享")
-
-    await Session.unshare(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    log.info("session.unshared", {"session_id": sessionID})
-    return _session_to_response(updated)
 
 
 class SummarizeRequest(BaseModel):

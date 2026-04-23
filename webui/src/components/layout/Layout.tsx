@@ -16,7 +16,7 @@ import {
   FolderOpen,
   Sparkles,
   ArrowUpCircle,
-  Settings,
+  UserCog,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -154,9 +154,9 @@ export default function Layout() {
       ],
     },
     {
-      name: '系统配置',
+      name: '管理',
       items: [
-        { name: '系统配置', href: '/config', icon: Settings },
+        { name: '账号管理', href: '/config', icon: UserCog },
       ],
     },
   ];
