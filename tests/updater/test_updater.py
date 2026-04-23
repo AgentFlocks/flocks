@@ -289,6 +289,28 @@ def test_build_uv_sync_env_returns_none_on_windows(
     assert updater._build_uv_sync_env() is None
 
 
+def test_build_frontend_subprocess_env_prepends_bundled_node_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node_home = tmp_path / "tools" / "node"
+    node_home.mkdir(parents=True)
+    (node_home / "node.exe").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    result = updater._build_frontend_subprocess_env(
+        npm_registry="https://registry.npmmirror.com/"
+    )
+
+    assert result is not None
+    assert result["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert result["PATH"].split(os.pathsep)[0] == str(node_home)
+
+
 def test_upgrade_page_html_contains_marker_and_version() -> None:
     html = updater._upgrade_page_html("2026.3.31.1")
 
@@ -1449,7 +1471,13 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
-    run_calls: list[list[str]] = []
+    node_home = tmp_path / "tools" / "node"
+    node_home.mkdir(parents=True)
+    (node_home / "node.exe").write_text("", encoding="utf-8")
+    bundled_npm = node_home / "npm.cmd"
+    bundled_npm.write_text("", encoding="utf-8")
+
+    run_calls: list[tuple[list[str], dict[str, str] | None]] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -1467,7 +1495,7 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
         return archive_path
 
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        run_calls.append(list(cmd))
+        run_calls.append((list(cmd), env))
         return 0, "", ""
 
     async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
@@ -1480,21 +1508,32 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
-    monkeypatch.setattr(updater, "_resolve_npm_executable", lambda: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd")
+    monkeypatch.setattr(updater, "_resolve_npm_executable", lambda: str(bundled_npm))
     monkeypatch.setattr(updater, "_find_executable", lambda name: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\uv\uv.exe" if name == "uv" else None)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
 
     assert progresses[-1].stage == "done"
-    assert run_calls[:2] == [
-        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "install"],
-        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "run", "build"],
+    assert [call[0] for call in run_calls[:2]] == [
+        [str(bundled_npm), "install"],
+        [str(bundled_npm), "run", "build"],
     ]
+    install_env = run_calls[0][1]
+    build_env = run_calls[1][1]
+    assert install_env is not None
+    assert build_env is not None
+    assert install_env["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert build_env["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert install_env["PATH"].split(os.pathsep)[0] == str(node_home)
+    assert build_env["PATH"].split(os.pathsep)[0] == str(node_home)
 
 
 @pytest.mark.asyncio

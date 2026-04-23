@@ -279,6 +279,23 @@ def _build_uv_sync_env() -> dict[str, str] | None:
     return {"PATH": os.pathsep.join([current_path] + missing)}
 
 
+def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[str, str] | None:
+    """Build supplemental env vars for frontend npm commands."""
+    env: dict[str, str] = {}
+    if npm_registry:
+        env["npm_config_registry"] = npm_registry
+
+    node_dir = _bundled_node_install_dir()
+    if node_dir is not None:
+        node_bin = str(node_dir if sys.platform == "win32" else node_dir / "bin")
+        current_path = os.environ.get("PATH", "")
+        path_entries = current_path.split(os.pathsep) if current_path else []
+        if node_bin not in path_entries:
+            env["PATH"] = node_bin if not current_path else node_bin + os.pathsep + current_path
+
+    return env or None
+
+
 # ------------------------------------------------------------------ #
 # Async subprocess helpers
 # ------------------------------------------------------------------ #
@@ -1879,7 +1896,7 @@ async def perform_update(
         npm = _resolve_npm_executable()
         if npm:
             yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
-            npm_env = {"npm_config_registry": profile.npm_registry} if profile.npm_registry else None
+            npm_env = _build_frontend_subprocess_env(npm_registry=profile.npm_registry)
             code, _, err = await _run_async(
                 [npm, "install"],
                 cwd=staged_webui_dir,

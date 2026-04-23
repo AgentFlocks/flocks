@@ -944,6 +944,22 @@ function Get-CommandPath {
     return $null
 }
 
+function Resolve-ExplicitBrowserPath {
+    $browserOverride = $env:FLOCKS_BROWSER_EXECUTABLE_OVERRIDE
+    if ([string]::IsNullOrWhiteSpace($browserOverride)) {
+        return $null
+    }
+
+    if (Test-Path $browserOverride) {
+        return $browserOverride
+    }
+
+    Write-Warning (Get-LocalizedText `
+        -English "The explicit browser override path does not exist and will be ignored: $browserOverride" `
+        -Chinese "显式指定的浏览器路径不存在，已忽略：$browserOverride")
+    return $null
+}
+
 function Find-SystemBrowserPath {
     $candidates = @(
         "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
@@ -1046,7 +1062,14 @@ function Install-ChromeForTesting {
 }
 
 function Configure-AgentBrowserBrowser {
-    $browserPath = Find-SystemBrowserPath
+    $browserPath = Resolve-ExplicitBrowserPath
+
+    if (-not [string]::IsNullOrWhiteSpace($browserPath)) {
+        Write-Info "Using explicit browser override. agent-browser will use: $browserPath"
+    }
+    else {
+        $browserPath = Find-SystemBrowserPath
+    }
 
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
         $browserPath = Resolve-ChromeForTestingPath -BrowserDir (Get-ChromeForTestingDir)
