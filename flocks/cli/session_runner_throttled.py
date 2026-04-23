@@ -7,6 +7,7 @@ while maintaining smoothness through throttling.
 To use: Replace the _on_text_delta implementation in session_runner.py
 """
 
+import asyncio
 import time
 from rich.text import Text
 

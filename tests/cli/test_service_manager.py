@@ -314,19 +314,11 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
 
 
-def test_is_expected_health_response_accepts_known_payload_shapes() -> None:
-    api_health = httpx.Response(200, json={"status": "healthy", "version": "v1"})
-    global_health = httpx.Response(200, json={"healthy": True, "version": "v1"})
-
-    assert service_manager._is_expected_health_response(api_health) is True
-    assert service_manager._is_expected_health_response(global_health) is True
-
-
-def test_wait_for_http_rejects_non_flocks_health_payload(monkeypatch) -> None:
+def test_wait_for_http_rejects_unreachable_responses(monkeypatch) -> None:
     responses = iter([
-        httpx.Response(404, json={"detail": "not found"}),
-        httpx.Response(200, json={"status": "starting"}),
-        httpx.Response(200, text="ok"),
+        httpx.Response(503, json={"detail": "not found"}),
+        httpx.Response(500, json={"status": "starting"}),
+        httpx.Response(502, text="bad gateway"),
     ])
 
     class _FakeClient:
@@ -352,14 +344,13 @@ def test_wait_for_http_rejects_non_flocks_health_payload(monkeypatch) -> None:
             "后端服务",
             attempts=3,
             delay=0.0,
-            validator=service_manager._is_expected_health_response,
         )
 
 
-def test_wait_for_http_accepts_flocks_health_response(monkeypatch) -> None:
+def test_wait_for_http_accepts_reachable_json_response(monkeypatch) -> None:
     responses = iter([
         httpx.Response(503, json={"detail": "warming"}),
-        httpx.Response(200, json={"status": "healthy", "version": "v1"}),
+        httpx.Response(200, json={"name": "Flocks API", "status": "running"}),
     ])
 
     class _FakeClient:
@@ -384,8 +375,72 @@ def test_wait_for_http_accepts_flocks_health_response(monkeypatch) -> None:
         "后端服务",
         attempts=2,
         delay=0.0,
-        validator=service_manager._is_expected_health_response,
     )
+
+
+def test_wait_for_http_accepts_running_status_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(200, json={"name": "Flocks API", "status": "starting"}),
+        httpx.Response(200, json={"name": "Flocks API", "status": "running"}),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000"],
+        "后端服务",
+        attempts=2,
+        delay=0.0,
+        validator=service_manager._is_running_status_response,
+    )
+
+
+def test_wait_for_http_rejects_missing_running_status_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(200, json={"name": "Flocks API", "status": "starting"}),
+        httpx.Response(200, text="<html>ok</html>"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager.wait_for_http(
+            ["http://127.0.0.1:8000"],
+            "后端服务",
+            attempts=2,
+            delay=0.0,
+            validator=service_manager._is_running_status_response,
+        )
 
 
 def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
@@ -439,7 +494,6 @@ def test_wait_for_http_ignores_proxy_environment(monkeypatch) -> None:
         "后端服务",
         attempts=1,
         delay=0.0,
-        validator=service_manager._is_expected_health_response,
     )
 
     assert captured == {"timeout": 2.0, "trust_env": False}
@@ -695,7 +749,18 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
     monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
-    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+    probe_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda urls, name, attempts=30, delay=1.0, validator=None: probe_calls.append({
+            "urls": list(urls),
+            "name": name,
+            "attempts": attempts,
+            "delay": delay,
+            "validator": validator,
+        }),
+    )
     monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(
         service_manager,
@@ -726,9 +791,16 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
         "--port",
         "8000",
     )
+    assert probe_calls == [{
+        "urls": ["http://127.0.0.1:8000"],
+        "name": "后端服务",
+        "attempts": 30,
+        "delay": 1.0,
+        "validator": service_manager._is_running_status_response,
+    }]
 
 
-def test_start_backend_runs_legacy_migration_before_launch(monkeypatch, tmp_path: Path) -> None:
+def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
         run_dir=tmp_path / "run",
@@ -741,28 +813,81 @@ def test_start_backend_runs_legacy_migration_before_launch(monkeypatch, tmp_path
     paths.run_dir.mkdir(parents=True)
     paths.log_dir.mkdir(parents=True)
     console = DummyConsole()
-    call_order: list[str] = []
+    stop_calls: list[tuple[int, Path, str]] = []
 
     monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
     monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
-    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(
         service_manager,
-        "_run_legacy_task_migration",
-        lambda root, _console: call_order.append(f"migrate:{root}"),
+        "resolve_flocks_cli_command",
+        lambda root=None: ["python", "-m", "flocks.cli.main"],
     )
     monkeypatch.setattr(
         service_manager,
         "_spawn_process",
-        lambda *_args, **_kwargs: (call_order.append("spawn"), SimpleNamespace(pid=2468))[1],
+        lambda *_args, **_kwargs: SimpleNamespace(pid=2468),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("后端服务 启动超时，请检查日志。")),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda port, pid_file, name, _console: stop_calls.append((port, pid_file, name)),
+    )
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager.start_backend(service_manager.ServiceConfig(), console)
+
+    assert stop_calls == [(8000, paths.backend_pid, "后端")]
+
+
+def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_flocks_cli_command",
+        lambda root=None: ["python", "-m", "flocks.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=2468),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: None,
     )
 
     service_manager.start_backend(service_manager.ServiceConfig(), console)
 
-    assert call_order == [f"migrate:{tmp_path}", "spawn"]
+    record = service_manager.read_runtime_record(paths.backend_pid)
+    assert record is not None
+    assert record.pid == 2468
+    assert console.messages[-1] == f"[flocks] 后端已启动，日志: {paths.backend_log}"
 
 
 def test_build_frontend_env_uses_backend_host_and_port() -> None:
