@@ -364,6 +364,7 @@ class BackgroundManager:
                     agent=input_data.agent,
                     model=(input_data.model or {}).get("modelID"),
                     provider=(input_data.model or {}).get("providerID"),
+                    model_pinned=bool((input_data.model or {}).get("providerID") and (input_data.model or {}).get("modelID")),
                     category=input_data.category or "task",
                 )
                 task.session_id = child_session.id

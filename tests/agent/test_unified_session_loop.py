@@ -141,3 +141,142 @@ class TestResolveModel:
                 assert provider_id == "test-provider"
                 assert model_id == "test-model"
                 assert source == "env_default"
+
+    @pytest.mark.asyncio
+    async def test_pinned_session_model_beats_agent_and_config(self):
+        """An explicit session pin should win over agent/config defaults."""
+        from types import SimpleNamespace
+        from flocks.server.routes.session import _resolve_model
+
+        request = MagicMock()
+        request.model = None
+
+        agent = MagicMock()
+        agent.name = "rex"
+        agent.model = {"providerID": "openai", "modelID": "gpt-4o"}
+
+        pinned_session = SimpleNamespace(
+            provider="anthropic",
+            model="claude-sonnet-4-5",
+            model_pinned=True,
+            parent_id=None,
+        )
+
+        with patch("flocks.server.routes.session.Session.get_by_id", AsyncMock(return_value=pinned_session)), \
+             patch("flocks.storage.storage.Storage.read", AsyncMock(return_value={})):
+            provider_id, model_id, source = await _resolve_model(request, agent, "test-session")
+
+        assert provider_id == "anthropic"
+        assert model_id == "claude-sonnet-4-5"
+        assert source == "session"
+
+    @pytest.mark.asyncio
+    async def test_unpinned_session_model_falls_through_to_config(self):
+        """Legacy session.provider/model should not override the new default."""
+        from types import SimpleNamespace
+        from flocks.server.routes.session import _resolve_model
+
+        request = MagicMock()
+        request.model = None
+
+        agent = MagicMock()
+        agent.name = "rex"
+        agent.model = None
+
+        legacy_session = SimpleNamespace(
+            provider="anthropic",
+            model="old-sticky-model",
+            model_pinned=False,
+            parent_id=None,
+        )
+
+        with patch("flocks.server.routes.session.Session.get_by_id", AsyncMock(return_value=legacy_session)), \
+             patch("flocks.storage.storage.Storage.read", AsyncMock(return_value={})), \
+             patch("flocks.config.config.Config.resolve_default_llm", AsyncMock(return_value={
+                 "provider_id": "openai",
+                 "model_id": "gpt-4o",
+             })), \
+             patch("flocks.server.routes.session._get_last_model", AsyncMock(return_value=None)):
+            provider_id, model_id, source = await _resolve_model(request, agent, "test-session")
+
+        assert provider_id == "openai"
+        assert model_id == "gpt-4o"
+        assert source == "config"
+
+    @pytest.mark.asyncio
+    async def test_process_session_message_pins_explicit_request_model(self, monkeypatch):
+        """Explicit request.model should persist an explicit session pin."""
+        from types import SimpleNamespace
+        from flocks.server.routes import session as session_routes
+
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "hello"}],
+            model=session_routes.ModelInfo(
+                providerID="anthropic",
+                modelID="claude-sonnet-4-5",
+            ),
+            noReply=True,
+        )
+        session = SimpleNamespace(
+            id="ses_test",
+            project_id="proj",
+            directory="/tmp/project",
+            agent="rex",
+            provider=None,
+            model=None,
+            model_pinned=False,
+        )
+
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.default_agent",
+            AsyncMock(return_value="rex"),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        update_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                provider="anthropic",
+                model="claude-sonnet-4-5",
+                model_pinned=True,
+                id=session.id,
+                project_id=session.project_id,
+                directory=session.directory,
+                agent=session.agent,
+            )
+        )
+        monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+        monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr("flocks.tool.registry.ToolRegistry.init", lambda: None)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=SimpleNamespace(id="msg_user_1")),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            AsyncMock(),
+        )
+
+        result = await session_routes._process_session_message(
+            "ses_test",
+            session,
+            request,
+            "/tmp/project",
+        )
+
+        assert result["role"] == "user"
+        update_mock.assert_awaited_once_with(
+            "proj",
+            "ses_test",
+            provider="anthropic",
+            model="claude-sonnet-4-5",
+            model_pinned=True,
+        )

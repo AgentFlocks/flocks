@@ -438,6 +438,7 @@ async def delegate_task_tool(
         agent=agent_to_use,
         model=(category_model or {}).get("modelID"),
         provider=(category_model or {}).get("providerID"),
+        model_pinned=bool((category_model or {}).get("providerID") and (category_model or {}).get("modelID")),
         permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
         category="task",
     )

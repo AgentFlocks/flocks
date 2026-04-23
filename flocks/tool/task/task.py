@@ -317,6 +317,7 @@ async def task_tool(
             agent=normalized,
             model=child_model,
             provider=child_provider,
+            model_pinned=bool(child_provider and child_model),
             permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
             category="task",
         )
