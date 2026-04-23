@@ -173,8 +173,6 @@
     "downloadGuide": "下载配置指引",
     "clientIdHint": "钉钉应用的 Client ID（即 AppKey）",
     "clientSecretHint": "钉钉应用的 Client Secret（即 AppSecret）",
-    "gatewayToken": "网关令牌",
-    "gatewayTokenHint": "OpenClaw 网关鉴权令牌（选填）",
     "optional": "选填",
     "behavior": "消息行为",
     "behaviorDesc": "配置消息路由和用户白名单。",
