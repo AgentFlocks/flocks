@@ -275,6 +275,18 @@ def _coerce_params(
     """
     param_type_map = {p.name: p.type for p in parameters}
     coerced: Dict[str, Any] = {}
+
+    def _coerce_json_string(value: Any, expected_type: type[Any]) -> Any:
+        if not isinstance(value, str):
+            return value
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+        if isinstance(parsed, expected_type):
+            return parsed
+        return value
+
     for k, v in kwargs.items():
         declared = param_type_map.get(k)
         if declared == ParameterType.STRING and not isinstance(v, str):
@@ -299,6 +311,22 @@ def _coerce_params(
                 v = float(v)
             except (TypeError, ValueError):
                 pass
+        elif declared == ParameterType.OBJECT and isinstance(v, str):
+            coerced_value = _coerce_json_string(v, dict)
+            if coerced_value is not v:
+                v = coerced_value
+                log.debug("tool.execute.coerce_param", {
+                    "tool": tool_name, "param": k,
+                    "original_type": "str", "coerced_to": "dict",
+                })
+        elif declared == ParameterType.ARRAY and isinstance(v, str):
+            coerced_value = _coerce_json_string(v, list)
+            if coerced_value is not v:
+                v = coerced_value
+                log.debug("tool.execute.coerce_param", {
+                    "tool": tool_name, "param": k,
+                    "original_type": "str", "coerced_to": "list",
+                })
         coerced[k] = v
     return coerced
 

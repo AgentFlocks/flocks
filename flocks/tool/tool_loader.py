@@ -227,6 +227,7 @@ def _json_schema_to_params(schema: dict) -> List[ToolParameter]:
     result = []
     for name, prop in properties.items():
         json_type = prop.get("type", "string")
+        json_schema = dict(prop) if json_type in {"object", "array"} else None
         result.append(ToolParameter(
             name=name,
             type=_TYPE_MAP.get(json_type, ParameterType.STRING),
@@ -234,6 +235,7 @@ def _json_schema_to_params(schema: dict) -> List[ToolParameter]:
             required=name in required_set,
             default=prop.get("default"),
             enum=prop.get("enum"),
+            json_schema=json_schema,
         ))
     return result
 
