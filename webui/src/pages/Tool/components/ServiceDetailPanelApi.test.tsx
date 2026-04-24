@@ -66,6 +66,7 @@ vi.mock('react-i18next', () => ({
         'serviceInfo.enterBaseUrl': '输入 API 地址',
         'serviceInfo.enterSecret': '输入密钥',
         'serviceInfo.enterUsername': '输入用户名',
+        'serviceInfo.enterPassword': '输入密码',
         'detail.hide': '隐藏',
         'detail.show': '显示',
         'alert.unknownError': '未知错误',
@@ -451,5 +452,34 @@ describe('APIServiceDetailPanel', () => {
         },
       }));
     });
+  });
+
+  it('keeps service tool descriptions compact in the tools tab', async () => {
+    const user = userEvent.setup();
+    const longDescription = 'OneSEC DNS grouped tool. dns_search_blocked_queries_by_super_long_keyword_with_no_breaks_and_more_details_to_force_wrapping';
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="onesec_api"
+        serviceTools={[
+          {
+            name: 'onesec_dns',
+            description: longDescription,
+            enabled: true,
+          } as any,
+        ]}
+        onSelectTool={vi.fn()}
+        enabled
+        onToggleEnabled={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole('button', { name: '工具' }));
+
+    const description = await screen.findByText(longDescription);
+    expect(description).toHaveClass('line-clamp-1');
+    expect(description).not.toHaveClass('whitespace-pre-wrap');
+    expect(description.parentElement).not.toHaveClass('overflow-y-auto');
   });
 });
