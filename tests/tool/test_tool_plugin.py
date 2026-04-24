@@ -32,7 +32,10 @@ from flocks.tool.registry import (
     Tool,
     ToolCategory,
     ToolContext,
+    ToolInfo,
+    ToolParameter,
     ToolResult,
+    _coerce_params,
 )
 
 
@@ -159,6 +162,96 @@ class TestJsonSchemaToParams:
         assert types["b"] == ParameterType.BOOLEAN
         assert types["a"] == ParameterType.ARRAY
         assert types["o"] == ParameterType.OBJECT
+
+    def test_preserves_object_and_array_subschemas(self):
+        schema = {
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "List of item ids",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Configuration map",
+                    "additionalProperties": True,
+                    "properties": {
+                        "mode": {"type": "string"},
+                    },
+                },
+            },
+            "required": ["config"],
+        }
+
+        params = _json_schema_to_params(schema)
+        params_by_name = {param.name: param for param in params}
+
+        assert params_by_name["items"].json_schema == schema["properties"]["items"]
+        assert params_by_name["config"].json_schema == schema["properties"]["config"]
+
+        tool_info = ToolInfo(
+            name="test_complex_schema",
+            description="Test tool",
+            category=ToolCategory.CUSTOM,
+            parameters=params,
+        )
+        json_schema = tool_info.get_schema().to_json_schema()
+
+        assert json_schema["properties"]["items"]["items"]["type"] == "integer"
+        assert json_schema["properties"]["items"]["minItems"] == 1
+        assert json_schema["properties"]["config"]["additionalProperties"] is True
+        assert json_schema["properties"]["config"]["properties"]["mode"]["type"] == "string"
+
+
+class TestCoerceParams:
+    def test_coerces_object_and_array_json_strings(self):
+        parameters = [
+            ToolParameter(
+                name="config",
+                type=ParameterType.OBJECT,
+            ),
+            ToolParameter(
+                name="items",
+                type=ParameterType.ARRAY,
+            ),
+        ]
+
+        result = _coerce_params(
+            {
+                "config": '{"enabled": true, "retries": 3}',
+                "items": '["a", "b"]',
+            },
+            parameters,
+            tool_name="test_tool",
+        )
+
+        assert result["config"] == {"enabled": True, "retries": 3}
+        assert result["items"] == ["a", "b"]
+
+    def test_keeps_non_json_or_type_mismatch_strings(self):
+        parameters = [
+            ToolParameter(
+                name="workflow",
+                type=ParameterType.OBJECT,
+            ),
+            ToolParameter(
+                name="items",
+                type=ParameterType.ARRAY,
+            ),
+        ]
+
+        result = _coerce_params(
+            {
+                "workflow": "/tmp/workflow.json",
+                "items": '{"not": "a list"}',
+            },
+            parameters,
+            tool_name="test_tool",
+        )
+
+        assert result["workflow"] == "/tmp/workflow.json"
+        assert result["items"] == '{"not": "a list"}'
 
 
 # ---------------------------------------------------------------------------
