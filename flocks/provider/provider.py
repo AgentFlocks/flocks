@@ -85,10 +85,13 @@ class ChatMessage(BaseModel):
     """Chat message"""
     role: str = Field(..., description="Message role (user, assistant, system, tool)")
     content: Union[str, List[Dict[str, Any]]] = Field("", description="Message content")
+    # Reasoning/Thinking content (optional)
+    reasoning: Optional[str] = Field(None, description="Reasoning or thinking content")
     # OpenAI function-calling fields (optional)
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls for assistant messages")
     tool_call_id: Optional[str] = Field(None, description="Tool call ID for tool-result messages")
     name: Optional[str] = Field(None, description="Tool name for tool-result messages")
+    custom_settings: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
@@ -108,6 +111,8 @@ class ChatResponse(BaseModel):
     content: str
     finish_reason: str
     usage: Dict[str, int]
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    reasoning: Optional[str] = None
 
 
 class ToolCallInfo(BaseModel):
