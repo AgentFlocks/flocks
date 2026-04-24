@@ -56,23 +56,53 @@ class GoogleProvider(BaseProvider):
         """Return configured models"""
         return list(getattr(self, "_config_models", []))
     
-    def _convert_messages(self, messages: List[ChatMessage]) -> tuple[Optional[str], List[Dict[str, Any]]]:
+    def _convert_messages(
+        self,
+        messages: List[ChatMessage],
+        session_id: Optional[str] = None,
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
         """
         Robust ReAct-style message conversion for Gemini 3.
         Rewrites history as text to bypass binary thought_signature requirements.
+
+        ``session_id`` is forwarded by the runner via kwargs (see
+        ``SessionRunner._call_llm``).  When provided, we attempt to reconstruct
+        the conversation directly from persisted session messages – including
+        reasoning parts – which gives Gemini perfect context.  As a defensive
+        fallback we also honour ``messages[0].sessionID`` / ``session_id``
+        attributes if a future caller chooses to attach them to the
+        ``ChatMessage`` itself.
         """
         system_msg = "You are a professional SecOps assistant. Use tools to complete tasks. " \
                      "If you decide to call a tool, you MUST use the function calling API. "
-        
-        session_id = None
-        if messages:
-            session_id = getattr(messages[0], "sessionID", None)
-            
+
+        if session_id is None and messages:
+            session_id = (
+                getattr(messages[0], "session_id", None)
+                or getattr(messages[0], "sessionID", None)
+            )
+
         raw_gemini_messages = []
         processed_mwps = False
 
-        # Try database-backed parts for perfect reasoning retrieval
+        # Try database-backed parts for perfect reasoning retrieval.
+        # We only consider the DB path "successful" if it actually produced
+        # at least one non-system gemini message; otherwise we fall back to
+        # the in-memory ``messages`` argument so we never hand Gemini an
+        # empty contents list (which the API rejects).
+        #
+        # IMPORTANT: build the DB-derived state into local variables and only
+        # commit them once the whole DB pass succeeds.  This prevents
+        # state-pollution scenarios where a mid-loop exception (or a DB
+        # snapshot containing only ``system`` rows / only empty turns) would
+        # leave ``system_msg``/``raw_gemini_messages`` partially populated and
+        # then the fallback would *append* the in-memory messages on top –
+        # producing a duplicated system prompt and duplicated conversation
+        # history.
         if session_id:
+            db_system_msg = system_msg
+            db_raw_messages: List[Dict[str, Any]] = []
+            db_pass_ok = False
             try:
                 from flocks.session.message import MessageSync
                 mwps = MessageSync.list_with_parts(session_id)
@@ -82,9 +112,9 @@ class GoogleProvider(BaseProvider):
                     if role == "system":
                         for p in mwp.parts:
                             if p.type == "text":
-                                system_msg += "\n" + p.text
+                                db_system_msg += "\n" + p.text
                         continue
-                    
+
                     parts = []
                     for p in mwp.parts:
                         if p.type == "reasoning" and p.text:
@@ -108,13 +138,27 @@ class GoogleProvider(BaseProvider):
                                         "mime_type": mime
                                     }
                                 })
-                    
+
                     gemini_role = "model" if role == "assistant" else "user"
                     if parts:
-                        raw_gemini_messages.append({"role": gemini_role, "parts": parts})
-                processed_mwps = True
+                        db_raw_messages.append({"role": gemini_role, "parts": parts})
+                db_pass_ok = True
             except Exception as e:
                 log.warning("provider.google.db_sync_failed", {"error": str(e)})
+
+            # Commit DB-derived state only if (a) the pass completed without
+            # exception AND (b) it actually produced at least one non-system
+            # turn.  Otherwise we discard partial DB state and fall back to
+            # the in-memory messages with a clean ``system_msg``.
+            if db_pass_ok and db_raw_messages:
+                system_msg = db_system_msg
+                raw_gemini_messages = db_raw_messages
+                processed_mwps = True
+            elif db_pass_ok:
+                log.debug(
+                    "provider.google.db_sync_empty",
+                    {"session_id": session_id},
+                )
 
         # Fallback to standard messages
         if not processed_mwps:
@@ -182,17 +226,53 @@ class GoogleProvider(BaseProvider):
                 continue
         return tool_calls
 
-    async def chat(self, model_id: str, messages: List[ChatMessage], **kwargs) -> ChatResponse:
-        client = self._get_client()
-        system_msg, gemini_messages = self._convert_messages(messages)
-        
-        config = {
+    def _build_generate_config(
+        self,
+        kwargs: Dict[str, Any],
+        system_msg: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build the Gemini ``generate_content`` config from caller kwargs.
+
+        Honours caller-provided ``max_tokens`` and ``thinkingConfig`` (set by
+        :func:`flocks.provider.options.build_provider_options` for Gemini 2.5
+        and Gemini 3 models).  Falls back to a conservative 8192 only when the
+        caller does not specify a token budget.
+        """
+        config: Dict[str, Any] = {
             "temperature": kwargs.get("temperature", 0.7),
-            "max_output_tokens": 8192
         }
+
+        # max_output_tokens: prefer caller-provided value (which already
+        # reflects model/config limits via Provider.resolve_model_info), then
+        # fall back to a safe default.
+        max_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
+        if max_tokens:
+            config["max_output_tokens"] = int(max_tokens)
+        else:
+            config["max_output_tokens"] = 8192
+
+        # thinkingConfig: built by build_provider_options() per model family.
+        # Forward verbatim so 2.5 thinkingBudget / Gemini 3 thinkingLevel are
+        # honoured.  Accept both Python-style ``thinking_config`` and the
+        # canonical ``thinkingConfig`` for safety.
+        thinking_config = kwargs.get("thinkingConfig") or kwargs.get("thinking_config")
+        if thinking_config:
+            config["thinking_config"] = thinking_config
+
         if system_msg:
             config["system_instruction"] = system_msg
-            
+
+        return config
+
+    async def chat(self, model_id: str, messages: List[ChatMessage], **kwargs) -> ChatResponse:
+        client = self._get_client()
+        session_id = kwargs.get("session_id")
+        system_msg, gemini_messages = self._convert_messages(
+            messages, session_id=session_id
+        )
+
+        config = self._build_generate_config(kwargs, system_msg)
+
         tools = self._convert_tools(kwargs.get("tools", []))
         if tools:
             config["tools"] = tools
@@ -257,15 +337,13 @@ class GoogleProvider(BaseProvider):
 
     async def chat_stream(self, model_id: str, messages: List[ChatMessage], **kwargs) -> AsyncIterator[StreamChunk]:
         client = self._get_client()
-        system_msg, gemini_messages = self._convert_messages(messages)
-        
-        config = {
-            "temperature": kwargs.get("temperature", 0.7), 
-            "max_output_tokens": 8192
-        }
-        if system_msg:
-            config["system_instruction"] = system_msg
-            
+        session_id = kwargs.get("session_id")
+        system_msg, gemini_messages = self._convert_messages(
+            messages, session_id=session_id
+        )
+
+        config = self._build_generate_config(kwargs, system_msg)
+
         tools = self._convert_tools(kwargs.get("tools", []))
         if tools:
             config["tools"] = tools
@@ -312,16 +390,30 @@ class GoogleProvider(BaseProvider):
                     "total_tokens": chunk.usage_metadata.total_token_count or 0,
                 }
 
-            if delta or reasoning or tool_calls:
+            # Emit reasoning, text and tool_calls as *separate* chunks so
+            # consumers don't have to special-case mixed chunks (and so a
+            # consumer that treats a reasoning-bearing chunk as
+            # reasoning-only cannot accidentally drop text or tool_calls).
+            if reasoning:
                 yield StreamChunk(
-                    delta=delta, 
-                    reasoning=reasoning, 
+                    delta="",
+                    reasoning=reasoning,
+                    event_type="reasoning",
+                    usage=None,
+                    finish_reason=None,
+                )
+
+            if delta or tool_calls:
+                yield StreamChunk(
+                    delta=delta,
                     tool_calls=tool_calls,
-                    event_type="reasoning" if reasoning and not delta else "text",
-                    usage=usage, 
-                    finish_reason=None
+                    event_type="text",
+                    usage=usage,
+                    finish_reason=None,
                 )
             elif usage:
+                # Surface usage even when the chunk carried only reasoning or
+                # only usage metadata.
                 yield StreamChunk(delta="", usage=usage, finish_reason=None)
         
         if "Action: Called tool" in full_content:
