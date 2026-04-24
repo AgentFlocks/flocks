@@ -1,20 +1,5 @@
 {
-  "provider": {
-    "custom-openai": {
-      "name": "Internal OpenAI Gateway",
-      "npm": "@ai-sdk/openai-compatible",
-      "options": {
-        "apiKey": "{secret:internal-openai_llm_key}",
-        "baseURL": "https://llm-gateway.example.internal/v1",
-        "verify_ssl": false
-      },
-      "models": {
-        "gpt-4o": {
-          "name": "gpt-4o"
-        }
-      }
-    }
-  },
+  "provider": {},
   "mcp": {},
   "channels": {},
   "api_services": {
