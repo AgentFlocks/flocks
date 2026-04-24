@@ -3319,7 +3319,7 @@ function Pagination({
 // Tool Detail Drawer (cjtools-style right-side drawer)
 // ============================================================================
 
-function ToolDetailDrawer({
+export function ToolDetailDrawer({
   tool,
   testParams,
   testResult,
@@ -3407,7 +3407,7 @@ function ToolDetailDrawer({
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl w-[520px] max-w-full">
+      <div className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full">
         <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
@@ -3456,12 +3456,14 @@ function ToolDetailDrawer({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {section === 'info' ? (
             <div className="space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-gray-600 leading-relaxed">{getLocalizedToolDescription(tool, i18n.language) || t('detail.noDescription')}</p>
+                <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                  {getLocalizedToolDescription(tool, i18n.language) || t('detail.noDescription')}
+                </p>
               </div>
 
               <div className="flex flex-wrap gap-4 items-start">
@@ -3518,32 +3520,36 @@ function ToolDetailDrawer({
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="rounded-lg border border-gray-200 overflow-hidden">
-                    <table className="min-w-full divide-y divide-gray-200">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200">
                       <thead className="bg-gray-50">
                         <tr>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
+                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-100 bg-white">
                         {tool.parameters.map((param: any, idx: number) => (
                           <tr key={idx} className="hover:bg-gray-50">
-                            <td className="px-4 py-2.5">
-                              <code className="text-xs font-mono text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded">{param.name}</code>
+                            <td className="px-4 py-2.5 align-top">
+                              <code className="text-xs font-mono text-gray-900 bg-gray-100 px-1.5 py-0.5 rounded break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2.5 text-xs text-gray-500">{param.type}</td>
-                            <td className="px-4 py-2.5">
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-500 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
+                            <td className="px-4 py-2.5 align-top">
                               {param.required
                                 ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
                                 : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2.5 text-xs text-gray-600">{param.description}</td>
+                            <td className="px-4 py-2.5 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                              {param.description}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}

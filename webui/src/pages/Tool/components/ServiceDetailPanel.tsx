@@ -212,7 +212,7 @@ export function MCPServerDetailPanel({
         ))}
       </div>
 
-      <div className="p-5">
+      <div className="p-5 min-h-0">
         {detailLoading ? (
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (

@@ -493,7 +493,7 @@ export default function APITabContent({
         return (
           <>
             <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSelectedServiceId(null)} />
-            <div className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+            <div className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
               <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-purple-50">
@@ -508,10 +508,10 @@ export default function APITabContent({
                   </button>
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto">
                 {catalogEntry && (
                   <div className="px-6 py-4 bg-gray-50 border-b border-gray-200">
-                    <p className="text-sm text-gray-600">{getCatalogDescription(catalogEntry, i18n.language)}</p>
+                    <p className="text-sm text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{getCatalogDescription(catalogEntry, i18n.language)}</p>
                   </div>
                 )}
                 <APIServiceDetailPanel
