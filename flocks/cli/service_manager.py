@@ -1353,15 +1353,37 @@ def access_host(host: str) -> str:
     return _loopback_host(host)
 
 
+def _format_host_for_url(host: str) -> str:
+    """Wrap IPv6 literals in brackets before composing URLs."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def backend_access_base_url(config: ServiceConfig) -> str:
     """Return the backend base URL that the local WebUI should connect to."""
-    return f"http://{access_host(config.backend_host)}:{config.backend_port}"
+    return f"http://{_format_host_for_url(access_host(config.backend_host))}:{config.backend_port}"
+
+
+def websocket_access_base_url(config: ServiceConfig) -> str:
+    """Return the websocket base URL matching ``backend_access_base_url()``."""
+    return _http_to_ws_url(backend_access_base_url(config))
 
 
 def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
     """Build frontend proxy environment variables from backend service settings."""
     env = os.environ.copy()
-    env["FLOCKS_API_PROXY_TARGET"] = backend_access_base_url(config)
+    backend_url = backend_access_base_url(config)
+    env["FLOCKS_API_PROXY_TARGET"] = backend_url
+
+    # Avoid leaking a stale Vite API target from the parent shell into a new
+    # build/start cycle.  For localhost or wildcard backends we intentionally
+    # stay on same-origin proxy mode, so the VITE_* overrides must be absent.
+    env.pop("VITE_API_BASE_URL", None)
+    env.pop("VITE_WS_BASE_URL", None)
+    if _should_inject_direct_backend_urls(config.backend_host):
+        env["VITE_API_BASE_URL"] = backend_url
+        env["VITE_WS_BASE_URL"] = websocket_access_base_url(config)
 
     # When using the bundled toolchain (Windows installer), npm/node spawned by
     # `npm run build/preview` must be able to locate the bundled node.exe via
@@ -1460,3 +1482,15 @@ def _join_pids(pids: Iterable[int]) -> str:
 
 def _loopback_host(host: str) -> str:
     return "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+
+
+def _http_to_ws_url(url: str) -> str:
+    if url.startswith("https://"):
+        return url.replace("https://", "wss://", 1)
+    if url.startswith("http://"):
+        return url.replace("http://", "ws://", 1)
+    return url
+
+
+def _should_inject_direct_backend_urls(host: str) -> bool:
+    return host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}
