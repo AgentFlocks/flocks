@@ -767,11 +767,14 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
         "resolve_flocks_cli_command",
         lambda root=None: ["python", "-m", "flocks.cli.main"],
     )
-    monkeypatch.setattr(
-        service_manager,
-        "_spawn_process",
-        lambda *_args, **_kwargs: SimpleNamespace(pid=2468),
-    )
+    spawn_env: dict[str, str] | None = None
+
+    def _capture_spawn(*_args, **kwargs) -> SimpleNamespace:
+        nonlocal spawn_env
+        spawn_env = kwargs.get("env")
+        return SimpleNamespace(pid=2468)
+
+    monkeypatch.setattr(service_manager, "_spawn_process", _capture_spawn)
 
     service_manager.start_backend(service_manager.ServiceConfig(), console)
 
@@ -795,9 +798,11 @@ def test_start_backend_writes_runtime_metadata(monkeypatch, tmp_path: Path) -> N
         "urls": ["http://127.0.0.1:8000"],
         "name": "后端服务",
         "attempts": 30,
-        "delay": 1.0,
+        "delay": 3.0,
         "validator": service_manager._is_running_status_response,
     }]
+    assert spawn_env is not None
+    assert spawn_env.get("PYTHONUNBUFFERED") == "1"
 
 
 def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) -> None:
@@ -812,6 +817,7 @@ def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) 
     )
     paths.run_dir.mkdir(parents=True)
     paths.log_dir.mkdir(parents=True)
+    paths.backend_log.write_text("line1\nline2\nboot failed here\n", encoding="utf-8")
     console = DummyConsole()
     stop_calls: list[tuple[int, Path, str]] = []
 
@@ -845,6 +851,9 @@ def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) 
         service_manager.start_backend(service_manager.ServiceConfig(), console)
 
     assert stop_calls == [(8000, paths.backend_pid, "后端")]
+    joined = "\n".join(console.messages)
+    assert "近期日志" in joined
+    assert "boot failed here" in joined
 
 
 def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_path: Path) -> None:

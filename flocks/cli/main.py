@@ -8,7 +8,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from dotenv import load_dotenv
@@ -289,6 +289,21 @@ def logs(
         _handle_service_error(error)
 
 
+def _uvicorn_log_config() -> dict[str, Any]:
+    """Uvicorn logging with wall-clock timestamps (visible in ``backend.log`` when daemonized)."""
+    import copy
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    cfg = copy.deepcopy(LOGGING_CONFIG)
+    stamp_fmt = "%Y-%m-%d %H:%M:%S"
+    for name in ("default", "access"):
+        formatter = cfg["formatters"][name]
+        formatter["fmt"] = "%(asctime)s | " + formatter["fmt"]
+        formatter["datefmt"] = stamp_fmt
+    return cfg
+
+
 @app.command(hidden=True)
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Server host"),
@@ -311,6 +326,7 @@ def serve(
         port=port,
         reload=reload,
         log_level="info",
+        log_config=_uvicorn_log_config(),
     )
 
 

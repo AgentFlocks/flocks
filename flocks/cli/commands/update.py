@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from flocks.utils.log import append_upgrade_text_log
+
 console = Console()
 
 
@@ -39,6 +41,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         info = await check_update(region=region)
 
     if info.error:
+        append_upgrade_text_log(f"ERROR version_check: {info.error}")
         console.print(f"[red]检查失败：{info.error}[/red]")
         raise typer.Exit(1)
 
@@ -76,6 +79,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             prompt = "\n当前已是最新版本，是否仍强制重新安装？"
         confirmed = typer.confirm(prompt, default=False)
         if not confirmed:
+            append_upgrade_text_log("INFO update_cancelled user_declined")
             console.print("[yellow]已取消[/yellow]")
             return
 
@@ -131,6 +135,7 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
             active_stage = progress.stage
 
+    append_upgrade_text_log(f"OK cli_update_completed version={version_to_apply}")
     console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
     console.print("[dim]如有后台服务正在运行，请执行 [bold]flocks restart[/bold] 重启服务[/dim]")
 
