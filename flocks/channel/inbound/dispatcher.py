@@ -592,43 +592,69 @@ class InboundDispatcher:
         user_text: str,
         scope_override: Optional[str],
     ) -> bool:
-        if msg.channel_id != "feishu":
-            return False
-
         command_name, command_args = _parse_slash_command(user_text)
         if not command_name:
             return False
 
+        from flocks.command.command import Command
+        from flocks.input.dispatcher import dispatch_user_input
+        from flocks.input.events import UserInputEvent
+        from flocks.input.output import ChannelOutputSink
+
+        command_def = Command.resolve(command_name)
+        if command_def is None:
+            return False
+
         callbacks = self._build_callbacks(binding, msg)
 
-        if command_name == "help":
-            from flocks.command.handler import handle_slash_command
+        async def _publish_direct_response(_event, text: str) -> None:
+            await callbacks.deliver_text(text)
 
-            return await handle_slash_command(
-                user_text,
-                send_text=callbacks.deliver_text,
-                send_prompt=callbacks.deliver_text,
+        async def _run_llm(_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+            await callbacks.deliver_text(
+                f"命令 `{display_text or prompt_text}` 暂不支持在当前渠道中以 slash 形式执行。"
             )
 
-        if command_name == "status":
-            await self._handle_status_command(binding, msg, callbacks)
-            return True
+        async def _run_session_control(_event, parsed) -> bool:
+            if parsed.canonical_name == "status":
+                await self._handle_status_command(binding, msg, callbacks)
+                return True
+            if parsed.canonical_name == "model":
+                await self._handle_model_command(binding, callbacks, command_args)
+                return True
+            if parsed.canonical_name == "new":
+                await self._handle_session_command(
+                    binding=binding,
+                    msg=msg,
+                    callbacks=callbacks,
+                    scope_override=scope_override,
+                )
+                return True
+            return False
 
-        if command_name == "model":
-            await self._handle_model_command(binding, callbacks, command_args)
-            return True
-
-        if command_name in {"new", "reset"}:
-            await self._handle_session_command(
-                binding=binding,
-                msg=msg,
-                callbacks=callbacks,
-                scope_override=scope_override,
-                action=command_name,
-            )
-            return True
-
-        return False
+        event = UserInputEvent(
+            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram"} else "channel",
+            sessionID=binding.session_id,
+            text=user_text,
+            parts=[{"type": "text", "text": user_text}],
+            agent=binding.agent_id,
+            display_text=user_text,
+            working_directory=channel_config.workspace_dir,
+            metadata={
+                "channel_id": msg.channel_id,
+                "chat_id": msg.chat_id or msg.sender_id,
+            },
+        )
+        await dispatch_user_input(
+            event,
+            ChannelOutputSink(
+                "channel",
+                direct_response=_publish_direct_response,
+                run_llm=_run_llm,
+                session_control=_run_session_control,
+            ),
+        )
+        return True
 
     async def _handle_status_command(self, binding, msg: InboundMessage, callbacks: ChannelDeliveryCallbacks) -> None:
         from flocks.session.core.status import SessionStatus
@@ -734,20 +760,19 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
-        action: str,
     ) -> None:
         from flocks.session.session import Session
+        from flocks.channel.inbound.session_binding import _build_title
 
         session = await Session.get_by_id(binding.session_id)
         if not session:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
-        parent_id = session.id if action == "new" else None
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
-            parent_id=parent_id,
+            title=_build_title(msg),
             agent=session.agent,
             **Session.inherited_model_kwargs(session),
         )
@@ -758,7 +783,7 @@ class InboundDispatcher:
             scope_override=scope_override,
         )
         await self._trigger_command_hook(
-            action,
+            "new",
             session.id,
             {
                 "previous_session_id": session.id,
@@ -768,11 +793,10 @@ class InboundDispatcher:
             },
         )
         new_callbacks = self._build_callbacks(new_binding, msg)
-        action_text = "已创建新会话。" if action == "new" else "已重置当前会话。"
         await new_callbacks.deliver_text(
             "\n".join(
                 [
-                    action_text,
+                    "已开始全新对话。",
                     f"Session: `{new_session.id}`",
                     f"Agent: `{new_session.agent or 'default'}`",
                 ]

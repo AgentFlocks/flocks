@@ -492,10 +492,7 @@ class TestFeishuNativeCommands:
                 agent="rex",
             )
         )
-        monkeypatch.setattr(
-            "flocks.session.session.Session.create",
-            create_mock,
-        )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
 
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
@@ -507,15 +504,15 @@ class TestFeishuNativeCommands:
 
         assert handled is True
         dispatcher.binding_service.rebind.assert_awaited_once()
-        create_kwargs = create_mock.await_args.kwargs
-        assert create_kwargs["provider"] == "anthropic"
-        assert create_kwargs["model"] == "claude-sonnet-4-20250514"
-        assert create_kwargs["model_pinned"] is True
         assert dispatcher.binding_service.rebind.await_args.kwargs["scope_override"] == "group_topic"
+        create_kwargs = create_mock.await_args.kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Feishu] oc_group"
         assert "session_new" in delivered[0]
+        assert "已开始全新对话。" in delivered[0]
 
     @pytest.mark.asyncio
-    async def test_new_command_does_not_inherit_unpinned_model(self, monkeypatch):
+    async def test_reset_alias_matches_new_semantics(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.channel.inbound.session_binding import SessionBinding
 
@@ -523,11 +520,11 @@ class TestFeishuNativeCommands:
         dispatcher._trigger_command_hook = AsyncMock()
         dispatcher.binding_service.rebind = AsyncMock(
             return_value=SessionBinding(
-                channel_id="feishu",
+                channel_id="wecom",
                 account_id="default",
-                chat_id="oc_group",
-                chat_type=ChatType.GROUP,
-                thread_id="root_1",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
                 session_id="session_new",
                 agent_id="rex",
                 created_at=0,
@@ -535,30 +532,38 @@ class TestFeishuNativeCommands:
             )
         )
         binding = SessionBinding(
-            channel_id="feishu",
+            channel_id="wecom",
             account_id="default",
-            chat_id="oc_group",
-            chat_type=ChatType.GROUP,
-            thread_id="root_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
             session_id="session_old",
             agent_id="rex",
             created_at=0,
             last_message_at=0,
         )
         msg = InboundMessage(
-            channel_id="feishu",
+            channel_id="wecom",
             account_id="default",
             message_id="msg_1",
-            sender_id="ou_user",
-            chat_id="oc_group",
-            chat_type=ChatType.GROUP,
-            text="/new",
-            mention_text="/new",
-            thread_id="root_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/reset",
+            mention_text="/reset",
         )
 
+        delivered: list[str] = []
+
         async def fake_deliver(ctx, session_id=None):
-            return None
+            delivered.append(ctx.text)
+
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
 
         monkeypatch.setattr(
             "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
@@ -573,16 +578,9 @@ class TestFeishuNativeCommands:
                     directory="/tmp/project",
                     agent="rex",
                     provider="anthropic",
-                    model="stale-model",
-                    model_pinned=False,
+                    model="claude-sonnet-4-20250514",
                 )
             ),
-        )
-        create_mock = AsyncMock(
-            return_value=SimpleNamespace(
-                id="session_new",
-                agent="rex",
-            )
         )
         monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
 
@@ -590,15 +588,67 @@ class TestFeishuNativeCommands:
             binding=binding,
             msg=msg,
             channel_config=ChannelConfig(enabled=True),
-            user_text="/new",
-            scope_override="group_topic",
+            user_text="/reset",
+            scope_override=None,
         )
 
         assert handled is True
         create_kwargs = create_mock.await_args.kwargs
-        assert "provider" not in create_kwargs
-        assert "model" not in create_kwargs
-        assert "model_pinned" not in create_kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Wecom] DM — user_1"
+        dispatcher._trigger_command_hook.assert_awaited_once()
+        assert dispatcher._trigger_command_hook.await_args.args[0] == "new"
+        assert "已开始全新对话。" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_help_command_works_for_non_feishu_channel(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/help",
+            mention_text="/help",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/help",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert delivered
+        assert "Available / commands:" in delivered[0]
 
     @pytest.mark.asyncio
     async def test_append_user_message_stores_feishu_media_part(self, monkeypatch):
