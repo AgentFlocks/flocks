@@ -19,6 +19,7 @@ import enPermission from './locales/en-US/permission.json';
 import enMonitoring from './locales/en-US/monitoring.json';
 import enUpdate from './locales/en-US/update.json';
 import enWorkspace from './locales/en-US/workspace.json';
+import enAuth from './locales/en-US/auth.json';
 
 import zhCommon from './locales/zh-CN/common.json';
 import zhNav from './locales/zh-CN/nav.json';
@@ -37,6 +38,7 @@ import zhPermission from './locales/zh-CN/permission.json';
 import zhMonitoring from './locales/zh-CN/monitoring.json';
 import zhUpdate from './locales/zh-CN/update.json';
 import zhWorkspace from './locales/zh-CN/workspace.json';
+import zhAuth from './locales/zh-CN/auth.json';
 
 i18n
   .use(LanguageDetector)
@@ -61,6 +63,7 @@ i18n
         monitoring: enMonitoring,
         update: enUpdate,
         workspace: enWorkspace,
+        auth: enAuth,
       },
       'zh-CN': {
         common: zhCommon,
@@ -80,11 +83,12 @@ i18n
         monitoring: zhMonitoring,
         update: zhUpdate,
         workspace: zhWorkspace,
+        auth: zhAuth,
       },
     },
     fallbackLng: 'en-US',
     defaultNS: 'common',
-    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace'],
+    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace', 'auth'],
     detection: {
       order: ['localStorage', 'navigator'],
       lookupLocalStorage: 'flocks-language',

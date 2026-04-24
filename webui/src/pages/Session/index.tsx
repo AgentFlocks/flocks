@@ -7,6 +7,7 @@ import {
   MoreHorizontal, PencilLine, Download,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import i18n from '@/i18n';
 import { useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -170,6 +171,11 @@ export default function SessionPage() {
   }, [addSession, selectedAgent, toast, t]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target?.canDelete === false) {
+      toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
+      return;
+    }
     if (!confirm(t('confirmDelete'))) return;
     try {
       await sessionApi.delete(sessionId);
@@ -440,7 +446,9 @@ export default function SessionPage() {
                           data-session-rename-input
                         />
                       ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm">{session.title}</h3>
+                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
+                          <span className="truncate">{session.title}</span>
+                        </h3>
                       )}
                     </div>
                     {session.time?.updated && (
@@ -495,7 +503,8 @@ export default function SessionPage() {
                               setOpenMenuSessionId(null);
                               void handleDeleteSession(session.id);
                             }}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50"
+                            disabled={session.canDelete === false}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                             <span>{t('deleteAction')}</span>

@@ -10,14 +10,16 @@ import asyncio
 import json
 import time
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.auth.context import get_current_auth_user
 from flocks.session.session import Session, SessionInfo as SessionModel
+from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
-
+from flocks.server.auth import require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -97,13 +99,14 @@ class SessionResponse(BaseModel):
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
-    share: Optional[Dict[str, Any]] = Field(None, description="Share information")
     title: str = Field(..., description="Session title")
     version: str = Field("1.0.0", description="Session version")
     time: SessionTime = Field(..., description="Session timestamps")
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    ownerUserID: Optional[str] = Field(None, description="Session owner user id")
+    canDelete: bool = Field(False, description="Whether current user can delete this session")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -113,6 +116,9 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     Note: agent/model/provider are NOT included at session level.
     They are retrieved from the latest user message in the session.
     """
+    current_user = get_current_auth_user()
+    can_delete = SessionPolicy.can_delete(session, current_user)
+
     return SessionResponse(
         id=session.id,
         slug=session.slug,
@@ -128,10 +134,11 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
             archived=session.time.archived,
         ),
         summary=session.summary.model_dump() if session.summary else None,
-        share=session.share.model_dump() if session.share else None,
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        ownerUserID=session.owner_user_id,
+        canDelete=can_delete,
     )
 
 
@@ -183,6 +190,7 @@ async def get_session_status() -> Dict[str, Any]:
     description="Get a list of all sessions, sorted by most recently updated",
 )
 async def list_sessions(
+    request: Request,
     directory: Optional[str] = Query(None, description="Filter by project directory"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
@@ -191,6 +199,7 @@ async def list_sessions(
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
 ) -> List[SessionResponse]:
     """List all sessions with optional filters"""
+    _current_user = require_user(request)
     all_sessions = await Session.list_all()
     
     filtered = []
@@ -229,8 +238,9 @@ async def list_sessions(
     summary="Create session",
     description="Create a new session",
 )
-async def create_session(request: Optional[SessionCreateRequest] = None) -> SessionResponse:
+async def create_session(http_request: Request, request: Optional[SessionCreateRequest] = None) -> SessionResponse:
     """Create a new session"""
+    current_user = require_user(http_request)
     import os
     
     if request is None:
@@ -293,9 +303,10 @@ async def create_session(request: Optional[SessionCreateRequest] = None) -> Sess
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
+        owner_user_id=current_user.id,
         **({"category": request.category} if request.category else {}),
     )
-    
+
     log.info("session.created", {"session_id": session.id})
     return _session_to_response(session)
 
@@ -308,8 +319,9 @@ async def create_session(request: Optional[SessionCreateRequest] = None) -> Sess
     summary="Get session",
     description="Get session by ID",
 )
-async def get_session(sessionID: str) -> SessionResponse:
+async def get_session(sessionID: str, request: Request) -> SessionResponse:
     """Get session by ID"""
+    _current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -356,10 +368,17 @@ class TodoInfo(BaseModel):
     summary="Get session todos",
     description="Get the todo list for a session",
 )
-async def get_session_todos(sessionID: str) -> List[TodoInfo]:
+async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     """Get session todos"""
     from flocks.storage.storage import Storage
-    
+    _current_user = require_user(request)
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found"
+        )
+
     try:
         todos = await Storage.read(["todo", sessionID])
         if todos is None:
@@ -376,11 +395,18 @@ async def get_session_todos(sessionID: str) -> List[TodoInfo]:
     summary="Update session todos",
     description="Update the todo list for a session",
 )
-async def update_session_todos(sessionID: str, todos: List[TodoInfo]) -> List[TodoInfo]:
+async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: Request) -> List[TodoInfo]:
     """Update session todos"""
     from flocks.storage.storage import Storage
     from flocks.server.routes.event import publish_event
-    
+    _current_user = require_user(request)
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found"
+        )
+
     try:
         await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
         
@@ -401,8 +427,9 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo]) -> List[To
     summary="Delete session",
     description="Delete session by ID",
 )
-async def delete_session(sessionID: str) -> bool:
+async def delete_session(sessionID: str, request: Request) -> bool:
     """Delete session by ID (returns true)"""
+    current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -411,6 +438,9 @@ async def delete_session(sessionID: str) -> bool:
             detail=f"Session {sessionID} not found"
         )
     
+    if not SessionPolicy.can_delete(session, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
+
     await Session.delete(session.project_id, sessionID)
     log.info("session.deleted", {"session_id": sessionID})
     return True
@@ -597,28 +627,6 @@ async def fork_session(sessionID: str, request: Optional[ForkRequest] = None) ->
     return _session_to_response(forked)
 
 
-@router.post(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Share session",
-    description="Create a shareable link for the session",
-)
-async def share_session(sessionID: str) -> SessionResponse:
-    """Share session"""
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    await Session.share(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    
-    log.info("session.shared", {"session_id": sessionID})
-    return _session_to_response(updated)
-
-
 @router.get(
     "/{sessionID}/diff",
     response_model=List[FileDiff],
@@ -647,28 +655,6 @@ async def get_session_diff(
     except Exception as e:
         log.warn("session.diff.read_error", {"sessionID": sessionID, "error": str(e)})
         return []
-
-
-@router.delete(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Unshare session",
-    description="Remove the shareable link for the session",
-)
-async def unshare_session(sessionID: str) -> SessionResponse:
-    """Unshare session"""
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    await Session.unshare(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    
-    log.info("session.unshared", {"session_id": sessionID})
-    return _session_to_response(updated)
 
 
 class SummarizeRequest(BaseModel):

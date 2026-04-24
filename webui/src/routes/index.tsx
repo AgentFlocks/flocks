@@ -1,10 +1,16 @@
 import { Suspense, lazy } from 'react';
 import { Routes as RouterRoutes, Route, Navigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import Layout from '@/components/layout/Layout';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
+import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
 import SessionPage from '@/pages/Session';
 import AgentPage from '@/pages/Agent';
+import LoginPage from '@/pages/Login';
+import SetupAdminPage from '@/pages/SetupAdmin';
+import ForceChangePasswordPage from '@/pages/ForceChangePassword';
+import { useAuth } from '@/contexts/AuthContext';
 
 const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
 const WorkflowCreate = lazy(() => import('@/pages/WorkflowCreate'));
@@ -29,8 +35,59 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
 }
 
 export function Routes() {
+  const { t } = useTranslation('auth');
+  const { loading, bootstrapped, error, user, refresh } = useAuth();
+
+  if (loading) {
+    return <RoutePageSkeleton />;
+  }
+
+  if (error) {
+    return (
+      <AuthLayout>
+        <div className="w-full max-w-lg bg-white border border-gray-200 rounded-xl p-6 shadow-sm space-y-4">
+          <div>
+            <h1 className="text-xl font-semibold text-gray-900">{t('error.systemUnknownTitle')}</h1>
+            <p className="text-sm text-gray-500 mt-1">{error}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void refresh()}
+            className="bg-slate-900 text-white rounded-lg px-4 py-2 font-medium hover:bg-slate-800"
+          >
+            {t('error.retry')}
+          </button>
+        </div>
+      </AuthLayout>
+    );
+  }
+
+  if (!bootstrapped) {
+    return (
+      <RouterRoutes>
+        <Route path="/setup-admin" element={<SetupAdminPage />} />
+        <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+      </RouterRoutes>
+    );
+  }
+
+  if (!user) {
+    return (
+      <RouterRoutes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </RouterRoutes>
+    );
+  }
+
+  if (user.must_reset_password) {
+    return <ForceChangePasswordPage />;
+  }
+
   return (
     <RouterRoutes>
+      <Route path="/login" element={<Navigate to="/" replace />} />
+      <Route path="/setup-admin" element={<Navigate to="/" replace />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
         
@@ -51,12 +108,15 @@ export function Routes() {
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
         
-        {/* 系统管理 */}
+        {/* 账号管理 */}
         <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
+        <Route path="config/*" element={<Navigate to="/config" replace />} />
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
+        <Route path="admin/users" element={<Navigate to="/config" replace />} />
       </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>
   );
 }

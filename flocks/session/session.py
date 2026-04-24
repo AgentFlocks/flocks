@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, ConfigDict
 # Sentinel for explicitly setting a field to None via Session.update()
 _UNSET = object()
 
+from flocks.auth.context import get_current_auth_user
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -36,12 +37,6 @@ class SessionChangeStats(BaseModel):
 
 # Backwards-compatible alias
 SessionSummary = SessionChangeStats
-
-
-class SessionShare(BaseModel):
-    """Session share information"""
-    url: str = Field(..., description="Share URL")
-    secret: Optional[str] = Field(None, description="Share secret for management")
 
 
 class SessionRevert(BaseModel):
@@ -98,11 +93,15 @@ class SessionInfo(BaseModel):
     
     # Session hierarchy
     parent_id: Optional[str] = Field(None, alias="parentID", description="Parent session for branching")
-    
-    # Summary and share
+
+    # Local account ownership (single-admin mode: session is private to its owner;
+    # admins can see all sessions; there is no cross-user sharing).
+    owner_user_id: Optional[str] = Field(None, alias="ownerUserID", description="Owner local user id")
+    owner_username: Optional[str] = Field(None, alias="ownerUsername", description="Owner local username")
+
+    # File change summary
     summary: Optional[SessionChangeStats] = Field(None, description="File change summary")
-    share: Optional[SessionShare] = Field(None, description="Share information")
-    
+
     # Revert state
     revert: Optional[SessionRevert] = Field(None, description="Revert state")
     
@@ -143,6 +142,20 @@ class Session:
     def _sort_sessions(sessions: List[SessionInfo]) -> List[SessionInfo]:
         """Return sessions sorted by most recently updated."""
         return sorted(sessions, key=lambda s: s.time.updated, reverse=True)
+
+    @staticmethod
+    def _is_accessible_to_current_user(session: SessionInfo) -> bool:
+        """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
+        from flocks.session.policy import SessionPolicy
+
+        return SessionPolicy.can_read(session)
+
+    @staticmethod
+    def _is_owned_by_auth_user(session: SessionInfo, auth_user) -> bool:
+        """Delegate to the unified SessionPolicy (kept for backward compatibility)."""
+        from flocks.session.policy import SessionPolicy
+
+        return SessionPolicy.is_owner(session, auth_user)
 
     @classmethod
     def _sync_list_cache(cls, session: SessionInfo) -> None:
@@ -257,6 +270,13 @@ class Session:
                     kwargs["memory_enabled"] = bool(getattr(memory_cfg, "enabled"))
             except Exception as e:
                 log.warn("session.memory.default.error", {"error": str(e)})
+
+        # Bind ownership from current auth context unless explicitly provided.
+        if "owner_user_id" not in kwargs or "owner_username" not in kwargs:
+            current_user = get_current_auth_user()
+            if current_user:
+                kwargs.setdefault("owner_user_id", current_user.id)
+                kwargs.setdefault("owner_username", current_user.username)
         
         session = SessionInfo(
             project_id=project_id,
@@ -339,6 +359,8 @@ class Session:
             # Don't return deleted sessions
             if session and session.status == "deleted":
                 return None
+            if session and not cls._is_accessible_to_current_user(session):
+                return None
             return session
         except Exception as e:
             log.warn("session.get.error", {"error": str(e), "id": session_id})
@@ -363,6 +385,8 @@ class Session:
             if cls._all_sessions_cache is not None:
                 cached = next((s for s in cls._all_sessions_cache if s.id == session_id), None)
                 if cached:
+                    if not cls._is_accessible_to_current_user(cached):
+                        return None
                     return cached
 
             # Fast path: check in-memory index
@@ -370,6 +394,8 @@ class Session:
             if cached_key:
                 session = await Storage.get(cached_key, SessionInfo)
                 if session and session.status != "deleted":
+                    if not cls._is_accessible_to_current_user(session):
+                        return None
                     return session
                 # Index is stale — remove and fall through
                 cls._id_index.pop(session_id, None)
@@ -382,6 +408,8 @@ class Session:
                     try:
                         session = await Storage.get(key, SessionInfo)
                         if session and session.status != "deleted":
+                            if not cls._is_accessible_to_current_user(session):
+                                return None
                             cls._id_index[session_id] = key
                             return session
                     except Exception as _e:
@@ -406,7 +434,7 @@ class Session:
         """
         try:
             if cls._all_sessions_cache is not None:
-                return [s for s in cls._all_sessions_cache if s.project_id == project_id]
+                return [s for s in cls._all_sessions_cache if s.project_id == project_id and cls._is_accessible_to_current_user(s)]
 
             entries = await Storage.list_entries(prefix=f"session:{project_id}:", model=SessionInfo)
             sessions = []
@@ -414,7 +442,8 @@ class Session:
             for key, session in entries:
                 try:
                     if session.status != "deleted":
-                        sessions.append(session)
+                        if cls._is_accessible_to_current_user(session):
+                            sessions.append(session)
                         cls._id_index[session.id] = key
                 except Exception as e:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
@@ -436,7 +465,7 @@ class Session:
         """
         try:
             if cls._all_sessions_cache is not None:
-                return list(cls._all_sessions_cache)
+                return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
 
             entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
             sessions = []
@@ -450,7 +479,7 @@ class Session:
                     log.warn("session.parse.error", {"key": key, "error": str(e)})
 
             cls._all_sessions_cache = cls._sort_sessions(sessions)
-            return list(cls._all_sessions_cache)
+            return [s for s in cls._all_sessions_cache if cls._is_accessible_to_current_user(s)]
         except Exception as e:
             log.error("session.list_all.error", {"error": str(e)})
             return []
@@ -481,6 +510,8 @@ class Session:
         alias_map = {
             "project_id": "projectID",
             "parent_id": "parentID",
+            "owner_user_id": "ownerUserID",
+            "owner_username": "ownerUsername",
         }
         
         # Update fields.
@@ -498,17 +529,12 @@ class Session:
                 continue
 
             if value is not None:
-                # Handle nested updates for summary, share, revert, time
+                # Handle nested updates for summary, revert, time
                 if key == "summary" and isinstance(value, dict):
                     if update_data.get("summary"):
                         update_data["summary"].update(value)
                     else:
                         update_data["summary"] = value
-                elif key == "share" and isinstance(value, dict):
-                    if update_data.get("share"):
-                        update_data["share"].update(value)
-                    else:
-                        update_data["share"] = value
                 elif key == "revert" and isinstance(value, dict):
                     update_data["revert"] = value
                 else:
@@ -558,11 +584,7 @@ class Session:
         children = await cls.children(project_id, session_id)
         for child in children:
             await cls.delete(project_id, child.id)
-        
-        # Unshare if shared
-        if session.share:
-            await cls.unshare(project_id, session_id)
-        
+
         # Soft delete
         await cls.update(project_id, session_id, status="deleted")
         cls._id_index.pop(session_id, None)
@@ -600,6 +622,32 @@ class Session:
             log.warn("session.deleted.event_error", {"error": str(e)})
         
         return True
+
+    @classmethod
+    async def retain_deleted_user_sessions(cls, user_id: str, username: str) -> int:
+        """
+        Detach session ownership from a deleted user id while preserving username ownership.
+
+        This allows a newly created account with the same username to regain access
+        to historical private sessions.
+        """
+        entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
+        migrated = 0
+
+        for _key, session in entries:
+            if session.status == "deleted":
+                continue
+            if session.owner_user_id != user_id:
+                continue
+            await cls.update(
+                project_id=session.project_id,
+                session_id=session.id,
+                owner_user_id=_UNSET,
+                owner_username=username,
+            )
+            migrated += 1
+
+        return migrated
     
     @classmethod
     async def archive(cls, project_id: str, session_id: str) -> bool:
@@ -661,79 +709,7 @@ class Session:
         })
         
         return True
-    
-    @classmethod
-    async def share(cls, project_id: str, session_id: str) -> Optional[SessionShare]:
-        """
-        Create a share link for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            ShareInfo or None if failed
-        """
-        # In production, this would create an actual share URL
-        # For now, create a placeholder
-        share_info = SessionShare(
-            url=f"https://share.example.com/s/{session_id[:8]}",
-            secret=Identifier.ascending("secret")[:16],
-        )
-        
-        await cls.update(project_id, session_id, share=share_info.model_dump())
-        
-        # Store share secret separately
-        await Storage.set(f"share:{session_id}", share_info.model_dump(), "share")
-        
-        log.info("session.shared", {
-            "id": session_id,
-            "url": share_info.url,
-        })
-        
-        return share_info
-    
-    @classmethod
-    async def unshare(cls, project_id: str, session_id: str) -> bool:
-        """
-        Remove share link for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            True if unshared
-        """
-        try:
-            await Storage.delete(f"share:{session_id}")
-            await cls.update(project_id, session_id, share=None)
-            
-            log.info("session.unshared", {"id": session_id})
-            return True
-        except Exception as e:
-            log.warn("session.unshare.error", {"error": str(e)})
-            return False
-    
-    @classmethod
-    async def get_share(cls, project_id: str, session_id: str) -> Optional[SessionShare]:
-        """
-        Get share info for session
-        
-        Args:
-            project_id: Project ID
-            session_id: Session ID
-            
-        Returns:
-            ShareInfo or None
-        """
-        try:
-            data = await Storage.get(f"share:{session_id}", dict)
-            return SessionShare(**data) if data else None
-        except Exception as _e:
-            log.debug("session.share.get_failed", {"session_id": session_id, "error": str(_e)})
-            return None
-    
+
     @classmethod
     async def children(cls, project_id: str, parent_id: str) -> List[SessionInfo]:
         """
