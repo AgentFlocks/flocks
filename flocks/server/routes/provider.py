@@ -84,7 +84,19 @@ def _should_persist_secondary_secret(metadata: Optional[Dict[str, Any]]) -> bool
 #: provider without an API key (internal LLM gateways without auth). It is
 #: passed verbatim to the OpenAI SDK so the client constructs cleanly, but
 #: should NEVER be surfaced back to the UI as the actual saved key.
+#:
+#: NOTE: This value is reserved by the system. If a real upstream service
+#: ever issues an API key whose literal value equals ``"not-needed"`` it will
+#: be masked back to ``None`` on the GET endpoint and logged with the
+#: ``"<no-auth>"`` marker. Practically this is a non-issue (no provider mints
+#: such keys), but it is documented here so downstream maintainers can change
+#: the sentinel in exactly one place if they ever need to.
 _NO_API_KEY_PLACEHOLDER = "not-needed"
+
+#: Marker used in audit logs in place of the sentinel so log readers don't
+#: confuse ``not-***eded`` (the naive 4/4 mask of the sentinel) with a real
+#: short API key.
+_NO_API_KEY_LOG_MARKER = "<no-auth>"
 
 
 def _is_placeholder_api_key(value: Optional[str]) -> bool:
@@ -1678,11 +1690,12 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
         secret_id = request.secret_id or f"{provider_id}_llm_key"
         secrets.set(secret_id, effective_api_key)
-        masked = (
-            f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
-            if len(effective_api_key) > 8
-            else "***"
-        )
+        if _is_placeholder_api_key(effective_api_key):
+            masked = _NO_API_KEY_LOG_MARKER
+        elif len(effective_api_key) > 8:
+            masked = f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
+        else:
+            masked = "***"
         log.info("provider.credentials.saving", {
             "provider_id": provider_id,
             "secret_id": secret_id,
