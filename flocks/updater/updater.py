@@ -148,6 +148,65 @@ def _looks_like_windows_python_launcher(entry: str) -> bool:
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
 
 
+def _is_windows_file_in_use_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a Windows file-lock failure."""
+    if sys.platform != "win32":
+        return False
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32:
+        return True
+
+    text = str(exc).lower()
+    return "winerror 32" in text or "used by another process" in text
+
+
+def _is_uv_managed_python_runtime_error(text: str) -> bool:
+    """Return True when uv reports a broken managed Python runtime cache."""
+    if not text:
+        return False
+    return bool(
+        re.search(
+            (
+                r"Failed to inspect Python interpreter from managed installations|"
+                r"Failed to query Python interpreter|"
+                r"failed to query metadata of file|"
+                r"Failed to create temporary virtualenv|"
+                r"Could not find a suitable Python executable for the virtual "
+                r"environment based on the interpreter"
+            ),
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _uv_managed_python_install_dir_from_text(text: str) -> Path | None:
+    """Extract the cached uv-managed Python install directory from error text."""
+    if not text:
+        return None
+    match = re.search(
+        r"([A-Z]:\\[^'\"\r\n]+\\uv\\python\\[^'\"\r\n]+\\python\.exe)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return Path(str(PureWindowsPath(match.group(1)).parent))
+
+
+def _repair_windows_uv_managed_python_install(text: str) -> Path | None:
+    """Remove the broken cached uv-managed Python install directory when possible."""
+    install_dir = _uv_managed_python_install_dir_from_text(text)
+    if install_dir is None:
+        return None
+
+    target = _resolve_windows_long_path(install_dir)
+    if not target.exists():
+        return target
+
+    _safe_rmtree(target)
+    return target
+
+
 def _resolve_windows_long_path(path: Path) -> Path:
     """Resolve Windows 8.3 short path names (e.g. THREAT~1) to their full long form.
 
@@ -1812,6 +1871,7 @@ async def perform_update(
     )
     install_root = _get_repo_root()
     current_version = get_current_version()
+    handover_active = False
 
     fmt = _choose_archive_format(ucfg.archive_format)
 
@@ -1957,6 +2017,27 @@ async def perform_update(
         stage="applying",
         message=f"Applying v{latest_tag}...",
     )
+
+    async def _restore_after_apply_failure() -> None:
+        nonlocal handover_active
+        if backup_path is None:
+            return
+        if handover_active:
+            await asyncio.to_thread(
+                _rollback_failed_update,
+                backup_path,
+                install_root,
+                current_version,
+            )
+            handover_active = False
+            return
+        await asyncio.to_thread(
+            _restore_backup_if_possible,
+            backup_path,
+            install_root,
+            current_version,
+        )
+
     try:
         await asyncio.to_thread(
             _replace_install_dir,
@@ -1964,19 +2045,36 @@ async def perform_update(
             install_root,
         )
     except Exception as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
-        msg = f"Failed to replace files: {exc}"
-        if backup_path:
-            msg += f"\nRestore from backup: {backup_path}"
-        yield UpdateProgress(stage="error", message=msg, success=False)
-        return
+        final_replace_error: Exception | None = exc
+        if (
+            sys.platform == "win32"
+            and restart
+            and needs_handover
+            and not handover_active
+            and _is_windows_file_in_use_error(exc)
+        ):
+            log.warning("updater.replace.locked_retry_with_handover", {"error": str(exc)})
+            try:
+                _prepare_upgrade_handover(latest_tag)
+                handover_active = True
+                await asyncio.to_thread(
+                    _replace_install_dir,
+                    content_root,
+                    install_root,
+                )
+            except Exception as retry_exc:
+                final_replace_error = retry_exc
+            else:
+                final_replace_error = None
+
+        if final_replace_error is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            msg = f"Failed to replace files: {final_replace_error}"
+            if backup_path:
+                msg += f"\nRestore from backup: {backup_path}"
+            yield UpdateProgress(stage="error", message=msg, success=False)
+            return
 
     # ------------------------------------------------------------------ #
     # Step 6 – sync dependencies
@@ -1986,13 +2084,7 @@ async def perform_update(
     uv_path = _find_executable("uv")
     if not uv_path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
+        await _restore_after_apply_failure()
         hint = (
             "Dependency sync failed: uv is required but was not found. "
             "Please install uv (https://docs.astral.sh/uv/) and ensure it "
@@ -2009,9 +2101,32 @@ async def perform_update(
         uv_cmd.extend(["--default-index", profile.uv_default_index])
 
     sync_env = _build_uv_sync_env()
+    retried_after_managed_python_repair = False
     code, _, err = await _run_async(
         uv_cmd, cwd=install_root, timeout=180, env=sync_env,
     )
+    if (
+        code != 0
+        and sys.platform == "win32"
+        and not retried_after_managed_python_repair
+        and _is_uv_managed_python_runtime_error(err)
+    ):
+        retried_after_managed_python_repair = True
+        repaired_dir = await asyncio.to_thread(_repair_windows_uv_managed_python_install, err)
+        if repaired_dir is not None:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python",
+                {"path": str(repaired_dir)},
+            )
+        else:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python_missing_path",
+                {"error": err},
+            )
+        await asyncio.sleep(2)
+        code, _, err = await _run_async(
+            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
+        )
     if code != 0:
         log.warning("updater.dependencies.sync_retry", {"first_error": err})
         await asyncio.sleep(3)
@@ -2021,13 +2136,7 @@ async def perform_update(
 
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
+        await _restore_after_apply_failure()
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
 
@@ -2035,13 +2144,7 @@ async def perform_update(
         validation_error = await _validate_windows_restart_runtime(install_root)
         if validation_error:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            if backup_path is not None:
-                await asyncio.to_thread(
-                    _restore_backup_if_possible,
-                    backup_path,
-                    install_root,
-                    current_version,
-                )
+            await _restore_after_apply_failure()
             yield UpdateProgress(stage="error", message=validation_error, success=False)
             return
 
@@ -2092,6 +2195,12 @@ async def perform_update(
         restart_argv = _build_restart_argv(install_root)
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
+        if handover_active:
+            try:
+                rollback_upgrade_handover()
+            except Exception:
+                pass
+            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to build restart command: {exc}",
@@ -2099,9 +2208,10 @@ async def perform_update(
         )
         return
 
-    if needs_handover:
+    if needs_handover and not handover_active:
         try:
             _prepare_upgrade_handover(latest_tag)
+            handover_active = True
         except Exception as exc:
             log.error("updater.handover.failed", {"error": str(exc)})
 
@@ -2116,11 +2226,12 @@ async def perform_update(
             os._exit(0)
         except OSError as exc:
             log.error("updater.restart.spawn_failed", {"error": str(exc)})
-            if needs_handover:
+            if handover_active:
                 try:
                     rollback_upgrade_handover()
                 except Exception:
                     pass
+                handover_active = False
             yield UpdateProgress(
                 stage="error",
                 message=f"Failed to restart service: {exc}",
@@ -2133,11 +2244,12 @@ async def perform_update(
         os.execv(restart_argv[0], restart_argv)
     except OSError as exc:
         log.error("updater.restart.execv_failed", {"error": str(exc)})
-        if needs_handover:
+        if handover_active:
             try:
                 rollback_upgrade_handover()
             except Exception:
                 pass
+            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to restart service: {exc}",
