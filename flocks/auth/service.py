@@ -512,9 +512,12 @@ class AuthService:
         / inbound-channel workers (which run without an auth context and
         therefore leave ``owner_user_id`` empty).
 
-        Returns a summary dict with ``scanned``, ``orphaned`` and
-        ``reassigned`` counts. ``reassigned`` is always 0 when
-        ``dry_run=True``.
+        Each session is rewritten independently: a single failure (IO
+        error, concurrent delete, …) does not abort the whole pass. The
+        returned summary always carries ``scanned`` / ``orphaned`` /
+        ``reassigned`` / ``failed`` counts, so the operator can decide
+        whether to re-run.  ``reassigned`` and ``failed`` are always 0
+        when ``dry_run=True``.
         """
         from flocks.session.session import Session
 
@@ -527,19 +530,28 @@ class AuthService:
         sessions = await Session.list_all()
         orphans = [s for s in sessions if not s.owner_user_id]
         reassigned = 0
+        failed = 0
         if not dry_run:
             for session in orphans:
-                await Session.update(
-                    project_id=session.project_id,
-                    session_id=session.id,
-                    owner_user_id=admin_user_id,
-                    owner_username=admin_user.username,
-                )
-                reassigned += 1
+                try:
+                    await Session.update(
+                        project_id=session.project_id,
+                        session_id=session.id,
+                        owner_user_id=admin_user_id,
+                        owner_username=admin_user.username,
+                    )
+                    reassigned += 1
+                except Exception as exc:
+                    failed += 1
+                    log.warn(
+                        "auth.reassign_orphan_sessions.update_failed",
+                        {"session_id": session.id, "error": str(exc)},
+                    )
         return {
             "scanned": len(sessions),
             "orphaned": len(orphans),
             "reassigned": reassigned,
+            "failed": failed,
         }
 
     @classmethod

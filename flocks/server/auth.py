@@ -46,18 +46,26 @@ PUBLIC_PREFIXES = (
 # caller / external platform).
 #
 # These endpoints are designed to be invoked by **external systems** that
-# cannot present the local cookie or `Authorization: Bearer` header:
+# cannot present the local cookie or ``Authorization: Bearer`` header:
 #
-#   * IM platform webhooks (DingTalk / WeCom / Feishu / Slack / Telegram, ...)
-#     POST to ``/api/channel/{channel_id}/webhook`` — the plugin's
-#     ``handle_webhook`` is responsible for signature/origin verification.
+#   * IM platform webhooks (Feishu / Slack / Telegram / 3rd-party plugins…)
+#     POST to ``/api/channel/{channel_id}/webhook`` — the concrete
+#     ``ChannelPlugin.handle_webhook`` implementation is responsible for
+#     signature / origin verification.  Note that the built-in DingTalk /
+#     WeCom plugins currently use stream / long-poll mode and do not
+#     implement ``handle_webhook``; this exemption mainly serves external
+#     or custom plugins.
+#
+# TODO: add ``^/(?:api/)?provider/[^/]+/oauth/callback/?$`` once the
+# provider OAuth callback in ``server/routes/provider.py`` is implemented
+# (today it's a stub returning ``True``).
 #
 # WARNING: any path matched here bypasses the global auth guard.  The
 # downstream handler is fully responsible for its own authentication
-# (signature checks, IP allowlists, replay protection, ...).  Do NOT add
+# (signature checks, IP allowlists, replay protection, …).  Do NOT add
 # entries that touch user data without a per-request integrity check.
 PUBLIC_PATH_REGEXES = (
-    re.compile(r"^/(api/)?channel/[^/]+/webhook/?$"),
+    re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
 )
 
 

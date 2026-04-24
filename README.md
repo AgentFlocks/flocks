@@ -222,20 +222,34 @@ Non-browser clients (TUI, SDKs, scripts):
 - **Local loopback** (`127.0.0.1` / `::1` / `localhost`, no
   `x-forwarded-for` header) is auto-trusted as `local-service` admin. This
   covers TUI, plugin sub-processes, and CLI calls running on the same host.
-- **Remote** clients must present an API token. Generate one on the server
-  host and copy it to the client's `~/.flocks/config/.secret.json`:
+- **Remote** clients must present an API token. The token lives in
+  `~/.flocks/config/.secret.json` under the secret id `server_api_token`.
+
+  On the **server**, generate (or rotate) the token — it is persisted on
+  the server's local secret store:
 
   ```bash
-  flocks admin generate-api-token       # prints the token, stores it under server_api_token
-  # OR
-  flocks admin set-api-token --token <existing-token>
+  flocks admin generate-api-token        # prints token; stores under server_api_token
   ```
 
-  Pass it via either header:
+  On each **remote client**, store the same token value into the client's
+  own secret file (so the client SDK / TUI can attach it automatically):
+
+  ```bash
+  flocks admin set-api-token --token <token-from-server>
+  ```
+
+  Or attach it directly per request via either header:
 
   ```text
   Authorization: Bearer <token>
   X-Flocks-API-Token: <token>
+  ```
+
+  Smoke test:
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
 Reverse-proxy deployments:
@@ -266,6 +280,11 @@ Orphan sessions (CLI / background / inbound channels):
   flocks admin reassign-orphan-sessions --username admin --dry-run   # preview
   flocks admin reassign-orphan-sessions --username admin             # apply
   ```
+
+  The command summarises `scanned / orphaned / reassigned / failed`
+  counts; a non-zero `failed` exits with code 2 so CI / scripts can
+  detect partial-write situations and re-run after fixing the underlying
+  cause (typically a transient storage error).
 
 ## 5. Join our community
 

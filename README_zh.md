@@ -219,19 +219,31 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 非浏览器客户端（TUI / SDK / 脚本）：
 
 - **本机回环**（`127.0.0.1` / `::1` / `localhost`，且请求不带 `x-forwarded-for` 头）会被自动识别为 `local-service` 管理员，满足同机的 TUI、插件子进程、CLI 调用。
-- **远程**调用必须携带 API Token。在服务端机器上生成，并把内容拷到客户端 `~/.flocks/config/.secret.json`：
+- **远程**调用必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
+
+  在 **服务端** 生成（或轮换）token，会持久化到服务端本机的 secret store：
 
   ```bash
-  flocks admin generate-api-token       # 打印 token，写入 server_api_token
-  # 或者
-  flocks admin set-api-token --token <已有 token>
+  flocks admin generate-api-token        # 打印 token 并写入 server_api_token
   ```
 
-  请求时通过任一 Header 携带：
+  在 **每台远程客户端** 上把同一个 token 写入客户端自己的 secret 文件，让 SDK / TUI 自动携带：
+
+  ```bash
+  flocks admin set-api-token --token <服务端打印的 token>
+  ```
+
+  也可以按请求显式携带任一 Header：
 
   ```text
   Authorization: Bearer <token>
   X-Flocks-API-Token: <token>
+  ```
+
+  快速验证：
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
   ```
 
 反向代理部署：
@@ -251,6 +263,8 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
   flocks admin reassign-orphan-sessions --username admin --dry-run   # 预览
   flocks admin reassign-orphan-sessions --username admin             # 实际写入
   ```
+
+  命令会输出 `scanned / orphaned / reassigned / failed` 四个计数；只要 `failed` 非零就以 exit code 2 退出，方便 CI / 脚本捕获"部分写入"情况、修复底层故障（一般是临时存储错误）后再次运行。
 
 ## 5. 加入社区
 

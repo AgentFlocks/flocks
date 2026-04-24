@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -125,36 +125,44 @@ def reassign_orphan_sessions(
     backfill the owner.
     """
 
-    async def _run() -> tuple[Optional[str], Dict[str, int]]:  # noqa: UP006 — keep tuple form
+    async def _run() -> Tuple[Optional[str], Optional[Dict[str, int]]]:
         await AuthService.init()
         info = await AuthService.get_user_by_username(username)
         if not info:
-            return username, {}
+            return None, None
         user, _, _ = info
-        if user.role != "admin":
-            return username, {"role": -1}
+        # Role validation lives in AuthService.reassign_orphan_sessions and
+        # surfaces as ValueError; intentionally not pre-checked here to
+        # keep authorization logic single-sourced.
         summary = await AuthService.reassign_orphan_sessions(user.id, dry_run=dry_run)
         return user.username, summary
 
     try:
         resolved_username, summary = asyncio.run(_run())
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     except Exception as exc:
         console.print(f"[red]Reassign failed: {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    if not summary:
-        console.print(f"[red]Admin user '{resolved_username}' not found[/red]")
-        raise typer.Exit(1)
-    if summary.get("role") == -1:
-        console.print(f"[red]'{resolved_username}' is not an admin[/red]")
+    if summary is None:
+        console.print(f"[red]Admin user '{username}' not found[/red]")
         raise typer.Exit(1)
 
-    mode = "[dim](dry-run)[/dim]" if dry_run else ""
+    mode_suffix = " [dim](dry-run)[/dim]" if dry_run else ""
+    failed = summary.get("failed", 0)
+    failed_part = f", [red]{failed}[/red] failed" if failed else ""
     console.print(
         f"Scanned [bold]{summary['scanned']}[/bold] sessions, "
         f"found [bold]{summary['orphaned']}[/bold] orphans, "
-        f"reassigned [bold]{summary['reassigned']}[/bold] to '{resolved_username}' {mode}".rstrip()
+        f"reassigned [bold]{summary['reassigned']}[/bold] to "
+        f"'{resolved_username}'{failed_part}{mode_suffix}"
     )
+    if failed:
+        # Non-zero failures: signal the operator (CI / scripts) so they
+        # can re-run after fixing the underlying cause.
+        raise typer.Exit(2)
 
 
 @admin_app.command("generate-one-time-password")

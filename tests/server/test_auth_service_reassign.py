@@ -18,6 +18,13 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _setup_admin():
+    """Idempotently ensure a bootstrap admin exists for these tests.
+
+    The autouse server-test isolation fixture (see tests/server/conftest.py)
+    rebuilds the AuthService singleton between tests, so the ``has_users``
+    branch will short-circuit on first call and run for real on subsequent
+    tests — both paths return the same admin record.
+    """
     from flocks.auth.service import AuthService
 
     if not await AuthService.has_users():
@@ -66,7 +73,7 @@ async def test_reassign_orphan_sessions_skips_owned_and_rewrites_orphans(monkeyp
 
     summary = await auth_service_module.AuthService.reassign_orphan_sessions(admin.id)
 
-    assert summary == {"scanned": 3, "orphaned": 2, "reassigned": 2}
+    assert summary == {"scanned": 3, "orphaned": 2, "reassigned": 2, "failed": 0}
     rewritten_ids = {c["session_id"] for c in update_calls}
     assert rewritten_ids == {"ses_orphan_a", "ses_orphan_b"}
     for call in update_calls:
@@ -92,7 +99,39 @@ async def test_reassign_orphan_sessions_dry_run_writes_nothing(monkeypatch):
     summary = await auth_service_module.AuthService.reassign_orphan_sessions(
         admin.id, dry_run=True
     )
-    assert summary == {"scanned": 1, "orphaned": 1, "reassigned": 0}
+    assert summary == {"scanned": 1, "orphaned": 1, "reassigned": 0, "failed": 0}
+
+
+async def test_reassign_orphan_sessions_continues_on_partial_failure(monkeypatch):
+    """A single Session.update failure must not abort the whole pass."""
+    from flocks.auth import service as auth_service_module
+    from flocks.session import session as session_module
+
+    admin = await _setup_admin()
+
+    listed = [
+        _stub_session("ses_a", owner=None),
+        _stub_session("ses_b", owner=None),
+        _stub_session("ses_c", owner=None),
+    ]
+    update_calls: list[str] = []
+
+    async def _list_all():
+        return listed
+
+    async def _update(*, project_id, session_id, owner_user_id, owner_username):
+        update_calls.append(session_id)
+        if session_id == "ses_b":
+            raise RuntimeError("storage write failed")
+
+    monkeypatch.setattr(session_module.Session, "list_all", staticmethod(_list_all))
+    monkeypatch.setattr(session_module.Session, "update", staticmethod(_update))
+
+    summary = await auth_service_module.AuthService.reassign_orphan_sessions(admin.id)
+
+    assert summary == {"scanned": 3, "orphaned": 3, "reassigned": 2, "failed": 1}
+    # All three orphans were attempted; the failing one did not stop the loop.
+    assert update_calls == ["ses_a", "ses_b", "ses_c"]
 
 
 async def test_reassign_orphan_sessions_refuses_unknown_user():
