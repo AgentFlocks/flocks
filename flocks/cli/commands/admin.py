@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from typing import Dict, Optional
 
 import typer
 from rich.console import Console
@@ -101,6 +102,59 @@ def set_api_token(
     console.print("[yellow]API token written to local secret store[/yellow]")
     console.print(f"[dim]Stored at: {secret_file}[/dim]")
     console.print(f"[dim]secret_id: {API_TOKEN_SECRET_ID}[/dim]")
+
+
+@admin_app.command("reassign-orphan-sessions")
+def reassign_orphan_sessions(
+    username: str = typer.Option(
+        "admin", "--username", "-u", help="Target admin username to claim orphan sessions"
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Only report counts; do not write changes",
+    ),
+):
+    """
+    Claim every session whose owner_user_id is empty for the given admin.
+
+    CLI / background / inbound-channel workers create sessions without an
+    auth context, so owner_user_id is left empty. While the system has
+    only the bootstrap admin this is harmless, but as soon as a member
+    account is added those sessions become invisible to it. Run this to
+    backfill the owner.
+    """
+
+    async def _run() -> tuple[Optional[str], Dict[str, int]]:  # noqa: UP006 — keep tuple form
+        await AuthService.init()
+        info = await AuthService.get_user_by_username(username)
+        if not info:
+            return username, {}
+        user, _, _ = info
+        if user.role != "admin":
+            return username, {"role": -1}
+        summary = await AuthService.reassign_orphan_sessions(user.id, dry_run=dry_run)
+        return user.username, summary
+
+    try:
+        resolved_username, summary = asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]Reassign failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if not summary:
+        console.print(f"[red]Admin user '{resolved_username}' not found[/red]")
+        raise typer.Exit(1)
+    if summary.get("role") == -1:
+        console.print(f"[red]'{resolved_username}' is not an admin[/red]")
+        raise typer.Exit(1)
+
+    mode = "[dim](dry-run)[/dim]" if dry_run else ""
+    console.print(
+        f"Scanned [bold]{summary['scanned']}[/bold] sessions, "
+        f"found [bold]{summary['orphaned']}[/bold] orphans, "
+        f"reassigned [bold]{summary['reassigned']}[/bold] to '{resolved_username}' {mode}".rstrip()
+    )
 
 
 @admin_app.command("generate-one-time-password")

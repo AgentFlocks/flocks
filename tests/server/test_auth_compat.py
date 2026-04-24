@@ -152,6 +152,69 @@ async def test_apply_auth_for_request_requires_password_reset_before_access(monk
     assert "必须先修改密码" in str(exc_info.value.detail)
 
 
+class TestAuthMiddlewareExempt:
+    """Cover ``auth_middleware_exempt`` — both fixed paths and regex patterns."""
+
+    def test_fixed_public_path_is_exempt(self):
+        assert auth_module.auth_middleware_exempt("/health") is True
+        assert auth_module.auth_middleware_exempt("/api/auth/login") is True
+
+    def test_static_prefix_is_exempt(self):
+        assert auth_module.auth_middleware_exempt("/assets/main.js") is True
+        assert auth_module.auth_middleware_exempt("/static/img/logo.png") is True
+
+    def test_protected_path_is_not_exempt(self):
+        assert auth_module.auth_middleware_exempt("/api/session") is False
+        assert auth_module.auth_middleware_exempt("/api/admin/users") is False
+
+    def test_channel_webhook_is_exempt_via_regex(self):
+        # /api/channel/{channel_id}/webhook is the public callback entry for
+        # IM platforms (DingTalk / WeCom / Feishu …).  Both /api/ and /
+        # mounts must be reachable.
+        assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/webhook") is True
+        assert auth_module.auth_middleware_exempt("/channel/dingtalk/webhook") is True
+        assert auth_module.auth_middleware_exempt("/api/channel/wecom/webhook") is True
+        assert auth_module.auth_middleware_exempt("/api/channel/feishu/webhook/") is True
+
+    def test_other_channel_subpaths_are_still_protected(self):
+        # Only ``/webhook`` is public; ``/bind``, ``/restart``, ``/status``
+        # and friends still require auth.
+        assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/bind") is False
+        assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/restart") is False
+        assert auth_module.auth_middleware_exempt("/api/channel/status") is False
+        assert auth_module.auth_middleware_exempt("/api/channel/list") is False
+        # Defense-in-depth: a malicious caller must not hide a protected path
+        # behind a fake ``webhook`` segment.
+        assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/webhook/extra") is False
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_channel_webhook_passes_without_credentials(monkeypatch):
+    """External platform webhook must reach the route handler without 401.
+
+    Channel webhooks are POSTed by IM platforms (DingTalk / WeCom / …)
+    that present neither cookies nor an API token.  The plugin's
+    ``handle_webhook`` is responsible for signature verification.
+    """
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+    request = _make_request(
+        headers={"user-agent": "DingTalk-Server"},
+        client_host="203.0.113.10",  # remote, not loopback
+        path="/api/channel/dingtalk/webhook",
+    )
+    blocked, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert blocked is None
+        # Public paths intentionally do not synthesize an auth user.
+        assert user is None
+    finally:
+        auth_module.clear_auth_context(token)
+
+
 @pytest.mark.asyncio
 async def test_apply_auth_for_request_allows_password_reset_endpoints_when_required(monkeypatch):
     async def _has_users():

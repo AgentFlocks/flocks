@@ -498,6 +498,51 @@ class AuthService:
         return temp_password
 
     @classmethod
+    async def reassign_orphan_sessions(
+        cls,
+        admin_user_id: str,
+        *,
+        dry_run: bool = False,
+    ) -> Dict[str, int]:
+        """Backfill owner on every session that still lacks one.
+
+        Unlike :meth:`migrate_legacy_sessions_to_admin`, this is **not**
+        guarded by the one-shot startup marker — it can be re-run anytime
+        operators discover orphan sessions accumulated by CLI / background
+        / inbound-channel workers (which run without an auth context and
+        therefore leave ``owner_user_id`` empty).
+
+        Returns a summary dict with ``scanned``, ``orphaned`` and
+        ``reassigned`` counts. ``reassigned`` is always 0 when
+        ``dry_run=True``.
+        """
+        from flocks.session.session import Session
+
+        admin_user = await cls.get_user_by_id(admin_user_id)
+        if not admin_user:
+            raise ValueError("目标管理员账号不存在")
+        if admin_user.role != "admin":
+            raise ValueError("目标账号不是管理员，拒绝转移所有权")
+
+        sessions = await Session.list_all()
+        orphans = [s for s in sessions if not s.owner_user_id]
+        reassigned = 0
+        if not dry_run:
+            for session in orphans:
+                await Session.update(
+                    project_id=session.project_id,
+                    session_id=session.id,
+                    owner_user_id=admin_user_id,
+                    owner_username=admin_user.username,
+                )
+                reassigned += 1
+        return {
+            "scanned": len(sessions),
+            "orphaned": len(orphans),
+            "reassigned": reassigned,
+        }
+
+    @classmethod
     async def migrate_legacy_sessions_to_admin(cls, admin_user_id: str) -> None:
         """Set owner on legacy sessions without owner_user_id."""
         marker_key = "auth:migration:legacy_session_owner_to_admin"

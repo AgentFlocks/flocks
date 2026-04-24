@@ -207,6 +207,51 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 ```
 虚拟机远程访问失败请指定 host 为虚拟机 IP。
 
+### 4.4 鉴权与 API Token
+
+启用本地账号体系后，所有 HTTP 路径默认要求鉴权，仅以下路径放行：WebUI 引导页（`/`、`/auth/*`）、静态资源、以及 IM 平台 webhook 回调（`/api/channel/{channel_id}/webhook`）。
+
+初次部署：
+
+1. 打开 WebUI，按提示完成 **bootstrap-admin**，创建唯一的 `admin` 账号。
+2. WebUI 会自动写入 `flocks_session` Cookie，浏览器侧无需额外配置。
+
+非浏览器客户端（TUI / SDK / 脚本）：
+
+- **本机回环**（`127.0.0.1` / `::1` / `localhost`，且请求不带 `x-forwarded-for` 头）会被自动识别为 `local-service` 管理员，满足同机的 TUI、插件子进程、CLI 调用。
+- **远程**调用必须携带 API Token。在服务端机器上生成，并把内容拷到客户端 `~/.flocks/config/.secret.json`：
+
+  ```bash
+  flocks admin generate-api-token       # 打印 token，写入 server_api_token
+  # 或者
+  flocks admin set-api-token --token <已有 token>
+  ```
+
+  请求时通过任一 Header 携带：
+
+  ```text
+  Authorization: Bearer <token>
+  X-Flocks-API-Token: <token>
+  ```
+
+反向代理部署：
+
+- 反代必须主动注入 `X-Forwarded-For`。若缺失，凡是直连本机回环的请求都会被自动放行为 `admin`；中间件依靠该头来区分"真本机"与"经由反代的外部请求"。
+- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确给 Cookie 加 `Secure` 标志。
+
+忘记密码 / 应急恢复：
+
+- 在服务器上执行 `flocks admin generate-one-time-password`，账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**这种状态下所有非浏览器接口都会返回 403**，请勿在不通知调用方的情况下对依赖自动化的账号执行该命令。
+
+无主 session（CLI / 后台任务 / inbound 渠道）：
+
+- 没有 auth 上下文创建出的 session（CLI 子命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 字段为空。bootstrap admin 仍可看到，但**之后新增的 member 账号将完全看不到**。可通过下列命令把这类 session 批量赋给指定 admin：
+
+  ```bash
+  flocks admin reassign-orphan-sessions --username admin --dry-run   # 预览
+  flocks admin reassign-orphan-sessions --username admin             # 实际写入
+  ```
+
 ## 5. 加入社区
 
 请使用**微信**扫描下方二维码，加入官方交流群。  

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from typing import Optional
 
 from fastapi import HTTPException, Request, Response, status
@@ -38,6 +39,25 @@ PUBLIC_PATHS = frozenset({
 PUBLIC_PREFIXES = (
     "/assets/",
     "/static/",
+)
+
+# Regex patterns for dynamic public paths that cannot be expressed via
+# fixed strings or simple prefixes (the path segment is provided by the
+# caller / external platform).
+#
+# These endpoints are designed to be invoked by **external systems** that
+# cannot present the local cookie or `Authorization: Bearer` header:
+#
+#   * IM platform webhooks (DingTalk / WeCom / Feishu / Slack / Telegram, ...)
+#     POST to ``/api/channel/{channel_id}/webhook`` — the plugin's
+#     ``handle_webhook`` is responsible for signature/origin verification.
+#
+# WARNING: any path matched here bypasses the global auth guard.  The
+# downstream handler is fully responsible for its own authentication
+# (signature checks, IP allowlists, replay protection, ...).  Do NOT add
+# entries that touch user data without a per-request integrity check.
+PUBLIC_PATH_REGEXES = (
+    re.compile(r"^/(api/)?channel/[^/]+/webhook/?$"),
 )
 
 
@@ -102,7 +122,9 @@ def auth_middleware_exempt(path: str) -> bool:
     """Return True if the path is public (no auth required)."""
     if path in PUBLIC_PATHS:
         return True
-    return any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES)
+    if any(path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
+        return True
+    return any(pattern.match(path) for pattern in PUBLIC_PATH_REGEXES)
 
 
 _PASSWORD_RESET_ALLOWED = frozenset({
