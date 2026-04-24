@@ -299,16 +299,17 @@ log = Log.create(service="server")
 # CORS Configuration
 #
 # Priority order:
-#   1. Explicit ``server.cors`` in flocks.json  → use those origins (plus
-#      the localhost fallback regex).
-#   2. ``_FLOCKS_WEBUI_HOST`` / ``_FLOCKS_WEBUI_PORT`` env vars set by
-#      ``start_backend()`` for a concrete IP → auto-whitelist that single
-#      origin.  We deliberately do NOT auto-whitelist when the WebUI binds
-#      to ``0.0.0.0``: matching ``[^/]+:<port>`` would accept every host on
-#      that port, effectively disabling CORS.  Remote deployments that run
-#      ``--webui-host 0.0.0.0`` must set ``server.cors`` explicitly in
-#      ``flocks.json``.
+#   1. Runtime env vars exported by ``start_backend()`` → add concrete
+#      ``_FLOCKS_WEBUI_*`` / ``_FLOCKS_SERVER_*`` origins inferred from the
+#      current CLI launch.
+#   2. Explicit ``server.cors`` in flocks.json → append user-configured
+#      origins without discarding the runtime ones.
 #   3. Fallback → only localhost (any port) via regex.
+#
+# We deliberately do NOT auto-whitelist wildcard binds such as ``0.0.0.0``:
+# matching ``[^/]+:<port>`` would accept every host on that port, effectively
+# disabling CORS.  Remote deployments that bind to wildcard hosts must keep
+# using explicit ``server.cors`` entries or start with a concrete IP/hostname.
 #
 # Config is read lazily on the first request via
 # :class:`_DeferredCORSMiddleware` so that importing ``app`` in an async
@@ -320,10 +321,19 @@ log = Log.create(service="server")
 _LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
 
 _LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_WILDCARD_HOSTS = {"0.0.0.0", "::"}
 
 
 def _is_localhost(host: str) -> bool:
     return host in _LOCALHOST_HOSTS
+
+
+def _append_origin(origins: list[str], host: str, port: str) -> None:
+    if not host or not port or _is_localhost(host) or host in _WILDCARD_HOSTS:
+        return
+    origin = f"http://{host}:{port}"
+    if origin not in origins:
+        origins.append(origin)
 
 
 def _read_cors_config() -> tuple[list[str], Optional[str]]:
@@ -335,6 +345,18 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
     """
     import json
 
+    origins: list[str] = []
+    _append_origin(
+        origins,
+        os.environ.get("_FLOCKS_WEBUI_HOST", ""),
+        os.environ.get("_FLOCKS_WEBUI_PORT", ""),
+    )
+    _append_origin(
+        origins,
+        os.environ.get("_FLOCKS_SERVER_HOST", ""),
+        os.environ.get("_FLOCKS_SERVER_PORT", ""),
+    )
+
     try:
         cfg_file = Config.get_config_file()
         if cfg_file.exists():
@@ -343,25 +365,13 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
             server_cfg = data.get("server") or {}
             cors = server_cfg.get("cors")
             if isinstance(cors, list):
-                origins = [c for c in cors if isinstance(c, str) and c]
-                if origins:
-                    return origins, _LOCALHOST_ORIGIN_RE
+                for candidate in cors:
+                    if isinstance(candidate, str) and candidate and candidate not in origins:
+                        origins.append(candidate)
     except Exception:
         pass
 
-    webui_host = os.environ.get("_FLOCKS_WEBUI_HOST", "")
-    webui_port = os.environ.get("_FLOCKS_WEBUI_PORT", "")
-
-    if (
-        webui_host
-        and webui_port
-        and not _is_localhost(webui_host)
-        and webui_host != "0.0.0.0"
-    ):
-        extra_origin = f"http://{webui_host}:{webui_port}"
-        return [extra_origin], _LOCALHOST_ORIGIN_RE
-
-    return [], _LOCALHOST_ORIGIN_RE
+    return origins, _LOCALHOST_ORIGIN_RE
 
 
 class _DeferredCORSMiddleware:
