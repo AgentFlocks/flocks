@@ -587,6 +587,62 @@ function Test-IsLockError {
     return $Text -match '拒绝访问|Access is denied|os error 5|WinError 5|failed to remove directory|Failed to update Windows PE resources'
 }
 
+function Test-IsUvManagedPythonInspectionError {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return $Text -match 'Failed to inspect Python interpreter from managed installations|Failed to query Python interpreter|failed to query metadata of file'
+}
+
+function Get-UvManagedPythonInstallDirFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $pathMatch = [Regex]::Match(
+        $Text,
+        '(?im)([A-Z]:\\[^''"\r\n]+\\uv\\python\\[^''"\r\n]+\\python\.exe)'
+    )
+    if (-not $pathMatch.Success) {
+        return $null
+    }
+
+    $pythonPath = $pathMatch.Groups[1].Value
+    if ([string]::IsNullOrWhiteSpace($pythonPath)) {
+        return $null
+    }
+
+    return (Split-Path -Parent $pythonPath)
+}
+
+function Repair-UvManagedPythonInstall {
+    param([string]$Text)
+
+    $installDir = Get-UvManagedPythonInstallDirFromText -Text $Text
+    if ([string]::IsNullOrWhiteSpace($installDir)) {
+        Write-Warning "uv reported a broken managed Python runtime, but the cached install directory could not be determined."
+        return
+    }
+
+    if (-not (Test-Path $installDir)) {
+        Write-Warning "uv reported a broken managed Python runtime, but the cached install directory was already missing: $installDir"
+        return
+    }
+
+    Write-Info "Removing broken uv-managed Python runtime: $installDir"
+    try {
+        Remove-Item -Path $installDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("Could not remove cached uv-managed Python runtime at {0}: {1}" -f $installDir, $_.Exception.Message)
+    }
+}
+
 function Format-CmdArgument {
     param([AllowNull()][string]$Argument)
 
@@ -828,32 +884,38 @@ function Invoke-InstallerCommandWithLockRetry {
         [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
-    if (-not $StreamOutput) {
-        Write-ProcessOutputText -Text $result.StdOut
-        Write-ProcessOutputText -Text $result.StdErr
-    }
+    $retriedAfterLockCleanup = $false
+    $retriedAfterManagedPythonRepair = $false
 
-    if ($result.ExitCode -eq 0) {
-        return
-    }
+    while ($true) {
+        $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+        if (-not $StreamOutput) {
+            Write-ProcessOutputText -Text $result.StdOut
+            Write-ProcessOutputText -Text $result.StdErr
+        }
 
-    $combinedOutput = @($result.StdOut, $result.StdErr) -join [Environment]::NewLine
-    if (-not (Test-IsLockError -Text $combinedOutput)) {
-        Fail "$Description failed."
-    }
+        if ($result.ExitCode -eq 0) {
+            return
+        }
 
-    Write-Info "$Description detected a file lock. Cleaning up leftover processes before retrying..."
-    Stop-FlocksProcesses
-    Start-Sleep -Seconds 3
+        $combinedOutput = @($result.StdOut, $result.StdErr) -join [Environment]::NewLine
 
-    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
-    if (-not $StreamOutput) {
-        Write-ProcessOutputText -Text $retryResult.StdOut
-        Write-ProcessOutputText -Text $retryResult.StdErr
-    }
+        if (-not $retriedAfterManagedPythonRepair -and (Test-IsUvManagedPythonInspectionError -Text $combinedOutput)) {
+            $retriedAfterManagedPythonRepair = $true
+            Write-Info "$Description detected a broken uv-managed Python runtime. Clearing the cached interpreter before retrying..."
+            Repair-UvManagedPythonInstall -Text $combinedOutput
+            Start-Sleep -Seconds 2
+            continue
+        }
 
-    if ($retryResult.ExitCode -ne 0) {
+        if (-not $retriedAfterLockCleanup -and (Test-IsLockError -Text $combinedOutput)) {
+            $retriedAfterLockCleanup = $true
+            Write-Info "$Description detected a file lock. Cleaning up leftover processes before retrying..."
+            Stop-FlocksProcesses
+            Start-Sleep -Seconds 3
+            continue
+        }
+
         Fail "$Description failed."
     }
 }
