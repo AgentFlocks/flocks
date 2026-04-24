@@ -749,6 +749,7 @@ def start_backend(config: ServiceConfig, console) -> None:
     backend_env = os.environ.copy()
     backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
     backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
+    backend_env["PYTHONUNBUFFERED"] = "1"
 
     console.print("[flocks] 启动后端服务...")
     process = _spawn_process(
@@ -772,9 +773,11 @@ def start_backend(config: ServiceConfig, console) -> None:
         wait_for_http(
             [backend_access_base_url(config)],
             "后端服务",
+            delay=3.0,
             validator=_is_running_status_response,
         )
     except ServiceError:
+        _emit_service_log_tail(console, paths.backend_log, "后端")
         stop_one(config.backend_port, paths.backend_pid, "后端", console)
         raise
 
@@ -882,6 +885,7 @@ def start_frontend(config: ServiceConfig, console) -> None:
     try:
         wait_for_http([config.frontend_url], "WebUI")
     except ServiceError:
+        _emit_service_log_tail(console, paths.frontend_log, "WebUI")
         stop_one(config.frontend_port, paths.frontend_pid, "WebUI", console)
         raise
 
@@ -1275,6 +1279,28 @@ def tail_lines(path: Path, lines: int) -> list[str]:
     """Read the last N lines from a text file."""
     with path.open("r", encoding="utf-8", errors="replace") as handle:
         return [line.rstrip("\n") for line in deque(handle, maxlen=max(lines, 0))]
+
+
+def _emit_service_log_tail(console, log_path: Path, service_label: str, lines: int = 40) -> None:
+    """Print the last *lines* lines of *log_path* to help diagnose failed daemon startups."""
+    if lines <= 0:
+        return
+    if not log_path.exists():
+        console.print(
+            f"[dim][flocks] {service_label} 日志文件尚不存在（{log_path}），"
+            "子进程可能启动即退出。[/dim]",
+        )
+        return
+    try:
+        excerpt = tail_lines(log_path, lines)
+    except OSError as exc:
+        console.print(f"[dim][flocks] 无法读取 {service_label} 日志: {exc}[/dim]")
+        return
+    if not excerpt:
+        return
+    console.print(f"[yellow][flocks] {service_label} 近期日志（最后 {len(excerpt)} 行）:[/yellow]")
+    for line in excerpt:
+        console.print(f"[dim]{line}[/dim]")
 
 
 def append_unique_pids(existing: Iterable[int], additions: Iterable[int]) -> list[int]:
