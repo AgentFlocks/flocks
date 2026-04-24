@@ -265,3 +265,95 @@ class TestOpenAICompatibleIsConfigured:
         from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
 
         assert CherryProvider.is_configured is OpenAICompatibleProvider.is_configured
+
+
+class TestGetCredentialsHidesPlaceholder:
+    """When the saved value is the ``not-needed`` sentinel the GET endpoint
+    must mask it as ``None`` so the WebUI doesn't pre-fill the API Key input
+    with that internal placeholder string.
+    """
+
+    @pytest.mark.asyncio
+    async def test_placeholder_is_hidden_but_has_credential_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake_secrets = MagicMock()
+        fake_secrets.get.side_effect = lambda key: {
+            "openai-compatible_llm_key": "not-needed",
+        }.get(key)
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager", lambda: fake_secrets
+        )
+        monkeypatch.setattr(
+            provider_routes.ConfigWriter,
+            "get_provider_raw",
+            lambda pid: {"options": {"baseURL": "http://internal/v1"}},
+        )
+
+        response = await provider_routes.get_provider_credentials("openai-compatible")
+
+        assert response.api_key is None, (
+            "Internal sentinel must NOT be exposed to the UI verbatim."
+        )
+        assert response.api_key_masked is None
+        assert response.has_credential is True, (
+            "A credential record exists; UI should know that, just not see the literal value."
+        )
+        assert response.secret_id == "openai-compatible_llm_key"
+        assert response.base_url == "http://internal/v1"
+
+    @pytest.mark.asyncio
+    async def test_real_api_key_still_returned_and_masked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        fake_secrets = MagicMock()
+        fake_secrets.get.side_effect = lambda key: {
+            "openai_llm_key": "sk-real-secret-1234567890",
+        }.get(key)
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager", lambda: fake_secrets
+        )
+        monkeypatch.setattr(
+            provider_routes.ConfigWriter,
+            "get_provider_raw",
+            lambda pid: None,
+        )
+
+        response = await provider_routes.get_provider_credentials("openai")
+
+        assert response.api_key == "sk-real-secret-1234567890"
+        assert response.api_key_masked is not None
+        assert response.api_key_masked != "sk-real-secret-1234567890"
+        assert response.has_credential is True
+
+    @pytest.mark.asyncio
+    async def test_inline_placeholder_in_flocks_json_also_hidden(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Defense-in-depth: even if a hand-edited flocks.json contains an
+        inline ``apiKey: 'not-needed'``, the GET endpoint should still mask it.
+        """
+        fake_secrets = MagicMock()
+        fake_secrets.get.return_value = None
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager", lambda: fake_secrets
+        )
+        monkeypatch.setattr(
+            provider_routes.ConfigWriter,
+            "get_provider_raw",
+            lambda pid: {
+                "options": {
+                    "apiKey": "not-needed",
+                    "baseURL": "http://internal/v1",
+                }
+            },
+        )
+
+        response = await provider_routes.get_provider_credentials("custom-internal")
+
+        assert response.api_key is None
+        assert response.api_key_masked is None
+        assert response.has_credential is True

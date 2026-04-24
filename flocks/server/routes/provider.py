@@ -80,6 +80,18 @@ def _should_persist_secondary_secret(metadata: Optional[Dict[str, Any]]) -> bool
     return True
 
 
+#: Sentinel value persisted when a user saves an OpenAI-compatible / custom
+#: provider without an API key (internal LLM gateways without auth). It is
+#: passed verbatim to the OpenAI SDK so the client constructs cleanly, but
+#: should NEVER be surfaced back to the UI as the actual saved key.
+_NO_API_KEY_PLACEHOLDER = "not-needed"
+
+
+def _is_placeholder_api_key(value: Optional[str]) -> bool:
+    """Whether ``value`` is the internal "no-auth" sentinel."""
+    return isinstance(value, str) and value.strip() == _NO_API_KEY_PLACEHOLDER
+
+
 def _get_inline_provider_api_key(provider_id: str) -> Optional[str]:
     """Return an inline apiKey from flocks.json when present.
 
@@ -1604,10 +1616,22 @@ async def get_provider_credentials(provider_id: str):
         if not base_url:
             base_url = secrets.get(f"{provider_id}_base_url")
 
+        # When the stored value is the no-auth sentinel, hide it from the
+        # response so the UI doesn't pre-fill the password input with the
+        # literal string "not-needed". We still report ``has_credential=True``
+        # because a credential record DOES exist; the user just chose to leave
+        # the key blank for an internal/no-auth gateway.
+        is_placeholder = _is_placeholder_api_key(api_key)
+        ui_api_key = None if is_placeholder else api_key
+
         return ProviderCredentialResponse(
             secret_id=secret_id if api_key else None,
-            api_key=api_key,
-            api_key_masked=SecretManager.mask(api_key) if api_key else None,
+            api_key=ui_api_key,
+            api_key_masked=(
+                SecretManager.mask(api_key)
+                if api_key and not is_placeholder
+                else None
+            ),
             base_url=base_url,
             has_credential=bool(api_key),
         )
@@ -1646,7 +1670,8 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
                 raise HTTPException(status_code=400, detail="API key required")
             # Persist a sentinel value so downstream OpenAI SDK clients (which
             # require a non-empty key argument) keep working transparently.
-            effective_api_key = "not-needed"
+            # The GET endpoint masks this back to ``None`` for the UI.
+            effective_api_key = _NO_API_KEY_PLACEHOLDER
 
         secrets = get_secret_manager()
 
