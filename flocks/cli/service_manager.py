@@ -747,8 +747,6 @@ def start_backend(config: ServiceConfig, console) -> None:
     ]
 
     backend_env = os.environ.copy()
-    backend_env["_FLOCKS_SERVER_HOST"] = config.backend_host
-    backend_env["_FLOCKS_SERVER_PORT"] = str(config.backend_port)
     backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
     backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
 
@@ -1355,9 +1353,16 @@ def access_host(host: str) -> str:
     return _loopback_host(host)
 
 
+def _format_host_for_url(host: str) -> str:
+    """Wrap IPv6 literals in brackets before composing URLs."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def backend_access_base_url(config: ServiceConfig) -> str:
     """Return the backend base URL that the local WebUI should connect to."""
-    return f"http://{access_host(config.backend_host)}:{config.backend_port}"
+    return f"http://{_format_host_for_url(access_host(config.backend_host))}:{config.backend_port}"
 
 
 def websocket_access_base_url(config: ServiceConfig) -> str:

@@ -299,9 +299,8 @@ log = Log.create(service="server")
 # CORS Configuration
 #
 # Priority order:
-#   1. Runtime env vars exported by ``start_backend()`` → add concrete
-#      ``_FLOCKS_WEBUI_*`` / ``_FLOCKS_SERVER_*`` origins inferred from the
-#      current CLI launch.
+#   1. Runtime env vars exported by ``start_backend()`` → add the concrete
+#      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
 #   3. Fallback → only localhost (any port) via regex.
@@ -328,10 +327,17 @@ def _is_localhost(host: str) -> bool:
     return host in _LOCALHOST_HOSTS
 
 
+def _format_host_for_url(host: str) -> str:
+    """Wrap IPv6 literals in brackets before composing origins."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def _append_origin(origins: list[str], host: str, port: str) -> None:
     if not host or not port or _is_localhost(host) or host in _WILDCARD_HOSTS:
         return
-    origin = f"http://{host}:{port}"
+    origin = f"http://{_format_host_for_url(host)}:{port}"
     if origin not in origins:
         origins.append(origin)
 
@@ -350,11 +356,6 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
         origins,
         os.environ.get("_FLOCKS_WEBUI_HOST", ""),
         os.environ.get("_FLOCKS_WEBUI_PORT", ""),
-    )
-    _append_origin(
-        origins,
-        os.environ.get("_FLOCKS_SERVER_HOST", ""),
-        os.environ.get("_FLOCKS_SERVER_PORT", ""),
     )
 
     try:

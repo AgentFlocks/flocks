@@ -7,9 +7,6 @@ on:
       - "packaging/windows/**"
       - "scripts/install.ps1"
       - "scripts/install_zh.ps1"
-      - "flocks/cli/service_manager.py"
-      - ".github/workflows/windows-packaging.yml"
-      - ".github/workflows/windows-packaging-release.yml"
 
 permissions:
   contents: read

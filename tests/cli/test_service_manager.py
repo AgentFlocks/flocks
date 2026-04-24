@@ -889,8 +889,6 @@ def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_pat
     assert record is not None
     assert record.pid == 2468
     backend_env = spawn_calls[0]["kwargs"]["env"]
-    assert backend_env["_FLOCKS_SERVER_HOST"] == "127.0.0.1"
-    assert backend_env["_FLOCKS_SERVER_PORT"] == "8000"
     assert backend_env["_FLOCKS_WEBUI_HOST"] == "127.0.0.1"
     assert backend_env["_FLOCKS_WEBUI_PORT"] == "5173"
     assert console.messages[-1] == f"[flocks] 后端已启动，日志: {paths.backend_log}"
@@ -907,6 +905,19 @@ def test_build_frontend_env_uses_backend_host_and_port() -> None:
     assert env["FLOCKS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
     assert env["VITE_API_BASE_URL"] == "http://10.0.0.8:9000"
     assert env["VITE_WS_BASE_URL"] == "ws://10.0.0.8:9000"
+
+
+def test_build_frontend_env_brackets_ipv6_backend_host() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="2001:db8::1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_API_PROXY_TARGET"] == "http://[2001:db8::1]:9000"
+    assert env["VITE_API_BASE_URL"] == "http://[2001:db8::1]:9000"
+    assert env["VITE_WS_BASE_URL"] == "ws://[2001:db8::1]:9000"
 
 
 def test_build_frontend_env_uses_loopback_for_wildcard_backend_host() -> None:
