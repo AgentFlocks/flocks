@@ -1338,11 +1338,19 @@ Please address this message and continue with your tasks.
         )
 
     def _should_use_text_tool_call_mode(self) -> bool:
+        # MiniMax models exposed through ThreatBook-managed gateways do not
+        # forward the OpenAI ``tool_calls`` field on their streaming chunks
+        # (observed on ``threatbook-cn-llm`` 2026-04: first ``ChoiceDelta``
+        # only contains ``content`` / ``role``). Without this opt-in the
+        # model can never request a tool and ends every turn with
+        # ``finish_reason=stop`` and zero tool calls. Force the MiniMax XML
+        # text-call protocol for these provider/model pairs so tools work.
         model_lower = (self.model_id or "").lower()
         provider_lower = (self.provider_id or "").lower()
         minimax_text_tool_call_providers = {
             "custom-threatbook-internal",
             "custom-tb-inner",
+            "threatbook-cn-llm",
         }
         return (
             "minimax" in model_lower
