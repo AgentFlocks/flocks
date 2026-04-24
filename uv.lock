@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = "==3.12.*"
 resolution-markers = [
     "sys_platform == 'win32'",
@@ -389,6 +389,19 @@ wheels = [
 ]
 
 [[package]]
+name = "dingtalk-stream"
+version = "0.24.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "requests" },
+    { name = "websockets" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/44/102dede3f371277598df6aa9725b82e3add068c729333c7a5dbc12764579/dingtalk_stream-0.24.3-py3-none-any.whl", hash = "sha256:2160403656985962878bf60cdf5adf41619f21067348e06f07a7c7eebf5943ad", size = 27813, upload-time = "2025-10-24T09:36:57.497Z" },
+]
+
+[[package]]
 name = "distro"
 version = "1.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -481,6 +494,7 @@ dependencies = [
     { name = "click" },
     { name = "croniter" },
     { name = "defusedxml" },
+    { name = "dingtalk-stream" },
     { name = "fastapi" },
     { name = "gitpython" },
     { name = "google-genai" },
@@ -543,6 +557,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.7" },
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
+    { name = "dingtalk-stream", specifier = ">=0.20" },
     { name = "fastapi", specifier = ">=0.109.0" },
     { name = "gitpython", specifier = ">=3.1.41" },
     { name = "google-genai", specifier = ">=0.3.0" },

@@ -1299,71 +1299,14 @@ class ACPAgent:
             )
             return done_response
 
-        async def send_text_response(text: str) -> None:
-            from flocks.session.message import Message, MessageRole
-
-            message = await Message.create(
-                session_id=session_id,
-                role=MessageRole.ASSISTANT,
-                content=text,
-                agent=agent,
-                providerID=model.get("providerID", ""),
-                modelID=model.get("modelID", ""),
-                mode=agent,
-            )
-            parts = await Message.parts(message.id, session_id=session_id)
-            await self._process_message({
-                "info": message.model_dump(by_alias=True),
-                "parts": [p.model_dump(by_alias=True) for p in parts],
-            })
-
-        from flocks.command.handler import handle_slash_command
-
-        handled = await handle_slash_command(
-            text_content,
-            send_text=send_text_response,
-            send_prompt=lambda prompt: self._sdk.session.prompt(
-                session_id=session_id,
-                model={
-                    "providerID": model["providerID"],
-                    "modelID": model["modelID"],
-                },
-                parts=[{"type": "text", "text": prompt}],
-                agent=agent,
-                directory=directory,
-            ),
-            clear_screen=None,
-            restart_session=lambda: self._restart_session_state(
-                session_id=session_id,
-            ),
+        await self._sdk.session.command(
+            session_id=session_id,
+            command=cmd["name"],
+            arguments=cmd["args"],
+            model=f"{model['providerID']}/{model['modelID']}",
+            agent=agent,
+            directory=directory,
         )
-        if handled:
-            return done_response
-        
-        # Check for custom command
-        commands = await self._sdk.command.list(directory=directory)
-        command = next((c for c in commands if c.get("name") == cmd["name"]), None)
-        
-        if command:
-            await self._sdk.session.command(
-                session_id=session_id,
-                command=command["name"],
-                arguments=cmd["args"],
-                model=f"{model['providerID']}/{model['modelID']}",
-                agent=agent,
-                directory=directory,
-            )
-            return done_response
-        
-        # Built-in commands
-        if cmd["name"] == "compact":
-            await self._sdk.session.summarize(
-                session_id=session_id,
-                directory=directory,
-                provider_id=model["providerID"],
-                model_id=model["modelID"],
-            )
-        
         return done_response
 
     async def _restart_session_state(self, session_id: str) -> None:

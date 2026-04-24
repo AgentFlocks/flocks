@@ -23,6 +23,7 @@ export interface WorkspaceStats {
 export interface UploadResult {
   name: string;
   path?: string;
+  abs_path?: string;
   size?: number;
   is_text_file?: boolean;
   preview_warning?: string;

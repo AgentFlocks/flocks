@@ -313,6 +313,7 @@ async def upload_files(
         results.append({
             "name": target.name,
             "path": str(target.relative_to(mgr.get_workspace_dir())),
+            "abs_path": str(target),
             "size": total,
             "is_text_file": is_text,
             "preview_warning": None if is_text else "Binary file — download only",

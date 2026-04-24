@@ -1,24 +1,18 @@
 """
-Tests for the DingTalk active-outbound send library.
+Tests for the DingTalk channel — Stream Mode inbound + OAPI outbound.
 
 Layout:
-  - send library  → flocks.channel.builtin.dingtalk.{config,client,send}
-  - inbound owner → .flocks/plugins/channels/dingtalk/dingtalk.py (Node.js)
-
-Only the OAPI app-robot ("stream/app push") path is supported; custom
-group-robot incoming webhooks are intentionally out of scope.
-
-The builtin package does NOT register a ChannelPlugin (to avoid id
-collisions with the local plugin), so registry-side tests are absent.
-The local Node.js plugin is owned separately and not exercised here.
+  - send library    → flocks.channel.builtin.dingtalk.{config,client,send}
+  - stream inbound  → flocks.channel.builtin.dingtalk.stream
+  - channel plugin  → flocks.channel.builtin.dingtalk.channel.DingTalkChannel
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -342,81 +336,59 @@ class TestEnsureApiSuccess:
 
 
 # ------------------------------------------------------------------
-# Builtin package no longer registers a ChannelPlugin
+# Builtin DingTalk channel plugin (Stream Mode)
 # ------------------------------------------------------------------
 
-class TestBuiltinHasNoChannelClass:
-    def test_no_dingtalk_in_builtin_registry(self):
+class TestBuiltinChannelPlugin:
+    def test_dingtalk_in_builtin_registry(self):
         from flocks.channel.registry import ChannelRegistry
         reg = ChannelRegistry()
         reg._register_builtin_channels()
-        # The builtin package intentionally exposes only a send library;
-        # the dingtalk id is owned by the project-local plugin.
-        assert reg.get("dingtalk") is None
+        plugin = reg.get("dingtalk")
+        assert plugin is not None, "DingTalkChannel must be registered as a builtin"
+        assert plugin.meta().id == "dingtalk"
 
-    def test_builtin_package_has_no_channel_module(self):
+    def test_builtin_channel_module_exists(self):
         spec = importlib.util.find_spec(
             "flocks.channel.builtin.dingtalk.channel"
         )
-        assert spec is None
+        assert spec is not None
 
+    def test_validate_config_accepts_client_id_alias(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        plugin = DingTalkChannel()
+        assert plugin.validate_config({
+            "clientId": "k", "clientSecret": "s",
+        }) is None
 
-# ------------------------------------------------------------------
-# Local plugin send_text — delegates to send_message_app
-# ------------------------------------------------------------------
+    def test_validate_config_rejects_missing_credentials(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        plugin = DingTalkChannel()
+        error = plugin.validate_config({})
+        assert error is not None
+        assert "appKey" in error or "credentials" in error.lower()
 
-# The local plugin lives under .flocks/plugins/channels/dingtalk/dingtalk.py;
-# load it by file path because that directory is not on sys.path during tests.
-_LOCAL_PLUGIN_PATH = (
-    Path(__file__).resolve().parents[2]
-    / ".flocks/plugins/channels/dingtalk/dingtalk.py"
-)
-
-
-def _load_local_plugin_module():
-    spec = importlib.util.spec_from_file_location(
-        "_test_dingtalk_local_plugin", _LOCAL_PLUGIN_PATH
-    )
-    assert spec and spec.loader, f"cannot load {_LOCAL_PLUGIN_PATH}"
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-class TestLocalPluginSendText:
-    """Active outbound (channel_message tool) goes through send_text."""
-
-    def _make_plugin(self, **config):
-        mod = _load_local_plugin_module()
-        plugin = mod.DingTalkChannel()
-        plugin._config = config
-        # Bypass the live `Config.get()` lookup added in send_text; tests
-        # supply the channel config directly.
-        async def _fake_resolve(self=plugin):
-            return dict(config)
-        plugin._resolve_outbound_config = _fake_resolve  # type: ignore[assignment]
-        return plugin
+    def test_meta_aliases(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        meta = DingTalkChannel().meta()
+        assert "dingding" in meta.aliases
 
     @pytest.mark.asyncio
     async def test_send_text_delegates_to_send_message_app(self):
-        plugin = self._make_plugin(
-            clientId="dingkey",
-            clientSecret="secret",
-            robotCode="dingrobot",
-        )
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        plugin = DingTalkChannel()
+        plugin._config = {"clientId": "k", "clientSecret": "s"}
         ctx = OutboundContext(
             channel_id="dingtalk",
             to="user:staff_001",
-            text="hello from rex",
-            account_id="default",
+            text="hello",
         )
 
-        sent_kwargs = {}
+        captured: dict = {}
 
         async def fake_send(**kwargs):
-            sent_kwargs.update(kwargs)
-            return {"message_id": "mid_xxx", "chat_id": "staff_001"}
+            captured.update(kwargs)
+            return {"message_id": "mid", "chat_id": "staff_001"}
 
         with patch(
             "flocks.channel.builtin.dingtalk.send_message_app",
@@ -425,40 +397,16 @@ class TestLocalPluginSendText:
             result = await plugin.send_text(ctx)
 
         assert result.success is True
-        assert result.message_id == "mid_xxx"
-        assert result.chat_id == "staff_001"
-        assert sent_kwargs["to"] == "user:staff_001"
-        assert sent_kwargs["text"] == "hello from rex"
-        # The plugin must forward its full config (so robotCode reaches the lib).
-        assert sent_kwargs["config"]["robotCode"] == "dingrobot"
+        assert result.message_id == "mid"
+        assert captured["to"] == "user:staff_001"
+        assert captured["text"] == "hello"
 
     @pytest.mark.asyncio
-    async def test_send_text_works_without_explicit_robot_code(self):
-        """robotCode defaults to clientId/appKey — no extra config needed."""
-        plugin = self._make_plugin(clientId="dingkey", clientSecret="s")
-        ctx = OutboundContext(channel_id="dingtalk", to="user:staff_001", text="hi")
-
-        sent_kwargs = {}
-
-        async def fake_send(**kwargs):
-            sent_kwargs.update(kwargs)
-            return {"message_id": "m", "chat_id": "staff_001"}
-
-        with patch(
-            "flocks.channel.builtin.dingtalk.send_message_app",
-            new=fake_send,
-        ):
-            result = await plugin.send_text(ctx)
-
-        assert result.success is True
-        # The plugin must NOT inject robotCode itself; the send library
-        # resolves it from clientId via resolve_account_credentials.
-        assert "robotCode" not in sent_kwargs["config"]
-
-    @pytest.mark.asyncio
-    async def test_send_text_missing_target_returns_error(self):
-        plugin = self._make_plugin(clientId="k", clientSecret="s")
-        ctx = OutboundContext(channel_id="dingtalk", to="", text="hi")
+    async def test_send_text_rejects_empty_target(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        plugin = DingTalkChannel()
+        plugin._config = {"clientId": "k", "clientSecret": "s"}
+        ctx = OutboundContext(channel_id="dingtalk", to="", text="x")
 
         result = await plugin.send_text(ctx)
 
@@ -466,58 +414,787 @@ class TestLocalPluginSendText:
         assert "to" in (result.error or "").lower()
 
     @pytest.mark.asyncio
-    async def test_resolve_outbound_config_reads_live_global_config(self):
-        """send_text must NOT depend on self._config: PluginLoader can register
-        a fresh DingTalkChannel after start() ran on the original instance,
-        leaving self._config = None on the one outbound actually picks up.
+    async def test_wait_until_done_handles_gather_future(self):
+        """Regression: ``_wait_until_done`` must not pass the
+        ``_GatheringFuture`` returned by ``asyncio.gather()`` to
+        ``asyncio.create_task``.  Symptom in production:
+
+            "a coroutine was expected, got <_GatheringFuture pending>"
+
+        was raised on every reconnect, looping the gateway forever.
         """
-        mod = _load_local_plugin_module()
-        plugin = mod.DingTalkChannel()  # NB: no plugin._config set on purpose
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
 
-        from flocks.config.config import ChannelConfig as _CC
+        plugin = DingTalkChannel()
 
-        live_cfg = _CC(
-            enabled=True,
-            **{
-                "clientId": "live_key",
-                "clientSecret": "live_secret",
+        async def _quick_runner():
+            return None
+
+        plugin._runner_tasks = [
+            asyncio.create_task(_quick_runner()),
+            asyncio.create_task(_quick_runner()),
+        ]
+        abort_event = asyncio.Event()
+
+        # Should complete cleanly when all runners finish — no TypeError.
+        await asyncio.wait_for(
+            plugin._wait_until_done(abort_event), timeout=2.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_until_done_returns_when_abort_fires(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+
+        plugin = DingTalkChannel()
+
+        async def _slow_runner():
+            await asyncio.sleep(60)
+
+        plugin._runner_tasks = [asyncio.create_task(_slow_runner())]
+        abort_event = asyncio.Event()
+
+        async def _fire_abort():
+            await asyncio.sleep(0.05)
+            abort_event.set()
+
+        asyncio.create_task(_fire_abort())
+        await asyncio.wait_for(
+            plugin._wait_until_done(abort_event), timeout=2.0,
+        )
+
+        # Caller is responsible for cancelling runners; verify the
+        # waiter returns even though the runner is still pending.
+        plugin._runner_tasks[0].cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await plugin._runner_tasks[0]
+
+    @pytest.mark.asyncio
+    async def test_wait_until_done_suppresses_permanent_auth_error(self):
+        """Permanent auth errors must NOT propagate from _wait_until_done
+        — otherwise the gateway would reconnect indefinitely with the
+        same bad credentials.
+        """
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+        from flocks.channel.builtin.dingtalk.stream import (
+            DingTalkPermanentAuthError,
+        )
+
+        plugin = DingTalkChannel()
+
+        async def _failing_runner():
+            raise DingTalkPermanentAuthError(
+                "bad creds", code="InvalidAuthentication", http_status=401,
+            )
+
+        plugin._runner_tasks = [asyncio.create_task(_failing_runner())]
+        abort_event = asyncio.Event()
+
+        # Must return cleanly, not raise.
+        await asyncio.wait_for(
+            plugin._wait_until_done(abort_event), timeout=1.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_wait_until_done_propagates_transient_error(self):
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+
+        plugin = DingTalkChannel()
+
+        async def _failing_runner():
+            raise RuntimeError("network hiccup")
+
+        plugin._runner_tasks = [asyncio.create_task(_failing_runner())]
+        abort_event = asyncio.Event()
+
+        with pytest.raises(RuntimeError, match="network hiccup"):
+            await asyncio.wait_for(
+                plugin._wait_until_done(abort_event), timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_wait_until_done_treats_external_cancel_as_transient(self):
+        """Regression: when ``plugin.stop()`` cancels runners while
+        ``abort_event`` is still clear (concurrent restart race in the
+        gateway), ``_wait_until_done`` must surface a transient error
+        — NOT return cleanly.
+
+        Returning cleanly there was the production bug observed in
+        ``backend.log``: the gateway's ``_run_with_reconnect`` then
+        misinterpreted the fast clean return as "webhook / passive
+        mode" and parked on ``abort_event.wait()`` forever, so DingTalk
+        never reconnected and stopped receiving messages.
+        """
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+
+        plugin = DingTalkChannel()
+
+        async def _slow_runner():
+            await asyncio.sleep(60)
+
+        plugin._runner_tasks = [asyncio.create_task(_slow_runner())]
+        abort_event = asyncio.Event()  # deliberately NOT set
+
+        async def _external_cancel():
+            await asyncio.sleep(0.05)
+            for t in plugin._runner_tasks:
+                t.cancel()
+
+        asyncio.create_task(_external_cancel())
+
+        with pytest.raises(RuntimeError, match="concurrent stop/restart"):
+            await asyncio.wait_for(
+                plugin._wait_until_done(abort_event), timeout=2.0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_wait_until_done_silent_when_cancel_after_abort(self):
+        """When abort fires *first* and runners are cancelled afterwards
+        (the normal shutdown path), no exception should be raised — the
+        cancellation is expected and the gateway is already breaking out.
+        """
+        from flocks.channel.builtin.dingtalk import DingTalkChannel
+
+        plugin = DingTalkChannel()
+
+        async def _slow_runner():
+            await asyncio.sleep(60)
+
+        plugin._runner_tasks = [asyncio.create_task(_slow_runner())]
+        abort_event = asyncio.Event()
+
+        async def _abort_then_cancel():
+            await asyncio.sleep(0.05)
+            abort_event.set()
+            await asyncio.sleep(0)  # let _wait_until_done observe abort
+            for t in plugin._runner_tasks:
+                t.cancel()
+
+        asyncio.create_task(_abort_then_cancel())
+
+        # No exception expected — abort fired before cancel, so the
+        # gateway will break out of its loop normally.
+        await asyncio.wait_for(
+            plugin._wait_until_done(abort_event), timeout=2.0,
+        )
+
+        # Drain the cancelled runner
+        with contextlib.suppress(asyncio.CancelledError):
+            await plugin._runner_tasks[0]
+
+
+# ------------------------------------------------------------------
+# Stream Mode helpers — gating + message extraction
+# ------------------------------------------------------------------
+
+class TestStreamHelpers:
+    def test_message_gate_dm_always_processes(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({"requireMention": True})
+        assert gate.should_process(SimpleNamespace(), "hi", is_group=False, chat_id="x")
+
+    def test_message_gate_group_requires_mention_when_enabled(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({"requireMention": True})
+        msg_no_mention = SimpleNamespace(is_in_at_list=False)
+        msg_mention = SimpleNamespace(is_in_at_list=True)
+        assert not gate.should_process(msg_no_mention, "hi", is_group=True, chat_id="g")
+        assert gate.should_process(msg_mention, "hi", is_group=True, chat_id="g")
+
+    def test_message_gate_free_response_chats_bypass_mention_check(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({
+            "requireMention": True,
+            "freeResponseChats": ["cidABC"],
+        })
+        msg = SimpleNamespace(is_in_at_list=False)
+        assert gate.should_process(msg, "hi", is_group=True, chat_id="cidABC")
+
+    def test_message_gate_mention_pattern_match(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({
+            "requireMention": True,
+            "mentionPatterns": ["^小马"],
+        })
+        msg = SimpleNamespace(is_in_at_list=False)
+        assert gate.should_process(msg, "小马 你好", is_group=True, chat_id="g")
+        assert not gate.should_process(msg, "你好", is_group=True, chat_id="g")
+
+    def test_message_gate_allowed_users_wildcard(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({"allowedUsers": ["*"]})
+        assert gate.is_user_allowed("anyone", "")
+
+    def test_message_gate_allowed_users_exact_match(self):
+        from flocks.channel.builtin.dingtalk.stream import _MessageGate
+        gate = _MessageGate({"allowedUsers": ["staff_001"]})
+        assert gate.is_user_allowed("u1", "staff_001")
+        assert not gate.is_user_allowed("u1", "staff_002")
+
+    def test_chatbot_message_to_inbound_extracts_text(self):
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=SimpleNamespace(content="hello world"),
+            conversation_id="cid_001",
+            conversation_type="2",  # group
+            sender_id="u1",
+            sender_staff_id="staff_001",
+            sender_nick="Alice",
+            message_id="msg_1",
+            is_in_at_list=True,
+        )
+        inbound = chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound is not None
+        assert inbound.text == "hello world"
+        assert inbound.chat_id == "cid_001"
+        assert inbound.chat_type is ChatType.GROUP
+        assert inbound.sender_id == "staff_001"
+        assert inbound.sender_name == "Alice"
+        assert inbound.mentioned is True
+        assert inbound.message_id == "msg_1"
+
+    @pytest.mark.asyncio
+    async def test_preflight_raises_on_invalid_credentials(self):
+        """4xx responses with auth-related codes must abort fast."""
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        class _FakeResp:
+            def __init__(self):
+                self.status_code = 401
+                self.content = b'{"code":"InvalidAuthentication","message":"bad secret"}'
+                self.text = self.content.decode()
+                self.request = None
+
+            def json(self):
+                return {"code": "InvalidAuthentication", "message": "bad secret"}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, *a, **kw):
+                return _FakeResp()
+
+        with patch.object(stream_mod.httpx, "AsyncClient", _FakeClient):
+            with pytest.raises(stream_mod.DingTalkPermanentAuthError) as exc_info:
+                await stream_mod._preflight_open_connection(
+                    client_id="bad", client_secret="bad",
+                )
+        assert exc_info.value.http_status == 401
+        assert exc_info.value.code == "InvalidAuthentication"
+
+    @pytest.mark.asyncio
+    async def test_preflight_passes_on_2xx(self):
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        class _OkResp:
+            status_code = 200
+            content = b'{"endpoint":"wss://x","ticket":"t"}'
+            text = content.decode()
+            request = None
+
+            def json(self):
+                return {"endpoint": "wss://x", "ticket": "t"}
+
+        class _OkClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, *a, **kw):
+                return _OkResp()
+
+        with patch.object(stream_mod.httpx, "AsyncClient", _OkClient):
+            await stream_mod._preflight_open_connection(
+                client_id="ok", client_secret="ok",
+            )
+
+    @pytest.mark.asyncio
+    async def test_preflight_5xx_is_transient(self):
+        """5xx must NOT be flagged permanent — the SDK / outer loop
+        should be allowed to retry."""
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        class _Err5xx:
+            status_code = 503
+            content = b"unavailable"
+            text = "unavailable"
+            request = None
+
+            def json(self):
+                raise ValueError
+
+        class _Client5xx:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, *a, **kw):
+                return _Err5xx()
+
+        with patch.object(stream_mod.httpx, "AsyncClient", _Client5xx):
+            with pytest.raises(stream_mod.httpx.HTTPStatusError):
+                await stream_mod._preflight_open_connection(
+                    client_id="x", client_secret="x",
+                )
+
+    def test_chatbot_message_to_inbound_dm_uses_staff_id_as_chat_id(self):
+        """Regression: DM ``chat_id`` MUST be the staff_id, NOT the
+        ``conversation_id``.
+
+        Production symptom (logs ``2026-04-23T112342.log``):
+
+            POST /v1.0/robot/groupMessages/send: 错误描述: robot 不存在；
+            解决方案:请确认 robotCode 是否正确
+
+        DingTalk delivers a ``cid…`` ``conversation_id`` for DMs as
+        well as groups, but only the group endpoint accepts it.  Using
+        ``conversation_id`` for DMs makes ``resolve_target_kind`` see
+        the ``cid`` prefix and route through ``/groupMessages/send``,
+        which fails with the above error.  The fix routes DMs through
+        ``staffId`` → ``/oToMessages/batchSend`` instead.
+        """
+        from flocks.channel.builtin.dingtalk.config import resolve_target_kind
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=SimpleNamespace(content="Hi"),
+            conversation_id="cidnrPnAQNfmP4fZCcLfRxZtv43vx736",
+            conversation_type="1",  # DM
+            sender_id="$:LWCP_v1:$opaqueSenderId",
+            sender_staff_id="2250583914922119",
+            sender_nick="熊剑",
+            message_id="msg_dm_1",
+        )
+        inbound = chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound is not None
+        assert inbound.chat_type is ChatType.DIRECT
+        # The critical assertion: chat_id must NOT be the conversation_id
+        # for DMs, because that would route the reply to /groupMessages/send.
+        assert inbound.chat_id == "2250583914922119"
+        # And the resolver must treat it as a 1:1 user target.
+        assert resolve_target_kind(inbound.chat_id) == "user"
+
+    def test_chatbot_message_to_inbound_group_keeps_conversation_id(self):
+        from flocks.channel.builtin.dingtalk.config import resolve_target_kind
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=SimpleNamespace(content="@bot hi"),
+            conversation_id="cidGROUP123",
+            conversation_type="2",  # group
+            sender_id="u1",
+            sender_staff_id="staff_001",
+            sender_nick="Alice",
+            message_id="msg_g_1",
+            is_in_at_list=True,
+        )
+        inbound = chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound is not None
+        assert inbound.chat_type is ChatType.GROUP
+        assert inbound.chat_id == "cidGROUP123"
+        assert resolve_target_kind(inbound.chat_id) == "group"
+
+    def test_resolve_chat_id_dm_prefers_staff_id(self):
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="$:LWCP_v1:$opaque",
+            sender_staff_id="2250583914922119",
+        )
+        assert _resolve_chat_id(msg, is_group=False) == "2250583914922119"
+
+    def test_resolve_chat_id_dm_falls_back_when_no_staff_id(self):
+        """When DingTalk omits ``sender_staff_id`` (rare but possible
+        for external/unverified users) we fall back to ``sender_id`` —
+        and only as a last resort to ``conversation_id``.
+        """
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="user_42",
+            sender_staff_id="",
+        )
+        assert _resolve_chat_id(msg, is_group=False) == "user_42"
+
+        msg2 = SimpleNamespace(
+            conversation_id="cidABC",
+            sender_id="",
+            sender_staff_id="",
+        )
+        assert _resolve_chat_id(msg2, is_group=False) == "cidABC"
+
+    def test_resolve_chat_id_group_uses_conversation_id(self):
+        from flocks.channel.builtin.dingtalk.stream import _resolve_chat_id
+        msg = SimpleNamespace(
+            conversation_id="cidGROUP123",
+            sender_id="u1",
+            sender_staff_id="staff_001",
+        )
+        assert _resolve_chat_id(msg, is_group=True) == "cidGROUP123"
+
+    def test_dispatch_and_inbound_agree_on_chat_id(self):
+        """Regression: ``_dispatch`` (used for gating) and
+        ``chatbot_message_to_inbound`` (used for routing) MUST agree on
+        the ``chat_id`` for the same message — otherwise an admin who
+        whitelists a chat in ``free_response_chats`` could see gating
+        accept the message but the reply land in a different chat (or
+        worse, fail with ``robot 不存在``).
+        """
+        from flocks.channel.builtin.dingtalk.stream import (
+            _is_group_message,
+            _resolve_chat_id,
+            chatbot_message_to_inbound,
+        )
+        dm = SimpleNamespace(
+            text=SimpleNamespace(content="hello"),
+            conversation_id="cidDM",
+            conversation_type="1",
+            sender_id="u_dm",
+            sender_staff_id="staff_dm",
+            sender_nick="Bob",
+            message_id="m_dm",
+        )
+        inbound_dm = chatbot_message_to_inbound(
+            dm, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound_dm is not None
+        assert inbound_dm.chat_id == _resolve_chat_id(
+            dm, is_group=_is_group_message(dm),
+        )
+
+        group = SimpleNamespace(
+            text=SimpleNamespace(content="@bot hi"),
+            conversation_id="cidGRP",
+            conversation_type="2",
+            sender_id="u_g",
+            sender_staff_id="staff_g",
+            sender_nick="Carol",
+            message_id="m_g",
+            is_in_at_list=True,
+        )
+        inbound_group = chatbot_message_to_inbound(
+            group, channel_id="dingtalk", account_id="default",
+        )
+        assert inbound_group is not None
+        assert inbound_group.chat_id == _resolve_chat_id(
+            group, is_group=_is_group_message(group),
+        )
+
+    def test_chatbot_message_to_inbound_returns_none_when_empty(self):
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=SimpleNamespace(content=""),
+            conversation_id="cid_001",
+            conversation_type="1",
+            sender_id="u1",
+            sender_staff_id="",
+            sender_nick="",
+            message_id="msg_2",
+        )
+        assert chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        ) is None
+
+
+# ------------------------------------------------------------------
+# Resilience regressions: R1 (silent stall) + R3 (back-pressure)
+# ------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("dingtalk_stream") is None,
+    reason="dingtalk-stream SDK not installed",
+)
+class TestStreamRunnerResilience:
+    """End-to-end tests for the runner's failure-mode safeguards.
+
+    These exercise the loop in :meth:`DingTalkStreamRunner._run_with_reconnect`
+    by patching :meth:`DingTalkStreamClient.start` so we can drive
+    ``clean return`` / ``raised`` / ``slow`` scenarios deterministically
+    without touching the network.  The pre-flight HTTP check is also
+    short-circuited.
+    """
+
+    def _make_runner(self, *, on_message=None, account_overrides=None):
+        from flocks.channel.builtin.dingtalk.stream import DingTalkStreamRunner
+
+        config = {
+            "_account_id": "default",
+            "appKey": "key",
+            "appSecret": "secret",
+        }
+        if account_overrides:
+            config.update(account_overrides)
+        runner = DingTalkStreamRunner(
+            account_config=config,
+            on_message=on_message or AsyncMock(),
+        )
+        return runner
+
+    @pytest.mark.asyncio
+    async def test_stall_detection_escalates_after_consecutive_short_clean_returns(
+        self, monkeypatch,
+    ):
+        """R1 regression: SDK ``start()`` returning instantly with zero
+        messages, repeated N times, MUST raise
+        :class:`DingTalkStreamStallError` so the channel layer pauses
+        reconnects on this account.
+
+        Production symptom (without this guard): the runner burns one
+        preflight + one reconnect cycle every ~2-60s forever, never
+        delivering a message and never surfacing a permanent error.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        # Skip pre-flight; we're testing the SDK's own behaviour.
+        async def _ok_preflight(**_kw):
+            return None
+
+        monkeypatch.setattr(
+            stream_mod, "_preflight_open_connection", _ok_preflight
+        )
+        # Collapse backoff so the test runs in milliseconds, not minutes.
+        monkeypatch.setattr(stream_mod, "_RECONNECT_BACKOFF", [0])
+
+        runner = self._make_runner()
+
+        # Fake stream client whose ``start()`` returns immediately every
+        # time — the exact pathology we want to detect.
+        class _ImmediateStartClient:
+            def __init__(self, *_a, **_kw):
+                self.start_calls = 0
+                self.websocket = None
+
+            def register_callback_handler(self, *_a, **_kw):
+                pass
+
+            async def start(self):
+                self.start_calls += 1
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            stream_mod.dingtalk_stream, "DingTalkStreamClient",
+            _ImmediateStartClient,
+        )
+
+        with pytest.raises(stream_mod.DingTalkStreamStallError) as exc_info:
+            await asyncio.wait_for(runner.run(), timeout=2.0)
+
+        # Threshold is 5 — confirm we escalate exactly at the boundary
+        # rather than after some larger arbitrary number of retries.
+        assert exc_info.value.consecutive_short_runs == 5
+        # And it MUST be a subclass of DingTalkPermanentError so
+        # channel.py's ``_classify_and_raise`` will swallow it (no
+        # retry) instead of re-raising for the gateway.
+        assert isinstance(exc_info.value, stream_mod.DingTalkPermanentError)
+
+    @pytest.mark.asyncio
+    async def test_stall_counter_resets_after_inbound_message(self, monkeypatch):
+        """A single healthy run (with messages delivered) MUST reset
+        the short-run counter — otherwise a busy account that
+        occasionally has a < 30s reconnect window would slowly
+        accumulate strikes and eventually be killed wrongly.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        async def _ok_preflight(**_kw):
+            return None
+
+        monkeypatch.setattr(
+            stream_mod, "_preflight_open_connection", _ok_preflight
+        )
+        monkeypatch.setattr(stream_mod, "_RECONNECT_BACKOFF", [0])
+
+        runner = self._make_runner()
+        # Pre-load a few "short runs" — half of the threshold.
+        runner._consecutive_short_runs = 3
+
+        call_count = {"n": 0}
+
+        class _MixedClient:
+            def __init__(self, *_a, **_kw):
+                self.websocket = None
+
+            def register_callback_handler(self, *_a, **_kw):
+                pass
+
+            async def start(self):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    # Simulate a healthy run: deliver one message,
+                    # then return cleanly.  The runner counts
+                    # ``_messages_received`` directly, so we bump it
+                    # before returning to mimic an inbound frame.
+                    runner._messages_received += 1
+                    return
+                # On the 2nd call, stop the runner so the loop exits
+                # without further iterations.
+                runner._running = False
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            stream_mod.dingtalk_stream, "DingTalkStreamClient",
+            _MixedClient,
+        )
+
+        await asyncio.wait_for(runner.run(), timeout=2.0)
+        # Counter MUST have reset after the run that delivered a message.
+        assert runner._consecutive_short_runs == 0
+
+    @pytest.mark.asyncio
+    async def test_dispatch_queue_drops_overflow_without_blocking(
+        self, monkeypatch,
+    ):
+        """R3 regression: when the dispatch queue saturates, new
+        messages MUST be dropped (not blocked, not stacked as
+        unbounded tasks) so the SDK's ``process()`` ack path stays
+        non-blocking and heartbeats keep flowing.
+
+        We size the queue + worker pool down to 1 each and pin the
+        single worker on a slow ``on_message`` so we can deterministically
+        push the queue into the QueueFull branch.
+        """
+        from flocks.channel.builtin.dingtalk import stream as stream_mod
+
+        # The on_message handler hangs until released — guarantees the
+        # single worker is busy when we enqueue the second message.
+        release = asyncio.Event()
+        first_received = asyncio.Event()
+        seen: list = []
+
+        async def _slow_on_message(msg):
+            seen.append(msg)
+            first_received.set()
+            await release.wait()
+
+        runner = self._make_runner(
+            on_message=_slow_on_message,
+            account_overrides={
+                "dispatchWorkers": 1,
+                "dispatchQueueSize": 1,
             },
         )
 
-        # _resolve_outbound_config inspects ``cfg.channels`` directly so it
-        # can distinguish "not configured" from a synthesised default — the
-        # stub must therefore expose the same attribute.
-        class _FakeCfgInfo:
-            channels = {"dingtalk": live_cfg}
+        # We don't want to actually open a websocket, so manually
+        # bootstrap just the queue + worker pool — same setup the
+        # ``run()`` entry point performs.  This keeps the test focused
+        # on the back-pressure invariant.
+        runner._dispatch_queue = asyncio.Queue(
+            maxsize=runner._dispatch_queue_size,
+        )
+        runner._worker_tasks = [
+            asyncio.create_task(runner._dispatch_worker(0))
+        ]
 
-        async def _fake_get():
-            return _FakeCfgInfo()
+        try:
+            # Build three "messages" that pass the gate trivially.  We
+            # use bare SimpleNamespace because the gate happily accepts
+            # any object exposing the expected attributes.
+            def _msg(text):
+                return SimpleNamespace(
+                    text=SimpleNamespace(content=text),
+                    conversation_id="cid_dm",
+                    conversation_type="1",  # DM → unconditionally accepted
+                    sender_id="u1",
+                    sender_staff_id="staff_001",
+                    sender_nick="Alice",
+                    message_id=f"m_{text}",
+                    is_in_at_list=False,
+                )
 
-        with patch("flocks.config.config.Config.get", new=_fake_get):
-            data = await plugin._resolve_outbound_config()
+            runner._enqueue_dispatch(_msg("a"))   # consumed by worker
+            await first_received.wait()
+            runner._enqueue_dispatch(_msg("b"))   # parked in queue (size=1)
+            runner._enqueue_dispatch(_msg("c"))   # MUST be dropped
 
-        assert data["clientId"] == "live_key"
-        assert data["clientSecret"] == "live_secret"
+            # _messages_received counts EVERY frame the SDK delivered —
+            # that's the right metric for stall detection (R1) even when
+            # back-pressure is sheding.
+            assert runner._messages_received == 3
+            # The third message was dropped, not blocked, not crashed.
+            assert runner._dropped_messages == 1
 
-    @pytest.mark.asyncio
-    async def test_send_text_propagates_dingtalk_api_error_as_failure(self):
-        plugin = self._make_plugin(clientId="k", clientSecret="s")
-        ctx = OutboundContext(channel_id="dingtalk", to="user:x", text="hi")
-
-        async def raising_send(**_):
-            raise DingTalkApiError(
-                "throttled", code="Throttling.Api", retryable=True,
+            release.set()
+            # Drain whatever the worker can finish before we cancel.
+            for _ in range(20):
+                if len(seen) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            # Worker processed exactly the 2 that fit (a + b); c was dropped.
+            assert len(seen) == 2
+        finally:
+            for task in runner._worker_tasks:
+                task.cancel()
+            await asyncio.gather(
+                *runner._worker_tasks, return_exceptions=True,
             )
 
-        with patch(
-            "flocks.channel.builtin.dingtalk.send_message_app",
-            new=raising_send,
-        ):
-            result = await plugin.send_text(ctx)
+    @pytest.mark.asyncio
+    async def test_enqueue_before_pool_started_does_not_crash(self):
+        """Calling ``_enqueue_dispatch`` before ``run()`` initialises
+        the queue (or after ``_shutdown()`` tore it down) must not
+        raise — we just log + drop.  Guards against rare ordering bugs
+        where the SDK pushes a frame during teardown.
+        """
+        runner = self._make_runner()
+        assert runner._dispatch_queue is None
 
-        assert result.success is False
-        assert result.retryable is True
-        assert "throttled" in (result.error or "")
+        runner._enqueue_dispatch(SimpleNamespace(text="orphan"))
+
+        # Counter ticks even though we shed — preserves the R1 stall
+        # signal in case a frame slips through during shutdown.
+        assert runner._messages_received == 1
+        assert runner._dropped_messages == 0  # no QueueFull, just no queue
+
+    def test_permanent_error_hierarchy(self):
+        """``DingTalkStreamStallError`` MUST inherit from
+        ``DingTalkPermanentError`` so :meth:`DingTalkChannel._classify_and_raise`
+        treats stalls the same as auth failures (drop the account from
+        the schedule rather than letting the gateway retry forever).
+        """
+        from flocks.channel.builtin.dingtalk.stream import (
+            DingTalkPermanentAuthError,
+            DingTalkPermanentError,
+            DingTalkStreamStallError,
+        )
+
+        assert issubclass(DingTalkPermanentAuthError, DingTalkPermanentError)
+        assert issubclass(DingTalkStreamStallError, DingTalkPermanentError)
+        # Belt-and-braces: make sure both still descend from RuntimeError
+        # so any generic ``except RuntimeError`` in calling code
+        # continues to work.
+        assert issubclass(DingTalkPermanentError, RuntimeError)
 
 
 # ------------------------------------------------------------------

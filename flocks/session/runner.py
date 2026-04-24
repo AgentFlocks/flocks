@@ -1929,6 +1929,11 @@ Please address this message and continue with your tasks.
                 model_id=self.model_id,
                 messages=messages,
                 tools=provider_tools,
+                # session_id is forwarded via kwargs so providers that need
+                # to look up persisted session data (e.g. Gemini's DB-backed
+                # reasoning replay) can do so.  Providers that don't care
+                # simply ignore unknown kwargs.
+                session_id=self.session.id,
                 **provider_options,
             ),
             first_chunk_timeout_s=LLM_STREAM_FIRST_CHUNK_TIMEOUT_S,
@@ -1948,51 +1953,71 @@ Please address this message and continue with your tasks.
             if self.is_aborted:
                 break
             
-            # Determine event type from chunk
+            # Determine event type from chunk.  A single chunk may carry any
+            # combination of reasoning / text / tool_calls (e.g. Gemini bundles
+            # them).  We must not drop non-reasoning content when reasoning is
+            # present, and we must not double-emit `delta` as text when the
+            # provider used `event_type == 'reasoning'` to overload `delta` for
+            # reasoning text.
             event_type = getattr(chunk, 'event_type', None)
-            
-            if event_type == 'reasoning' or (hasattr(chunk, 'reasoning') and chunk.reasoning):
-                reasoning_text = chunk.reasoning if hasattr(chunk, 'reasoning') else chunk.delta
-                if reasoning_text:
-                    chunk_counts["reasoning"] += 1
-                    log.debug("runner.reasoning.received", {
-                        "length": len(reasoning_text),
-                        "text_preview": reasoning_text[:50],
-                    })
-                    # Generate reasoning ID if needed
-                    if not hasattr(self, '_current_reasoning_id'):
-                        reasoning_id_counter += 1
-                        self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                        await processor.process_event(ReasoningStartEvent(
-                            id=self._current_reasoning_id
-                        ))
-                    
-                    # Send reasoning delta
-                    await processor.process_event(ReasoningDeltaEvent(
-                        id=self._current_reasoning_id,
-                        text=reasoning_text,
+
+            chunk_reasoning = getattr(chunk, 'reasoning', None) or None
+            if not chunk_reasoning and event_type == 'reasoning':
+                # Older providers signal reasoning via event_type and put the
+                # reasoning text in `delta` (no separate `reasoning` field).
+                chunk_reasoning = getattr(chunk, 'delta', '') or None
+
+            # Treat `delta` as text only when it isn't already consumed as
+            # reasoning above.  This preserves backward compatibility with
+            # providers that emit reasoning-only chunks via `event_type`.
+            chunk_text = ''
+            if event_type != 'reasoning' or getattr(chunk, 'reasoning', None):
+                chunk_text = getattr(chunk, 'delta', '') or ''
+
+            chunk_tool_calls = getattr(chunk, 'tool_calls', None)
+
+            # 1) Process reasoning delta (start reasoning block on first sight).
+            if chunk_reasoning:
+                chunk_counts["reasoning"] += 1
+                log.debug("runner.reasoning.received", {
+                    "length": len(chunk_reasoning),
+                    "text_preview": chunk_reasoning[:50],
+                })
+                if not hasattr(self, '_current_reasoning_id'):
+                    reasoning_id_counter += 1
+                    self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                    await processor.process_event(ReasoningStartEvent(
+                        id=self._current_reasoning_id
                     ))
-                continue
-            elif hasattr(self, '_current_reasoning_id'):
-                # End current reasoning block
+
+                await processor.process_event(ReasoningDeltaEvent(
+                    id=self._current_reasoning_id,
+                    text=chunk_reasoning,
+                ))
+
+            # 2) End reasoning block when this chunk also carries non-reasoning
+            #    content (or once the stream moves away from reasoning).
+            if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
                 await processor.process_event(ReasoningEndEvent(
                     id=self._current_reasoning_id
                 ))
                 delattr(self, '_current_reasoning_id')
-            
-            if hasattr(chunk, 'delta') and chunk.delta:
+
+            # 3) Process text delta.
+            if chunk_text:
                 chunk_counts["text"] += 1
                 if not text_started:
                     await processor.process_event(TextStartEvent())
                     text_started = True
-                
+
                 await processor.process_event(TextDeltaEvent(
-                    text=chunk.delta,
+                    text=chunk_text,
                 ))
-            
-            if hasattr(chunk, 'tool_calls') and chunk.tool_calls:
+
+            # 4) Process tool calls.
+            if chunk_tool_calls:
                 chunk_counts["tool"] += 1
-                for tc in chunk.tool_calls:
+                for tc in chunk_tool_calls:
                     await tool_accumulator.feed_chunk(tc)
         
         log.info("runner.stream.summary", {
