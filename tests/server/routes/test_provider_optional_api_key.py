@@ -126,6 +126,36 @@ class TestOptionalApiKey:
         patched_runtime["secrets"].set.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_sentinel_logged_with_explicit_marker_not_naive_mask(
+        self, patched_runtime, capfd
+    ):
+        """Audit log should clearly mark sentinel (``<no-auth>``) instead of
+        emitting a naive 4/4 mask like ``not-***eded`` which looks like a real
+        short API key in log searches.
+        """
+        await provider_routes.set_provider_credentials(
+            "openai-compatible",
+            provider_routes.ProviderCredentialRequest(
+                api_key="",
+                base_url="http://internal/v1",
+            ),
+        )
+
+        captured = capfd.readouterr()
+        log_output = captured.out + captured.err
+        save_lines = [
+            line for line in log_output.splitlines()
+            if "provider.credentials.saving" in line
+        ]
+        assert save_lines, f"Expected a 'provider.credentials.saving' log line, got: {log_output!r}"
+        assert all(
+            provider_routes._NO_API_KEY_LOG_MARKER in line for line in save_lines
+        ), f"Expected sentinel marker in logs, got: {save_lines}"
+        assert not any(
+            "not-***" in line for line in save_lines
+        ), "Should not naively mask sentinel as if it were a real key"
+
+    @pytest.mark.asyncio
     async def test_explicit_api_key_for_optional_provider_is_persisted(
         self, patched_runtime
     ):

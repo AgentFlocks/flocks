@@ -357,13 +357,21 @@ export interface MCPCatalogStats {
 }
 
 export interface ProviderCredentials {
-  secret_id?: string;
-  api_key?: string;
-  api_key_masked?: string;
-  secret?: string;
-  secret_masked?: string;
-  base_url?: string;
-  username?: string;
+  secret_id?: string | null;
+  /**
+   * The actual API key value, when one exists.
+   * Note: For openai-compatible / custom-* providers configured WITHOUT an
+   * API key (internal no-auth gateways) the backend stores a sentinel value
+   * but returns ``api_key: null`` while still setting ``has_credential: true``
+   * and a real ``secret_id``. UI code should rely on ``has_credential`` (not
+   * ``api_key``) to decide whether a credential record exists.
+   */
+  api_key?: string | null;
+  api_key_masked?: string | null;
+  secret?: string | null;
+  secret_masked?: string | null;
+  base_url?: string | null;
+  username?: string | null;
   fields?: Record<string, string | undefined>;
   secret_ids?: Record<string, string>;
   has_credential: boolean;
