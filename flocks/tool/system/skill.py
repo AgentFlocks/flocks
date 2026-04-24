@@ -19,29 +19,90 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.skill")
 
 
+# Maximum characters of a skill's description shown in the `skill` tool's
+# meta-description (the tool index that ships with the system prompt).
+#
+# Why a limit at all?
+#   The `skill` tool's description is injected into every LLM call as part of
+#   the tool schema. Listing the full SKILL.md frontmatter description (allowed
+#   up to 1024 chars by `Skill._is_valid_description`) for every skill makes
+#   the prompt grow linearly with the number of skills — and most of that text
+#   is "how to use" detail that the model only needs *after* it decides to
+#   load the skill.
+#
+# Why 500?
+#   Empirically, the descriptions in `flocks/.flocks/plugins/skills/*/SKILL.md`
+#   cluster between 60 and 614 characters; 500 chars preserves ~96% of the
+#   total content (only one outlier needs trimming) while keeping the worst-
+#   case cost of the index bounded. Critically, threat-intel/EDR skills tend
+#   to put their hard constraints ("must load this skill before any X tool")
+#   at the *end* of the description, so we keep both head and tail.
+MAX_SKILL_DESCRIPTION_PREVIEW_CHARS = 500
+
+
+def _truncate_skill_description(description: str, name: str) -> str:
+    """
+    Cap a single skill's description at MAX_SKILL_DESCRIPTION_PREVIEW_CHARS.
+
+    Uses head + tail truncation so both the opening (scope/triggers) and the
+    closing (hard constraints, "must load first") survive. Inserts a marker
+    that tells the model how to fetch the full content via the `skill` tool.
+    """
+    if len(description) <= MAX_SKILL_DESCRIPTION_PREVIEW_CHARS:
+        return description
+
+    marker = f' … [truncated; load full SKILL.md via skill(name="{name}") before acting] … '
+    available = MAX_SKILL_DESCRIPTION_PREVIEW_CHARS - len(marker)
+    if available < 80:
+        # Marker alone is unusually long (very long skill name); fall back to
+        # plain head truncation so we still emit something useful.
+        return description[: MAX_SKILL_DESCRIPTION_PREVIEW_CHARS - 1] + "…"
+
+    head_size = (available * 3) // 5  # ~60% head
+    tail_size = available - head_size
+    return description[:head_size] + marker + description[-tail_size:]
+
+
 def build_description(skills: List[SkillInfo]) -> str:
-    """Build tool description with available skills"""
+    """Build tool description with available skills.
+
+    Each skill's description is capped at MAX_SKILL_DESCRIPTION_PREVIEW_CHARS
+    (head + tail). The model is instructed to call `skill(name=...)` to
+    obtain the full SKILL.md when it decides to act on a skill.
+    """
     if not skills:
         return "Load a skill to get detailed instructions for a specific task. No skills are currently available."
-    
+
     # Match Flocks's format: space-separated, no newlines
     parts = [
         "Load a skill to get detailed instructions for a specific task.",
         "Skills provide specialized knowledge and step-by-step guidance.",
         "Use this when a task matches an available skill's description.",
+        # Strong, explicit guidance: the descriptions below are PREVIEWS only.
+        # The model must call this tool to get the full SKILL.md before
+        # actually executing the skill's workflow.
+        (
+            "IMPORTANT: each <description> below is a preview that may be "
+            f"truncated to {MAX_SKILL_DESCRIPTION_PREVIEW_CHARS} chars. "
+            "It is enough to decide WHETHER a skill applies, but NOT enough "
+            "to execute it. Once you pick a skill, you MUST call "
+            "skill(name=\"<skill-name>\") to load the full SKILL.md before "
+            "running its steps or calling any tool the skill governs."
+        ),
         "<available_skills>",
     ]
-    
+
     for skill in skills:
+        preview = _truncate_skill_description(skill.description, skill.name)
         parts.extend([
             "  <skill>",
             f"    <name>{skill.name}</name>",
-            f"    <description>{skill.description}</description>",
+            f"    <description>{preview}</description>",
             "  </skill>",
         ])
-    
+
     parts.append("</available_skills>")
-    
+
     # Join with space like Flocks does: .join(" ")
     return " ".join(parts)
 
@@ -99,21 +160,39 @@ async def skill_tool_impl(
     
     # Get base directory
     skill_dir = os.path.dirname(location)
-    
+
     # Format output
     output = f"""## Skill: {skill.name}
 
 **Base directory**: {skill_dir}
 
 {content.strip()}"""
-    
+
+    # ``truncated=True`` here is intentional: it tells ToolRegistry's
+    # auto-truncate path (registry.py: "Auto-truncate output unless the tool
+    # already handled it") to leave our payload alone. The `skill` tool is the
+    # *load-on-demand* counterpart of the tiny preview that ships in the system
+    # prompt -- if the model just decided to load this skill, it needs the
+    # FULL SKILL.md to act on. Cropping it at 10 KB / 200 lines (the
+    # registry's defaults) silently drops the workflow steps, references, and
+    # constraints that authors typically place at the *end* of the file, which
+    # is the exact bug users were hitting (skill.md tail "感觉就完全丢失了").
+    # Mirrors hermes-agent's `skill_view`, which also returns content in full.
+    log.info("skill.load.full_content", {
+        "name": skill.name,
+        "bytes": len(output.encode("utf-8")),
+        "lines": output.count("\n") + 1,
+    })
+
     return ToolResult(
         success=True,
         output=output,
         title=f"Loaded skill: {skill.name}",
+        truncated=True,
         metadata={
             "name": skill.name,
-            "dir": skill_dir
+            "dir": skill_dir,
+            "auto_truncate_bypassed": True,
         }
     )
 
