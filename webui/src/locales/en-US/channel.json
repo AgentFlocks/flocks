@@ -173,8 +173,6 @@
     "downloadGuide": "Download Configuration Guide",
     "clientIdHint": "DingTalk app Client ID (i.e. AppKey)",
     "clientSecretHint": "DingTalk app Client Secret (i.e. AppSecret)",
-    "gatewayToken": "Gateway Token",
-    "gatewayTokenHint": "OpenClaw gateway authentication token (optional)",
     "optional": "Optional",
     "behavior": "Message Behavior",
     "behaviorDesc": "Configure message routing and user allowlist.",

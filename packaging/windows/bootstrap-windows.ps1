@@ -67,6 +67,28 @@ function Add-UserPathEntryIfMissing {
     }
 }
 
+function Resolve-ChromeExecutablePath {
+    param([string]$BrowserRoot)
+
+    if ([string]::IsNullOrWhiteSpace($BrowserRoot) -or -not (Test-Path $BrowserRoot)) {
+        return $null
+    }
+
+    $preferred = @(Get-ChildItem -Path $BrowserRoot -Recurse -Filter "chrome.exe" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -match 'chrome-win' })
+    if ($preferred) {
+        return $preferred[0].FullName
+    }
+
+    $fallback = Get-ChildItem -Path $BrowserRoot -Recurse -Filter "chrome.exe" -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($fallback) {
+        return $fallback.FullName
+    }
+
+    return $null
+}
+
 # 1) Surface bundled uv / node so install.ps1's Test-Command "uv" / "npm.cmd" are satisfied
 #    without install.ps1 ever referencing FLOCKS_INSTALL_ROOT.
 $bundledUv = Join-Path $InstallRoot "tools\uv"
@@ -118,6 +140,15 @@ if (Test-Path $bundledChrome) {
         else {
             Write-Host "[flocks-bootstrap] linked bundled Chrome: $target -> $bundledChrome"
         }
+    }
+
+    $bundledChromeExecutable = Resolve-ChromeExecutablePath -BrowserRoot $bundledChrome
+    if ([string]::IsNullOrWhiteSpace($bundledChromeExecutable)) {
+        Write-Host "[flocks-bootstrap] warning: chrome.exe not found under bundled Chrome at $bundledChrome" -ForegroundColor Yellow
+    }
+    else {
+        $env:FLOCKS_BROWSER_EXECUTABLE_OVERRIDE = $bundledChromeExecutable
+        Write-Host "[flocks-bootstrap] configured bundled browser override: $bundledChromeExecutable"
     }
 }
 else {

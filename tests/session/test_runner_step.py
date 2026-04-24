@@ -622,6 +622,38 @@ class TestMiniMaxTextToolMode:
         )
         assert runner._should_use_text_tool_call_mode() is True
 
+    def test_enabled_for_threatbook_cn_llm_minimax(self):
+        # Regression: threatbook-cn-llm gateway strips the OpenAI tool_calls
+        # field for MiniMax models, so the XML text-call protocol must be
+        # forced or every turn ends with finish_reason=stop and zero tools.
+        session = _make_session("ses_minimax_threatbook_cn_llm")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="minimax-m2.7",
+        )
+        assert runner._should_use_text_tool_call_mode() is True
+
+    def test_enabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
+        session = _make_session("ses_minimax_threatbook_cn_llm_case")
+        runner = SessionRunner(
+            session=session,
+            provider_id="ThreatBook-CN-LLM",
+            model_id="MiniMax-M2.5",
+        )
+        assert runner._should_use_text_tool_call_mode() is True
+
+    def test_disabled_for_threatbook_cn_llm_non_minimax(self):
+        # Other models routed through the same gateway (e.g. qwen, GLM) keep
+        # the standard OpenAI native function-calling path.
+        session = _make_session("ses_threatbook_cn_llm_qwen")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="qwen3.6-plus",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
     def test_disabled_for_other_models(self):
         session = _make_session("ses_normal_mode")
         runner = SessionRunner(

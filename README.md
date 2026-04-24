@@ -204,6 +204,88 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
 
+### 4.4 Authentication & API Token
+
+Since the local-account update, every HTTP path is protected by default — only
+the WebUI bootstrap pages (`/`, `/auth/*`), static assets, and IM platform
+webhooks (`/api/channel/{channel_id}/webhook`) are public.
+
+Initial setup:
+
+1. Open the WebUI and complete the **bootstrap-admin** flow to create the
+   single `admin` account.
+2. The browser session cookie (`flocks_session`) is enough for the WebUI;
+   no extra steps are required.
+
+Non-browser clients (TUI, SDKs, scripts):
+
+- **Local loopback** (`127.0.0.1` / `::1` / `localhost`, no
+  `x-forwarded-for` header) is auto-trusted as `local-service` admin. This
+  covers TUI, plugin sub-processes, and CLI calls running on the same host.
+- **Remote** clients must present an API token. The token lives in
+  `~/.flocks/config/.secret.json` under the secret id `server_api_token`.
+
+  On the **server**, generate (or rotate) the token — it is persisted on
+  the server's local secret store:
+
+  ```bash
+  flocks admin generate-api-token        # prints token; stores under server_api_token
+  ```
+
+  On each **remote client**, store the same token value into the client's
+  own secret file (so the client SDK / TUI can attach it automatically):
+
+  ```bash
+  flocks admin set-api-token --token <token-from-server>
+  ```
+
+  Or attach it directly per request via either header:
+
+  ```text
+  Authorization: Bearer <token>
+  X-Flocks-API-Token: <token>
+  ```
+
+  Smoke test:
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
+  ```
+
+Reverse-proxy deployments:
+
+- Always set `X-Forwarded-For` on the proxy. Without it, any direct
+  loopback request would be auto-elevated to `admin`. The middleware
+  intentionally refuses to trust loopback when this header is absent and a
+  proxy is in front.
+- For HTTPS termination, also forward `X-Forwarded-Proto: https` so that
+  the secure-cookie flag is set correctly.
+
+Recovery / lost password:
+
+- Run `flocks admin generate-one-time-password` on the host. The admin
+  account is then forced into `must_reset_password=true`; the next WebUI
+  login is redirected to the change-password page. **All non-browser
+  endpoints return 403 in that state**, so do not run this against an
+  account that automation depends on without coordination.
+
+Orphan sessions (CLI / background / inbound channels):
+
+- Sessions created without an auth context (CLI commands, background
+  tasks, inbound IM-channel dispatchers) leave `owner_user_id` empty.
+  The bootstrap admin still sees them, but a later-added member account
+  would not. Backfill ownership with:
+
+  ```bash
+  flocks admin reassign-orphan-sessions --username admin --dry-run   # preview
+  flocks admin reassign-orphan-sessions --username admin             # apply
+  ```
+
+  The command summarises `scanned / orphaned / reassigned / failed`
+  counts; a non-zero `failed` exits with code 2 so CI / scripts can
+  detect partial-write situations and re-run after fixing the underlying
+  cause (typically a transient storage error).
+
 ## 5. Join our community
 
 Scan the QR code with **WeChat** to join our official discussion group.  

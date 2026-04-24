@@ -137,6 +137,49 @@ def test_find_executable_checks_windows_cmd_suffixes(
     assert updater._find_executable("npm") == str(npm_cmd)
 
 
+def test_is_windows_file_in_use_error_detects_winerror32(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+
+    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 32] file in use")) is True
+    assert updater._is_windows_file_in_use_error(PermissionError("[WinError 5] access denied")) is False
+
+
+def test_is_uv_managed_python_runtime_error_detects_virtualenv_creation_failure() -> None:
+    text = (
+        "Failed to create temporary virtualenv\n"
+        "Could not find a suitable Python executable for the virtual environment "
+        "based on the interpreter: "
+        r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\python.exe"
+    )
+
+    assert updater._is_uv_managed_python_runtime_error(text) is True
+    assert updater._uv_managed_python_install_dir_from_text(text) == Path(
+        r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none"
+    )
+
+
+def test_repair_windows_uv_managed_python_install_removes_cached_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    removed: list[Path] = []
+
+    monkeypatch.setattr(updater, "_resolve_windows_long_path", lambda path: path)
+    monkeypatch.setattr(Path, "exists", lambda self: str(self).lower().endswith("cpython-3.12-windows-x86_64-none"))
+    monkeypatch.setattr(updater, "_safe_rmtree", lambda path: removed.append(path))
+
+    text = (
+        "Failed to create temporary virtualenv\n"
+        "Could not find a suitable Python executable for the virtual environment "
+        "based on the interpreter: "
+        r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\python.exe"
+    )
+
+    repaired = updater._repair_windows_uv_managed_python_install(text)
+
+    assert repaired == Path(r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none")
+    assert removed == [Path(r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none")]
+
+
 def test_resolve_npm_executable_prefers_bundled_node_home_on_windows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -287,6 +330,28 @@ def test_build_uv_sync_env_returns_none_on_windows(
 ) -> None:
     monkeypatch.setattr(updater.sys, "platform", "win32")
     assert updater._build_uv_sync_env() is None
+
+
+def test_build_frontend_subprocess_env_prepends_bundled_node_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node_home = tmp_path / "tools" / "node"
+    node_home.mkdir(parents=True)
+    (node_home / "node.exe").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    result = updater._build_frontend_subprocess_env(
+        npm_registry="https://registry.npmmirror.com/"
+    )
+
+    assert result is not None
+    assert result["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert result["PATH"].split(os.pathsep)[0] == str(node_home)
 
 
 def test_upgrade_page_html_contains_marker_and_version() -> None:
@@ -1449,7 +1514,13 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
-    run_calls: list[list[str]] = []
+    node_home = tmp_path / "tools" / "node"
+    node_home.mkdir(parents=True)
+    (node_home / "node.exe").write_text("", encoding="utf-8")
+    bundled_npm = node_home / "npm.cmd"
+    bundled_npm.write_text("", encoding="utf-8")
+
+    run_calls: list[tuple[list[str], dict[str, str] | None]] = []
 
     async def fake_get_updater_config():
         return SimpleNamespace(
@@ -1467,7 +1538,7 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
         return archive_path
 
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
-        run_calls.append(list(cmd))
+        run_calls.append((list(cmd), env))
         return 0, "", ""
 
     async def fake_validate_windows_restart_runtime(*_args, **_kwargs):
@@ -1480,21 +1551,32 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
     monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
-    monkeypatch.setattr(updater, "_resolve_npm_executable", lambda: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd")
+    monkeypatch.setattr(updater, "_resolve_npm_executable", lambda: str(bundled_npm))
     monkeypatch.setattr(updater, "_find_executable", lambda name: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\uv\uv.exe" if name == "uv" else None)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
     monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
 
     assert progresses[-1].stage == "done"
-    assert run_calls[:2] == [
-        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "install"],
-        [r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd", "run", "build"],
+    assert [call[0] for call in run_calls[:2]] == [
+        [str(bundled_npm), "install"],
+        [str(bundled_npm), "run", "build"],
     ]
+    install_env = run_calls[0][1]
+    build_env = run_calls[1][1]
+    assert install_env is not None
+    assert build_env is not None
+    assert install_env["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert build_env["npm_config_registry"] == "https://registry.npmmirror.com/"
+    assert install_env["PATH"].split(os.pathsep)[0] == str(node_home)
+    assert build_env["PATH"].split(os.pathsep)[0] == str(node_home)
 
 
 @pytest.mark.asyncio
@@ -1667,6 +1749,83 @@ async def test_perform_update_fails_after_uv_sync_retry_exhausted(
 
 
 @pytest.mark.asyncio
+async def test_perform_update_repairs_broken_uv_managed_python_cache_before_retrying_sync(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+
+    call_count = 0
+    sleep_calls: list[int | float] = []
+    repaired_messages: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        nonlocal call_count
+        if "sync" in cmd:
+            call_count += 1
+            if call_count == 1:
+                return (
+                    1,
+                    "",
+                    "Failed to create temporary virtualenv\n"
+                    "Could not find a suitable Python executable for the virtual environment "
+                    "based on the interpreter: "
+                    r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\python.exe",
+                )
+            return 0, "", ""
+        return 0, "", ""
+
+    async def fake_download(**_kw):
+        return archive_path
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
+        return None
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_a, **_kw: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda _name: r"C:\Users\worker\AppData\Local\Programs\Flocks\tools\uv\uv.exe")
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_a, **_kw: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
+    monkeypatch.setattr(updater, "_repair_windows_uv_managed_python_install", lambda text: repaired_messages.append(text) or Path(r"C:\Users\worker\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none"))
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+
+    progresses = [
+        step async for step in updater.perform_update("2026.4.1", restart=False)
+    ]
+
+    assert progresses[-1].stage == "done"
+    assert call_count == 2
+    assert sleep_calls == [2]
+    assert len(repaired_messages) == 1
+
+
+@pytest.mark.asyncio
 async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1736,6 +1895,91 @@ async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_fi
     assert "WinError 5" in progresses[-1].message
     assert events == ["npm-install", "npm-build", "restore"]
     assert "handover" not in events
+
+
+@pytest.mark.asyncio
+async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_handover_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    events: list[str] = []
+    replace_attempts = {"count": 0}
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        if cmd[1] == "install":
+            events.append("npm-install")
+        elif cmd[:3] == ["/usr/bin/npm", "run", "build"]:
+            events.append("npm-build")
+        else:
+            events.append("uv-sync")
+        return 0, "", ""
+
+    async def fake_validate_windows_restart_runtime(_install_root: Path) -> str | None:
+        return "No module named uvicorn"
+
+    def fake_replace_install_dir(*_args, **_kwargs):
+        replace_attempts["count"] += 1
+        events.append(f"replace-{replace_attempts['count']}")
+        if replace_attempts["count"] == 1:
+            raise PermissionError("[WinError 32] The process cannot access the file because it is being used by another process")
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover"))
+    monkeypatch.setattr(updater, "_replace_install_dir", fake_replace_install_dir)
+    monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
+    monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert progresses[-1].message == "No module named uvicorn"
+    assert events == [
+        "npm-install",
+        "npm-build",
+        "replace-1",
+        "handover",
+        "replace-2",
+        "uv-sync",
+        "rollback",
+    ]
+    assert "restore" not in events
 
 
 @pytest.mark.asyncio

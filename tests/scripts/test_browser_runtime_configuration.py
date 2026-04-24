@@ -30,6 +30,8 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
 def test_powershell_installer_prefers_explicit_browser_configuration() -> None:
     script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
 
+    assert "Resolve-ExplicitBrowserPath" in script
+    assert "FLOCKS_BROWSER_EXECUTABLE_OVERRIDE" in script
     assert "Find-SystemBrowserPath" in script
     assert "AGENT_BROWSER_EXECUTABLE_PATH" in script
     assert "Get-ChromeForTestingDir" in script
@@ -66,7 +68,9 @@ def test_powershell_bootstrap_wires_bundled_toolchain() -> None:
     """packaging/windows/bootstrap-windows.ps1 is the single place that bridges the bundled layout to install.ps1."""
     script = (PACKAGING_WINDOWS_DIR / "bootstrap-windows.ps1").read_text(encoding="utf-8-sig")
 
+    assert "Resolve-ChromeExecutablePath" in script
     assert "FLOCKS_SKIP_ADMIN_CHECK" in script
+    assert "FLOCKS_BROWSER_EXECUTABLE_OVERRIDE" in script
     assert "tools\\uv" in script
     assert "tools\\node" in script
     assert "tools\\chrome" in script

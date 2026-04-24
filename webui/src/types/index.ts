@@ -10,7 +10,6 @@ export interface Session {
   directory: string;
   parentID?: string;
   summary?: SessionSummary;
-  share?: SessionShare;
   title: string;
   version: string;
   time: SessionTime;
@@ -18,6 +17,8 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  ownerUserID?: string;
+  canDelete?: boolean;
 }
 
 export interface SessionTime {
@@ -30,11 +31,6 @@ export interface SessionTime {
 export interface SessionSummary {
   title?: string;
   diffs?: FileDiff[];
-}
-
-export interface SessionShare {
-  id: string;
-  createdAt: number;
 }
 
 export interface SessionRevert {

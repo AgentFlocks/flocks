@@ -109,7 +109,6 @@ interface DingTalkChannelConfig {
   clientId?: string;
   clientSecret?: string;
   defaultAgent?: string;
-  gatewayToken?: string;
   debug?: boolean;
   allowFrom?: string[];
 }
@@ -1124,13 +1123,6 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
             value={config.clientSecret ?? ''}
             onChange={(v) => set('clientSecret', v || undefined)}
             placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxx"
-          />
-        </FieldRow>
-        <FieldRow label={t('dingtalk.gatewayToken')} hint={t('dingtalk.gatewayTokenHint')}>
-          <SecretInput
-            value={config.gatewayToken ?? ''}
-            onChange={(v) => set('gatewayToken', v || undefined)}
-            placeholder={t('dingtalk.optional')}
           />
         </FieldRow>
       </Section>

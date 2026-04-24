@@ -36,6 +36,8 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert "function Stop-FlocksProcesses" in script
     assert "function Initialize-InstallSources" in script
     assert "function Invoke-NativeCommand" in script
+    assert "function Test-IsUvManagedPythonInspectionError" in script
+    assert "function Repair-UvManagedPythonInstall" in script
     assert "& $flocksCommand.Source stop" in script
     assert 'Join-Path $runDir "upgrade_server.pid"' in script
     assert "Get-CimInstance Win32_Process" in script
@@ -55,6 +57,86 @@ def test_powershell_installer_stops_processes_before_retrying_locked_operations(
     assert '"vite preview"' not in script
     assert "$runtimePid = Get-PidFromRuntimeFile -PidFile $pidFile" in script
     assert "$pid = Get-PidFromRuntimeFile -PidFile $pidFile" not in script
+    assert "broken uv-managed Python runtime" in script
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is required to execute PowerShell helper functions")
+def test_powershell_installer_repairs_broken_uv_managed_python_cache() -> None:
+    script = (SCRIPT_DIR / "install.ps1").read_text(encoding="utf-8-sig")
+    script_without_main = re.sub(r"\r?\nMain\s*$", "\n", script)
+    test_script = (
+        script_without_main
+        + """
+
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString())
+$installDir = 'C:\\Users\\worker\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none'
+
+$errorText = @'
+error: Failed to inspect Python interpreter from managed installations at 'C:\\Users\\worker\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\python.exe'
+  Caused by: Failed to query Python interpreter
+  Caused by: failed to query metadata of file `C:\\Users\\worker\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none\\python.exe`: broken
+'@
+
+if (-not (Test-IsUvManagedPythonInspectionError -Text $errorText)) {
+    Write-Host "inspect=false"
+    exit 1
+}
+
+$resolved = Get-UvManagedPythonInstallDirFromText -Text $errorText
+if (($resolved -replace '/', '\\') -ne 'C:\\Users\\worker\\AppData\\Roaming\\uv\\python\\cpython-3.12-windows-x86_64-none') {
+    Write-Host "resolved=$resolved"
+    exit 1
+}
+
+$repairText = @"
+error: Failed to inspect Python interpreter from managed installations at '$installDir\\python.exe'
+  Caused by: failed to query metadata of file `$installDir\\python.exe`: broken
+"@
+
+$script:removedPath = $null
+function Test-Path {
+    param([string]$Path)
+    if ($Path -eq $installDir) {
+        return $true
+    }
+    return Microsoft.PowerShell.Management\\Test-Path -Path $Path
+}
+
+function Remove-Item {
+    param(
+        [string]$Path,
+        [switch]$Recurse,
+        [switch]$Force,
+        $ErrorAction
+    )
+    if ($Path -eq $installDir) {
+        $script:removedPath = $Path
+        return
+    }
+    Microsoft.PowerShell.Management\\Remove-Item -Path $Path -Recurse:$Recurse -Force:$Force -ErrorAction $ErrorAction
+}
+
+Repair-UvManagedPythonInstall -Text $repairText
+if (($script:removedPath -replace '/', '\\') -ne $installDir) {
+    Write-Host "removed=$script:removedPath"
+    exit 1
+}
+"""
+    )
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8-sig", newline="\r\n", suffix=".ps1", delete=False) as handle:
+        handle.write(test_script)
+        temp_script_path = handle.name
+    try:
+        result = subprocess.run(
+            ["pwsh", "-NoProfile", "-File", temp_script_path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        Path(temp_script_path).unlink(missing_ok=True)
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
 
 
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="pwsh is required to execute PowerShell helper functions")

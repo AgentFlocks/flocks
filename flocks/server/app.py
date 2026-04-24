@@ -19,6 +19,8 @@ from flocks.utils.log import Log, LogLevel
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
+from flocks.auth.service import AuthService
+from flocks.server.auth import apply_auth_for_request, clear_auth_context
 
 # Load .env file at startup
 try:
@@ -84,6 +86,25 @@ async def lifespan(app: FastAPI):
     # Initialize storage
     await Storage.init()
     log.info("storage.initialized")
+
+    # Initialize local auth/account tables
+    await AuthService.init()
+    log.info("auth.initialized")
+
+    # Best-effort migration: old sessions default to admin ownership.
+    # The migration itself is idempotent (guarded by a persisted marker),
+    # but we still skip loading users when the marker is already set
+    # to avoid unnecessary DB + session scans on every startup.
+    try:
+        marker = await Storage.get("auth:migration:legacy_session_owner_to_admin", dict)
+        if not (marker and marker.get("done")):
+            if await AuthService.has_users():
+                users = await AuthService.list_users()
+                admin = next((u for u in users if u.role == "admin"), None)
+                if admin:
+                    await AuthService.migrate_legacy_sessions_to_admin(admin.id)
+    except Exception as e:
+        log.warning("auth.legacy_sessions.migration_failed", {"error": str(e)})
     
     # Setup question handler for real user interaction
     from flocks.tool.question_handler import setup_api_question_handler
@@ -299,16 +320,16 @@ log = Log.create(service="server")
 # CORS Configuration
 #
 # Priority order:
-#   1. Explicit ``server.cors`` in flocks.json  → use those origins (plus
-#      the localhost fallback regex).
-#   2. ``_FLOCKS_WEBUI_HOST`` / ``_FLOCKS_WEBUI_PORT`` env vars set by
-#      ``start_backend()`` for a concrete IP → auto-whitelist that single
-#      origin.  We deliberately do NOT auto-whitelist when the WebUI binds
-#      to ``0.0.0.0``: matching ``[^/]+:<port>`` would accept every host on
-#      that port, effectively disabling CORS.  Remote deployments that run
-#      ``--webui-host 0.0.0.0`` must set ``server.cors`` explicitly in
-#      ``flocks.json``.
+#   1. Runtime env vars exported by ``start_backend()`` → add the concrete
+#      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
+#   2. Explicit ``server.cors`` in flocks.json → append user-configured
+#      origins without discarding the runtime ones.
 #   3. Fallback → only localhost (any port) via regex.
+#
+# We deliberately do NOT auto-whitelist wildcard binds such as ``0.0.0.0``:
+# matching ``[^/]+:<port>`` would accept every host on that port, effectively
+# disabling CORS.  Remote deployments that bind to wildcard hosts must keep
+# using explicit ``server.cors`` entries or start with a concrete IP/hostname.
 #
 # Config is read lazily on the first request via
 # :class:`_DeferredCORSMiddleware` so that importing ``app`` in an async
@@ -320,10 +341,26 @@ log = Log.create(service="server")
 _LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
 
 _LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_WILDCARD_HOSTS = {"0.0.0.0", "::"}
 
 
 def _is_localhost(host: str) -> bool:
     return host in _LOCALHOST_HOSTS
+
+
+def _format_host_for_url(host: str) -> str:
+    """Wrap IPv6 literals in brackets before composing origins."""
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _append_origin(origins: list[str], host: str, port: str) -> None:
+    if not host or not port or _is_localhost(host) or host in _WILDCARD_HOSTS:
+        return
+    origin = f"http://{_format_host_for_url(host)}:{port}"
+    if origin not in origins:
+        origins.append(origin)
 
 
 def _read_cors_config() -> tuple[list[str], Optional[str]]:
@@ -335,6 +372,13 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
     """
     import json
 
+    origins: list[str] = []
+    _append_origin(
+        origins,
+        os.environ.get("_FLOCKS_WEBUI_HOST", ""),
+        os.environ.get("_FLOCKS_WEBUI_PORT", ""),
+    )
+
     try:
         cfg_file = Config.get_config_file()
         if cfg_file.exists():
@@ -343,25 +387,13 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
             server_cfg = data.get("server") or {}
             cors = server_cfg.get("cors")
             if isinstance(cors, list):
-                origins = [c for c in cors if isinstance(c, str) and c]
-                if origins:
-                    return origins, _LOCALHOST_ORIGIN_RE
+                for candidate in cors:
+                    if isinstance(candidate, str) and candidate and candidate not in origins:
+                        origins.append(candidate)
     except Exception:
         pass
 
-    webui_host = os.environ.get("_FLOCKS_WEBUI_HOST", "")
-    webui_port = os.environ.get("_FLOCKS_WEBUI_PORT", "")
-
-    if (
-        webui_host
-        and webui_port
-        and not _is_localhost(webui_host)
-        and webui_host != "0.0.0.0"
-    ):
-        extra_origin = f"http://{webui_host}:{webui_port}"
-        return [extra_origin], _LOCALHOST_ORIGIN_RE
-
-    return [], _LOCALHOST_ORIGIN_RE
+    return origins, _LOCALHOST_ORIGIN_RE
 
 
 class _DeferredCORSMiddleware:
@@ -477,6 +509,32 @@ async def log_requests(request: Request, call_next):
         })
     
     return response
+
+
+@app.middleware("http")
+async def auth_guard_middleware(request: Request, call_next):
+    """Guard requests with local account auth, except public endpoints."""
+    try:
+        _blocked, token, _user = await apply_auth_for_request(request)
+    except StarletteHTTPException as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": "AuthError", "message": exc.detail},
+        )
+    except Exception as exc:
+        log.error("auth.middleware.unexpected", {
+            "path": request.url.path,
+            "error": repr(exc),
+        })
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+        )
+
+    try:
+        return await call_next(request)
+    finally:
+        clear_auth_context(token)
 
 
 # Error Handlers
@@ -596,6 +654,8 @@ from flocks.server.routes.workspace import router as workspace_router
 from flocks.server.routes.update import router as update_router
 # Log viewing
 from flocks.server.routes.logs import router as logs_router
+from flocks.server.routes.auth import router as auth_router
+from flocks.server.routes.admin_users import router as admin_users_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -646,6 +706,8 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
+app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -706,6 +768,8 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 
 # TUI control routes (/tui/*)
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
+app.include_router(auth_router, prefix="/auth", tags=["Auth"])
+app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
 
 
 @app.get("/", tags=["Root"])
