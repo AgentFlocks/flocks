@@ -741,8 +741,7 @@ class InboundDispatcher:
         await Session.update(
             session.project_id,
             session.id,
-            provider=provider_id,
-            model=model_id,
+            **Session.explicit_model_updates(provider_id, model_id),
         )
         await self._trigger_command_hook(
             "model",
@@ -775,8 +774,7 @@ class InboundDispatcher:
             directory=session.directory,
             title=_build_title(msg),
             agent=session.agent,
-            provider=session.provider,
-            model=session.model,
+            **Session.inherited_model_kwargs(session),
         )
         new_binding = await self.binding_service.rebind(
             msg,

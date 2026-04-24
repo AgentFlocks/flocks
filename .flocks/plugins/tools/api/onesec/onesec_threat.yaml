@@ -1,11 +1,11 @@
 name: onesec_threat
 description: >
   OneSEC threat protection grouped tool. Use the `action` parameter to access
-  antivirus version and scan task APIs. Credentials note: enter
-  `api_key|secret` in the API Key field of the service configuration.
+  antivirus version and scan task APIs. Configure the OneSEC service with
+  separate API Key and Secret credentials.
 description_cn: >
   OneSEC 威胁防护分组工具。通过 `action` 参数调用病毒库版本和扫描任务相关接口。
-  配置时请在服务的 API Key 输入框填写 `api_key|secret`。
+  请在 OneSEC 服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
 category: custom
 enabled: true
 requires_confirmation: true

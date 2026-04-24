@@ -295,26 +295,15 @@ class SessionLoop:
             provider_id = provider_id or resolved_provider
             model_id = model_id or resolved_model
         
-        # Persist resolved model to session so child sessions can inherit it
-        session_model_changed = False
-        if provider_id and getattr(session, 'provider', None) != provider_id:
+        # Keep the in-memory session aligned with the runtime model so
+        # downstream helpers (title generation, compaction checks, etc.) see
+        # the model actually selected for this loop iteration. Unpinned
+        # sessions must not persist these values; otherwise switching the
+        # global default model would keep older sessions stuck on stale data.
+        if provider_id:
             session.provider = provider_id
-            session_model_changed = True
-        if model_id and getattr(session, 'model', None) != model_id:
+        if model_id:
             session.model = model_id
-            session_model_changed = True
-        if session_model_changed:
-            try:
-                project_id = getattr(session, 'project_id', None)
-                if project_id:
-                    await Session.update(project_id, session_id, model=model_id, provider=provider_id)
-                    log.info("loop.model_persisted", {
-                        "session_id": session_id,
-                        "provider": provider_id,
-                        "model": model_id,
-                    })
-            except Exception as exc:
-                log.debug("loop.model_persist_failed", {"error": str(exc)})
         
         # Create SessionContext interface for decoupled access
         from flocks.session.core.context import DefaultSessionContext
@@ -453,6 +442,8 @@ class SessionLoop:
         session: Any,
         provider_id: Optional[str],
         model_id: Optional[str],
+        *,
+        include_source: bool = False,
     ) -> tuple:
         """
         Resolve provider_id and model_id for session execution.
@@ -474,12 +465,14 @@ class SessionLoop:
         
         resolved_provider = provider_id
         resolved_model = model_id
+        source = "explicit" if provider_id and model_id else "unknown"
         
         # Priority 2: Session's stored model/provider
-        if not resolved_provider and hasattr(session, 'provider') and session.provider:
-            resolved_provider = session.provider
-        if not resolved_model and hasattr(session, 'model') and session.model:
-            resolved_model = session.model
+        if (not resolved_provider or not resolved_model) and Session.has_pinned_model(session):
+            resolved_provider = resolved_provider or session.provider
+            resolved_model = resolved_model or session.model
+            if resolved_provider and resolved_model:
+                source = "session"
         
         # Priority 3: Agent model override from Storage (set via WebUI)
         if not resolved_provider or not resolved_model:
@@ -495,6 +488,7 @@ class SessionLoop:
                         if override_provider and override_model:
                             resolved_provider = override_provider
                             resolved_model = override_model
+                            source = "agent_override"
                 except Exception as _e:
                     log.debug("loop.resolve_model.storage_override_failed", {"error": str(_e)})
         
@@ -508,6 +502,8 @@ class SessionLoop:
                     if agent_info and agent_info.model:
                         resolved_provider = resolved_provider or agent_info.model.provider_id
                         resolved_model = resolved_model or agent_info.model.model_id
+                        if resolved_provider and resolved_model:
+                            source = "agent"
                 except Exception as _e:
                     log.debug("loop.resolve_model.agent_model_failed", {"error": str(_e)})
         
@@ -517,9 +513,11 @@ class SessionLoop:
             if parent_id:
                 try:
                     parent = await Session.get_by_id(parent_id)
-                    if parent:
+                    if Session.has_pinned_model(parent):
                         resolved_provider = resolved_provider or getattr(parent, 'provider', None)
                         resolved_model = resolved_model or getattr(parent, 'model', None)
+                        if resolved_provider and resolved_model:
+                            source = "parent_session"
                 except Exception as _e:
                     log.debug("loop.resolve_model.parent_failed", {"error": str(_e)})
         
@@ -531,6 +529,8 @@ class SessionLoop:
                 if default_llm:
                     resolved_provider = resolved_provider or default_llm["provider_id"]
                     resolved_model = resolved_model or default_llm["model_id"]
+                    if resolved_provider and resolved_model:
+                        source = "config"
             except Exception as _e:
                 log.debug("loop.resolve_model.config_default_failed", {"error": str(_e)})
         
@@ -539,12 +539,18 @@ class SessionLoop:
             resolved_provider = os.environ.get("LLM_PROVIDER")
         if not resolved_model:
             resolved_model = os.environ.get("LLM_MODEL")
+        if resolved_provider and resolved_model and source == "unknown":
+            source = "env_default"
         
         # Priority 8: Hardcoded fallback
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
         resolved_provider = resolved_provider or fallback_provider_id()
         resolved_model = resolved_model or fallback_model_id()
-        
+        if source == "unknown":
+            source = "fallback"
+
+        if include_source:
+            return resolved_provider, resolved_model, source
         return resolved_provider, resolved_model
 
     @classmethod

@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,7 +14,7 @@ import flocks.task.manager as task_manager_module
 from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
-from flocks.task.background import BackgroundManager, BackgroundTask
+from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
 from flocks.task.executor import TaskExecutor
 from flocks.task.manager import TaskManager
 from flocks.task.models import (
@@ -294,7 +295,12 @@ async def test_queue_status_uses_largest_elapsed_running_time(tmp_path: Path):
 async def test_background_task_fails_fast_when_user_input_is_required(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    async def fake_session_loop(_session_id: str, callbacks=None):
+    async def fake_session_loop(
+        _session_id: str,
+        provider_id=None,
+        model_id=None,
+        callbacks=None,
+    ):
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -332,6 +338,57 @@ async def test_background_task_fails_fast_when_user_input_is_required(
         )
 
     assert rejected == ["ses_interactive_block"]
+
+
+@pytest.mark.asyncio
+async def test_background_task_uses_unpinned_model_as_runtime_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_mock = AsyncMock(return_value=SimpleNamespace(id="ses_task_child"))
+    loop_run = AsyncMock(return_value=SimpleNamespace(last_message=None))
+
+    monkeypatch.setattr(background_module.Session, "create", create_mock)
+    monkeypatch.setattr(background_module.Message, "create", AsyncMock())
+    monkeypatch.setattr(background_module.SessionLoop, "run", loop_run)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_test_runtime_override",
+        status="pending",
+        description="scheduled",
+        prompt="",
+        agent="rex",
+    )
+
+    await manager._run_task(
+        task,
+        LaunchInput(
+            description="scheduled",
+            prompt="Run a quick check",
+            agent="rex",
+            parent_session_id=None,
+            parent_message_id=None,
+            parent_agent=None,
+            model={
+                "providerID": "anthropic",
+                "modelID": "claude-haiku-4-5",
+            },
+            model_pinned=False,
+            directory="/tmp/project",
+            project_id="proj",
+        ),
+    )
+
+    create_kwargs = create_mock.await_args.kwargs
+    assert "provider" not in create_kwargs
+    assert "model" not in create_kwargs
+    assert "model_pinned" not in create_kwargs
+    assert loop_run.await_count == 1
+    assert loop_run.await_args.args == ("ses_task_child",)
+    assert loop_run.await_args.kwargs["provider_id"] == "anthropic"
+    assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
+    assert loop_run.await_args.kwargs["callbacks"] is not None
+    assert task.status == "completed"
 
 
 @pytest.mark.asyncio

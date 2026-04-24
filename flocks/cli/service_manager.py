@@ -29,7 +29,6 @@ except ImportError:  # pragma: no cover - unavailable on Windows
     fcntl = None
 
 MIN_NODE_MAJOR = 22
-BACKEND_HEALTH_PATHS = ("/api/health", "/health")
 FOLLOW_POLL_INTERVAL = 0.5
 
 
@@ -45,11 +44,6 @@ class ServiceConfig:
     frontend_port: int = 5173
     no_browser: bool = False
     skip_frontend_build: bool = False
-
-    @property
-    def backend_urls(self) -> list[str]:
-        base = backend_access_base_url(self)
-        return [f"{base}{path}" for path in BACKEND_HEALTH_PATHS]
 
     @property
     def frontend_url(self) -> str:
@@ -677,22 +671,20 @@ def port_owner_pids(port: int) -> list[int]:
     raise ServiceError("未检测到 lsof 或 fuser，无法检查端口占用。")
 
 
-def _is_expected_health_response(response: httpx.Response) -> bool:
-    """Return True when the response matches a Flocks health payload."""
+def _is_reachable_response(response: httpx.Response) -> bool:
+    """Return True when an HTTP endpoint is reachable enough for startup checks."""
+    return response.status_code < 500
+
+
+def _is_running_status_response(response: httpx.Response) -> bool:
+    """Return True when the backend root endpoint reports a running status."""
     if response.status_code != 200:
         return False
     try:
         payload = response.json()
     except ValueError:
         return False
-    if not isinstance(payload, dict):
-        return False
-    return payload.get("status") == "healthy" or payload.get("healthy") is True
-
-
-def _is_reachable_response(response: httpx.Response) -> bool:
-    """Return True when an HTTP endpoint is reachable enough for startup checks."""
-    return response.status_code < 500
+    return isinstance(payload, dict) and payload.get("status") == "running"
 
 
 def wait_for_http(
@@ -746,8 +738,6 @@ def start_backend(config: ServiceConfig, console) -> None:
     if runtime_record is not None:
         paths.backend_pid.unlink(missing_ok=True)
 
-    _run_legacy_task_migration(root, console)
-
     command = resolve_flocks_cli_command(root) + [
         "serve",
         "--host",
@@ -779,7 +769,11 @@ def start_backend(config: ServiceConfig, console) -> None:
     _log_startup_config(paths.backend_log, "backend", config.backend_host, config.backend_port, read_runtime_record(paths.backend_pid))
 
     try:
-        wait_for_http(config.backend_urls, "后端服务", validator=_is_expected_health_response)
+        wait_for_http(
+            [backend_access_base_url(config)],
+            "后端服务",
+            validator=_is_running_status_response,
+        )
     except ServiceError:
         stop_one(config.backend_port, paths.backend_pid, "后端", console)
         raise
@@ -1073,33 +1067,6 @@ def _log_startup_config(
     line = f"[{timestamp}] {name} starting: host={host} port={port} pid={pid}{pgid_info}\n"
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(line)
-
-
-def _run_legacy_task_migration(root: Path, console) -> None:
-    """Run the legacy task migration script before backend startup."""
-    migration_script = root / "scripts" / "migrate_legacy_task_tables.py"
-    if not migration_script.exists():
-        return
-
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(migration_script)],
-            cwd=root,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-    except OSError as error:
-        if console is not None:
-            console.print(f"[flocks] 旧任务迁移脚本启动失败: {error}")
-        return
-
-    if completed.returncode != 0 and console is not None:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        if detail:
-            console.print(f"[flocks] 旧任务迁移失败: {detail}")
-        else:
-            console.print("[flocks] 旧任务迁移失败，请检查日志。")
 
 
 def _resolve_stop_ports(

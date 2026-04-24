@@ -414,6 +414,7 @@ class TestFeishuNativeCommands:
                 {
                     "provider": "anthropic",
                     "model": "claude-sonnet-4-20250514",
+                    "model_pinned": True,
                 },
             )
         ]
@@ -481,6 +482,7 @@ class TestFeishuNativeCommands:
                     agent="rex",
                     provider="anthropic",
                     model="claude-sonnet-4-20250514",
+                    model_pinned=True,
                 )
             ),
         )
@@ -842,9 +844,8 @@ class TestMultimodalInput:
             ),
         )
         monkeypatch.setattr(
-            SessionRunner,
-            "_extract_pdf_text_from_bytes",
-            classmethod(lambda cls, data, max_pages=20, max_chars=12000: "PDF body text"),
+            "flocks.session.utils.file_extractor.extract_pdf_text_from_bytes",
+            lambda data, *, max_pages=20, max_chars=12000: "PDF body text",
         )
 
         chat_messages = await runner._to_chat_messages(
