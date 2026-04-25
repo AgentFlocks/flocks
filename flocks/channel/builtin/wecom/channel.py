@@ -190,6 +190,65 @@ class WeComChannel(ChannelPlugin):
                 success=False, error=str(e), retryable=retryable,
             )
 
+    async def send_media(self, ctx: OutboundContext) -> DeliveryResult:
+        if not self._ws_client:
+            return DeliveryResult(
+                channel_id="wecom", message_id="",
+                success=False, error="WebSocket not connected",
+            )
+        if not ctx.media_url:
+            return await self.send_text(ctx)
+
+        try:
+            from flocks.channel.builtin.wecom.media import prepare_wecom_media
+
+            media = await prepare_wecom_media(ctx.media_url)
+            upload = await self._ws_client.upload_media(
+                media.data,
+                type=media.media_type,
+                filename=media.filename,
+            )
+            media_id = upload.get("media_id", "")
+            if not media_id:
+                raise RuntimeError(f"WeCom media upload failed: {upload}")
+
+            frame = (
+                self._frame_cache.pop(ctx.reply_to_id, None)
+                if ctx.reply_to_id else None
+            )
+            if frame:
+                sent = await self._ws_client.reply_media(
+                    frame,
+                    media.media_type,
+                    media_id,
+                    video_title=media.filename if media.media_type == "video" else None,
+                )
+            else:
+                sent = await self._ws_client.send_media_message(
+                    ctx.to,
+                    media.media_type,
+                    media_id,
+                    video_title=media.filename if media.media_type == "video" else None,
+                )
+
+            # WeCom's media payload does not carry companion text. Keep the
+            # attachment first, then send text as a separate message.
+            if ctx.text:
+                await self.send_text(OutboundContext(**{**vars(ctx), "media_url": None}))
+
+            self.record_message()
+            return DeliveryResult(
+                channel_id="wecom",
+                message_id=_extract_sent_message_id(sent),
+                chat_id=ctx.to,
+            )
+        except Exception as e:
+            retryable = "timeout" in str(e).lower() or "rate limit" in str(e).lower()
+            return DeliveryResult(
+                channel_id="wecom", message_id="",
+                success=False, error=str(e), retryable=retryable,
+            )
+
     def format_message(self, text: str, format_hint: str = "markdown") -> str:
         return text
 
@@ -404,6 +463,15 @@ def _parse_frame(frame: dict, config: dict) -> Optional[InboundMessage]:
     )
 
 
+def _extract_sent_message_id(frame: Any) -> str:
+    if not isinstance(frame, dict):
+        return ""
+    body = frame.get("body") or {}
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("msgid") or body.get("message_id") or "")
+
+
 def _extract_content(body: dict) -> tuple[str, Optional[str]]:
     """Extract ``(text, media_url)`` from the frame body."""
     msg_type = body.get("msgtype", "")
@@ -444,6 +512,13 @@ def _extract_mixed(mixed: dict) -> tuple[str, Optional[str]]:
         elif item_type == "image":
             parts.append("[图片]")
             url = item.get("image", {}).get("url", "")
+            if not first_media_url and url:
+                first_media_url = url
+        elif item_type == "file":
+            file_block = item.get("file", {})
+            filename = str(file_block.get("filename", "") or "").strip()
+            parts.append(f"[文件: {filename}]" if filename else "[文件]")
+            url = file_block.get("url", "")
             if not first_media_url and url:
                 first_media_url = url
     return " ".join(parts).strip(), first_media_url

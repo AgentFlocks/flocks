@@ -1023,6 +1023,14 @@ class InboundDispatcher:
                             text=new_text,
                         )
                         await Message.store_part(session_id, message.id, updated)
+                        try:
+                            from flocks.server.routes.event import publish_event
+                            await publish_event("message.part.updated", {
+                                "part": updated.model_dump(by_alias=True, exclude_none=True),
+                                "sessionID": session_id,
+                            })
+                        except Exception:
+                            pass
                         break
             except Exception:
                 pass
