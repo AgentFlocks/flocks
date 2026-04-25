@@ -152,6 +152,39 @@ async def test_apply_auth_for_request_requires_password_reset_before_access(monk
     assert "必须先修改密码" in str(exc_info.value.detail)
 
 
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_treats_referer_only_remote_request_as_browser(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=False)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    request = _make_request(
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "referer": "http://10.0.0.9:5173/login",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        client_host="10.0.0.2",
+        path="/api/auth/me",
+    )
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is not None
+        assert user.username == "test-user"
+    finally:
+        auth_module.clear_auth_context(token)
+
+
 class TestAuthMiddlewareExempt:
     """Cover ``auth_middleware_exempt`` — both fixed paths and regex patterns."""
 
