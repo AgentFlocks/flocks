@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.4.24"
+version = "v2026.4.24.1"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
