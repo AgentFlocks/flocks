@@ -419,22 +419,31 @@ def _extract_content(body: dict) -> tuple[str, Optional[str]]:
         return body.get("voice", {}).get("content", "[语音消息]"), None
 
     if msg_type == "file":
-        url = body.get("file", {}).get("url", "")
+        file_block = body.get("file", {})
+        url = file_block.get("url", "")
+        filename = str(file_block.get("filename", "") or "").strip()
+        if filename:
+            return f"[文件消息: {filename}]", url or None
         return "[文件消息]", url or None
 
     if msg_type == "mixed":
-        return _extract_mixed(body.get("mixed", {})), None
+        text, media_url = _extract_mixed(body.get("mixed", {}))
+        return text, media_url
 
     return "", None
 
 
-def _extract_mixed(mixed: dict) -> str:
-    """Flatten a mixed (图文混排) message into text."""
+def _extract_mixed(mixed: dict) -> tuple[str, Optional[str]]:
+    """Flatten a mixed (图文混排) message into text + first media URL."""
     parts: list[str] = []
+    first_media_url: Optional[str] = None
     for item in mixed.get("msg_item", []):
         item_type = item.get("msgtype", "")
         if item_type == "text":
             parts.append(item.get("text", {}).get("content", ""))
         elif item_type == "image":
             parts.append("[图片]")
-    return " ".join(parts).strip()
+            url = item.get("image", {}).get("url", "")
+            if not first_media_url and url:
+                first_media_url = url
+    return " ".join(parts).strip(), first_media_url

@@ -375,6 +375,21 @@ class TestParseFrame:
                 "chattype": "single",
                 "from": {"userid": "u1"},
                 "msgtype": "file",
+                "file": {"url": "https://example.com/file.pdf", "filename": "report.pdf"},
+            }
+        }
+        msg = _parse_frame(frame, {})
+        assert msg is not None
+        assert msg.text == "[文件消息: report.pdf]"
+        assert msg.media_url == "https://example.com/file.pdf"
+
+    def test_file_message_no_filename(self):
+        frame = {
+            "body": {
+                "msgid": "msg005b",
+                "chattype": "single",
+                "from": {"userid": "u1"},
+                "msgtype": "file",
                 "file": {"url": "https://example.com/file.pdf"},
             }
         }
@@ -453,16 +468,26 @@ class TestExtractContent:
 
 class TestExtractMixed:
     def test_mixed_text_and_image(self):
-        result = _extract_mixed({
+        result_text, result_media = _extract_mixed({
             "msg_item": [
                 {"msgtype": "text", "text": {"content": "A"}},
                 {"msgtype": "image", "image": {"url": "https://x.com/b.png"}},
                 {"msgtype": "text", "text": {"content": "B"}},
             ]
         })
-        assert "A" in result
-        assert "[图片]" in result
-        assert "B" in result
+        assert "A" in result_text
+        assert "[图片]" in result_text
+        assert "B" in result_text
+        assert result_media == "https://x.com/b.png"
+
+    def test_mixed_no_image(self):
+        result_text, result_media = _extract_mixed({
+            "msg_item": [
+                {"msgtype": "text", "text": {"content": "hello"}},
+            ]
+        })
+        assert result_text == "hello"
+        assert result_media is None
 
 
 # ------------------------------------------------------------------

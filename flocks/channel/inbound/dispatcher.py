@@ -980,29 +980,62 @@ class InboundDispatcher:
 
         message = await Message.create(**create_kwargs)
 
-        if msg.channel_id != "feishu" or not msg.media_url or channel_config is None:
+        if not msg.media_url or channel_config is None:
             return
 
-        try:
-            from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
+        raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
 
-            raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
-            media = await download_inbound_media(msg, raw_cfg)
+        try:
+            media = await _download_channel_media(msg, raw_cfg)
             if not media:
                 return
 
-            await Message.store_part(
-                session_id,
-                message.id,
-                FilePart(
-                    sessionID=session_id,
-                    messageID=message.id,
-                    mime=media.mime,
-                    filename=media.filename,
-                    url=media.url,
-                    source=media.source,
-                ),
+            file_part = FilePart(
+                sessionID=session_id,
+                messageID=message.id,
+                mime=media.mime,
+                filename=media.filename,
+                url=media.url,
+                source=media.source,
             )
+            await Message.store_part(session_id, message.id, file_part)
+
+            try:
+                from flocks.session.message import TextPart
+                parts = await Message.parts(message.id, session_id=session_id)
+                for p in parts:
+                    if p.type == "text" and hasattr(p, "text") and (
+                        p.text in ("[文件消息]", "[图片消息]")
+                        or p.text.startswith("[文件消息:")
+                    ):
+                        from pathlib import PurePosixPath
+                        file_path_str = media.url.replace("file://", "")
+                        try:
+                            display_path = str(PurePosixPath(file_path_str))
+                        except Exception:
+                            display_path = file_path_str
+                        new_text = f"Attached files:\n- {display_path}"
+                        updated = TextPart(
+                            id=p.id,
+                            sessionID=session_id,
+                            messageID=message.id,
+                            type="text",
+                            text=new_text,
+                        )
+                        await Message.store_part(session_id, message.id, updated)
+                        break
+            except Exception:
+                pass
+
+            try:
+                from flocks.server.routes.event import publish_event
+                part_event = file_part.model_dump(by_alias=True, exclude_none=True)
+                await publish_event("message.part.updated", {
+                    "part": part_event,
+                    "sessionID": session_id,
+                })
+            except Exception:
+                pass
         except Exception as e:
             log.warning("dispatcher.inbound_media_download_failed", {
                 "channel_id": msg.channel_id,
@@ -1205,3 +1238,16 @@ async def _fetch_quoted_message(
 # 权限错误通知冷却时间（同一账号 5 分钟内只通知一次）
 _PERM_NOTICE_COOLDOWN = 300
 _perm_notice_last: dict[str, float] = {}
+
+
+async def _download_channel_media(msg: InboundMessage, config: dict):
+    """Dispatch inbound media download to the appropriate channel handler."""
+    if msg.channel_id == "feishu":
+        from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
+        return await download_inbound_media(msg, config)
+
+    if msg.channel_id == "wecom":
+        from flocks.channel.builtin.wecom.inbound_media import download_inbound_media
+        return await download_inbound_media(msg, config)
+
+    return None
