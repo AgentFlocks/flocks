@@ -743,14 +743,10 @@ class StreamProcessor:
                 "tool_name": tool_name,
                 "success": result.success,
             })
-            output_preview = result.output if result.success else result.error
-            if isinstance(output_preview, str):
-                output_preview = output_preview[:600]
-
             try:
                 if tool_span_ctx is not None:
                     end_kwargs: Dict[str, Any] = {
-                        "output": output_preview,
+                        "output": result.output if result.success else result.error,
                         "metadata": {
                             "success": result.success,
                             "title": result.title,

@@ -372,6 +372,68 @@ class TestToolCallExecution:
         callback.assert_called_once()
 
     @pytest.mark.asyncio
+    async def test_tool_span_records_full_output(self):
+        proc = _make_processor()
+        proc._langfuse_generation = object()
+        long_output = "tool output " * 120
+        span_ctx = MagicMock()
+
+        successful_result = ToolResult(
+            success=True,
+            output=long_output,
+            title="bash",
+            metadata={},
+        )
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=successful_result),
+            ),
+            patch("flocks.session.streaming.stream_processor.span_scope", return_value=span_ctx),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_span_output", tool_name="bash"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_span_output", tool_name="bash", input={"command": "ls -la"})
+            )
+
+        assert span_ctx.end.call_count == 1
+        assert span_ctx.end.call_args.kwargs["output"] == long_output
+
+    @pytest.mark.asyncio
+    async def test_tool_span_records_full_error(self):
+        proc = _make_processor()
+        proc._langfuse_generation = object()
+        long_error = "tool error " * 120
+        span_ctx = MagicMock()
+
+        failed_result = ToolResult(
+            success=False,
+            error=long_error,
+            metadata={},
+        )
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=failed_result),
+            ),
+            patch("flocks.session.streaming.stream_processor.span_scope", return_value=span_ctx),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_span_error", tool_name="bash"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_span_error", tool_name="bash", input={"command": "false"})
+            )
+
+        assert span_ctx.end.call_count == 1
+        assert span_ctx.end.call_args.kwargs["output"] == long_error
+        assert span_ctx.end.call_args.kwargs["level"] == "ERROR"
+
+    @pytest.mark.asyncio
     async def test_tool_error_falls_back_to_metadata_output(self):
         event_callback = AsyncMock()
         proc = _make_processor(event_callback=event_callback)
