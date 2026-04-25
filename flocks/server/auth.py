@@ -163,6 +163,8 @@ def _is_browser_like_request(request: Request) -> bool:
         return True
     if headers.get("origin"):
         return True
+    if headers.get("referer"):
+        return True
     return False
 
 
