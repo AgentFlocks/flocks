@@ -1,0 +1,56 @@
+name: onesig_v2_5_older_helper
+description: >
+  OneSIG help center grouped tool. Use the `action` parameter to access help
+  documentation, product news red dots, version information and feedback
+  endpoints under the `/helper/*` routes.
+description_cn: >
+  OneSIG 帮助中心分组工具。通过 `action` 调用帮助文档、产品动态红点、版本信息以及
+  问题反馈接口，对应 Web 控制台 `/helper/*` 子页。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: onesig_v2_5_older_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Helper 分组动作名：
+        - document_list           POST /v3/document/list                分页查询帮助文档
+        - document_preview        GET  /v3/document/preview             预览帮助文档（需 fileName）
+        - product_news_get        GET  /v3/product/news                 产品动态红点
+        - product_news_mark_read  PUT  /v3/product/news                 标记产品动态已读
+        - product_version         GET  /v3/product/version              产品版本信息
+        - product_issue           POST /v3/product/issue                提交产品问题反馈
+      enum:
+        - document_list
+        - document_preview
+        - product_news_get
+        - product_news_mark_read
+        - product_version
+        - product_issue
+    fileName:
+      type: string
+      description: 帮助文档文件名（document_preview 必填）
+    pageNo:
+      type: integer
+      default: 1
+    pageSize:
+      type: integer
+      default: 20
+    search:
+      type: string
+      description: 文档列表模糊搜索关键字
+    documentUpdate:
+      type: boolean
+      description: 标记帮助文档红点已读
+    versionUpdate:
+      type: boolean
+      description: 标记版本更新红点已读
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig_v2_5_older.handler.py
+  function: helper
