@@ -1,0 +1,90 @@
+name: onesig_v2_5_older_assets
+description: >
+  OneSIG asset management grouped tool. Use the `action` parameter to manage
+  assets, asset groups, asset types, and import / export workflows under
+  `/assets/segment`.
+description_cn: >
+  OneSIG 资产管理分组工具。通过 `action` 调用资产、资产组、资产类型以及导入/导出
+  相关接口，对应 Web 控制台 `/assets/segment` 资产配置页。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_v2_5_older_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Assets 分组动作名：
+        - asset_delete           DELETE /v3/asset                      删除资产
+        - asset_create           POST   /v3/asset                      新增资产
+        - asset_update           PUT    /v3/asset                      更新资产
+        - asset_export           POST   /v3/asset/export               导出资产（文件）
+        - asset_group_delete     DELETE /v3/asset/group                删除资产组
+        - asset_group_get        GET    /v3/asset/group                查询资产组
+        - asset_group_create     POST   /v3/asset/group                新增资产组
+        - asset_group_update     PUT    /v3/asset/group                更新资产组
+        - asset_import           POST   /v3/asset/import               导入资产（multipart：传 file_path）
+        - asset_template         GET    /v3/asset/template             导入模板（文件）
+        - asset_list             POST   /v3/asset/list                 分页查询资产列表
+        - asset_type_delete      DELETE /v3/asset/type                 删除资产类型
+        - asset_type_get         GET    /v3/asset/type                 查询资产类型
+        - asset_type_create      POST   /v3/asset/type                 新增资产类型
+        - common_asset_group_tree GET   /v3/common/assetGroupTree      资产组树
+      enum:
+        - asset_delete
+        - asset_create
+        - asset_update
+        - asset_export
+        - asset_group_delete
+        - asset_group_get
+        - asset_group_create
+        - asset_group_update
+        - asset_import
+        - asset_template
+        - asset_list
+        - asset_type_delete
+        - asset_type_get
+        - asset_type_create
+        - common_asset_group_tree
+    uniqueId:
+      type: string
+      description: 资产/资产组/资产类型 ID
+    uniqueIds:
+      type: array
+      items:
+        type: string
+      description: 批量删除使用的 ID 列表
+    name:
+      type: string
+      description: 名称
+    ip:
+      type: string
+      description: IP / CIDR / 网段
+    assetGroup:
+      type: string
+      description: 资产组路径
+    assetType:
+      type: string
+      description: 资产类型
+    pageNo:
+      type: integer
+      default: 1
+    pageSize:
+      type: integer
+      default: 20
+    search:
+      type: string
+      description: 模糊查询关键字
+    file_path:
+      type: string
+      description: |
+        本地待上传文件的绝对路径；仅 multipart 上传类动作使用：
+          - asset_import      .csv 资产导入文件（字段名 `file`）
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig_v2_5_older.handler.py
+  function: assets

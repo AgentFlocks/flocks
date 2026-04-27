@@ -1,0 +1,156 @@
+name: onesig_v2_5_older
+service_id: onesig_v2_5_older_api
+description: >
+  OneSIG (Secure Internet Gateway) Web API service — *older v2.5 firmware*
+  variant. Authentication still uses cookie session, but the login endpoint
+  receives the **plaintext** password directly (no `GET /v3/pubkey` and no
+  RSA-OAEP encryption on `POST /v3/login`). All other behaviour mirrors the
+  standard `onesig` plugin: cookie persistence, captcha / TOTP fallback,
+  session auto-relogin, and RSA-OAEP encryption of sensitive write fields
+  (change_password, user_create / user_delete, audit-log purge, interface
+  password, device upgrade password, …).
+
+  Configure host base URL, username and password separately in the credentials
+  form. The optional captcha / TOTP fields are only required when the device
+  has captcha or two-factor authentication enabled.
+description_cn: >
+  OneSIG（安全互联网网关）Web API 服务 —— *老版本 v2.5 固件* 变体。认证仍走
+  Cookie 会话，但登录接口直接发送**明文**密码（不再调 `GET /v3/pubkey`，不对
+  `POST /v3/login` 的 password 字段做 RSA-OAEP 加密）。其余行为与标准 `onesig`
+  插件保持一致：Cookie 持久化、验证码 / TOTP 兜底、会话自动重登，以及对*非登录*
+  敏感写字段（改密、删用户、删审计、接口启停、设备升级口令等）的 RSA-OAEP 加密。
+
+  配置页需分别填写 Base URL、用户名、密码；当设备开启图形验证码或 TOTP 时，
+  对应字段可在调用 `onesig_v2_5_older_login` 时按需传入。
+auth:
+  type: custom
+  secret: onesig_v2_5_older_password
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://device.example.com"
+  - key: api_prefix
+    label: API Prefix
+    storage: config
+    config_key: api_prefix
+    input_type: text
+    required: false
+    default: ""
+    placeholder: "留空（默认）或 /api"
+  - key: username
+    label: Username
+    storage: config
+    config_key: username
+    input_type: text
+    required: true
+  - key: password
+    label: Password (plaintext on login)
+    storage: secret
+    config_key: password
+    secret_id: onesig_v2_5_older_password
+    input_type: password
+    required: true
+  - key: oaep_hash
+    label: RSA-OAEP Hash (sensitive write fields only)
+    storage: config
+    config_key: oaep_hash
+    input_type: text
+    required: false
+    default: "sha1"
+    placeholder: "sha1 或 sha256"
+defaults:
+  api_prefix: ""
+  oaep_hash: "sha1"
+  timeout: 60
+  category: custom
+notes: |
+  OneSIG v2.5 老版本（onesig_v2_5_older）使用 Cookie 会话鉴权 + 明文密码登录。
+
+  常见配置示例：
+    - api_services.onesig_v2_5_older_api.base_url     = "https://device.example.com"
+    - api_services.onesig_v2_5_older_api.api_prefix   = ""               # 大部分 v2.5.x 部署留空；reverse-proxy 部署才填 "/api"
+    - api_services.onesig_v2_5_older_api.username     = "admin"
+    - api_services.onesig_v2_5_older_api.password     = "{secret:onesig_v2_5_older_password}"
+    - api_services.onesig_v2_5_older_api.oaep_hash    = "sha1"           # 仅用于「敏感写字段」加密；登录与该项无关
+
+  与新版 `onesig` 插件的差异（仅一处）：
+    - 登录链路：本插件 **跳过** `GET /v3/pubkey` 与 RSA-OAEP 加密，
+      `POST /v3/login` 的 body 形如：
+
+          { "username": "admin", "password": "<明文密码>", "captcha"?: "...", "checksum"?: "..." }
+
+      老固件早期发布版本只接受明文密码，发送 RSA 密文会被解析成乱码并返回
+      `responseCode=1009 / 1017`。
+
+  其他链路与新版完全一致（已沿用同一份 handler 代码）：
+    - Cookie 会话维持 + `.secret.json` 持久化（key 形如
+      `onesig_v2_5_older_session_cookie__<sha1[:12](base_url|username)>`）；
+    - 401 / responseCode 1019..1022 自动 force-relogin；
+    - 改密、删用户、清审计、接口启停、设备升级 等接口里的 `password` /
+      `oldPassword` / `newPassword` / `dupPassword` 仍由处理器在发送前
+      用最新公钥（每次重新拉 `/v3/pubkey`）做 RSA-OAEP 加密；调用方继续
+      传入**明文**即可，请勿手动加密。
+
+  `api_prefix` 选取建议（与新版相同）：
+    - 默认值 `""`（空）。绝大多数 OneSIG v2.5.x 设备 nginx 已经把 `/v3/`
+      直接路由到后端，`https://host/v3/captcha` 直接返回 JSON。
+    - 如果设备前面挂了反向代理（路径是 `https://host/api/v3/...`），把
+      `api_prefix` 显式改成 `"/api"`。
+    - 看到日志 `HTTP 404` 几乎都是 `api_prefix` 没对齐：把当前值取反
+      （空 ↔ "/api"）再试。
+
+  `verify_ssl` 由表单底部「SSL 验证」开关控制，按以下优先级取值：
+    1. `verify_ssl`                                 （主键）
+    2. `ssl_verify`                                 （兼容别名）
+    3. `verifySsl`                                  （历史 camelCase 别名）
+    4. `custom_settings.verify_ssl`                 （WebUI 表单写入位置）
+    5. 环境变量 `ONESIG_V2_5_OLDER_VERIFY_SSL`      （本插件专用）
+    6. 环境变量 `ONESIG_VERIFY_SSL`                 （与新版插件共用兜底）
+    7. 兜底默认值 `False`（**默认关闭证书验证**）
+
+  ⚠️ 安全提示：本插件登录阶段以**明文**形式下发密码，请仅在「内网受控网络
+  + HTTPS + verify_ssl=true」的部署上启用，避免凭据泄露。
+
+  Cookie 会话持久化（`persist_cookies`）：
+    - 处理器会在登录成功后把 aiohttp CookieJar 序列化成 JSON 写入
+      `~/.flocks/config/.secret.json`（与口令同居一份 0600 权限文件），
+      key 形如 `onesig_v2_5_older_session_cookie__<sha1[:12](base_url|username)>`。
+    - 进程重启时若该条 secret 还在且至少有一个 cookie 未过期，会直接灌回
+      jar 并跳过 captcha→/v3/login→/v3/account 整条链路；如果设备已经
+      吊销该 cookie，首次业务请求拿到 401 / responseCode 1019..1022 时
+      会触发自动重登一次（与原行为一致）。
+    - `logout` 动作会同步删除磁盘上的 cookie；`close` 不会删（用于优雅
+      关停时保留持久化数据）。
+    - 字段优先级：
+        1. `persist_cookies`
+        2. `persistCookies`
+        3. `custom_settings.persist_cookies`
+        4. 环境变量 `ONESIG_V2_5_OLDER_PERSIST_COOKIES`
+        5. 环境变量 `ONESIG_PERSIST_COOKIES`
+        6. 兜底默认值 `True`（**默认开启持久化**）
+
+  说明：
+    - 文档接口路径形如 `/v3/...`；处理器在拼接 URL 时会自动加上 `api_prefix`，
+      请按部署环境调整。
+    - 当设备启用图形验证码或 TOTP 时，可在 `onesig_v2_5_older_login` 工具的
+      `login` 动作中传入 `captcha` / `totp` 参数；TOTP 一次性口令本身不加密。
+    - 处理器在 401 / responseCode 1019..1022 等会话失效场景自动重新登录并重试一次；
+      也可以手动调用 `onesig_v2_5_older_login` 的 `login` / `logout` 动作管理会话。
+
+  敏感字段加密（与新版 onesig 完全一致，与登录链路*独立*）：
+    - 改密、删除用户、清空审计、接口启停、设备升级等接口的 `password` 字段
+      仍由处理器自动 RSA-OAEP 加密（每次拉最新 `/v3/pubkey`，对齐前端
+      `clearRSACache`）。
+    - 哈希参数由 `oaep_hash` 控制，默认 `sha1`；如改密返回 `1009/1017`
+      但口令正确，请尝试切换为 `sha256`：
+        api_services.onesig_v2_5_older_api.oaep_hash = "sha256"
+
+  multipart 上传：
+    - 多个 `导入 / 上传 / 升级` 类接口（asset_import、tls_cert_create、
+      system_upgrade、device_upgrade_upload、basic_information_import、
+      basic_license_upload、backup_import 等）会以 `multipart/form-data`
+      提交本地文件，调用方需提供 `file_path` 指向本地绝对路径。

@@ -1,0 +1,400 @@
+name: onesig_v2_5_older_device
+description: >
+  OneSIG device management grouped tool. Use the `action` parameter to access
+  alert / notification policies, audit logs, user / login management, HTTPS
+  decryption, deployment guide, network interfaces, routes, DNS, HA, OneCC
+  (centralized control), system info, license, MDR service, system diagnosis,
+  and the device configuration / backup / upgrade flows under `/device/*`.
+description_cn: >
+  OneSIG 平台管理分组工具。通过 `action` 调用告警/通知策略、管理日志、用户/登录安全
+  策略、HTTPS 解密、部署引导、接口、路由、DNS、HA 高可用、一体化管控、系统信息、
+  许可证、MDR 服务、设备诊断以及备份/升级等接口（覆盖 Web 控制台 `/device/*` 子页）。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_v2_5_older_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Device 分组动作名（按 UI 子页归类）：
+
+        # 通知配置 (/device/alert)
+        - alert_policy_list                POST   /v3/alert/policy/list
+        - alert_policy_enable              POST   /v3/alert/policy/enable
+        - alert_policy_delete              DELETE /v3/alert/policy
+        - alert_policy_create              POST   /v3/alert/policy
+        - alert_policy_update              PUT    /v3/alert/policy
+        - alert_policy_export              POST   /v3/alert/policy/export       （文件）
+        - alert_policy_find_by_config      POST   /v3/alert/policy/findByConfig
+        - alert_policy_object              POST   /v3/alert/policy/object
+        - get_notice_config                GET    /v3/setting/noticeConfig
+        - set_notice_config                PUT    /v3/setting/noticeConfig
+        - get_notice_send_key              GET    /v3/setting/noticeConfig/sendKey
+        - test_email                       POST   /v3/test/email
+        - test_syslog                      POST   /v3/test/syslog
+        - test_webhook                     POST   /v3/test/webhook
+
+        # 审计日志 (/device/audit)
+        - aclog_stat                       GET    /v3/aclog/stat
+        - aclog_list                       POST   /v3/aclog/list
+        - aclog_export                     POST   /v3/aclog/export             （文件）
+        - aclog_delete                     DELETE /v3/aclog                         （password 自动 RSA 加密）
+        - get_clean_config                 GET    /v3/setting/cleanConfig
+        - set_clean_config                 PUT    /v3/setting/cleanConfig
+
+        # 登录管理 (/device/loginManagement)
+        - user_list                        POST   /v3/user/list
+        - user_export                      POST   /v3/user/export              （文件）
+        - user_delete                      DELETE /v3/user                          （password 自动 RSA 加密）
+        - user_secret_reset                PUT    /v3/user/secret/reset            （password 自动 RSA 加密）
+        - user_create                      POST   /v3/user                          （password / dupPassword 自动 RSA 加密）
+        - user_update                      PUT    /v3/user
+        - get_login_config                 GET    /v3/setting/loginConfig
+        - set_login_config                 PUT    /v3/setting/loginConfig
+
+        # HTTPS 解密 (/device/httpsDecryption)
+        - get_decrypt_config               GET    /v3/setting/decryptConfig
+        - set_decrypt_config               PUT    /v3/setting/decryptConfig
+        - get_detect_config                GET    /v3/setting/detectConfig
+        - set_detect_config                PUT    /v3/setting/detectConfig
+        - tls_decrypt_policy_list          POST   /v3/tls/decrypt/policy/list
+        - tls_decrypt_policy_create        POST   /v3/tls/decrypt/policy
+        - tls_decrypt_policy_update        PUT    /v3/tls/decrypt/policy
+        - tls_decrypt_policy_enable        POST   /v3/tls/decrypt/policy/enable
+        - tls_decrypt_policy_delete        DELETE /v3/tls/decrypt/policy
+        - tls_decrypt_policy_batch         POST   /v3/tls/decrypt/policy/batch
+        - tls_cert_list                    POST   /v3/tls/cert/list
+        - tls_cert_create                  POST   /v3/tls/cert                     （multipart：file_path 指向 .crt/.pem，字段名 certFile）
+        - tls_cert_update                  PUT    /v3/tls/cert                     （multipart：同 tls_cert_create，body 需带 uniqueId）
+        - tls_cert_delete                  DELETE /v3/tls/cert
+        - tls_cert_set_default             POST   /v3/tls/cert/set_default
+        - tls_detect_list                  POST   /v3/tls/detect/list
+        - tls_detect_list_detail           POST   /v3/tls/detect/list/detail
+        - tls_detect_delete                DELETE /v3/tls/detect
+        - tls_detect_group                 POST   /v3/tls/detect/group
+        - tls_detect_group_export          POST   /v3/tls/detect/group/export   （文件）
+        - tls_detect_list_export           POST   /v3/tls/detect/list/export    （文件）
+
+        # 接口 / 部署引导 (/device/interface, /device/deployguide)
+        - interface_list                   GET    /v3/interface/list
+        - interface_update                 PUT    /v3/interface                    （启停场景 password 自动 RSA 加密）
+        - interface_check_loop             POST   /v3/interface/check/loop
+        - interface_relation_list          GET    /v3/interface/relation/list
+        - interface_select_list            GET    /v3/interface/select/list
+        - interface_virtual_line_create    POST   /v3/interface/virtualLine
+        - interface_virtual_line_update    PUT    /v3/interface/virtualLine
+        - interface_virtual_line_delete    DELETE /v3/interface/virtualLine
+        - interface_listen_create          POST   /v3/interface/listen
+        - interface_listen_update          PUT    /v3/interface/listen
+        - interface_listen_delete          DELETE /v3/interface/listen
+        - interface_bridge_create          POST   /v3/interface/bridge
+        - interface_bridge_update          PUT    /v3/interface/bridge
+        - interface_bridge_delete          DELETE /v3/interface/bridge
+
+        # 路由 (/device/route)
+        - route_outif_list                 GET    /v3/route/outIf/list
+        - route_static_list                POST   /v3/route/static/list
+        - route_static_create              POST   /v3/route/static
+        - route_static_update              PUT    /v3/route/static
+        - route_static_delete              DELETE /v3/route/static
+        - route_table_list                 POST   /v3/route/table/list
+        - ipv6_route_static_list           POST   /v3/ipv6Route/static/list
+        - ipv6_route_static_create         POST   /v3/ipv6Route/static
+        - ipv6_route_static_update         PUT    /v3/ipv6Route/static
+        - ipv6_route_static_delete         DELETE /v3/ipv6Route/static
+        - ipv6_route_table_list            POST   /v3/ipv6Route/table/list
+
+        # DNS 配置 (/device/system_dns)
+        - get_dns_config                   GET    /v3/setting/dnsConfig
+        - set_dns_config                   PUT    /v3/setting/dnsConfig
+        - hosts_get                        GET    /v3/setting/hosts
+        - hosts_create                     POST   /v3/setting/hosts
+        - hosts_update                     PUT    /v3/setting/hosts
+        - hosts_delete                     DELETE /v3/setting/hosts
+        - test_network                     GET    /v3/test/network
+
+        # 代理 (/device/agent)
+        - get_proxy_config                 GET    /v3/setting/proxyConfig
+        - set_proxy_config                 PUT    /v3/setting/proxyConfig
+        - test_proxy                       POST   /v3/test/proxy
+
+        # 高可用 (/device/high_availability)
+        - ha_status                        GET    /v3/ha/status
+        - get_ha_config                    GET    /v3/setting/haConfig
+        - set_ha_config                    PUT    /v3/setting/haConfig
+        - ha_module_list                   GET    /v3/ha/moduleList
+        - ha_compare_config                POST   /v3/ha/compareConfig
+        - ha_switching                     PUT    /v3/ha/switching
+        - ha_sync_config                   POST   /v3/ha/syncConfig
+        - ha_sync_status                   GET    /v3/ha/syncStatus
+
+        # 集中管控 (/device/centralized_control)
+        - onecc_status                     GET    /v3/setting/oneccConfig/status
+        - get_onecc_config                 GET    /v3/setting/oneccConfig
+        - set_onecc_config                 PUT    /v3/setting/oneccConfig
+        - set_onecc_status                 PUT    /v3/setting/oneccConfig/status
+        - test_onecc                       POST   /v3/test/onecc
+
+        # 设备配置 / 升级 / 备份 / 日志外发 (/device/deviceConfig)
+        - device_quick_bypass              POST   /v3/device/quickBypass
+        - device_upgrade_record_list       POST   /v3/device/upgradeRecord/list
+        - get_upgrade_config               GET    /v3/setting/upgradeConfig
+        - set_upgrade_config               PUT    /v3/setting/upgradeConfig
+        - basic_version                    GET    /v3/basic/version
+        - device_upgrade_info              GET    /v3/device/upgradeInfo
+        - device_download_package          POST   /v3/device/downloadPackage
+        - device_upgrade                   POST   /v3/device/upgrade               （已下载包升级；password 自动 RSA 加密）
+        - device_upgrade_upload            POST   /v3/device/upgrade               （本地上传包升级；multipart + password 自动 RSA 加密）
+        - system_upgrade                   POST   /v3/system/upgrade               （multipart：file_path 指向系统升级包）
+        - device_custom_get                GET    /v3/device/custom
+        - device_custom_set                PUT    /v3/device/custom
+        - device_reboot                    POST   /v3/device/reboot
+        - device_shutdown                  POST   /v3/device/shutdown
+        - device_reinit                    POST   /v3/device/reinit
+        - device_system_timezone           GET    /v3/device/systemTimeZone
+        - device_system_time_get           GET    /v3/device/systemTime
+        - device_system_time_set           PUT    /v3/device/systemTime
+        - get_storage_config               GET    /v3/setting/storageConfig
+        - set_storage_config               PUT    /v3/setting/storageConfig
+        - backup_recover_progress          GET    /v3/backup/recover/progress
+        - backup_list                      POST   /v3/backup/list
+        - backup_create                    POST   /v3/backup
+        - backup_download                  GET    /v3/backup/download           （文件）
+        - backup_recover                   POST   /v3/backup/recover
+        - backup_delete                    DELETE /v3/backup
+        - backup_update                    PUT    /v3/backup
+        - backup_import                    POST   /v3/backup/import                （multipart：file_path 指向备份包）
+        - logaccess_list                   POST   /v3/logAccess/list
+        - logaccess_delete                 DELETE /v3/logAccess
+        - logaccess_create                 POST   /v3/logAccess
+        - logaccess_update                 PUT    /v3/logAccess
+        - logaccess_sample                 POST   /v3/logAccess/sample
+        - logaccess_test                   POST   /v3/logAccess/test
+        - logaccess_check                  GET    /v3/logAccess/check
+
+        # 基本信息 (/device/system_info)
+        - basic_license_get                GET    /v3/basic/license
+        - basic_connect_status             GET    /v3/basic/connectStatus
+        - basic_information                GET    /v3/basic/information
+        - basic_information_enable         POST   /v3/basic/information/enable
+        - basic_information_import         POST   /v3/basic/information            （multipart：file_path 指向离线情报库更新包，Query 需 name=...）
+        - basic_license_upload             POST   /v3/basic/license                （multipart：file_path 指向授权文件）
+        - mdr_service_status               GET    /v3/mdrService/status
+        - mdr_service_enable               PUT    /v3/mdrService/enable
+
+        # 设备诊断 (/device/system_diagnosis)
+        - device_coredump_list             GET    /v3/device/coredump
+        - device_coredump_download         POST   /v3/device/coredumpDownload   （文件）
+        - device_coredump_delete           DELETE /v3/device/coredump
+        - device_pcap_get                  GET    /v3/device/pcap
+        - device_pcap_set                  PUT    /v3/device/pcap
+        - device_pcap_file_list            GET    /v3/device/pcapFile
+        - device_pcap_download             POST   /v3/device/pcapDownload       （文件）
+        - device_pcap_file_delete          DELETE /v3/device/pcapFile
+      enum:
+        - alert_policy_list
+        - alert_policy_enable
+        - alert_policy_delete
+        - alert_policy_create
+        - alert_policy_update
+        - alert_policy_export
+        - alert_policy_find_by_config
+        - alert_policy_object
+        - get_notice_config
+        - set_notice_config
+        - get_notice_send_key
+        - test_email
+        - test_syslog
+        - test_webhook
+        - aclog_stat
+        - aclog_list
+        - aclog_export
+        - aclog_delete
+        - get_clean_config
+        - set_clean_config
+        - user_list
+        - user_export
+        - user_delete
+        - user_secret_reset
+        - user_create
+        - user_update
+        - get_login_config
+        - set_login_config
+        - get_decrypt_config
+        - set_decrypt_config
+        - get_detect_config
+        - set_detect_config
+        - tls_decrypt_policy_list
+        - tls_decrypt_policy_create
+        - tls_decrypt_policy_update
+        - tls_decrypt_policy_enable
+        - tls_decrypt_policy_delete
+        - tls_decrypt_policy_batch
+        - tls_cert_list
+        - tls_cert_create
+        - tls_cert_update
+        - tls_cert_delete
+        - tls_cert_set_default
+        - tls_detect_list
+        - tls_detect_list_detail
+        - tls_detect_delete
+        - tls_detect_group
+        - tls_detect_group_export
+        - tls_detect_list_export
+        - interface_list
+        - interface_update
+        - interface_check_loop
+        - interface_relation_list
+        - interface_select_list
+        - interface_virtual_line_create
+        - interface_virtual_line_update
+        - interface_virtual_line_delete
+        - interface_listen_create
+        - interface_listen_update
+        - interface_listen_delete
+        - interface_bridge_create
+        - interface_bridge_update
+        - interface_bridge_delete
+        - route_outif_list
+        - route_static_list
+        - route_static_create
+        - route_static_update
+        - route_static_delete
+        - route_table_list
+        - ipv6_route_static_list
+        - ipv6_route_static_create
+        - ipv6_route_static_update
+        - ipv6_route_static_delete
+        - ipv6_route_table_list
+        - get_dns_config
+        - set_dns_config
+        - hosts_get
+        - hosts_create
+        - hosts_update
+        - hosts_delete
+        - test_network
+        - get_proxy_config
+        - set_proxy_config
+        - test_proxy
+        - ha_status
+        - get_ha_config
+        - set_ha_config
+        - ha_module_list
+        - ha_compare_config
+        - ha_switching
+        - ha_sync_config
+        - ha_sync_status
+        - onecc_status
+        - get_onecc_config
+        - set_onecc_config
+        - set_onecc_status
+        - test_onecc
+        - device_quick_bypass
+        - device_upgrade_record_list
+        - get_upgrade_config
+        - set_upgrade_config
+        - basic_version
+        - device_upgrade_info
+        - device_download_package
+        - device_upgrade
+        - device_upgrade_upload
+        - system_upgrade
+        - device_custom_get
+        - device_custom_set
+        - device_reboot
+        - device_shutdown
+        - device_reinit
+        - device_system_timezone
+        - device_system_time_get
+        - device_system_time_set
+        - get_storage_config
+        - set_storage_config
+        - backup_recover_progress
+        - backup_list
+        - backup_create
+        - backup_download
+        - backup_recover
+        - backup_delete
+        - backup_update
+        - backup_import
+        - logaccess_list
+        - logaccess_delete
+        - logaccess_create
+        - logaccess_update
+        - logaccess_sample
+        - logaccess_test
+        - logaccess_check
+        - basic_license_get
+        - basic_connect_status
+        - basic_information
+        - basic_information_enable
+        - basic_information_import
+        - basic_license_upload
+        - mdr_service_status
+        - mdr_service_enable
+        - device_coredump_list
+        - device_coredump_download
+        - device_coredump_delete
+        - device_pcap_get
+        - device_pcap_set
+        - device_pcap_file_list
+        - device_pcap_download
+        - device_pcap_file_delete
+    uniqueId:
+      type: string
+      description: 资源唯一 ID（删除/下载等场景）
+    uniqueIds:
+      type: array
+      items:
+        type: string
+      description: 批量删除使用的 ID 列表
+    pageNo:
+      type: integer
+      default: 1
+    pageSize:
+      type: integer
+      default: 20
+    startTime:
+      type: integer
+      description: 起始时间戳（管理日志统计 / 列表 / 导出场景使用）
+    endTime:
+      type: integer
+      description: 结束时间戳
+    name:
+      type: string
+      description: 名称（用户名、配置项名称等）
+    enable:
+      type: boolean
+      description: 启停标识
+    password:
+      type: string
+      description: |
+        敏感写操作所需的当前用户登录密码（明文）。处理器会自动用 `/v3/pubkey`
+        最新公钥做 RSA-OAEP 加密后再发送，无需调用方手动加密。
+        适用：aclog_delete、user_delete、user_secret_reset、user_create
+        （同时配合 dupPassword）、interface_update（接口启停）、
+        device_upgrade、device_upgrade_upload。
+    dupPassword:
+      type: string
+      description: |
+        新增用户（user_create）使用的二次确认密码（明文）。处理器会与
+        `password` 一起用同一公钥 RSA-OAEP 加密。
+    file_path:
+      type: string
+      description: |
+        本地待上传文件的绝对路径；仅 multipart 上传类动作使用：
+          - tls_cert_create / tls_cert_update    .crt/.pem 证书文件（字段名 `certFile`）
+          - basic_information_import             离线情报库更新包（字段名 `file`，Query 需 `name`）
+          - basic_license_upload                 授权 license 文件（字段名 `file`）
+          - system_upgrade                       系统升级包（字段名 `file`）
+          - device_upgrade_upload                设备升级包（字段名 `file`，body 同时要求 password）
+          - backup_import                        配置备份包（字段名 `file`）
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig_v2_5_older.handler.py
+  function: device
