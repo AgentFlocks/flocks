@@ -204,6 +204,17 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
 
+The WebUI now defaults to same-origin `/api` proxy mode even when the backend
+binds to a non-loopback IP. This keeps browser cookies and SSE on a single
+origin, which is the safest choice for LAN access and reverse proxies.
+
+Only enable direct browser-to-backend URLs when you explicitly need them:
+
+```bash
+FLOCKS_WEBUI_DIRECT_BACKEND_URLS=1 \
+flocks start --server-host 10.0.0.8 --webui-host 0.0.0.0
+```
+
 ### 4.4 Authentication & API Token
 
 Since the local-account update, every HTTP path is protected by default — only
@@ -260,6 +271,11 @@ Reverse-proxy deployments:
   proxy is in front.
 - For HTTPS termination, also forward `X-Forwarded-Proto: https` so that
   the secure-cookie flag is set correctly.
+- Prefer same-origin proxying for browser traffic: keep the WebUI on `/` and
+  route backend traffic through `/api` (and `/event` if needed). Do not set
+  `VITE_API_BASE_URL` in reverse-proxy deployments unless you intentionally
+  want the browser to bypass the proxy and talk to the backend origin directly.
+- For SSE endpoints, disable proxy buffering and keep HTTP/1.1 enabled. 
 
 Recovery / lost password:
 

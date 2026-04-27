@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
+WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
 
 
 class ServiceError(RuntimeError):
@@ -1403,8 +1404,10 @@ def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
     env["FLOCKS_API_PROXY_TARGET"] = backend_url
 
     # Avoid leaking a stale Vite API target from the parent shell into a new
-    # build/start cycle.  For localhost or wildcard backends we intentionally
-    # stay on same-origin proxy mode, so the VITE_* overrides must be absent.
+    # build/start cycle.  WebUI now defaults to same-origin proxy mode for all
+    # backend hosts so that reverse-proxy / remote access deployments keep a
+    # single browser origin and cookie scope.  Direct backend URLs remain
+    # available as an explicit opt-in via WEBUI_DIRECT_BACKEND_URLS_ENV.
     env.pop("VITE_API_BASE_URL", None)
     env.pop("VITE_WS_BASE_URL", None)
     if _should_inject_direct_backend_urls(config.backend_host):
@@ -1518,5 +1521,14 @@ def _http_to_ws_url(url: str) -> str:
     return url
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = os.getenv(name)
+    if not value:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _should_inject_direct_backend_urls(host: str) -> bool:
-    return host not in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}
+    if host in {"127.0.0.1", "localhost", "::1", "0.0.0.0", "::"}:
+        return False
+    return _env_flag_enabled(WEBUI_DIRECT_BACKEND_URLS_ENV)

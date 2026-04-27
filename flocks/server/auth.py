@@ -149,6 +149,11 @@ def password_reset_exempt(path: str) -> bool:
     return path in _PASSWORD_RESET_ALLOWED
 
 
+def _has_session_cookie(request: Request) -> bool:
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    return bool(session_id and session_id.strip())
+
+
 def _is_browser_like_request(request: Request) -> bool:
     """
     Identify browser-originated traffic (must keep strict login checks).
@@ -156,7 +161,9 @@ def _is_browser_like_request(request: Request) -> bool:
     Modern browsers always send `sec-fetch-*` fetch-metadata headers on
     same-origin and cross-origin fetches. We rely on those, plus `origin`
     (covers older Chromium/Safari on some same-origin cases) and `referer`.
-    This is strict: non-browser clients (curl/SDKs/TUI) don't send any of these.
+    Some browser flows seen behind reverse proxies (for example EventSource)
+    can lose a subset of these headers, so we also accept an existing session
+    cookie or a typical browser UA paired with HTML/SSE Accept headers.
     """
     headers = request.headers
     if headers.get("sec-fetch-site") or headers.get("sec-fetch-mode") or headers.get("sec-fetch-dest"):
@@ -164,6 +171,17 @@ def _is_browser_like_request(request: Request) -> bool:
     if headers.get("origin"):
         return True
     if headers.get("referer"):
+        return True
+    if _has_session_cookie(request):
+        return True
+
+    user_agent = (headers.get("user-agent") or "").lower()
+    accept = (headers.get("accept") or "").lower()
+    if "mozilla/" in user_agent and (
+        "text/html" in accept
+        or "application/xhtml+xml" in accept
+        or "text/event-stream" in accept
+    ):
         return True
     return False
 
@@ -252,6 +270,32 @@ async def apply_auth_for_request(request: Request):
     if auth_middleware_exempt(request.url.path):
         token = set_current_auth_user(None)
         return None, token, None
+
+    if _has_session_cookie(request):
+        bootstrapped = await AuthService.has_users()
+        if not bootstrapped:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="系统尚未初始化管理员账号，请先完成初始化",
+            )
+
+        session_id = request.cookies.get(SESSION_COOKIE_NAME)
+        if not session_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+
+        user = await AuthService.get_user_by_session_id(session_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
+
+        auth_user = user.to_auth_user()
+        request.state.auth_user = auth_user
+        token = set_current_auth_user(auth_user)
+        if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前账号必须先修改密码后才能继续使用",
+            )
+        return None, token, auth_user
 
     # Non-browser clients: local loopback can run without token; remote requires API token.
     if not _is_browser_like_request(request):
