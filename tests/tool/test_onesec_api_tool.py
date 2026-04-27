@@ -134,6 +134,7 @@ async def test_onesec_dns_search_queries_uses_signed_query_params_and_doc_payloa
         "auth_timestamp": "1700000000",
         "sign": _expected_sign("api-key-1", "secret-1", 1700000000),
     }
+    assert kwargs["ssl"] is False
     assert kwargs["json"] == {
         "condition": {
             "time_from": 1699990000,
@@ -147,6 +148,47 @@ async def test_onesec_dns_search_queries_uses_signed_query_params_and_doc_payloa
             "page_items_num": 50,
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_get_public_ip_list_honors_verify_ssl_true():
+    tool = _load_tool("onesec_dns.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "response_code": 0,
+                    "verbose_msg": "SUCCESS",
+                    "data": ["1.1.1.1"],
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:onesec_credentials}",
+                "verify_ssl": True,
+            },
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_get_public_ip_list",
+        )
+
+    assert result.success is True
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "GET"
+    assert url == "https://console.onesec.net/open/api/client/getPublicIPList"
+    assert kwargs["ssl"] is True
 
 
 @pytest.mark.asyncio

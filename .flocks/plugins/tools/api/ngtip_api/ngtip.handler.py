@@ -37,6 +37,22 @@ def _service_config() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
+    # "verify_ssl" is canonical; "ssl_verify" is accepted for backward compatibility.
+    value = raw.get("verify_ssl")
+    if value is None:
+        value = raw.get("ssl_verify")
+    if value is None:
+        custom_settings = raw.get("custom_settings", {})
+        if isinstance(custom_settings, dict):
+            value = custom_settings.get("verify_ssl", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _ensure_scheme(url: str) -> str:
     """Auto-prepend https:// if the URL has no scheme."""
     if url and not url.startswith(("http://", "https://")):
@@ -44,8 +60,8 @@ def _ensure_scheme(url: str) -> str:
     return url
 
 
-def _resolve_runtime_config() -> tuple[str, str, int, str]:
-    """Returns (platform_base_url, query_base_url, timeout, apikey)."""
+def _resolve_runtime_config() -> tuple[str, str, int, str, bool]:
+    """Returns (platform_base_url, query_base_url, timeout, apikey, verify_ssl)."""
     raw = _service_config()
 
     platform_base_url = _ensure_scheme(
@@ -88,7 +104,7 @@ def _resolve_runtime_config() -> tuple[str, str, int, str]:
             "NGTIP API key not found. Configure ngtip_api.apiKey in your service settings "
             "or set the NGTIP_APIKEY environment variable."
         )
-    return platform_base_url, query_base_url, timeout, apikey
+    return platform_base_url, query_base_url, timeout, apikey, _resolve_verify_ssl(raw)
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
@@ -121,13 +137,14 @@ async def _get_request(
     url: str,
     params: dict[str, Any],
     timeout: int,
+    verify_ssl: bool,
     action: str,
 ) -> ToolResult:
     try:
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=timeout)
         ) as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, ssl=verify_ssl) as resp:
                 if resp.status >= 400:
                     text = await resp.text()
                     return ToolResult(success=False, error=f"HTTP {resp.status}: {text[:500]}")
@@ -143,6 +160,7 @@ async def _post_request(
     url: str,
     body: dict[str, Any],
     timeout: int,
+    verify_ssl: bool,
     action: str,
 ) -> ToolResult:
     headers = {"Content-Type": "application/json"}
@@ -150,7 +168,7 @@ async def _post_request(
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=timeout)
         ) as session:
-            async with session.post(url, json=body, headers=headers) as resp:
+            async with session.post(url, json=body, headers=headers, ssl=verify_ssl) as resp:
                 if resp.status >= 400:
                     text = await resp.text()
                     return ToolResult(success=False, error=f"HTTP {resp.status}: {text[:500]}")
@@ -451,13 +469,13 @@ async def query(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
         return ToolResult(success=False, error=err)
 
     try:
-        _, query_base_url, timeout, apikey = _resolve_runtime_config()
+        _, query_base_url, timeout, apikey, verify_ssl = _resolve_runtime_config()
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
 
     url = f"{query_base_url}{spec.path}"
     query_params = {"apikey": apikey, **spec.param_builder(params)}
-    result = await _get_request(url, query_params, timeout, action)
+    result = await _get_request(url, query_params, timeout, verify_ssl, action)
     if result.success:
         result.metadata = {**(result.metadata or {}), "api": action}
     return result
@@ -477,7 +495,7 @@ async def platform(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
         return ToolResult(success=False, error=err)
 
     try:
-        platform_base_url, _, timeout, apikey = _resolve_runtime_config()
+        platform_base_url, _, timeout, apikey, verify_ssl = _resolve_runtime_config()
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
 
@@ -487,10 +505,10 @@ async def platform(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
     if spec.method.upper() == "GET":
         if not spec.skip_apikey:
             payload = {"apikey": apikey, **payload}
-        result = await _get_request(url, payload, timeout, action)
+        result = await _get_request(url, payload, timeout, verify_ssl, action)
     else:
         body = {"apikey": apikey, **payload} if not spec.skip_apikey else payload
-        result = await _post_request(url, body, timeout, action)
+        result = await _post_request(url, body, timeout, verify_ssl, action)
 
     if result.success:
         result.metadata = {**(result.metadata or {}), "api": action}

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import ssl
 import time
 import urllib.parse
 import http.client as httplib
@@ -44,7 +45,24 @@ def _resolve_base_url() -> str:
     return ""
 
 
-def _split_connection_target(base_url: str) -> tuple[type[httplib.HTTPConnection], str, int, str]:
+def _resolve_verify_ssl(raw_service: dict[str, Any]) -> bool:
+    value = raw_service.get("verify_ssl")
+    if value is None:
+        value = raw_service.get("ssl_verify")
+    if value is None:
+        custom_settings = raw_service.get("custom_settings", {})
+        if isinstance(custom_settings, dict):
+            value = custom_settings.get("verify_ssl", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _split_connection_target(
+    base_url: str,
+) -> tuple[type[httplib.HTTPConnection], str, int, str, bool]:
     parsed = urllib.parse.urlparse(base_url)
     scheme = (parsed.scheme or "http").lower()
     if scheme not in {"http", "https"}:
@@ -57,7 +75,7 @@ def _split_connection_target(base_url: str) -> tuple[type[httplib.HTTPConnection
     port = parsed.port or (443 if scheme == "https" else 80)
     base_path = parsed.path.rstrip("/")
     conn_cls = httplib.HTTPSConnection if scheme == "https" else httplib.HTTPConnection
-    return conn_cls, host, port, base_path
+    return conn_cls, host, port, base_path, scheme == "https"
 
 
 def _build_request_path(base_path: str, path: str) -> str:
@@ -66,7 +84,7 @@ def _build_request_path(base_path: str, path: str) -> str:
     return f"{base_path}{path}"
 
 
-def _load_runtime_config() -> tuple[type[httplib.HTTPConnection], str, int, str, str, str] | None:
+def _load_runtime_config() -> tuple[type[httplib.HTTPConnection], str, int, str, str, str, bool, bool] | None:
     raw_service = ConfigWriter.get_api_service_raw(SERVICE_ID) or {}
     sm = get_secret_manager()
     username = _resolve_ref(raw_service.get("username")) or sm.get("qingteng_username")
@@ -74,8 +92,30 @@ def _load_runtime_config() -> tuple[type[httplib.HTTPConnection], str, int, str,
     base_url = _resolve_base_url()
     if not base_url or not username or not password:
         return None
-    conn_cls, host, port, base_path = _split_connection_target(base_url)
-    return conn_cls, host, port, base_path, username, password
+    conn_cls, host, port, base_path, is_https = _split_connection_target(base_url)
+    return (
+        conn_cls,
+        host,
+        port,
+        base_path,
+        username,
+        password,
+        _resolve_verify_ssl(raw_service),
+        is_https,
+    )
+
+
+def _open_connection(
+    conn_cls: type[httplib.HTTPConnection],
+    host: str,
+    port: int,
+    *,
+    verify_ssl: bool,
+    is_https: bool,
+):
+    if is_https and not verify_ssl:
+        return conn_cls(host, port, context=ssl._create_unverified_context())
+    return conn_cls(host, port)
 
 
 def _parse_json_response(response: Any) -> dict[str, Any]:
@@ -128,8 +168,13 @@ def _login_request(
     base_path: str,
     username: str,
     password: str,
+    *,
+    verify_ssl: bool,
+    is_https: bool,
 ) -> tuple[bool, dict[str, Any] | str, dict[str, Any] | None]:
-    conn = conn_cls(host, port)
+    conn = _open_connection(
+        conn_cls, host, port, verify_ssl=verify_ssl, is_https=is_https
+    )
     try:
         body = json.dumps({"username": username, "password": password})
         conn.request(
@@ -208,8 +253,17 @@ def _request_signed_json(
             error="Missing configuration: qingteng base_url/qingteng_host, qingteng_username, qingteng_password",
         )
 
-    conn_cls, host, port, base_path, username, password = config
-    ok, auth_result, login_payload = _login_request(conn_cls, host, port, base_path, username, password)
+    conn_cls, host, port, base_path, username, password, verify_ssl, is_https = config
+    ok, auth_result, login_payload = _login_request(
+        conn_cls,
+        host,
+        port,
+        base_path,
+        username,
+        password,
+        verify_ssl=verify_ssl,
+        is_https=is_https,
+    )
     if not ok:
         return ToolResult(success=False, error=str(auth_result), output=login_payload)
 
@@ -240,7 +294,9 @@ def _request_signed_json(
         "Authorization": f"Bearer {auth['jwt']}",
     }
 
-    conn = conn_cls(host, port)
+    conn = _open_connection(
+        conn_cls, host, port, verify_ssl=verify_ssl, is_https=is_https
+    )
     try:
         conn.request(
             method=method,

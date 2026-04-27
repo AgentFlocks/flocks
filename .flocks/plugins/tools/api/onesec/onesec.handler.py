@@ -41,7 +41,23 @@ def _service_config() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _resolve_runtime_config() -> tuple[str, int, str, str]:
+def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
+    # "verify_ssl" is canonical; "ssl_verify" remains as a backward-compatible alias.
+    value = raw.get("verify_ssl")
+    if value is None:
+        value = raw.get("ssl_verify")
+    if value is None:
+        custom_settings = raw.get("custom_settings", {})
+        if isinstance(custom_settings, dict):
+            value = custom_settings.get("verify_ssl", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _resolve_runtime_config() -> tuple[str, int, str, str, bool]:
     raw = _service_config()
     base_url = (
         _resolve_ref(raw.get("base_url"))
@@ -60,7 +76,13 @@ def _resolve_runtime_config() -> tuple[str, int, str, str]:
     combined = _resolve_ref(api_key_ref)
     if combined and "|" in combined:
         api_key, secret = combined.split("|", 1)
-        return base_url, timeout, api_key.strip(), secret.strip()
+        return (
+            base_url,
+            timeout,
+            api_key.strip(),
+            secret.strip(),
+            _resolve_verify_ssl(raw),
+        )
 
     secret_manager = _get_secret_manager()
     combined_candidates = [
@@ -71,7 +93,13 @@ def _resolve_runtime_config() -> tuple[str, int, str, str]:
     for candidate in combined_candidates:
         if candidate and "|" in candidate:
             api_key, secret = candidate.split("|", 1)
-            return base_url, timeout, api_key.strip(), secret.strip()
+            return (
+                base_url,
+                timeout,
+                api_key.strip(),
+                secret.strip(),
+                _resolve_verify_ssl(raw),
+            )
 
     api_key = (
         combined
@@ -90,7 +118,7 @@ def _resolve_runtime_config() -> tuple[str, int, str, str]:
             "OneSEC API credentials not found. Configure onesec_credentials as "
             "'api_key|secret', or set apiKey/secret separately."
         )
-    return base_url, timeout, api_key, secret
+    return base_url, timeout, api_key, secret, _resolve_verify_ssl(raw)
 
 
 def _build_auth_params(api_key: str, secret: str) -> dict[str, str]:
@@ -973,7 +1001,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
 
 async def _call_onesec_api(method: str, path: str, payload: Optional[dict[str, Any]]) -> ToolResult:
     try:
-        base_url, timeout, api_key, secret = _resolve_runtime_config()
+        base_url, timeout, api_key, secret, verify_ssl = _resolve_runtime_config()
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc))
 
@@ -990,6 +1018,7 @@ async def _call_onesec_api(method: str, path: str, payload: Optional[dict[str, A
                     url,
                     params={**auth_params, **(payload or {})},
                     headers=request_headers,
+                    ssl=verify_ssl,
                 ) as resp:
                     if resp.status >= 400:
                         text = await resp.text()
@@ -1001,6 +1030,7 @@ async def _call_onesec_api(method: str, path: str, payload: Optional[dict[str, A
                     params=auth_params,
                     json=payload or {},
                     headers=request_headers,
+                    ssl=verify_ssl,
                 ) as resp:
                     if resp.status >= 400:
                         text = await resp.text()
