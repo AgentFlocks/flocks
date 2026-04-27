@@ -9,6 +9,9 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import sys
+import types
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,6 +19,7 @@ import pytest
 from flocks.channel.base import (
     ChatType,
     DeliveryResult,
+    InboundMessage,
     OutboundContext,
 )
 from flocks.channel.builtin.wecom.channel import (
@@ -23,6 +27,10 @@ from flocks.channel.builtin.wecom.channel import (
     _extract_content,
     _extract_mixed,
     _parse_frame,
+)
+from flocks.channel.builtin.wecom.inbound_media import (
+    _filename_from_content_disposition,
+    download_inbound_media,
 )
 
 
@@ -169,6 +177,171 @@ class TestWeComSendText:
         assert result.success is False
         assert result.retryable is True
         assert "timeout" in result.error
+
+
+class TestWeComSendMedia:
+    async def test_send_media_uploads_and_sends_file(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(
+            return_value={"media_id": "media_1", "type": "file"},
+        )
+        ch._ws_client.send_media_message = AsyncMock(
+            return_value={"body": {"msgid": "wx_msg_1"}},
+        )
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is True
+        assert result.message_id == "wx_msg_1"
+        ch._ws_client.upload_media.assert_awaited_once()
+        upload_args = ch._ws_client.upload_media.await_args
+        assert upload_args.args[0] == b"pdf-data"
+        assert upload_args.kwargs["type"] == "file"
+        assert upload_args.kwargs["filename"] == "report.pdf"
+        ch._ws_client.send_media_message.assert_awaited_once_with(
+            "zhangsan",
+            "file",
+            "media_1",
+            video_title=None,
+        )
+
+    async def test_send_media_replies_with_cached_frame(self, tmp_path: Path):
+        path = tmp_path / "image.png"
+        path.write_bytes(b"png-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(
+            return_value={"media_id": "media_img", "type": "image"},
+        )
+        ch._ws_client.reply_media = AsyncMock(
+            return_value={"body": {"msgid": "wx_reply_1"}},
+        )
+        frame = {"body": {"msgid": "incoming_1"}, "headers": {"req_id": "req_1"}}
+        ch._cache_frame("incoming_1", frame)
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                media_url=path.as_uri(),
+                reply_to_id="incoming_1",
+            )
+        )
+
+        assert result.success is True
+        assert result.message_id == "wx_reply_1"
+        ch._ws_client.reply_media.assert_awaited_once_with(
+            frame,
+            "image",
+            "media_img",
+            video_title=None,
+        )
+        assert ch._frame_cache.get("incoming_1") is None
+
+    async def test_send_media_not_connected(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is False
+        assert "not connected" in result.error.lower()
+
+    async def test_send_media_upload_missing_media_id(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(return_value={"type": "file"})
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is False
+        assert "media upload failed" in result.error
+        ch._ws_client.send_media_message.assert_not_awaited()
+
+    async def test_send_media_upload_exception(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(side_effect=RuntimeError("timeout"))
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is False
+        assert result.retryable is True
+        assert "timeout" in result.error
+
+    async def test_send_media_with_text_sends_text_after_media(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(
+            return_value={"media_id": "media_1", "type": "file"},
+        )
+        ch._ws_client.send_media_message = AsyncMock(
+            return_value={"body": {"msgid": "wx_media_1"}},
+        )
+        ch._ws_client.send_message = AsyncMock(
+            return_value={"body": {"msgid": "wx_text_1"}},
+        )
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                text="这是附件说明",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is True
+        assert result.message_id == "wx_media_1"
+        ch._ws_client.send_media_message.assert_awaited_once()
+        ch._ws_client.send_message.assert_awaited_once_with(
+            "zhangsan",
+            {"msgtype": "markdown", "markdown": {"content": "这是附件说明"}},
+        )
 
 
 # ------------------------------------------------------------------
@@ -375,6 +548,21 @@ class TestParseFrame:
                 "chattype": "single",
                 "from": {"userid": "u1"},
                 "msgtype": "file",
+                "file": {"url": "https://example.com/file.pdf", "filename": "report.pdf"},
+            }
+        }
+        msg = _parse_frame(frame, {})
+        assert msg is not None
+        assert msg.text == "[文件消息: report.pdf]"
+        assert msg.media_url == "https://example.com/file.pdf"
+
+    def test_file_message_no_filename(self):
+        frame = {
+            "body": {
+                "msgid": "msg005b",
+                "chattype": "single",
+                "from": {"userid": "u1"},
+                "msgtype": "file",
                 "file": {"url": "https://example.com/file.pdf"},
             }
         }
@@ -402,6 +590,34 @@ class TestParseFrame:
         assert msg is not None
         assert "看这个" in msg.text
         assert "[图片]" in msg.text
+
+    def test_mixed_file_message(self):
+        frame = {
+            "body": {
+                "msgid": "msg006b",
+                "chattype": "single",
+                "from": {"userid": "u1"},
+                "msgtype": "mixed",
+                "mixed": {
+                    "msg_item": [
+                        {"msgtype": "text", "text": {"content": "看附件"}},
+                        {
+                            "msgtype": "file",
+                            "file": {
+                                "url": "https://example.com/file.bin",
+                                "filename": "report.bin",
+                                "aeskey": "k1",
+                            },
+                        },
+                    ]
+                },
+            }
+        }
+        msg = _parse_frame(frame, {})
+        assert msg is not None
+        assert "看附件" in msg.text
+        assert "[文件: report.bin]" in msg.text
+        assert msg.media_url == "https://example.com/file.bin"
 
     def test_stream_type_ignored(self):
         frame = {
@@ -453,16 +669,372 @@ class TestExtractContent:
 
 class TestExtractMixed:
     def test_mixed_text_and_image(self):
-        result = _extract_mixed({
+        result_text, result_media = _extract_mixed({
             "msg_item": [
                 {"msgtype": "text", "text": {"content": "A"}},
                 {"msgtype": "image", "image": {"url": "https://x.com/b.png"}},
                 {"msgtype": "text", "text": {"content": "B"}},
             ]
         })
-        assert "A" in result
-        assert "[图片]" in result
-        assert "B" in result
+        assert "A" in result_text
+        assert "[图片]" in result_text
+        assert "B" in result_text
+        assert result_media == "https://x.com/b.png"
+
+    def test_mixed_no_image(self):
+        result_text, result_media = _extract_mixed({
+            "msg_item": [
+                {"msgtype": "text", "text": {"content": "hello"}},
+            ]
+        })
+        assert result_text == "hello"
+        assert result_media is None
+
+    def test_mixed_text_and_file(self):
+        result_text, result_media = _extract_mixed({
+            "msg_item": [
+                {"msgtype": "text", "text": {"content": "A"}},
+                {
+                    "msgtype": "file",
+                    "file": {
+                        "url": "https://x.com/report.pdf",
+                        "filename": "report.pdf",
+                    },
+                },
+            ]
+        })
+        assert "A" in result_text
+        assert "[文件: report.pdf]" in result_text
+        assert result_media == "https://x.com/report.pdf"
+
+
+class TestContentDispositionFilename:
+    def test_filename_from_content_disposition_plain(self):
+        filename = _filename_from_content_disposition(
+            'attachment; filename="report.pdf"',
+        )
+        assert filename == "report.pdf"
+
+    def test_filename_from_content_disposition_utf8(self):
+        filename = _filename_from_content_disposition(
+            "attachment; filename*=UTF-8''%E6%8A%A5%E5%91%8A.pdf",
+        )
+        assert filename == "报告.pdf"
+
+
+# ------------------------------------------------------------------
+# 入站媒体下载
+# ------------------------------------------------------------------
+
+class TestWeComInboundMedia:
+    @pytest.mark.asyncio
+    async def test_download_inbound_media_streams_decrypts_and_closes(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        class FakeResponse:
+            headers = {
+                "content-disposition": 'attachment; filename="from-header.bin"',
+            }
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"hello"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def __init__(self):
+                self.closed = False
+
+            def stream(self, method, url):
+                assert method == "GET"
+                assert url == "https://example.com/file.bin"
+                return FakeStream()
+
+            async def aclose(self):
+                self.closed = True
+
+        class FakeWeComApiClient:
+            last_instance = None
+
+            def __init__(self, *_args, **_kwargs):
+                self._client = FakeClient()
+                FakeWeComApiClient.last_instance = self
+
+            async def download_file_raw(self, _url):
+                raise AssertionError("stream path should be used")
+
+        fake_sdk = types.SimpleNamespace(
+            WeComApiClient=FakeWeComApiClient,
+            decrypt_file=lambda data, key: data + key.encode(),
+        )
+        monkeypatch.setitem(sys.modules, "wecom_aibot_sdk", fake_sdk)
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media._media_storage_dir",
+            lambda _account_id: tmp_path,
+        )
+
+        media = await download_inbound_media(
+            InboundMessage(
+                channel_id="wecom",
+                account_id="main",
+                message_id="msg_1",
+                sender_id="u1",
+                media_url="https://example.com/file.bin",
+                raw={
+                    "msgtype": "file",
+                    "file": {
+                        "filename": "../report.bin",
+                        "aeskey": "k1",
+                    },
+                },
+            ),
+            {},
+            max_bytes=20,
+        )
+
+        assert media is not None
+        assert media.filename == ".._report.bin"
+        assert media.mime == "application/octet-stream"
+        assert Path(media.url.removeprefix("file://")).read_bytes() == b"hellok1"
+        assert FakeWeComApiClient.last_instance._client.closed is True
+
+    @pytest.mark.asyncio
+    async def test_download_inbound_media_rejects_large_content_length(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        class FakeResponse:
+            headers = {"content-length": "30"}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"too-large"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def __init__(self):
+                self.closed = False
+
+            def stream(self, *_args, **_kwargs):
+                return FakeStream()
+
+            async def aclose(self):
+                self.closed = True
+
+        class FakeWeComApiClient:
+            last_instance = None
+
+            def __init__(self, *_args, **_kwargs):
+                self._client = FakeClient()
+                FakeWeComApiClient.last_instance = self
+
+        fake_sdk = types.SimpleNamespace(
+            WeComApiClient=FakeWeComApiClient,
+            decrypt_file=lambda data, _key: data,
+        )
+        warnings = []
+        monkeypatch.setitem(sys.modules, "wecom_aibot_sdk", fake_sdk)
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media._media_storage_dir",
+            lambda _account_id: tmp_path,
+        )
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media.log.warning",
+            lambda event, data=None: warnings.append((event, data or {})),
+        )
+
+        media = await download_inbound_media(
+            InboundMessage(
+                channel_id="wecom",
+                account_id="main",
+                message_id="msg_2",
+                sender_id="u1",
+                media_url="https://example.com/big.bin",
+                raw={"msgtype": "file", "file": {"filename": "big.bin"}},
+            ),
+            {},
+            max_bytes=10,
+        )
+
+        assert media is None
+        assert list(tmp_path.iterdir()) == []
+        assert FakeWeComApiClient.last_instance._client.closed is True
+        assert warnings[0][0] == "wecom.media.file_too_large"
+
+    @pytest.mark.asyncio
+    async def test_download_inbound_media_decrypt_failure_returns_none(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        class FakeResponse:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"encrypted"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def __init__(self):
+                self.closed = False
+
+            def stream(self, *_args, **_kwargs):
+                return FakeStream()
+
+            async def aclose(self):
+                self.closed = True
+
+        class FakeWeComApiClient:
+            last_instance = None
+
+            def __init__(self, *_args, **_kwargs):
+                self._client = FakeClient()
+                FakeWeComApiClient.last_instance = self
+
+        def fail_decrypt(_data, _key):
+            raise RuntimeError("bad aes key")
+
+        fake_sdk = types.SimpleNamespace(
+            WeComApiClient=FakeWeComApiClient,
+            decrypt_file=fail_decrypt,
+        )
+        warnings = []
+        monkeypatch.setitem(sys.modules, "wecom_aibot_sdk", fake_sdk)
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media._media_storage_dir",
+            lambda _account_id: tmp_path,
+        )
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media.log.warning",
+            lambda event, data=None: warnings.append((event, data or {})),
+        )
+
+        media = await download_inbound_media(
+            InboundMessage(
+                channel_id="wecom",
+                account_id="main",
+                message_id="msg_decrypt",
+                sender_id="u1",
+                media_url="https://example.com/file.bin",
+                raw={"msgtype": "file", "file": {"filename": "file.bin", "aeskey": "bad"}},
+            ),
+            {},
+            max_bytes=20,
+        )
+
+        assert media is None
+        assert list(tmp_path.iterdir()) == []
+        assert FakeWeComApiClient.last_instance._client.closed is True
+        assert warnings[0][0] == "wecom.media.decrypt_failed"
+
+    @pytest.mark.asyncio
+    async def test_download_inbound_media_mixed_file_uses_nested_aeskey(
+        self,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        class FakeResponse:
+            headers = {}
+
+            def raise_for_status(self):
+                return None
+
+            async def aiter_bytes(self, _size):
+                yield b"encrypted"
+
+        class FakeStream:
+            async def __aenter__(self):
+                return FakeResponse()
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class FakeClient:
+            def stream(self, *_args, **_kwargs):
+                return FakeStream()
+
+            async def aclose(self):
+                return None
+
+        class FakeWeComApiClient:
+            def __init__(self, *_args, **_kwargs):
+                self._client = FakeClient()
+
+        captured = {}
+
+        def decrypt(data, key):
+            captured["key"] = key
+            return data + b"-ok"
+
+        fake_sdk = types.SimpleNamespace(
+            WeComApiClient=FakeWeComApiClient,
+            decrypt_file=decrypt,
+        )
+        monkeypatch.setitem(sys.modules, "wecom_aibot_sdk", fake_sdk)
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media._media_storage_dir",
+            lambda _account_id: tmp_path,
+        )
+
+        media = await download_inbound_media(
+            InboundMessage(
+                channel_id="wecom",
+                account_id="main",
+                message_id="msg_mixed",
+                sender_id="u1",
+                media_url="https://example.com/file.bin",
+                raw={
+                    "msgtype": "mixed",
+                    "mixed": {
+                        "msg_item": [
+                            {"msgtype": "text", "text": {"content": "见附件"}},
+                            {
+                                "msgtype": "file",
+                                "file": {
+                                    "filename": "nested.bin",
+                                    "aeskey": "nested-key",
+                                },
+                            },
+                        ]
+                    },
+                },
+            ),
+            {},
+            max_bytes=20,
+        )
+
+        assert media is not None
+        assert captured["key"] == "nested-key"
+        assert media.filename == "nested.bin"
+        assert Path(media.url.removeprefix("file://")).read_bytes() == b"encrypted-ok"
 
 
 # ------------------------------------------------------------------
