@@ -662,11 +662,14 @@ export function APIServiceDetailPanel({
     const schema = buildFallbackCredentialSchema(nextMetadata);
     const nextValues: Record<string, string> = {};
 
+    // Always show whatever the backend reports in `fields`. Do NOT compare with
+    // schema.default_value to decide visibility: the metadata endpoint reuses
+    // the persisted base_url as default_value for some providers (e.g. onesig),
+    // and that previously caused the saved URL to be cleared from the form.
     schema.forEach((field) => {
       const dynamicValue = nextCredentials?.fields?.[field.key];
-      const value = dynamicValue ?? getLegacyCredentialValue(nextCredentials, field.key) ?? '';
-      const effectiveDefault = field.default_value || (field.key === 'base_url' ? nextMetadata?.base_url : undefined);
-      nextValues[field.key] = (effectiveDefault && value === effectiveDefault) ? '' : (value || '');
+      const legacyValue = getLegacyCredentialValue(nextCredentials, field.key);
+      nextValues[field.key] = dynamicValue ?? legacyValue ?? '';
     });
 
     setFormValues(nextValues);
