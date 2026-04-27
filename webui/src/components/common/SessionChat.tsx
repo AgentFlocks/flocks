@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { useToast } from './Toast';
 import { QuestionTool } from './QuestionTool';
-import DelegateTaskCard, { isDelegateTool } from './DelegateTaskCard';
+import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
@@ -2004,14 +2004,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
-  // Primary check: tool name is a known delegate tool.
-  // Fallback: state.input contains delegate-specific fields (handles cases where
-  // part.tool may be missing or unrecognized after reload).
-  const stateInput = part.state?.input as Record<string, any> | undefined;
-  if (
-    isDelegateTool(toolName) ||
-    (stateInput && ('subagent_type' in stateInput || 'category' in stateInput))
-  ) {
+  // Keep the delegate fallback narrow: many MCP tools also carry a generic
+  // `category` field (for example wecom_mcp category="doc").
+  if (shouldRenderDelegateTaskCard(part)) {
     return <DelegateTaskCard part={part} />;
   }
 
