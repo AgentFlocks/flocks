@@ -2,7 +2,7 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import SessionPage from './index';
 
 const {
@@ -59,7 +59,9 @@ vi.mock('@/components/common/LoadingSpinner', () => ({
 
 vi.mock('@/components/common/SessionChat', () => ({
   __esModule: true,
-  default: () => <div data-testid="session-chat">session-chat</div>,
+  default: ({ sessionId }: { sessionId?: string | null }) => (
+    <div data-testid="session-chat">{sessionId ?? 'no-session'}</div>
+  ),
 }));
 
 vi.mock('@/utils/agentDisplay', () => ({
@@ -89,6 +91,13 @@ const session = {
     updated: 1710000001000,
   },
   category: 'user',
+};
+
+const secondSession = {
+  ...session,
+  id: 'session-2',
+  slug: 'session-2',
+  title: 'Second Session',
 };
 
 function renderSessionPage() {
@@ -253,5 +262,46 @@ describe('SessionPage session actions menu', () => {
     });
     expect(removeSession).toHaveBeenCalledWith('session-1');
     expect(global.confirm).toHaveBeenCalledWith('confirmDelete');
+  });
+
+  it('syncs selected session when query param changes after mount', async () => {
+    const user = userEvent.setup();
+
+    useSessions.mockReturnValue({
+      sessions: [session, secondSession],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    function NavigateButton() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate('/sessions?session=session-2')}>
+          go-session-2
+        </button>
+      );
+    }
+
+    render(
+      <MemoryRouter initialEntries={['/sessions']}>
+        <NavigateButton />
+        <SessionPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    });
+
+    await user.click(screen.getByRole('button', { name: 'go-session-2' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
+    });
   });
 });

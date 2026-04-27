@@ -31,8 +31,6 @@ function sanitizeSessionExportName(value: string) {
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const [searchParams, setSearchParams] = useSearchParams();
-  // Capture params on mount only — avoids re-running when setSearchParams clears the URL.
-  const initialSearchParamsRef = useRef(searchParams);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
@@ -79,21 +77,24 @@ export default function SessionPage() {
     }
   }, [updateSessionTitle, refetchSessions]);
 
-  // Handle ?session=<id>&message=<text> query params (e.g. from onboarding).
-  // We read from the ref captured at mount time so the effect only runs once
-  // and doesn't re-trigger when setSearchParams clears the URL.
+  // Keep the selected session in sync with URL query params (e.g. onboarding
+  // or other in-app navigation to `/sessions?session=...`). Clear the params
+  // after consuming them so refreshes don't re-send the initial message.
   useEffect(() => {
-    const params = initialSearchParamsRef.current;
-    const sessionParam = params.get('session');
-    const messageParam = params.get('message');
-    if (sessionParam) {
+    const sessionParam = searchParams.get('session');
+    const messageParam = searchParams.get('message');
+    if (!sessionParam) return;
+
+    if (sessionParam !== selectedSessionId) {
       setSelectedSessionId(sessionParam);
+    }
+    if (sessionParam) {
       if (messageParam) {
         setPendingInitialMessage(messageParam);
       }
       setSearchParams({}, { replace: true });
     }
-  }, []);
+  }, [searchParams, selectedSessionId, setSearchParams]);
 
   // Auto select first session
   useEffect(() => {
@@ -606,6 +607,7 @@ export default function SessionPage() {
 
         {/* Chat — powered by unified SessionChat */}
         <SessionChat
+          key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
           live
           display={{ compact: false, showActions: true, showTimestamp: false }}

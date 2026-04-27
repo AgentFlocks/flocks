@@ -21,6 +21,21 @@ export function isDelegateTool(toolName: string): boolean {
   return DELEGATE_TOOLS.has(toolName);
 }
 
+export function shouldRenderDelegateTaskCard(part: MessagePart): boolean {
+  if (part.tool && isDelegateTool(part.tool)) {
+    return true;
+  }
+
+  const state: Partial<ToolState> = part.state || {};
+  const input = state.input || {};
+  if (typeof input.subagent_type === 'string' && input.subagent_type.trim()) {
+    return true;
+  }
+
+  const output = typeof state.output === 'string' ? state.output : undefined;
+  return !!extractSessionId(state.metadata, output);
+}
+
 interface ActivityStep {
   tool: string;
   title: string;
@@ -40,6 +55,28 @@ interface DelegateInfo {
   stepCount: number;
   currentText: string;
   elapsed: number;
+}
+
+function extractSessionId(
+  meta: Record<string, any> | undefined,
+  output: string | undefined,
+): string | undefined {
+  const innerMeta = meta?.metadata as Record<string, any> | undefined;
+  const sessionId =
+    meta?.sessionId ??
+    meta?.sessionID ??
+    meta?.session_id ??
+    innerMeta?.sessionId ??
+    innerMeta?.sessionID ??
+    innerMeta?.session_id;
+
+  if (typeof sessionId === 'string' && sessionId.trim()) {
+    return sessionId.trim();
+  }
+
+  if (!output) return undefined;
+  const match = output.match(/<task_metadata>[\s\S]*?session_id:\s*([^\n<]+)[\s\S]*?<\/task_metadata>/i);
+  return match?.[1]?.trim() || undefined;
 }
 
 function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
@@ -67,8 +104,7 @@ function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): D
   const meta = state.metadata as Record<string, any> | undefined;
   const innerMeta = meta?.metadata as Record<string, any> | undefined;
 
-  const childSessionId: string | undefined =
-    meta?.sessionId ?? innerMeta?.sessionId ?? undefined;
+  const childSessionId = extractSessionId(meta, typeof state.output === 'string' ? state.output : undefined);
   const steps = (meta?.steps ?? innerMeta?.steps ?? []) as ActivityStep[];
   const stepCount = (meta?.stepCount ?? innerMeta?.stepCount ?? 0) as number;
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
