@@ -426,10 +426,15 @@ class TestTestCredentialsToolExecution:
             )
 
     @pytest.mark.asyncio
-    async def test_failed_attempts_are_aggregated_in_message(self):
-        """When every tool/param combination fails, the response should expose
-        the per-attempt error log so the WebUI can show why each probe failed
-        instead of only the message of the last attempt.
+    async def test_single_attempt_only_to_avoid_account_lockout(self):
+        """Connectivity test must probe the service **at most once**.
+
+        Some API services (OneSIG / OneSec / Qingteng / ...) lock the
+        account after a small number of consecutive failed logins. The
+        old behaviour iterated up to ``service_tools[:5] × _build_param_sets``
+        which could fire ~30 login attempts on a single bad-credential test
+        and trip the server-side lockout. The current contract is exactly
+        one tool, exactly one parameter set per click.
         """
         from flocks.server.routes.provider import test_provider_credentials
 
@@ -468,25 +473,113 @@ class TestTestCredentialsToolExecution:
                 "flocks.tool.generated.qingteng": ["qingteng_assets"],
             }
 
-            errors_by_action = {
-                "list": "Missing required parameters for assets.list: resource, os_type",
-                "refresh": "Missing required parameters for assets.refresh: resource, os_type",
-            }
-
-            async def _execute(tool_name, **params):
-                action = params.get("action")
-                return ToolResult(success=False, error=errors_by_action[action])
-
-            mock_tr.execute = AsyncMock(side_effect=_execute)
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=False,
+                error="Missing required parameters for assets.list: resource, os_type",
+            ))
 
             result = await test_provider_credentials("qingteng")
 
             assert result["success"] is False, result
+            assert mock_tr.execute.await_count == 1, (
+                "Expected exactly one execute() call to avoid account lockout, "
+                f"got {mock_tr.execute.await_count}"
+            )
             assert "attempts" in result, result
-            attempted_actions = {a["params"].get("action") for a in result["attempts"]}
-            assert {"list", "refresh"}.issubset(attempted_actions), result["attempts"]
-            assert "assets.list" in result["message"]
-            assert "assets.refresh" in result["message"]
+            assert len(result["attempts"]) == 1, result["attempts"]
+            assert result["tool_tested"] == "qingteng_assets"
+            assert "为避免连续失败导致账号锁定" in result["message"], result["message"]
+
+    @pytest.mark.asyncio
+    async def test_action_dispatch_login_tool_uses_test_action(self):
+        """For services whose login tool is action-dispatch (e.g.
+        ``onesig_login``, ``onesec_login``, ``onesig_v2_5_older_login``)
+        — i.e. the name ends in ``_login`` and ``action`` is a required
+        enum parameter — the connectivity probe must be invoked with
+        ``action="test"``.
+
+        Why: handlers like ``flocks/.flocks/plugins/tools/api/onesig/onesig.handler.py``
+        special-case ``action="test"`` in ``_dispatch_group`` and route to
+        ``_CONNECTIVITY_TEST_ACTIONS[group]`` — a single read-only call
+        (e.g. ``get_account``). Picking any other enum value (``login``,
+        ``logout``, ``change_password``, ``get_pubkey``, ...) would either
+        force a fresh login round-trip or invoke a sensitive write path,
+        both of which are unsafe for a connectivity test.
+        """
+        from flocks.server.routes.provider import test_provider_credentials
+
+        login_tool = ToolInfo(
+            name="onesig_login",
+            description="OneSIG action-dispatch login tool",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Login subaction",
+                    required=True,
+                    enum=[
+                        "login",
+                        "logout",
+                        "change_password",
+                        "get_pubkey",
+                        "get_account",
+                        "get_captcha",
+                    ],
+                )
+            ],
+            requires_confirmation=False,
+        )
+        assets_tool = ToolInfo(
+            name="onesig_assets",
+            description="OneSIG assets dispatch",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Asset action",
+                    required=True,
+                    enum=["asset_list", "asset_create", "asset_delete"],
+                )
+            ],
+            requires_confirmation=True,
+        )
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "onesig_api")),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            # Put the assets tool first to prove the sort ranking promotes
+            # the `_login` action-dispatch tool above other groups.
+            mock_tr.list_tools.return_value = [assets_tool, login_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.onesig": ["onesig_assets", "onesig_login"],
+            }
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=True,
+                output={"username": "admin"},
+            ))
+
+            result = await test_provider_credentials("onesig_api")
+
+            assert result["success"] is True, result
+            assert result["tool_tested"] == "onesig_login"
+            assert mock_tr.execute.await_count == 1
+            mock_tr.execute.assert_awaited_once_with(
+                tool_name="onesig_login",
+                action="test",
+            )
 
     @pytest.mark.asyncio
     async def test_service_metadata_secret_is_used_for_hyphenated_service(self):

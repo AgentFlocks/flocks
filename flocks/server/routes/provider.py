@@ -2326,13 +2326,41 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                     name_lower.endswith(f"_{kw}") for kw in login_probe_keywords
                 )
 
+            def _is_action_dispatch_login_probe(t: ToolInfo) -> bool:
+                """Action-dispatch login tool (e.g. ``onesig_login``,
+                ``onesec_login``, ``onesig_v2_5_older_login``).
+
+                These tools require an ``action`` enum parameter, so they don't
+                qualify as parameter-free probes; but their handler ships a
+                special ``action="test"`` branch that runs a single read-only
+                call (``get_account`` / ``common_threat_type_list`` / ...) —
+                which is the *cheapest* way to verify credentials without
+                triggering any business write or repeated logins. We pick
+                them as the connectivity probe of choice for such services.
+                """
+                if t.requires_confirmation:
+                    return False
+                name_lower = t.name.lower()
+                if not (name_lower == "login" or name_lower.endswith("_login")):
+                    return False
+                for param in t.parameters:
+                    if param.name == "action" and param.enum:
+                        return True
+                return False
+
             def _tool_sort_key(t: ToolInfo) -> tuple[int, int, str]:
                 required_count = sum(1 for p in t.parameters if p.required)
                 name_lower = t.name.lower()
                 # Highest priority: dedicated login/health probes. These are the
                 # safest connectivity test because they have no required params
                 # and only exercise the auth/sign-in flow.
-                if _is_login_probe(t):
+                #
+                # We treat action-dispatch login tools (``<service>_login``
+                # with required ``action`` enum) as equally safe: the handler
+                # special-cases ``action="test"`` to a single read-only call,
+                # so we'll force that value below and avoid enumerating other
+                # actions (which would each trigger a fresh login attempt).
+                if _is_login_probe(t) or _is_action_dispatch_login_probe(t):
                     priority = -1
                 # Prefer query/scan style tools first, and push upload/file tools last.
                 elif "ip" in name_lower:
@@ -2464,102 +2492,121 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                     param_sets = next_sets or param_sets
                 return param_sets or [{}]
 
-            def _short_repr(value: object, limit: int = 80) -> str:
-                """Compact repr for params, capped to *limit* chars to keep
-                the failure summary message readable (and the cached status
-                payload small)."""
-                text = repr(value)
-                if len(text) <= limit:
-                    return text
-                return text[: limit - 3] + "..."
-
+            # ----------------------------------------------------------------
+            # Connectivity test policy: probe **at most one tool, with a single
+            # parameter set**.
+            #
+            # Rationale: services that authenticate via session cookies
+            # (OneSIG / OneSec / Qingteng / ...) lock the account after a
+            # small number of consecutive failed logins. Iterating through
+            # multiple tools and enum-driven action variants on a wrong-cred
+            # test would multiply login attempts (often N tools × M actions
+            # = double-digit login attempts in a single click), tripping the
+            # server-side lockout. A single probe is enough to surface the
+            # auth failure to the user without burning their account.
+            #
+            # Tradeoff: if the chosen probe happens to fail for non-auth
+            # reasons (e.g. the synthesized param value is rejected by a
+            # specialized endpoint), the user sees a false negative and
+            # has to re-test after fixing the config — much better than
+            # discovering their service account was locked. The
+            # ``_tool_sort_key`` ranking above is what makes this safe:
+            # login probes (parameter-free or action-dispatch) get top
+            # priority, so for credential-style services we land on the
+            # cheapest possible call.
+            # ----------------------------------------------------------------
             attempts: list[dict[str, object]] = []
-            last_response: Optional[dict[str, object]] = None
-            for test_tool in service_tools[:5]:
-                for test_params in _build_param_sets(test_tool):
-                    try:
-                        log.info("testing.api.connectivity", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                        })
+            test_tool = service_tools[0]
 
-                        result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
-                        latency = int((time.time() - start) * 1000)
+            if _is_action_dispatch_login_probe(test_tool):
+                # Handlers like onesig.handler.py / onesec.handler.py ship a
+                # ``_dispatch_group(group, action="test", ...)`` branch that
+                # routes to ``_CONNECTIVITY_TEST_ACTIONS[group]`` — a single
+                # read-only API (e.g. ``get_account``). Bypass the enum
+                # exploration so we don't accidentally invoke ``login``,
+                # ``logout``, ``change_password``, ``get_pubkey``, etc.,
+                # each of which would trigger its own login round-trip.
+                test_params: dict[str, object] = {"action": "test"}
+            else:
+                # Fallback path for services without action-dispatch login
+                # tools. Only the *first* synthesized param set is tried
+                # to keep total login attempts at one.
+                param_sets = _build_param_sets(test_tool)
+                test_params = param_sets[0] if param_sets else {}
 
-                        if result.success:
-                            response = {
-                                "success": True,
-                                "message": f"✅ API 连通性测试成功！使用工具 '{test_tool.name}' 进行测试。",
-                                "latency_ms": latency,
-                                "tool_tested": test_tool.name,
-                                "attempts": attempts,
-                            }
-                            await _save_api_service_status(provider_id, response)
-                            return response
+            try:
+                log.info("testing.api.connectivity", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "single_attempt": True,
+                })
 
-                        error_detail = result.error or "Unknown error"
-                        log.warning("testing.api.connectivity.failed", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": error_detail,
-                        })
-                        attempts.append({
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": error_detail,
-                        })
-                        last_response = {
-                            "success": False,
-                            "message": f"❌ API 调用失败: {error_detail}",
-                            "error": error_detail,
-                            "latency_ms": latency,
-                            "tool_tested": test_tool.name,
-                        }
-                    except Exception as tool_error:
-                        latency = int((time.time() - start) * 1000)
-                        log.warning("testing.api.connectivity.failed", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": str(tool_error),
-                            "exception": True,
-                        })
-                        attempts.append({
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": str(tool_error),
-                        })
-                        last_response = {
-                            "success": False,
-                            "message": f"❌ API 连通性测试失败: {str(tool_error)}",
-                            "error": str(tool_error),
-                            "latency_ms": latency,
-                            "tool_tested": test_tool.name,
-                        }
+                result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
+                latency = int((time.time() - start) * 1000)
 
-            response = last_response or {
-                "success": False,
-                "message": "❌ API 连通性测试失败: 未生成可执行的测试参数",
-                "error": "No executable connectivity test candidate",
-                "latency_ms": int((time.time() - start) * 1000),
-            }
-            # Attach all attempts so the WebUI/log can show why every probe
-            # failed, instead of only the message of the very last attempt.
-            response["attempts"] = attempts
-            if attempts:
-                # Keep message single-line so any UI (toast/popover) renders
-                # consistently regardless of whitespace handling. Per-attempt
-                # params are truncated to avoid blowing up the cached message.
-                detail = "; ".join(
-                    f"{a['tool']}({_short_repr(a.get('params') or {})})→{a['error']}"
-                    for a in attempts
-                )
-                response["message"] = (
-                    f"❌ API 连通性测试失败（共尝试 {len(attempts)} 次）。"
-                    f"最后一次错误: {response.get('error', 'unknown')}｜尝试明细: {detail}"
-                )
+                if result.success:
+                    response = {
+                        "success": True,
+                        "message": f"✅ API 连通性测试成功！使用工具 '{test_tool.name}' 进行测试。",
+                        "latency_ms": latency,
+                        "tool_tested": test_tool.name,
+                        "attempts": [],
+                    }
+                    await _save_api_service_status(provider_id, response)
+                    return response
+
+                error_detail = result.error or "Unknown error"
+                log.warning("testing.api.connectivity.failed", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": error_detail,
+                })
+                attempts.append({
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": error_detail,
+                })
+                response = {
+                    "success": False,
+                    "message": (
+                        f"❌ API 连通性测试失败: {error_detail}（已使用工具 "
+                        f"'{test_tool.name}' 探测一次；为避免连续失败导致账号锁定，"
+                        "本次不再尝试其它工具）"
+                    ),
+                    "error": error_detail,
+                    "latency_ms": latency,
+                    "tool_tested": test_tool.name,
+                    "attempts": attempts,
+                }
+            except Exception as tool_error:
+                latency = int((time.time() - start) * 1000)
+                log.warning("testing.api.connectivity.failed", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": str(tool_error),
+                    "exception": True,
+                })
+                attempts.append({
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": str(tool_error),
+                })
+                response = {
+                    "success": False,
+                    "message": (
+                        f"❌ API 连通性测试失败: {str(tool_error)}（已使用工具 "
+                        f"'{test_tool.name}' 探测一次；为避免连续失败导致账号锁定，"
+                        "本次不再尝试其它工具）"
+                    ),
+                    "error": str(tool_error),
+                    "latency_ms": latency,
+                    "tool_tested": test_tool.name,
+                    "attempts": attempts,
+                }
+
             await _save_api_service_status(provider_id, response)
             return response
     except Exception as e:
