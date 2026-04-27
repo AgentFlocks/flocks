@@ -1,0 +1,138 @@
+name: onesig
+service_id: onesig_api
+description: >
+  OneSIG (Secure Internet Gateway) Web API service. Authentication uses cookie
+  session: the handler logs in with username + RSA-OAEP encrypted password and
+  reuses the resulting session cookie across subsequent calls. Configure host
+  base URL, username and password separately in the credentials form. The
+  optional captcha / TOTP fields are only required when the device has captcha
+  or two-factor authentication enabled.
+description_cn: >
+  OneSIG（安全互联网网关）Web API 服务。认证采用 Cookie 会话：处理器先用
+  `用户名 + RSA-OAEP 加密的密码` 登录，建立 Cookie 后复用同一会话调用业务接口。
+  配置页需分别填写 Base URL、用户名、密码；当设备开启图形验证码或 TOTP 时，
+  对应字段可在调用 `onesig_login` 时按需传入。
+auth:
+  type: custom
+  secret: onesig_password
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://device.example.com"
+  - key: api_prefix
+    label: API Prefix
+    storage: config
+    config_key: api_prefix
+    input_type: text
+    required: false
+    default: "/api"
+    placeholder: "/api 或留空"
+  - key: username
+    label: Username
+    storage: config
+    config_key: username
+    input_type: text
+    required: true
+  - key: password
+    label: Password
+    storage: secret
+    config_key: password
+    secret_id: onesig_password
+    input_type: password
+    required: true
+  - key: oaep_hash
+    label: RSA-OAEP Hash
+    storage: config
+    config_key: oaep_hash
+    input_type: text
+    required: false
+    default: "sha1"
+    placeholder: "sha1 或 sha256"
+defaults:
+  api_prefix: "/api"
+  oaep_hash: "sha1"
+  timeout: 60
+  category: custom
+notes: |
+  OneSIG Web API 使用 Cookie 会话鉴权。
+
+  常见配置示例：
+    - api_services.onesig_api.base_url     = "https://device.example.com"
+    - api_services.onesig_api.api_prefix   = ""               # 大部分 v2.5.x 部署留空；reverse-proxy 部署才填 "/api"
+    - api_services.onesig_api.username     = "admin"
+    - api_services.onesig_api.password     = "{secret:onesig_password}"
+    - api_services.onesig_api.oaep_hash    = "sha1"           # JSEncrypt 默认；联调失败可改为 sha256
+
+  `api_prefix` 选取建议：
+    - 默认值 `""`（空）。绝大多数 OneSIG v2.5.x 设备 nginx 已经把 `/v3/`
+      直接路由到后端，因此 `https://host/v3/captcha` 这样的 URL 才能拿到
+      JSON。把 `api_prefix` 留空即可。
+    - 如果设备前面挂了反向代理（路径是 `https://host/api/v3/...`），把
+      `api_prefix` 显式改成 `"/api"`。
+    - 看到日志 `无法从 .../v3/pubkey 获取 RSA 公钥（HTTP 404 ...）` 几乎都是
+      `api_prefix` 没对齐：把当前值取反（空 ↔ "/api"）再试。
+
+  `verify_ssl` 由表单底部「SSL 验证」开关控制，与 onesec / ngtip / qingteng 一致，
+  下列字段都会被识别为 SSL 验证开关，按以下优先级取值：
+    1. `verify_ssl`                         （主键）
+    2. `ssl_verify`                         （兼容别名）
+    3. `verifySsl`                          （onesig 历史 camelCase 别名）
+    4. `custom_settings.verify_ssl`         （WebUI 表单写入位置）
+    5. 环境变量 `ONESIG_VERIFY_SSL`         （CLI / 容器场景兜底）
+    6. 兜底默认值 `False`（**默认关闭证书验证**）
+
+  关于默认值：OneSIG 设备绝大多数情况以私有网关形式部署，使用自签证书。为了开盒
+  即用，默认与 onesec / ngtip / qingteng 保持一致，**默认关闭证书校验**。在
+  公网或使用受信任 CA 的部署上，请显式打开 UI「SSL 验证」开关或在配置中设置
+  `verify_ssl: true` 以启用严格证书校验。
+
+  Cookie 会话持久化（`persist_cookies`）：
+    - 处理器会在登录成功后把 aiohttp CookieJar 序列化成 JSON 写入
+      `~/.flocks/config/.secret.json`（与口令同居一份 0600 权限文件），
+      key 形如 `onesig_session_cookie__<sha1[:12](base_url|username)>`。
+    - 进程重启时若该条 secret 还在且至少有一个 cookie 未过期，会直接灌回
+      jar 并跳过 captcha→pubkey→/v3/login→/v3/account 整条链路；如果设备
+      已经吊销该 cookie，首次业务请求拿到 401 / responseCode 1019..1022
+      时会触发自动重登一次（与原行为一致）。
+    - `logout` 动作会同步删除磁盘上的 cookie；`close` 不会删（用于优雅
+      关停时保留持久化数据）。
+    - 字段优先级与 `verify_ssl` 完全一致：
+        1. `persist_cookies`
+        2. `persistCookies`
+        3. `custom_settings.persist_cookies`
+        4. 环境变量 `ONESIG_PERSIST_COOKIES`
+        5. 兜底默认值 `True`（**默认开启持久化**）
+    - 关闭场景：在严格安全或多用户共享同一 `~/.flocks` 的部署上想退回
+      纯内存模式时，把 `persist_cookies: false` 写到 service config 即可。
+
+  说明：
+    - 文档接口路径形如 `/v3/...`，前端实际请求会带 `/api` 前缀。处理器在拼接 URL 时会自动加上
+      `api_prefix`，请按部署环境调整。
+    - 当设备启用图形验证码或 TOTP 时，可在 `onesig_login` 工具的 `login` 动作中传入 `captcha`
+      和 `totp` 参数，否则会因 responseCode 1012/验证码错误而失败。
+    - 处理器会在 401 / responseCode 1019 等会话失效场景自动重新登录并重试一次；
+      也可以手动调用 `onesig_login` 的 `login` / `logout` 动作管理会话。
+
+  RSA-OAEP 与 oaep_hash 联调指引：
+    - JSEncrypt（前端默认）使用 SHA-1 + MGF1-SHA1，因此本插件默认 `oaep_hash: sha1`。
+    - 若 `POST /v3/login` 返回 responseCode `1009`（密码无效）或 `1017`（密码错误）但
+      用户名/口令确实正确，先优先怀疑 OAEP 哈希不匹配；将 oaep_hash 切换为 `sha256`
+      重试一次：
+        api_services.onesig_api.oaep_hash = "sha256"
+    - 改密、删除用户、清空审计、接口启停、设备升级等敏感写操作的 `password` 字段
+      也使用同一份公钥与同一组哈希参数加密；切换 oaep_hash 时这些动作会同步生效。
+    - 如果对接遇到「公钥过期」型报错，可直接重发；处理器在改密/敏感字段加密前会
+      重新拉取 `/v3/pubkey`（与前端 clearRSACache 行为一致）。
+
+  multipart 上传与 RSA 字段（与 onesig_device / onesig_assets 工具配合）：
+    - 多个 `导入 / 上传 / 升级` 类接口（如 asset_import、tls_cert_create、system_upgrade、
+      device_upgrade_upload、basic_information_import、basic_license_upload、backup_import）
+      会以 `multipart/form-data` 提交本地文件，调用方需提供 `file_path` 指向本地绝对路径。
+    - 删除/启停/改密类敏感写操作（aclog_delete、user_delete、user_secret_reset、user_create、
+      interface_update、device_upgrade、device_upgrade_upload）需要传入**明文**
+      `password`（user_create 还需 `dupPassword`），处理器会自动用最新公钥做 RSA-OAEP 加密
+      后再发送，请勿手动加密。

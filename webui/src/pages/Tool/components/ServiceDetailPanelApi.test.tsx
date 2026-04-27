@@ -454,6 +454,63 @@ describe('APIServiceDetailPanel', () => {
     });
   });
 
+  it('renders saved base_url even when the metadata schema reports it as default_value (onesig regression)', async () => {
+    // The metadata endpoint backfills `default_value` for `base_url` from the
+    // currently-saved config (so a fresh form can preview the URL). The form
+    // must NOT treat "value === default_value" as "user has not filled in a
+    // value" — otherwise the saved Base URL silently disappears after save.
+    const savedBaseUrl = 'https://onesig-test-131.threatbook-inc.cn';
+    providerAPI.getMetadata.mockResolvedValueOnce({
+      data: {
+        name: 'onesig',
+        description: 'OneSIG API service',
+        base_url: savedBaseUrl,
+        credential_schema: [
+          { key: 'base_url', label: 'Base URL', storage: 'config', sensitive: false, required: true, input_type: 'url', config_key: 'base_url', default_value: savedBaseUrl },
+          { key: 'api_prefix', label: 'API Prefix', storage: 'config', sensitive: false, required: false, input_type: 'text', config_key: 'api_prefix', default_value: '/api' },
+          { key: 'username', label: 'Username', storage: 'config', sensitive: false, required: true, input_type: 'text', config_key: 'username' },
+          { key: 'password', label: 'Password', storage: 'secret', sensitive: true, required: true, input_type: 'password', config_key: 'password', secret_id: 'onesig_password' },
+          { key: 'oaep_hash', label: 'RSA-OAEP Hash', storage: 'config', sensitive: false, required: false, input_type: 'text', config_key: 'oaep_hash', default_value: 'sha1' },
+        ],
+      },
+    });
+    providerAPI.getServiceCredentials.mockResolvedValueOnce({
+      data: {
+        base_url: savedBaseUrl,
+        username: 'admin',
+        fields: {
+          base_url: savedBaseUrl,
+          username: 'admin',
+          password: 'Threatbook@506',
+          oaep_hash: 'sha256',
+        },
+        secret_ids: { password: 'onesig_password' },
+        has_credential: true,
+      },
+    });
+
+    render(
+      <APIServiceDetailPanel
+        serviceName="onesig_api"
+        serviceTools={[]}
+        onSelectTool={vi.fn()}
+        enabled
+        onToggleEnabled={vi.fn()}
+        onDelete={vi.fn()}
+      />,
+    );
+
+    const baseUrlInput = await screen.findByPlaceholderText('输入 API 地址') as HTMLInputElement;
+    expect(baseUrlInput.value).toBe(savedBaseUrl);
+
+    const usernameInput = screen.getByPlaceholderText('输入用户名') as HTMLInputElement;
+    expect(usernameInput.value).toBe('admin');
+
+    // value matches default_value but is also the actually-saved value, so the
+    // form should be considered "unchanged" — no Save button.
+    expect(screen.queryByRole('button', { name: '保存' })).toBeNull();
+  });
+
   it('keeps service tool descriptions compact in the tools tab', async () => {
     const user = userEvent.setup();
     const longDescription = 'OneSEC DNS grouped tool. dns_search_blocked_queries_by_super_long_keyword_with_no_breaks_and_more_details_to_force_wrapping';

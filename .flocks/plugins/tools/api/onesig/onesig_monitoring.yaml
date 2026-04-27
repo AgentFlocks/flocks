@@ -1,0 +1,256 @@
+name: onesig_monitoring
+description: >
+  OneSIG monitoring grouped tool. Use the `action` parameter to access
+  dashboard, threat overview, device status, alert host, inbound / outbound
+  threat events, and report management APIs. The handler accepts arbitrary
+  filter / pagination keys and forwards them to the JSON body, matching the
+  Web console behaviour.
+description_cn: >
+  OneSIG 监控分组工具。通过 `action` 调用仪表盘、威胁防护大屏、设备状态、失陷主机、
+  入站 / 出站威胁事件、报告管理等接口。处理器会把所有过滤 / 分页字段透传到 JSON
+  请求体，与 Web 控制台调用方式保持一致。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Monitoring 分组动作名，按页面分类：
+
+        # 仪表盘 (/monitoring/dashboard)
+        - dashboard_overview            POST /v3/dashboard/overview         仪表盘总览数据
+        - dashboard_outbound            POST /v3/dashboard/outbound         仪表盘出站数据
+        - dashboard_inbound             POST /v3/dashboard/inbound          仪表盘入站数据
+        - dashboard_zeroday             POST /v3/dashboard/zeroday          仪表盘零日数据
+        - dashboard_status              GET  /v3/dashboard/status           仪表盘服务状态
+        - dashboard_ioc_type_sum        GET  /v3/dashboard/ioctypesum       IOC 类型汇总
+        - set_custom_config             PUT  /v3/setting/customConfig       更新仪表盘自定义配置（写）
+
+        # 威胁防护大屏 (/monitoring/overview)
+        - common_threat_type_list       GET  /v3/common/threatTypeList      威胁类型列表
+        - overview_event_inbound        POST /v3/overview/eventInbound      入站事件
+        - overview_event_outbound       POST /v3/overview/eventOutbound     出站事件
+        - overview_export_event_inbound POST /v3/overview/exportEventInbound      导出入站事件（文件）
+        - overview_export_event_outbound POST /v3/overview/exportEventOutbound    导出出站事件（文件）
+        - overview_asset_brief          POST /v3/overview/assetBrief        资产简报
+        - overview_asset_top            POST /v3/overview/assetTop          资产 TOP
+        - overview_event_inbound_agg    POST /v3/overview/eventInboundAgg   入站聚合
+        - overview_export_event_inbound_agg  POST /v3/overview/exportEventInboundAgg   导出入站聚合（文件）
+        - overview_event_outbound_agg   POST /v3/overview/eventOutboundAgg  出站聚合
+        - overview_export_event_outbound_agg POST /v3/overview/exportEventOutboundAgg  导出出站聚合（文件）
+        - overview_event_recent_agg     POST /v3/overview/eventRecentAgg    近期事件聚合
+        - overview_event_trend          POST /v3/overview/eventTrend        事件趋势
+        - overview_traffic_trend        POST /v3/overview/trafficTrend      流量趋势
+        - overview_stat                 POST /v3/overview/stat              总览统计卡片
+        - overview_threat_type_proportion POST /v3/overview/threatTypeProportion  威胁类型占比
+        - overview_ioc_type_proportion  POST /v3/overview/iocTypeProportion       IOC 类型占比
+        - overview_export_threat_type_proportion POST /v3/overview/exportThreatTypeProportion 导出威胁类型占比（文件）
+        - overview_export_ioc_type_proportion    POST /v3/overview/exportIocTypeProportion    导出 IOC 类型占比（文件）
+        - get_overview_config           GET  /v3/setting/overviewConfig     总览展示配置
+        - set_overview_config           PUT  /v3/setting/overviewConfig     更新总览展示配置（写）
+
+        # 设备状态 (/monitoring/status)
+        - device_platform_status        GET  /v3/device/platformStatus      平台运行状态
+        - device_system_status          GET  /v3/device/systemStatus        系统资源状态
+        - device_network_status         GET  /v3/device/networkStatus       网络状态
+        - common_interface_list         GET  /v3/common/interfaceList       网口列表
+        - basic_cpu_attr                GET  /v3/basic/cpuAttr              CPU 属性
+
+        # 失陷主机 (/monitoring/hosts, /monitoring/hostdetail)
+        - alert_host_stat               GET  /v3/alertHost/stat             失陷主机统计
+        - alert_host_tree               POST /v3/alertHost/tree             失陷主机资产树
+        - alert_host_list               POST /v3/alertHost/list             分页查询失陷主机（必填 startTime/endTime）
+        - alert_host_export             POST /v3/alertHost/export           导出失陷主机（文件）
+        - alert_host_detail             POST /v3/alertHost/detail           失陷主机详情概览
+        - alert_host_detail_list        POST /v3/alertHost/detail/list      失陷主机详情关联列表
+        - alert_host_detail_export      POST /v3/alertHost/detail/export    导出失陷主机详情（文件）
+        - common_asset_type_list        GET  /v3/common/assetTypeList       资产类型列表
+
+        # 入站威胁 (/monitoring/inbound_threat)
+        - event_inbound_stat            GET  /v3/event/inbound/stat         入站威胁统计
+        - event_inbound_list            POST /v3/event/inbound/list         分页查询入站威胁（必填 startTime/endTime）
+        - event_inbound_export          POST /v3/event/inbound/export       导出入站威胁（文件）
+        - event_inbound_detail          POST /v3/event/inbound/detail       入站威胁详情
+        - event_inbound_detail_trend    POST /v3/event/inbound/detail/trend 入站威胁详情趋势
+        - event_inbound_detail_list     POST /v3/event/inbound/detail/list  入站威胁详情列表
+        - event_inbound_detail_export   POST /v3/event/inbound/detail/export 导出入站威胁详情（文件）
+        - port_protect_group_list       POST /v3/portProtectGroup/list      端口防护组列表（共享）
+        - web_custom_column_set         PUT  /v3/webCustomColumn/set        保存自定义列配置（写）
+
+        # 出站威胁 (/monitoring/outbound_threat)
+        - event_outbound_stat           GET  /v3/event/outbound/stat        出站威胁统计
+        - event_outbound_list           POST /v3/event/outbound/list        分页查询出站威胁（必填 startTime/endTime）
+        - event_outbound_export         POST /v3/event/outbound/export      导出出站威胁（文件）
+        - event_outbound_detail         POST /v3/event/outbound/detail      出站威胁详情
+        - event_outbound_detail_trend   POST /v3/event/outbound/detail/trend 出站威胁详情趋势
+        - event_outbound_detail_list    POST /v3/event/outbound/detail/list 出站威胁详情列表
+        - event_outbound_detail_export  POST /v3/event/outbound/detail/export 导出出站威胁详情（文件）
+        - set_dnslog_config             PUT  /v3/setting/dnslogConfig       更新 DNS 日志接入配置（写）
+
+        # 报告管理 (/monitoring/report)
+        - get_notice_config             GET  /v3/setting/noticeConfig       通知配置
+        - report_form_create            POST /v3/report/form                新增报表表单
+        - report_form_list              POST /v3/report/form/list           分页查询报表表单
+        - report_form_download          GET  /v3/report/form/download       下载报表（文件，需 uniqueId）
+        - report_form_delete            DELETE /v3/report/form              删除报表表单
+        - report_task_list              POST /v3/report/task/list           分页查询报表任务
+        - report_task_create            POST /v3/report/task                新增报表任务
+        - report_task_update            PUT  /v3/report/task                更新报表任务
+        - report_task_delete            DELETE /v3/report/task              删除报表任务
+        - report_task_test              POST /v3/report/task/test           测试报表任务
+
+        # 共享 (monitoring layout)
+        - common_asset_group_tree       GET  /v3/common/assetGroupTree      资产组树
+        - ips_rule_create               POST /v3/ips/rule                   新增 IPS 自定义规则
+        - ips_rule_apply                POST /v3/ips/rule/apply             应用 IPS 规则变更
+        - ips_ruleset_namelist          POST /v3/ips/ruleset/namelist       规则集名称列表
+        - ips_ruleset_referred          POST /v3/ips/ruleset/referred       规则集引用关系
+        - logaccess_stat                GET  /v3/logAccess/stat             日志接入统计
+        - get_dnslog_config             GET  /v3/setting/dnslogConfig       DNS 日志接入配置
+      enum:
+        - dashboard_overview
+        - dashboard_outbound
+        - dashboard_inbound
+        - dashboard_zeroday
+        - dashboard_status
+        - dashboard_ioc_type_sum
+        - set_custom_config
+        - common_threat_type_list
+        - overview_event_inbound
+        - overview_event_outbound
+        - overview_export_event_inbound
+        - overview_export_event_outbound
+        - overview_asset_brief
+        - overview_asset_top
+        - overview_event_inbound_agg
+        - overview_export_event_inbound_agg
+        - overview_event_outbound_agg
+        - overview_export_event_outbound_agg
+        - overview_event_recent_agg
+        - overview_event_trend
+        - overview_traffic_trend
+        - overview_stat
+        - overview_threat_type_proportion
+        - overview_ioc_type_proportion
+        - overview_export_threat_type_proportion
+        - overview_export_ioc_type_proportion
+        - get_overview_config
+        - set_overview_config
+        - device_platform_status
+        - device_system_status
+        - device_network_status
+        - common_interface_list
+        - basic_cpu_attr
+        - alert_host_stat
+        - alert_host_tree
+        - alert_host_list
+        - alert_host_export
+        - alert_host_detail
+        - alert_host_detail_list
+        - alert_host_detail_export
+        - common_asset_type_list
+        - event_inbound_stat
+        - event_inbound_list
+        - event_inbound_export
+        - event_inbound_detail
+        - event_inbound_detail_trend
+        - event_inbound_detail_list
+        - event_inbound_detail_export
+        - port_protect_group_list
+        - web_custom_column_set
+        - event_outbound_stat
+        - event_outbound_list
+        - event_outbound_export
+        - event_outbound_detail
+        - event_outbound_detail_trend
+        - event_outbound_detail_list
+        - event_outbound_detail_export
+        - set_dnslog_config
+        - get_notice_config
+        - report_form_create
+        - report_form_list
+        - report_form_download
+        - report_form_delete
+        - report_task_list
+        - report_task_create
+        - report_task_update
+        - report_task_delete
+        - report_task_test
+        - common_asset_group_tree
+        - ips_rule_create
+        - ips_rule_apply
+        - ips_ruleset_namelist
+        - ips_ruleset_referred
+        - logaccess_stat
+        - get_dnslog_config
+    startTime:
+      type: integer
+      description: 起始时间戳（Unix 秒）
+    endTime:
+      type: integer
+      description: 结束时间戳（Unix 秒）
+    pageNo:
+      type: integer
+      default: 1
+      description: 分页页码
+    pageSize:
+      type: integer
+      default: 20
+      description: 分页大小
+    sortBy:
+      type: string
+      description: 排序字段
+    orderBy:
+      type: string
+      description: 排序方向，`asc` / `desc`
+    search:
+      type: string
+      description: 模糊搜索关键字
+    severity:
+      type: array
+      items:
+        type: integer
+      description: 威胁等级过滤
+    threatType:
+      type: array
+      items:
+        type: string
+      description: 威胁类型过滤
+    assetType:
+      type: array
+      items:
+        type: string
+      description: 资产类型过滤
+    threatLabel:
+      type: array
+      items:
+        type: string
+      description: 特定威胁标签过滤
+    threatState:
+      type: string
+      description: 失陷主机状态过滤
+    assetGroup:
+      type: string
+      description: 资产组路径，`全部` 转为空串
+    direction:
+      type: string
+      description: 威胁方向（inbound/outbound）
+    isTls:
+      type: boolean
+      description: 是否仅 TLS 加密流量
+    uniqueId:
+      type: string
+      description: 资源唯一 ID（删除/下载/详情等）
+    fileName:
+      type: string
+      description: 文件名（下载报表表单）
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig.handler.py
+  function: monitoring

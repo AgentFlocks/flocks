@@ -1,0 +1,268 @@
+name: onesig_strategy
+description: >
+  OneSIG strategy grouped tool. Use the `action` parameter to manage protection
+  policies including global whitelist / blacklist, multi-dimensional blocking,
+  API keys, syslog auto-blacklist, FTP / SFTP linkage, IPS rules and rule sets,
+  HTTP blacklist, port protection groups, and the strategy landing page itself.
+description_cn: >
+  OneSIG 防护策略分组工具。通过 `action` 调用全局白/黑名单、多维封锁、API 联动密钥、
+  Syslog 自动封禁、FTP/SFTP 联动、IPS 规则和规则集、HTTP 黑名单、端口防护组以及策略
+  首页相关接口。多数写操作具有破坏性，请谨慎调用。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Strategy 分组动作名（按 UI 子页归类）：
+
+        # 白名单 (/strategy/whitelist)
+        - whitelist_add               POST   /v3/globalWhitelist             新增（多方向）
+        - whitelist_update            PUT    /v3/globalWhitelist             更新（编辑单方向）
+        - whitelist_delete            DELETE /v3/globalWhitelist             删除（uniqueIds 数组）
+        - whitelist_export            POST   /v3/globalWhitelist/export      导出（文件）
+        - whitelist_import            POST   /v3/globalWhitelist/import      导入
+        - whitelist_template          GET    /v3/globalWhitelist/template    导入模板（文件）
+        - whitelist_list              POST   /v3/globalWhitelist/list        分页查询
+        - whitelist_remove_batch      DELETE /v3/globalWhitelist/remove      批量移除
+
+        # 黑名单 (/strategy/blacklist)
+        - blacklist_location_options  GET    /v3/blacklist/location          地理位置选项
+        - blacklist_add               POST   /v3/globalBlacklist             新增
+        - blacklist_update            PUT    /v3/globalBlacklist             更新
+        - blacklist_delete            DELETE /v3/globalBlacklist             删除
+        - blacklist_check             POST   /v3/globalBlacklist/check       冲突校验
+        - blacklist_export            POST   /v3/globalBlacklist/export      导出（文件）
+        - blacklist_import            POST   /v3/globalBlacklist/import      导入
+        - blacklist_template          GET    /v3/globalBlacklist/template    导入模板（文件）
+        - blacklist_list              POST   /v3/globalBlacklist/list        分页查询
+        - blacklist_remove_batch      DELETE /v3/globalBlacklist/remove      批量移除
+
+        # 多维封锁 (/strategy/multi_block, /strategy/add_multi_block)
+        - multiblock_executelog_list   POST   /v3/multiblock/executelog
+        - multiblock_executelog_export POST   /v3/multiblock/executelog/export   （文件）
+        - multiblock_rule_delete       DELETE /v3/multiblock/rule
+        - multiblock_rule_active       POST   /v3/multiblock/rule/active
+        - multiblock_rule_dict         POST   /v3/multiblock/rule/dict
+        - multiblock_rule_list         POST   /v3/multiblock/rule/list
+        - multiblock_rule_get          POST   /v3/multiblock/rule/get
+        - multiblock_rule_preview      POST   /v3/multiblock/rule/preview
+        - multiblock_rule_create       POST   /v3/multiblock/rule
+        - multiblock_rule_update       PUT    /v3/multiblock/rule
+
+        # API 联动 (/strategy/api)
+        - apikey_delete               DELETE /v3/apikey
+        - apikey_update               PUT    /v3/apikey
+        - apikey_create               POST   /v3/apikey
+        - apikey_list                 GET    /v3/apikey/list
+        - apikey_secret               GET    /v3/apikey/secret               需 uniqueId
+
+        # Syslog 自动封禁 (/strategy/syslog)
+        - auto_blacklist_delete       DELETE /v3/autoBlacklist
+        - auto_blacklist_check        POST   /v3/autoBlacklist/check
+        - auto_blacklist_create       POST   /v3/autoBlacklist
+        - auto_blacklist_update       PUT    /v3/autoBlacklist
+        - auto_blacklist_list         POST   /v3/autoBlacklist/list
+        - auto_blacklist_trend        GET    /v3/autoBlacklist/trend         需 startTime/endTime
+        - auto_blacklist_sample       POST   /v3/autoBlacklist/sample
+
+        # FTP/SFTP 联动 (/strategy/ftp)
+        - linkage_delete              DELETE /v3/linkage
+        - linkage_create              POST   /v3/linkage
+        - linkage_update              PUT    /v3/linkage
+        - linkage_enable              POST   /v3/linkage/enable
+        - linkage_info                GET    /v3/linkage/info                需 uniqueId
+        - linkage_list                POST   /v3/linkage/list
+        - linkage_template            GET    /v3/linkage/template            （文件）
+        - linkage_test                POST   /v3/linkage/test
+
+        # 入侵防护 (/strategy/intrusion_prevention)
+        - ips_rule_create             POST   /v3/ips/rule
+        - ips_rule_all                POST   /v3/ips/rule/all                全量操作
+        - ips_rule_apply              POST   /v3/ips/rule/apply              应用变更
+        - ips_rule_list               POST   /v3/ips/rule/list
+        - ips_ruleset_create          POST   /v3/ips/ruleset
+        - ips_ruleset_update          PUT    /v3/ips/ruleset
+        - ips_ruleset_delete          DELETE /v3/ips/ruleset
+        - ips_ruleset_info            POST   /v3/ips/ruleset/info
+        - ips_ruleset_list            POST   /v3/ips/ruleset/list
+        - ips_ruleset_namelist        POST   /v3/ips/ruleset/namelist
+        - ips_threat_types            POST   /v3/ips/threatTypes
+
+        # HTTP 防护 (/strategy/httpProtect)
+        - http_blacklist_delete       DELETE /v3/httpBlacklist
+        - http_blacklist_enable       POST   /v3/httpBlacklist/enable
+        - http_blacklist_export       POST   /v3/httpBlacklist/export        （文件）
+        - http_blacklist_list         POST   /v3/httpBlacklist/list
+        - http_blacklist_create       POST   /v3/httpBlacklist
+        - http_blacklist_update       PUT    /v3/httpBlacklist
+        - get_advanced_config         GET    /v3/setting/advancedConfig      共享高级配置
+        - set_advanced_config         PUT    /v3/setting/advancedConfig      共享高级配置（写）
+        - get_xff_config              GET    /v3/setting/xffConfig
+        - set_xff_config              PUT    /v3/setting/xffConfig
+
+        # 高危端口防护 (/strategy/portProtect)
+        - port_protect_group_delete       DELETE /v3/portProtectGroup
+        - port_protect_group_create       POST   /v3/portProtectGroup
+        - port_protect_group_update       PUT    /v3/portProtectGroup
+        - port_protect_group_clone        POST   /v3/portProtectGroup/clone
+        - port_protect_group_default_info GET    /v3/portProtectGroup/defaultInfo
+        - port_protect_group_list_full    POST   /v3/portProtectGroup/list
+        - port_protect_port_delete        DELETE /v3/portProtectGroup/port
+        - port_protect_port_create        POST   /v3/portProtectGroup/port
+        - port_protect_port_update        PUT    /v3/portProtectGroup/port
+        - port_protect_port_export        POST   /v3/portProtectGroup/port/export       （文件）
+        - port_protect_port_list          POST   /v3/portProtectGroup/port/list
+        - port_protect_port_onekey_import POST   /v3/portProtectGroup/port/onekeyImport
+        - port_protect_port_onekey_status GET    /v3/portProtectGroup/port/onekeyImport
+        - port_protect_portinfo           POST   /v3/portProtectGroup/portinfo
+
+        # 策略首页 (/strategy/strategy)
+        - device_onekey_bypass        POST   /v3/device/onekeyBypass
+        - protection_policy_delete    DELETE /v3/protection/policy
+        - protection_policy_update    PUT    /v3/protection/policy
+        - protection_policy_get       GET    /v3/protection/policy           需 uniqueId
+        - protection_policy_tree      GET    /v3/protection/policy/tree
+        - set_scan_config             PUT    /v3/setting/scanConfig
+      enum:
+        - whitelist_add
+        - whitelist_update
+        - whitelist_delete
+        - whitelist_export
+        - whitelist_import
+        - whitelist_template
+        - whitelist_list
+        - whitelist_remove_batch
+        - blacklist_location_options
+        - blacklist_add
+        - blacklist_update
+        - blacklist_delete
+        - blacklist_check
+        - blacklist_export
+        - blacklist_import
+        - blacklist_template
+        - blacklist_list
+        - blacklist_remove_batch
+        - multiblock_executelog_list
+        - multiblock_executelog_export
+        - multiblock_rule_delete
+        - multiblock_rule_active
+        - multiblock_rule_dict
+        - multiblock_rule_list
+        - multiblock_rule_get
+        - multiblock_rule_preview
+        - multiblock_rule_create
+        - multiblock_rule_update
+        - apikey_delete
+        - apikey_update
+        - apikey_create
+        - apikey_list
+        - apikey_secret
+        - auto_blacklist_delete
+        - auto_blacklist_check
+        - auto_blacklist_create
+        - auto_blacklist_update
+        - auto_blacklist_list
+        - auto_blacklist_trend
+        - auto_blacklist_sample
+        - linkage_delete
+        - linkage_create
+        - linkage_update
+        - linkage_enable
+        - linkage_info
+        - linkage_list
+        - linkage_template
+        - linkage_test
+        - ips_rule_create
+        - ips_rule_all
+        - ips_rule_apply
+        - ips_rule_list
+        - ips_ruleset_create
+        - ips_ruleset_update
+        - ips_ruleset_delete
+        - ips_ruleset_info
+        - ips_ruleset_list
+        - ips_ruleset_namelist
+        - ips_threat_types
+        - http_blacklist_delete
+        - http_blacklist_enable
+        - http_blacklist_export
+        - http_blacklist_list
+        - http_blacklist_create
+        - http_blacklist_update
+        - get_advanced_config
+        - set_advanced_config
+        - get_xff_config
+        - set_xff_config
+        - port_protect_group_delete
+        - port_protect_group_create
+        - port_protect_group_update
+        - port_protect_group_clone
+        - port_protect_group_default_info
+        - port_protect_group_list_full
+        - port_protect_port_delete
+        - port_protect_port_create
+        - port_protect_port_update
+        - port_protect_port_export
+        - port_protect_port_list
+        - port_protect_port_onekey_import
+        - port_protect_port_onekey_status
+        - port_protect_portinfo
+        - device_onekey_bypass
+        - protection_policy_delete
+        - protection_policy_update
+        - protection_policy_get
+        - protection_policy_tree
+        - set_scan_config
+    uniqueId:
+      type: string
+      description: 资源唯一 ID（GET / DELETE 单条目时使用）
+    uniqueIds:
+      type: array
+      items:
+        type: string
+      description: 批量删除使用的 ID 列表
+    whiteList:
+      type: array
+      items:
+        type: object
+      description: 白名单方向数组（whitelist_add 必填，元素含 `direction`）
+    direction:
+      type: string
+      description: 白名单方向（whitelist_update 必填，可选 inbound/outbound/both）
+    condition:
+      type: array
+      items:
+        type: object
+      description: 白/黑名单条件列表
+    comments:
+      type: string
+      description: 备注
+    pageNo:
+      type: integer
+      default: 1
+    pageSize:
+      type: integer
+      default: 20
+    startTime:
+      type: integer
+      description: 起始时间戳（auto_blacklist_trend 等使用）
+    endTime:
+      type: integer
+      description: 结束时间戳
+    name:
+      type: string
+      description: 名称（如 API 联动密钥名 / 端口防护组名）
+    enable:
+      type: boolean
+      description: 启停标识
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig.handler.py
+  function: strategy

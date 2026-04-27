@@ -1,0 +1,124 @@
+name: onesig_login
+description: >
+  OneSIG login / session management grouped tool. Use the `action` parameter to
+  log in (build a cookie session), log out, change the current user's password,
+  pull captcha / pubkey / account info, and manage product news / TOTP recovery
+  codes. Most other OneSIG tools auto-login on demand so explicit `login` calls
+  are only needed when captcha or TOTP is required.
+
+  Auth-flow endpoints handled internally (NOT registered as ActionSpecs):
+    - GET  /v3/captcha       fetched implicitly during login
+    - GET  /v3/pubkey        fetched before each login + before any
+                             RSA-encrypted body field is sent
+    - POST /v3/login         driven by `login` action
+    - POST /v3/login/totp    driven by `login` action when responseCode 1012
+                             or when the device requires inline TOTP
+    - POST /v3/logout        driven by `logout` action
+    - PUT  /v3/user/password driven by `change_password` action (each of
+                             oldPassword / newPassword / dupPassword is
+                             auto RSA-OAEP encrypted with the latest pubkey)
+description_cn: >
+  OneSIG 登录/会话管理工具。通过 `action` 调用登录、登出、改密、拉取验证码 / 公钥 /
+  账户信息，以及产品动态、TOTP 恢复码等接口。其他 OneSIG 工具会按需自动登录，
+  仅在设备启用图形验证码或 TOTP 时需要显式调用 `login` 并传入 `captcha`/`totp`。
+
+  专用鉴权流程（已在处理器内部封装，不以 ActionSpec 形式开放）：
+    - GET  /v3/captcha       登录时自动拉取，判断是否需 captcha / inline TOTP
+    - GET  /v3/pubkey        登录前与所有需 RSA 加密字段的接口前自动拉取
+    - POST /v3/login         由 `login` 动作驱动
+    - POST /v3/login/totp    `login` 动作在 responseCode 1012 或 inline-TOTP
+                             场景下自动续走
+    - POST /v3/logout        由 `logout` 动作驱动
+    - PUT  /v3/user/password 由 `change_password` 驱动；oldPassword /
+                             newPassword / dupPassword 三个字段会用最新公钥
+                             分别做 RSA-OAEP 加密（无需调用方手动加密）
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesig_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Login 分组动作名，可选值：
+        - login
+          用途: 显式触发登录流程（拉取 captcha+pubkey、RSA-OAEP 加密密码、POST /v3/login，必要时再走 /v3/login/totp）
+          必填: 无（用户名密码取自服务凭据）
+          常用: `captcha`、`totp`
+          风险提示: 大多数业务调用会按需自动登录，仅在启用验证码 / TOTP 时需手动登录
+        - logout
+          用途: 退出当前会话（POST /v3/logout）并清空本地 Cookie
+          必填: 无
+          常用: 无
+          风险提示: 后续调用会重新登录
+        - change_password
+          用途: 修改当前用户密码（PUT /v3/user/password，三个密码字段会自动 RSA-OAEP 加密）
+          必填: `new_password`
+          常用: `old_password`、`dup_password`、`username`
+          风险提示: 写操作；密码长度需 8~20 且含字母+数字+特殊字符
+        - get_captcha
+          用途: 获取图形验证码状态（GET /v3/captcha）
+          必填: 无
+        - get_pubkey
+          用途: 获取登录 RSA 公钥（GET /v3/pubkey）
+          必填: 无
+        - get_account
+          用途: 获取当前账户信息（GET /v3/account）
+          必填: 无
+        - get_recovery_code
+          用途: 查看 TOTP 恢复码（GET /v3/user/recoveryCode）
+          必填: 无
+        - regenerate_recovery_code
+          用途: 重新生成 TOTP 恢复码（PUT /v3/user/recoveryCode）
+          必填: 无
+          风险提示: 旧恢复码立即失效
+        - get_product_news
+          用途: 获取产品动态红点状态（GET /v3/product/news）
+          必填: 无
+        - mark_product_news_read
+          用途: 标记产品动态已读（PUT /v3/product/news）
+          必填: 至少一个布尔字段（如 `documentUpdate=false`）
+          风险提示: 写操作
+      enum:
+        - login
+        - logout
+        - change_password
+        - get_captcha
+        - get_pubkey
+        - get_account
+        - get_recovery_code
+        - regenerate_recovery_code
+        - get_product_news
+        - mark_product_news_read
+    captcha:
+      type: string
+      description: 当设备启用图形验证码时填写（4 位）。仅在 `login` 动作有效。
+    totp:
+      type: string
+      description: 当设备启用 TOTP（双因素）时填写动态口令或恢复码。仅在 `login` 动作有效。
+    username:
+      type: string
+      description: 改密时使用的用户名，默认取服务凭据中的 `username`。
+    new_password:
+      type: string
+      description: 新密码明文，长度 8~20，需包含字母、数字与特殊字符。仅在 `change_password` 动作必填。
+    old_password:
+      type: string
+      description: 当前密码明文。强制改密分支可省略；常规改密必填。
+    dup_password:
+      type: string
+      description: 新密码确认明文，留空时与 `new_password` 相同。
+    documentUpdate:
+      type: boolean
+      description: 标记帮助文档红点是否已读（mark_product_news_read 使用）。
+    versionUpdate:
+      type: boolean
+      description: 标记版本更新红点是否已读（mark_product_news_read 使用）。
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesig.handler.py
+  function: login
