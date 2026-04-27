@@ -14,6 +14,9 @@ const {
   onboardingAPI,
   providerAPI,
   sessionApi,
+  getActiveNotifications,
+  ackNotification,
+  useAuth,
   useStats,
 } = vi.hoisted(() => ({
   catalogAPI: {
@@ -36,6 +39,9 @@ const {
   sessionApi: {
     create: vi.fn(),
   },
+  getActiveNotifications: vi.fn(),
+  ackNotification: vi.fn(),
+  useAuth: vi.fn(),
   useStats: vi.fn(),
 }));
 
@@ -59,6 +65,15 @@ vi.mock('@/api/session', () => ({
 
 vi.mock('@/api/update', () => ({
   checkUpdate,
+}));
+
+vi.mock('@/api/notifications', () => ({
+  getActiveNotifications,
+  ackNotification,
+}));
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth,
 }));
 
 vi.mock('@/hooks/useStats', () => ({
@@ -146,6 +161,21 @@ describe('Layout onboarding entry', () => {
       latest_version: null,
       current_version: '0.2.0',
       error: null,
+    });
+    getActiveNotifications.mockResolvedValue([]);
+    ackNotification.mockResolvedValue({
+      notification_id: 'notice-1',
+      user_id: 'user-1',
+      acknowledged_at: '2026-04-27T00:00:00Z',
+    });
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-1',
+        username: 'admin',
+        role: 'admin',
+        status: 'active',
+        must_reset_password: false,
+      },
     });
 
     useStats.mockReturnValue({
