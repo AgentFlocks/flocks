@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
+ORPHAN_WORKER_MARKER = "multiprocessing.spawn"
 
 
 class ServiceError(RuntimeError):
@@ -927,7 +928,8 @@ def _current_stop_targets(
     """Refresh the pid list that stop_one() should verify or force kill."""
     result = append_unique_pids([], tracked_pids)
     result = append_unique_pids(result, _runtime_record_pids(record))
-    return append_unique_pids(result, port_owner_pids(port))
+    result = append_unique_pids(result, port_owner_pids(port))
+    return append_unique_pids(result, orphaned_flocks_worker_pids())
 
 
 def signal_process_group(sig: signal.Signals, pgid: int | None) -> None:
@@ -951,6 +953,7 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
     if tracked_pid is not None:
         target_pids = append_unique_pids(target_pids, collect_process_tree_pids(tracked_pid))
     target_pids = append_unique_pids(target_pids, listeners)
+    target_pids = append_unique_pids(target_pids, orphaned_flocks_worker_pids())
 
     group_running = process_group_is_running(runtime_record.pgid if runtime_record else None)
     if not target_pids and not group_running:
@@ -1352,6 +1355,103 @@ def child_pids(pid: int) -> list[int]:
         if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit() and int(parts[1]) == pid:
             result.append(int(parts[0]))
     return result
+
+
+def _process_table_rows() -> list[tuple[int, int, str]]:
+    """Return ``(pid, ppid, command)`` rows for Unix process inspection."""
+    if sys.platform == "win32":
+        return []
+    try:
+        completed = subprocess.run(
+            ["ps", "-eo", "pid=,ppid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+    if completed.returncode != 0:
+        return []
+
+    rows: list[tuple[int, int, str]] = []
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows
+
+
+def _process_lsof_output(pid: int) -> str:
+    """Return lsof output for *pid*, or an empty string when unavailable."""
+    if sys.platform == "win32" or not which("lsof"):
+        return ""
+    try:
+        completed = subprocess.run(
+            ["lsof", "-nP", "-p", str(pid)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return ""
+    return (completed.stdout or "") + (completed.stderr or "")
+
+
+def _path_marker(path: Path) -> str:
+    """Normalize a path marker for substring checks against lsof output."""
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser())
+
+
+def _flocks_process_markers() -> list[str]:
+    """Return filesystem markers that identify workers belonging to this install."""
+    root = repo_root()
+    state_root = flocks_root()
+    markers = [
+        _path_marker(root),
+        _path_marker(root / ".venv"),
+        _path_marker(state_root),
+    ]
+    return [marker for marker in dict.fromkeys(markers) if marker]
+
+
+def _is_orphaned_flocks_worker(pid: int, ppid: int, command: str, markers: Sequence[str]) -> bool:
+    """Return True for orphaned multiprocessing workers from this Flocks install."""
+    if sys.platform == "win32" or pid <= 0 or ppid != 1:
+        return False
+    if ORPHAN_WORKER_MARKER not in command:
+        return False
+    if "Python" not in command and "python" not in command:
+        return False
+
+    opened = _process_lsof_output(pid)
+    if not opened:
+        return False
+    return any(marker in opened for marker in markers)
+
+
+def orphaned_flocks_worker_pids() -> list[int]:
+    """Find orphaned Python multiprocessing workers owned by this Flocks install.
+
+    These workers can survive if the backend process exits before Python's
+    multiprocessing children are reaped.  Once reparented to PID 1 they are no
+    longer reachable through the backend pid tree or process group, and they do
+    not necessarily listen on the backend port.
+    """
+    if sys.platform == "win32":
+        return []
+    markers = _flocks_process_markers()
+    if not markers:
+        return []
+
+    pids: list[int] = []
+    for pid, ppid, command in _process_table_rows():
+        if _is_orphaned_flocks_worker(pid, ppid, command, markers):
+            pids.append(pid)
+    return pids
 
 
 def signal_pid_list(sig: signal.Signals, pids: Iterable[int]) -> None:

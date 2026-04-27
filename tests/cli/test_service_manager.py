@@ -1316,6 +1316,85 @@ def test_stop_one_keeps_runtime_record_when_force_kill_still_times_out(monkeypat
     assert pid_file.exists()
 
 
+def test_orphaned_flocks_worker_pids_requires_spawn_marker_and_flocks_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "flocks"
+    state = tmp_path / ".flocks"
+    repo.mkdir()
+    state.mkdir()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "repo_root", lambda: repo)
+    monkeypatch.setattr(service_manager, "flocks_root", lambda: state)
+    monkeypatch.setattr(
+        service_manager,
+        "_process_table_rows",
+        lambda: [
+            (
+                444,
+                1,
+                "/opt/homebrew/bin/Python -c from multiprocessing.spawn import spawn_main; "
+                "spawn_main(tracker_fd=5, pipe_handle=7) --multiprocessing-fork",
+            ),
+            (
+                555,
+                1,
+                "/opt/homebrew/bin/Python -c from multiprocessing.spawn import spawn_main; "
+                "spawn_main(tracker_fd=5, pipe_handle=7) --multiprocessing-fork",
+            ),
+            (
+                666,
+                123,
+                "/opt/homebrew/bin/Python -c from multiprocessing.spawn import spawn_main; "
+                "spawn_main(tracker_fd=5, pipe_handle=7) --multiprocessing-fork",
+            ),
+            (777, 1, "/opt/homebrew/bin/Python /tmp/other.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_process_lsof_output",
+        lambda pid: (
+            f"Python {pid} cwd DIR {repo}\nPython {pid} txt REG {repo / '.venv' / 'lib'}\n"
+            if pid == 444
+            else f"Python {pid} cwd DIR /tmp/unrelated\n"
+        ),
+    )
+
+    assert service_manager.orphaned_flocks_worker_pids() == [444]
+
+
+def test_stop_one_cleans_orphaned_flocks_workers_without_pid_file_or_listener(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    pid_file = tmp_path / "backend.pid"
+    console = DummyConsole()
+    alive = {444}
+    pid_signals: list[tuple[signal.Signals, list[int]]] = []
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid in alive)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: False)
+    monkeypatch.setattr(service_manager, "orphaned_flocks_worker_pids", lambda: sorted(alive))
+
+    def fake_signal_pid_list(sig, pids):
+        pid_list = list(pids)
+        pid_signals.append((sig, pid_list))
+        if sig == signal.SIGTERM:
+            alive.difference_update(pid_list)
+
+    monkeypatch.setattr(service_manager, "signal_pid_list", fake_signal_pid_list)
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert pid_signals == [(signal.SIGTERM, [444])]
+    assert console.messages[-1] == "[flocks] 后端 已停止。"
+
+
 @contextlib.contextmanager
 def _record_call(call_order: list[str], name: str):
     call_order.append(name)
