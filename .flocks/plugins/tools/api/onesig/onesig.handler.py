@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import os
 import ssl
+import time
+from email.utils import parsedate_to_datetime
+from http.cookies import Morsel, SimpleCookie
 from typing import Any, Optional
 
 import aiohttp
+from yarl import URL
 
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
@@ -14,10 +20,20 @@ from flocks.tool.registry import ToolContext, ToolResult
 
 SERVICE_ID = "onesig_api"
 
-DEFAULT_API_PREFIX = "/api"
+# OneSIG v2.5.x 设备直接监听 ``/v3/...``，没有任何额外前缀。早期对接时曾
+# 经默认 ``"/api"``，结果实际部署里 nginx 把 ``/v3/`` 直接路由到了后端，
+# ``/api/v3/...`` 全部 404。改成空字符串作为开盒即用值；个别需要前缀的
+# 部署仍可在 UI 上把 ``api_prefix`` 设成 ``"/api"`` 或其它值覆盖。
+DEFAULT_API_PREFIX = ""
 DEFAULT_OAEP_HASH = "sha1"
 DEFAULT_TIMEOUT = 60
-DEFAULT_VERIFY_SSL = True
+DEFAULT_VERIFY_SSL = False
+DEFAULT_PERSIST_COOKIES = True
+
+# Bumped whenever the on-disk shape under ``onesig_session_cookie__*`` changes
+# in an incompatible way; older snapshots are silently discarded.
+_COOKIE_SNAPSHOT_VERSION = 1
+_COOKIE_SECRET_PREFIX = "onesig_session_cookie__"
 
 _RESPONSE_CODE_OK = 0
 _RESPONSE_CODE_TOTP_REQUIRED = 1012
@@ -66,6 +82,84 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
+    """Resolve the SSL verification toggle from a service-config dict.
+
+    Mirrors the PR #193 cross-handler convention so that the WebUI's
+    "SSL verify" switch (which writes to ``custom_settings.verify_ssl``)
+    drives onesec / ngtip / qingteng / onesig **uniformly**. Lookup order:
+
+      1. ``raw["verify_ssl"]``                    - canonical
+      2. ``raw["ssl_verify"]``                    - snake_case alias (PR #193)
+      3. ``raw["verifySsl"]``                     - camelCase alias (onesig legacy)
+      4. ``raw["custom_settings"]["verify_ssl"]`` - WebUI generic toggle
+      5. ``ONESIG_VERIFY_SSL`` env var            - onesig-specific override
+      6. fallback to ``DEFAULT_VERIFY_SSL``       - default ``False`` (parity
+                                                    with onesec / ngtip / qingteng
+                                                    after PR #193): OneSIG is
+                                                    almost always deployed as a
+                                                    private gateway with self-
+                                                    signed certs, so the open-
+                                                    box behaviour is to skip
+                                                    validation. Flip the toggle
+                                                    on to enforce certificate
+                                                    checks for public / signed
+                                                    deployments.
+
+    String values are normalised through ``_coerce_bool`` so that any of
+    ``"true"/"false"/"1"/"0"/"yes"/"no"/"on"/"off"`` work consistently with
+    the rest of the codebase.
+    """
+    candidates: list[Any] = [
+        raw.get("verify_ssl"),
+        raw.get("ssl_verify"),
+        raw.get("verifySsl"),
+    ]
+    custom = raw.get("custom_settings")
+    if isinstance(custom, dict):
+        candidates.append(custom.get("verify_ssl"))
+    candidates.append(os.getenv("ONESIG_VERIFY_SSL"))
+
+    for value in candidates:
+        if value is None:
+            continue
+        return _coerce_bool(value, default=DEFAULT_VERIFY_SSL)
+    return DEFAULT_VERIFY_SSL
+
+
+def _resolve_persist_cookies(raw: dict[str, Any]) -> bool:
+    """Resolve the cookie-persistence toggle.
+
+    OneSIG sessions are cookie-based; persisting the jar to ``.secret.json``
+    lets a flocks restart skip the captcha → pubkey → /v3/login → /v3/account
+    chain (~4 RTT) and reuse the still-valid cookie until the device returns
+    401 / responseCode 1019..1022, at which point the existing auto-relogin
+    path takes over.
+
+    Same shape as :func:`_resolve_verify_ssl`:
+
+      1. ``raw["persist_cookies"]``                    - canonical
+      2. ``raw["persistCookies"]``                     - camelCase alias
+      3. ``raw["custom_settings"]["persist_cookies"]`` - WebUI generic toggle
+      4. ``ONESIG_PERSIST_COOKIES`` env var            - CLI / container
+      5. fallback to ``DEFAULT_PERSIST_COOKIES``       - ``True``
+    """
+    candidates: list[Any] = [
+        raw.get("persist_cookies"),
+        raw.get("persistCookies"),
+    ]
+    custom = raw.get("custom_settings")
+    if isinstance(custom, dict):
+        candidates.append(custom.get("persist_cookies"))
+    candidates.append(os.getenv("ONESIG_PERSIST_COOKIES"))
+
+    for value in candidates:
+        if value is None:
+            continue
+        return _coerce_bool(value, default=DEFAULT_PERSIST_COOKIES)
+    return DEFAULT_PERSIST_COOKIES
+
+
 class OneSIGRuntimeConfig:
     """Resolved runtime configuration for a single OneSIG service entry."""
 
@@ -79,6 +173,7 @@ class OneSIGRuntimeConfig:
         oaep_hash: str,
         verify_ssl: bool,
         timeout: int,
+        persist_cookies: bool = DEFAULT_PERSIST_COOKIES,
     ) -> None:
         self.base_url = base_url
         self.api_prefix = api_prefix
@@ -87,6 +182,7 @@ class OneSIGRuntimeConfig:
         self.oaep_hash = oaep_hash
         self.verify_ssl = verify_ssl
         self.timeout = timeout
+        self.persist_cookies = persist_cookies
 
     @property
     def session_key(self) -> str:
@@ -152,10 +248,8 @@ def _resolve_runtime_config() -> OneSIGRuntimeConfig:
     if oaep_hash not in {"sha1", "sha256"}:
         oaep_hash = DEFAULT_OAEP_HASH
 
-    verify_ssl = _coerce_bool(
-        raw.get("verify_ssl", raw.get("verifySsl", os.getenv("ONESIG_VERIFY_SSL"))),
-        default=DEFAULT_VERIFY_SSL,
-    )
+    verify_ssl = _resolve_verify_ssl(raw)
+    persist_cookies = _resolve_persist_cookies(raw)
 
     timeout_raw = raw.get("timeout", DEFAULT_TIMEOUT)
     try:
@@ -171,6 +265,7 @@ def _resolve_runtime_config() -> OneSIGRuntimeConfig:
         oaep_hash=oaep_hash,
         verify_ssl=verify_ssl,
         timeout=timeout,
+        persist_cookies=persist_cookies,
     )
 
 
@@ -204,6 +299,168 @@ def _ssl_context(verify_ssl: bool) -> Any:
     return ctx
 
 
+# ---------------------------------------------------------------------------
+# Cookie persistence (.secret.json round-trip)
+# ---------------------------------------------------------------------------
+# OneSIG sessions are cookie-based and the device hands out a session cookie
+# only after the captcha → pubkey → /v3/login dance. To avoid re-running that
+# 4-RTT dance after every flocks restart we serialise the cookie jar to the
+# existing ``~/.flocks/config/.secret.json`` (mode 0600) under a per-device
+# secret_id, then re-hydrate it when a fresh ``OneSIGSession`` is constructed.
+#
+# Format choices intentionally avoid ``aiohttp.CookieJar.save/load`` (pickle):
+#   - JSON keeps the file human-readable for ops debugging.
+#   - JSON is immune to deserialisation-as-RCE if .secret.json ever leaks
+#     write privileges.
+#   - The shape is versioned so future changes can simply bump
+#     ``_COOKIE_SNAPSHOT_VERSION`` and discard older snapshots.
+
+
+def _cookie_secret_id(base_url: str, username: str) -> str:
+    """Stable, filesystem-/JSON-safe secret id for a (device, account) pair.
+
+    The pair is hashed (sha1, truncated) so URL/IP/port special chars never
+    leak into the secret_id namespace, and so the same secret slot is reused
+    across reconfigurations of the same logical session.
+    """
+    digest = hashlib.sha1(
+        f"{base_url}|{username}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{_COOKIE_SECRET_PREFIX}{digest}"
+
+
+def _cookies_to_snapshot(jar: aiohttp.CookieJar) -> list[dict[str, Any]]:
+    """Snapshot every Morsel in ``jar`` into a list of plain JSON-able dicts."""
+    rows: list[dict[str, Any]] = []
+    for morsel in jar:  # iterates over http.cookies.Morsel
+        rows.append(
+            {
+                "name": morsel.key,
+                "value": morsel.value,
+                "domain": morsel["domain"] or "",
+                "path": morsel["path"] or "/",
+                "expires": morsel["expires"] or "",
+                "secure": bool(morsel["secure"]),
+                "httponly": bool(morsel["httponly"]),
+            }
+        )
+    return rows
+
+
+def _is_cookie_expired(expires: str, *, now: Optional[float] = None) -> bool:
+    """Best-effort check on RFC 1123 ``Expires`` string. Unparseable → False
+    (defer to aiohttp's own jar logic; we don't want to silently drop cookies
+    just because the device returned a non-standard expires format)."""
+    if not expires:
+        return False
+    try:
+        exp_dt = parsedate_to_datetime(expires)
+    except (TypeError, ValueError):
+        return False
+    if exp_dt is None:
+        return False
+    ts = exp_dt.timestamp()
+    return ts <= (now if now is not None else time.time())
+
+
+def _snapshot_into_jar(
+    jar: aiohttp.CookieJar,
+    rows: list[dict[str, Any]],
+    base_url: str,
+) -> int:
+    """Inflate ``rows`` (output of :func:`_cookies_to_snapshot`) back into
+    an aiohttp jar. Already-expired cookies are silently dropped. Returns
+    the number of cookies actually injected."""
+    if not rows:
+        return 0
+    sc: SimpleCookie = SimpleCookie()
+    injected = 0
+    for row in rows:
+        name = row.get("name") or ""
+        if not name:
+            continue
+        if _is_cookie_expired(row.get("expires") or ""):
+            continue
+        value = row.get("value") or ""
+        sc[name] = value
+        m: Morsel = sc[name]
+        if row.get("domain"):
+            m["domain"] = row["domain"]
+        if row.get("path"):
+            m["path"] = row["path"]
+        if row.get("expires"):
+            m["expires"] = row["expires"]
+        if row.get("secure"):
+            m["secure"] = True
+        if row.get("httponly"):
+            m["httponly"] = True
+        injected += 1
+    if injected == 0:
+        return 0
+    # response_url seeds the jar's domain/path bookkeeping for any cookie
+    # that didn't carry an explicit Domain attribute (typical for OneSIG,
+    # which scopes cookies to the device host).
+    try:
+        response_url = URL(base_url)
+    except Exception:
+        response_url = URL("http://localhost")
+    jar.update_cookies(sc, response_url=response_url)
+    return injected
+
+
+def _load_cookie_snapshot(secret_id: str) -> Optional[dict[str, Any]]:
+    """Pull a previously persisted snapshot dict, dropping malformed or
+    fully-expired payloads. Returns ``None`` when there is nothing usable.
+
+    Failure modes (corrupt JSON, version mismatch, all cookies expired) are
+    swallowed so a poisoned secret never breaks the calling tool — the
+    handler will simply fall through to a fresh login."""
+    raw = _get_secret_manager().get(secret_id)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("version") != _COOKIE_SNAPSHOT_VERSION:
+        return None
+    cookies = data.get("cookies")
+    if not isinstance(cookies, list):
+        return None
+    fresh = [
+        c for c in cookies
+        if isinstance(c, dict)
+        and c.get("name")
+        and not _is_cookie_expired(c.get("expires") or "")
+    ]
+    if not fresh:
+        return None
+    data["cookies"] = fresh
+    return data
+
+
+def _save_cookie_snapshot(secret_id: str, snapshot: dict[str, Any]) -> bool:
+    """Persist a snapshot. Best-effort: returns False on I/O failure but
+    never raises — cookie persistence is an optimisation, not a hard
+    requirement of the request path."""
+    try:
+        _get_secret_manager().set(
+            secret_id, json.dumps(snapshot, separators=(",", ":"))
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _delete_cookie_snapshot(secret_id: str) -> bool:
+    try:
+        return _get_secret_manager().delete(secret_id)
+    except Exception:
+        return False
+
+
 class OneSIGSession:
     """Cookie-based session for a OneSIG device.
 
@@ -217,14 +474,82 @@ class OneSIGSession:
         self._session: Optional[aiohttp.ClientSession] = None
         self._logged_in = False
         self._login_lock = asyncio.Lock()
+        # Cookies waiting to be injected into the jar at the next
+        # ``_ensure_session`` call. Populated synchronously from
+        # ``.secret.json`` here so that tests / dispatchers can observe
+        # ``_logged_in`` immediately after construction.
+        self._pending_cookies: Optional[list[dict[str, Any]]] = None
+        self._cookies_loaded = False
+
+        if self.config.persist_cookies:
+            snapshot = _load_cookie_snapshot(self._cookie_secret_id)
+            cookies = (snapshot or {}).get("cookies") if snapshot else None
+            if cookies:
+                self._pending_cookies = cookies
+                # Trust the persisted cookie. If the device has rotated /
+                # invalidated it the existing 401-or-1019..1022 auto-relogin
+                # path in ``request()`` will repair the session on first
+                # business call. No extra RTT lost vs. unconditional login.
+                self._logged_in = True
+
+    @property
+    def _cookie_secret_id(self) -> str:
+        return _cookie_secret_id(self.config.base_url, self.config.username)
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             jar = aiohttp.CookieJar(unsafe=True)
+            if self._pending_cookies and not self._cookies_loaded:
+                try:
+                    _snapshot_into_jar(
+                        jar, self._pending_cookies, self.config.base_url
+                    )
+                except Exception:
+                    # Bad on-disk snapshot must not block the request path:
+                    # forget the persisted cookies and force a clean login.
+                    self._logged_in = False
+                self._cookies_loaded = True
+                self._pending_cookies = None
             self._session = aiohttp.ClientSession(cookie_jar=jar)
         return self._session
 
+    def _persist_cookies(self) -> None:
+        """Snapshot the current jar to ``.secret.json``. Called after every
+        successful login / re-login. No-op when persistence is disabled or
+        the jar is empty.
+
+        Best-effort: any exception (missing ``cookie_jar`` on a swapped-in
+        test double, FS error, JSON encode bug, …) is swallowed so the
+        request path is never blocked by a persistence side-effect."""
+        if not self.config.persist_cookies:
+            return
+        if self._session is None or self._session.closed:
+            return
+        try:
+            jar = getattr(self._session, "cookie_jar", None)
+            if jar is None:
+                return
+            rows = _cookies_to_snapshot(jar)
+            if not rows:
+                return
+            snapshot = {
+                "version": _COOKIE_SNAPSHOT_VERSION,
+                "session_key": self.config.session_key,
+                "saved_at": int(time.time()),
+                "cookies": rows,
+            }
+            _save_cookie_snapshot(self._cookie_secret_id, snapshot)
+        except Exception:
+            return
+
+    def _drop_persisted_cookies(self) -> None:
+        if self.config.persist_cookies:
+            _delete_cookie_snapshot(self._cookie_secret_id)
+
     async def close(self) -> None:
+        # ``close`` is for graceful shutdown (e.g. process exit). It does NOT
+        # drop the persisted cookie — that's the whole point of persistence.
+        # Use ``logout()`` for an explicit invalidation instead.
         if self._session is not None and not self._session.closed:
             await self._session.close()
         self._session = None
@@ -276,8 +601,24 @@ class OneSIGSession:
             )
             pubkey = pubkey_data.get("pubkey")
             if not pubkey:
+                # 把 status / URL / body 摘要都拼进错误里：拿到 404 一般就是
+                # ``api_prefix`` 配错（v2.5.x 大部分部署不带 ``/api``）；拿到
+                # 5xx / connection error 才是真的 device 不通。
+                hint = ""
+                if isinstance(pubkey_info, dict) and pubkey_info.get("_status"):
+                    status = pubkey_info["_status"]
+                    if status == 404:
+                        hint = (
+                            "（HTTP 404，通常意味着 `api_prefix` 配置不对 —— "
+                            "OneSIG v2.5.x 大多数部署需要把 `api_prefix` 留空"
+                            "或显式设成 `\"\"`，少数 reverse-proxy 部署才需要 "
+                            "`\"/api\"`。）"
+                        )
+                    else:
+                        hint = f"（HTTP {status}）"
                 raise ValueError(
-                    f"无法从 /v3/pubkey 获取 RSA 公钥：{pubkey_info!r}"
+                    f"无法从 {self.config.build_url('/v3/pubkey')} 获取 RSA 公钥{hint}："
+                    f"{pubkey_info!r}"
                 )
 
             try:
@@ -333,6 +674,10 @@ class OneSIGSession:
                 )
 
             self._logged_in = True
+            # Persist immediately on successful login (before /v3/account so
+            # cookie survives even if the verification call fails). Best-
+            # effort: failures here never break the calling tool.
+            self._persist_cookies()
             account_resp = await self._raw_request_json("GET", "/v3/account")
             if (
                 isinstance(account_resp, dict)
@@ -346,6 +691,10 @@ class OneSIGSession:
             resp = await self._raw_request_json("POST", "/v3/logout", json_body={})
         finally:
             self._logged_in = False
+            # Logout invalidates the cookie server-side; remove the local
+            # snapshot too so the next process doesn't try to reuse a dead
+            # session and pay an extra round-trip discovering it.
+            self._drop_persisted_cookies()
         if isinstance(resp, dict):
             return resp
         return {}
@@ -375,9 +724,23 @@ class OneSIGSession:
         async with session.request(method.upper(), url, **kwargs) as resp:
             text = await resp.text()
             try:
-                return await resp.json(content_type=None)
+                parsed = await resp.json(content_type=None)
             except Exception:
-                return {"_status": resp.status, "_text": text[:500]}
+                parsed = None
+            # ``aiohttp.ClientResponse.json(content_type=None)`` returns
+            # ``None`` for empty / whitespace-only bodies *without raising*,
+            # which used to surface as the very confusing
+            #   ``无法从 /v3/pubkey 获取 RSA 公钥：None``
+            # 在错误日志里 — 看不到 status / URL，根本没法定位到「``/api`` 前
+            # 缀错了导致 404」之类的根因。这里把 ``None`` 也统一塞进 fallback
+            # 字典，让上层的报错带上 status 和 body 摘要。
+            if parsed is None or not isinstance(parsed, (dict, list)):
+                return {
+                    "_status": resp.status,
+                    "_url": str(resp.url),
+                    "_text": text[:500],
+                }
+            return parsed
 
     async def encrypt_with_pubkey(self, plain: str) -> str:
         """Fetch the latest /v3/pubkey and RSA-OAEP encrypt the given plaintext.
@@ -539,9 +902,22 @@ class ActionSpec:
 
         body: Optional[Any] = None
         if self.method == "GET" and not self.multipart:
+            # OneSIG 的 GET list 接口对 query 里的分页/过滤参数要求很严
+            # （e.g. /v3/apikey/list 不带 pageNo/pageSize 直接回 1004）。
+            # body_keys 里声明过的字段先入 query；剩余非保留、非已声明的字段
+            # 也透传进 query，避免调用方传了 pageNo/severity 这类常见过滤
+            # 项被 handler 静默丢掉。
             for key in self.body_keys:
                 if params.get(key) is not None:
                     query[key] = params[key]
+            for k, v in params.items():
+                if v is None:
+                    continue
+                if k in _RESERVED_PARAM_KEYS:
+                    continue
+                if k in self.query_keys or k in self.body_keys:
+                    continue
+                query[k] = v
         else:
             if self.passthrough_body:
                 body = {
@@ -608,9 +984,23 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "overview_export_event_outbound": ActionSpec(
         "POST", "/v3/overview/exportEventOutbound", passthrough_body=True, binary=True
     ),
-    "overview_asset_brief": ActionSpec("POST", "/v3/overview/assetBrief", passthrough_body=True),
+    # OneSIG v2.5.3 实测：文档标 `incIntervalSec` 选填，但服务端实际必填，
+    # 不带直接回 1004 "请求数据非法"。前端总是从页面 ref 取轮询间隔传入。
+    "overview_asset_brief": ActionSpec(
+        "POST",
+        "/v3/overview/assetBrief",
+        passthrough_body=True,
+        required=["startTime", "endTime", "incIntervalSec"],
+    ),
     "overview_asset_top": ActionSpec("POST", "/v3/overview/assetTop", passthrough_body=True),
-    "overview_event_inbound_agg": ActionSpec("POST", "/v3/overview/eventInboundAgg", passthrough_body=True),
+    # OneSIG v2.5.3 实测：除文档明示的 startTime/endTime 外，`type` 与
+    # `pageNo`/`pageSize` 也是必填，不带任何一个均回 1004。
+    "overview_event_inbound_agg": ActionSpec(
+        "POST",
+        "/v3/overview/eventInboundAgg",
+        passthrough_body=True,
+        required=["startTime", "endTime", "type", "pageNo", "pageSize"],
+    ),
     "overview_export_event_inbound_agg": ActionSpec(
         "POST", "/v3/overview/exportEventInboundAgg", passthrough_body=True, binary=True
     ),
@@ -619,9 +1009,22 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
         "POST", "/v3/overview/exportEventOutboundAgg", passthrough_body=True, binary=True
     ),
     "overview_event_recent_agg": ActionSpec("POST", "/v3/overview/eventRecentAgg", passthrough_body=True),
-    "overview_event_trend": ActionSpec("POST", "/v3/overview/eventTrend", passthrough_body=True),
+    # OneSIG v2.5.3 实测：`interval` 文档标选填，实际必填（"1 DAY" / "1 HOUR"），
+    # 否则回 1004。前端按时间窗自动派发 "1 DAY" 或 "1 HOUR"。
+    "overview_event_trend": ActionSpec(
+        "POST",
+        "/v3/overview/eventTrend",
+        passthrough_body=True,
+        required=["startTime", "endTime", "interval"],
+    ),
     "overview_traffic_trend": ActionSpec("POST", "/v3/overview/trafficTrend", passthrough_body=True),
-    "overview_stat": ActionSpec("POST", "/v3/overview/stat", passthrough_body=True),
+    # OneSIG v2.5.3 实测：`incIntervalSec` 文档标选填，实际必填。
+    "overview_stat": ActionSpec(
+        "POST",
+        "/v3/overview/stat",
+        passthrough_body=True,
+        required=["startTime", "endTime", "incIntervalSec"],
+    ),
     "overview_threat_type_proportion": ActionSpec(
         "POST", "/v3/overview/threatTypeProportion", passthrough_body=True
     ),
@@ -638,7 +1041,15 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "set_overview_config": ActionSpec("PUT", "/v3/setting/overviewConfig", passthrough_body=True),
     # status
     "device_platform_status": ActionSpec("GET", "/v3/device/platformStatus"),
-    "device_system_status": ActionSpec("GET", "/v3/device/systemStatus"),
+    # OneSIG v2.5.3 文档：模式 A 用 (time, module)；模式 B 用 (startTime, endTime,
+    # module, ifName)。`module` 必传但前端在 index.jsx 初次批拉时传空串即可，
+    # 因此这里把 `time` 列为强制必填，调用方至少要给一个时间锚。
+    "device_system_status": ActionSpec(
+        "GET",
+        "/v3/device/systemStatus",
+        body_keys=["time", "module", "startTime", "endTime", "ifName"],
+        required=["time"],
+    ),
     "device_network_status": ActionSpec("GET", "/v3/device/networkStatus"),
     "common_interface_list": ActionSpec("GET", "/v3/common/interfaceList"),
     "basic_cpu_attr": ActionSpec("GET", "/v3/basic/cpuAttr"),
@@ -656,9 +1067,19 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "alert_host_export": ActionSpec(
         "POST", "/v3/alertHost/export", passthrough_body=True, binary=True
     ),
-    "alert_host_detail": ActionSpec("POST", "/v3/alertHost/detail", passthrough_body=True),
+    # OneSIG 文档 monitoringHostdetail.md：必填 startTime + endTime + source
+    # （source = 当前告警主机 IP，由列表行 `detailData.source` 带入）。
+    "alert_host_detail": ActionSpec(
+        "POST",
+        "/v3/alertHost/detail",
+        passthrough_body=True,
+        required=["startTime", "endTime", "source"],
+    ),
     "alert_host_detail_list": ActionSpec(
-        "POST", "/v3/alertHost/detail/list", passthrough_body=True
+        "POST",
+        "/v3/alertHost/detail/list",
+        passthrough_body=True,
+        required=["startTime", "endTime", "source"],
     ),
     "alert_host_detail_export": ActionSpec(
         "POST", "/v3/alertHost/detail/export", passthrough_body=True, binary=True
@@ -677,12 +1098,27 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "event_inbound_export": ActionSpec(
         "POST", "/v3/event/inbound/export", passthrough_body=True, binary=True
     ),
-    "event_inbound_detail": ActionSpec("POST", "/v3/event/inbound/detail", passthrough_body=True),
+    # OneSIG 文档 monitoringInboundThreat.md：必填 startTime + endTime；
+    # 实测仅传时间窗仍可能 1004，因为入站详情弹窗在生产路径上始终带 `threatTag`
+    # 等行级威胁元数据，建议调用方一并传入 (`threatName` / `threatTag` /
+    # `threatType` 三选一非空)。
+    "event_inbound_detail": ActionSpec(
+        "POST",
+        "/v3/event/inbound/detail",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
+    ),
     "event_inbound_detail_trend": ActionSpec(
-        "POST", "/v3/event/inbound/detail/trend", passthrough_body=True
+        "POST",
+        "/v3/event/inbound/detail/trend",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
     ),
     "event_inbound_detail_list": ActionSpec(
-        "POST", "/v3/event/inbound/detail/list", passthrough_body=True
+        "POST",
+        "/v3/event/inbound/detail/list",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
     ),
     "event_inbound_detail_export": ActionSpec(
         "POST", "/v3/event/inbound/detail/export", passthrough_body=True, binary=True
@@ -705,12 +1141,25 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "event_outbound_export": ActionSpec(
         "POST", "/v3/event/outbound/export", passthrough_body=True, binary=True
     ),
-    "event_outbound_detail": ActionSpec("POST", "/v3/event/outbound/detail", passthrough_body=True),
+    # OneSIG 文档 monitoringOutboundThreat.md：必填 startTime + endTime；
+    # 与入站系列同理，弹窗内联动行上下文（`threatName` 等）后才能稳定返回数据。
+    "event_outbound_detail": ActionSpec(
+        "POST",
+        "/v3/event/outbound/detail",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
+    ),
     "event_outbound_detail_trend": ActionSpec(
-        "POST", "/v3/event/outbound/detail/trend", passthrough_body=True
+        "POST",
+        "/v3/event/outbound/detail/trend",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
     ),
     "event_outbound_detail_list": ActionSpec(
-        "POST", "/v3/event/outbound/detail/list", passthrough_body=True
+        "POST",
+        "/v3/event/outbound/detail/list",
+        passthrough_body=True,
+        required=["startTime", "endTime"],
     ),
     "event_outbound_detail_export": ActionSpec(
         "POST", "/v3/event/outbound/detail/export", passthrough_body=True, binary=True
@@ -743,7 +1192,13 @@ MONITORING_ACTION_SPECS: dict[str, ActionSpec] = {
     "ips_rule_create": ActionSpec("POST", "/v3/ips/rule", passthrough_body=True),
     "ips_rule_apply": ActionSpec("POST", "/v3/ips/rule/apply", passthrough_body=True),
     "ips_ruleset_namelist": ActionSpec("POST", "/v3/ips/ruleset/namelist", passthrough_body=True),
-    "ips_ruleset_referred": ActionSpec("POST", "/v3/ips/ruleset/referred", passthrough_body=True),
+    # OneSIG 文档：必填 ruleId + assetIp（用于查询「当前」生效的规则集名称）。
+    "ips_ruleset_referred": ActionSpec(
+        "POST",
+        "/v3/ips/ruleset/referred",
+        passthrough_body=True,
+        required=["ruleId", "assetIp"],
+    ),
     "logaccess_stat": ActionSpec("GET", "/v3/logAccess/stat"),
     "get_dnslog_config": ActionSpec("GET", "/v3/setting/dnslogConfig"),
 }
@@ -773,7 +1228,13 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "blacklist_add": ActionSpec("POST", "/v3/globalBlacklist", passthrough_body=True),
     "blacklist_update": ActionSpec("PUT", "/v3/globalBlacklist", passthrough_body=True),
     "blacklist_delete": ActionSpec("DELETE", "/v3/globalBlacklist", passthrough_body=True),
-    "blacklist_check": ActionSpec("POST", "/v3/globalBlacklist/check", passthrough_body=True),
+    # OneSIG 文档：必填 blackList（待校验的黑名单对象数组）。
+    "blacklist_check": ActionSpec(
+        "POST",
+        "/v3/globalBlacklist/check",
+        passthrough_body=True,
+        required=["blackList"],
+    ),
     "blacklist_export": ActionSpec(
         "POST", "/v3/globalBlacklist/export", passthrough_body=True, binary=True
     ),
@@ -784,8 +1245,13 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
         "DELETE", "/v3/globalBlacklist/remove", passthrough_body=True
     ),
     # multi-block
+    # OneSIG 文档：必填 name + startTime + endTime + pageNo + pageSize；
+    # `name` 缺失时直接 1004。
     "multiblock_executelog_list": ActionSpec(
-        "POST", "/v3/multiblock/executelog", passthrough_body=True
+        "POST",
+        "/v3/multiblock/executelog",
+        passthrough_body=True,
+        required=["name", "startTime", "endTime", "pageNo", "pageSize"],
     ),
     "multiblock_executelog_export": ActionSpec(
         "POST", "/v3/multiblock/executelog/export", passthrough_body=True, binary=True
@@ -802,11 +1268,27 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "multiblock_rule_list": ActionSpec(
         "POST", "/v3/multiblock/rule/list", passthrough_body=True
     ),
+    # OneSIG 文档：必填 name（多维封锁规则名称）。
     "multiblock_rule_get": ActionSpec(
-        "POST", "/v3/multiblock/rule/get", passthrough_body=True
+        "POST",
+        "/v3/multiblock/rule/get",
+        passthrough_body=True,
+        required=["name"],
     ),
+    # OneSIG 文档：预运行需带规则核心字段；前端在发起前会移除 blockTime/
+    # blockDirection/showCommit。
     "multiblock_rule_preview": ActionSpec(
-        "POST", "/v3/multiblock/rule/preview", passthrough_body=True
+        "POST",
+        "/v3/multiblock/rule/preview",
+        passthrough_body=True,
+        required=[
+            "name",
+            "detectTimeNum",
+            "detectTimeUnit",
+            "detectDirection",
+            "detectGroups",
+            "blockType",
+        ],
     ),
     "multiblock_rule_create": ActionSpec(
         "POST", "/v3/multiblock/rule", passthrough_body=True
@@ -818,14 +1300,30 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "apikey_delete": ActionSpec("DELETE", "/v3/apikey", passthrough_body=True),
     "apikey_update": ActionSpec("PUT", "/v3/apikey", passthrough_body=True),
     "apikey_create": ActionSpec("POST", "/v3/apikey", passthrough_body=True),
-    "apikey_list": ActionSpec("GET", "/v3/apikey/list"),
-    "apikey_secret": ActionSpec("GET", "/v3/apikey/secret", body_keys=["uniqueId"]),
+    # OneSIG 服务端 GET list 接口要求 query 里至少带 pageNo/pageSize，
+    # 否则统一回 responseCode=1004 "请求数据非法"。
+    "apikey_list": ActionSpec(
+        "GET", "/v3/apikey/list", body_keys=["pageNo", "pageSize"]
+    ),
+    # OneSIG 文档 strategyApi.md：query 必填 key + password
+    # （二次校验登录密码用于查看 secret，敏感字段勿入日志）。
+    "apikey_secret": ActionSpec(
+        "GET",
+        "/v3/apikey/secret",
+        body_keys=["key", "password"],
+        required=["key", "password"],
+    ),
     # syslog auto-blacklist
     "auto_blacklist_delete": ActionSpec(
         "DELETE", "/v3/autoBlacklist", passthrough_body=True
     ),
+    # OneSIG 文档：必填 name + port + srcIp + protocol + direction
+    # （步骤 1 → 步骤 2 之间的接入配置重复性校验）。
     "auto_blacklist_check": ActionSpec(
-        "POST", "/v3/autoBlacklist/check", passthrough_body=True
+        "POST",
+        "/v3/autoBlacklist/check",
+        passthrough_body=True,
+        required=["name", "port", "srcIp", "protocol", "direction"],
     ),
     "auto_blacklist_create": ActionSpec(
         "POST", "/v3/autoBlacklist", passthrough_body=True
@@ -836,18 +1334,40 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "auto_blacklist_list": ActionSpec(
         "POST", "/v3/autoBlacklist/list", passthrough_body=True
     ),
+    # OneSIG 文档：query 仅 `srcIp` 必填（来自 syslog 接入配置的源 IP）。
     "auto_blacklist_trend": ActionSpec(
-        "GET", "/v3/autoBlacklist/trend", body_keys=["startTime", "endTime"]
+        "GET",
+        "/v3/autoBlacklist/trend",
+        body_keys=["srcIp", "startTime", "endTime"],
+        required=["srcIp"],
     ),
+    # OneSIG 文档：必填 srcIp + protocol + direction（入站/出站）。
     "auto_blacklist_sample": ActionSpec(
-        "POST", "/v3/autoBlacklist/sample", passthrough_body=True
+        "POST",
+        "/v3/autoBlacklist/sample",
+        passthrough_body=True,
+        required=["srcIp", "protocol", "direction"],
     ),
     # ftp/sftp linkage
     "linkage_delete": ActionSpec("DELETE", "/v3/linkage", passthrough_body=True),
     "linkage_create": ActionSpec("POST", "/v3/linkage", passthrough_body=True),
     "linkage_update": ActionSpec("PUT", "/v3/linkage", passthrough_body=True),
     "linkage_enable": ActionSpec("POST", "/v3/linkage/enable", passthrough_body=True),
-    "linkage_info": ActionSpec("GET", "/v3/linkage/info", body_keys=["uniqueId"]),
+    # 注意：尽管命名是 "info"，OneSIG 服务端在响应前会触发一次 FTP/SFTP
+    # 连通性测试（v2.5.3 实测：传 uniqueId=dummy 直接返回 1309
+    # "FTP联通测试失败[dummy]"）。换言之这是个有副作用的接口，仅在确
+    # 实需要重新探活时再调用，普通"读配置"用 linkage_list 即可。
+    # OneSIG 文档：query 必填 uniqueId（联动配置 ID）；password 选填，
+    # 仅在 FTPAccount 查看密钥时拼接。
+    # 注意：尽管命名是 "info"，OneSIG 服务端在响应前会触发一次 FTP/SFTP
+    # 连通性测试（v2.5.3 实测：传 uniqueId=dummy 直接返回 1309
+    # "FTP联通测试失败[dummy]"）。换言之这是个有副作用的接口。
+    "linkage_info": ActionSpec(
+        "GET",
+        "/v3/linkage/info",
+        body_keys=["uniqueId", "password"],
+        required=["uniqueId"],
+    ),
     "linkage_list": ActionSpec("POST", "/v3/linkage/list", passthrough_body=True),
     "linkage_template": ActionSpec("GET", "/v3/linkage/template", binary=True),
     "linkage_test": ActionSpec("POST", "/v3/linkage/test", passthrough_body=True),
@@ -859,7 +1379,13 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "ips_ruleset_create": ActionSpec("POST", "/v3/ips/ruleset", passthrough_body=True),
     "ips_ruleset_update": ActionSpec("PUT", "/v3/ips/ruleset", passthrough_body=True),
     "ips_ruleset_delete": ActionSpec("DELETE", "/v3/ips/ruleset", passthrough_body=True),
-    "ips_ruleset_info": ActionSpec("POST", "/v3/ips/ruleset/info", passthrough_body=True),
+    # OneSIG 文档：必填 name（IPS 规则集名称）。
+    "ips_ruleset_info": ActionSpec(
+        "POST",
+        "/v3/ips/ruleset/info",
+        passthrough_body=True,
+        required=["name"],
+    ),
     "ips_ruleset_list": ActionSpec("POST", "/v3/ips/ruleset/list", passthrough_body=True),
     "ips_ruleset_namelist": ActionSpec(
         "POST", "/v3/ips/ruleset/namelist", passthrough_body=True
@@ -919,8 +1445,13 @@ STRATEGY_ACTION_SPECS: dict[str, ActionSpec] = {
     "port_protect_port_export": ActionSpec(
         "POST", "/v3/portProtectGroup/port/export", passthrough_body=True, binary=True
     ),
+    # OneSIG 文档：必填 groupName + pageNo + pageSize；search 超过 32 字符
+    # 前端拦截。
     "port_protect_port_list": ActionSpec(
-        "POST", "/v3/portProtectGroup/port/list", passthrough_body=True
+        "POST",
+        "/v3/portProtectGroup/port/list",
+        passthrough_body=True,
+        required=["groupName", "pageNo", "pageSize"],
     ),
     "port_protect_port_onekey_import": ActionSpec(
         "POST", "/v3/portProtectGroup/port/onekeyImport", passthrough_body=True
@@ -992,8 +1523,14 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
     "alert_policy_export": ActionSpec(
         "POST", "/v3/alert/policy/export", passthrough_body=True, binary=True
     ),
+    # OneSIG 文档：必填 search + type；
+    #   - syslog: search 形如 "UDP:192.168.0.1:514"
+    #   - webhook: search 形如 "type:url"
     "alert_policy_find_by_config": ActionSpec(
-        "POST", "/v3/alert/policy/findByConfig", passthrough_body=True
+        "POST",
+        "/v3/alert/policy/findByConfig",
+        passthrough_body=True,
+        required=["search", "type"],
     ),
     "alert_policy_object": ActionSpec(
         "POST", "/v3/alert/policy/object", passthrough_body=True
@@ -1081,8 +1618,13 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
         "POST", "/v3/tls/cert/set_default", passthrough_body=True
     ),
     "tls_detect_list": ActionSpec("POST", "/v3/tls/detect/list", passthrough_body=True),
+    # OneSIG 文档：必填 server + port + orderBy + sortBy
+    # （父行 serverAddress/serverPort，固定 desc / updateTime）。
     "tls_detect_list_detail": ActionSpec(
-        "POST", "/v3/tls/detect/list/detail", passthrough_body=True
+        "POST",
+        "/v3/tls/detect/list/detail",
+        passthrough_body=True,
+        required=["server", "port", "orderBy", "sortBy"],
     ),
     "tls_detect_delete": ActionSpec("DELETE", "/v3/tls/detect", passthrough_body=True),
     "tls_detect_group": ActionSpec("POST", "/v3/tls/detect/group", passthrough_body=True),
@@ -1104,7 +1646,13 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
         "POST", "/v3/interface/check/loop", passthrough_body=True
     ),
     "interface_relation_list": ActionSpec("GET", "/v3/interface/relation/list"),
-    "interface_select_list": ActionSpec("GET", "/v3/interface/select/list"),
+    # OneSIG 文档：必填 workMode（listen/bridge/vline）；不传直接 1004。
+    "interface_select_list": ActionSpec(
+        "GET",
+        "/v3/interface/select/list",
+        body_keys=["workMode", "name", "itemName"],
+        required=["workMode"],
+    ),
     "interface_virtual_line_create": ActionSpec(
         "POST", "/v3/interface/virtualLine", passthrough_body=True
     ),
@@ -1176,7 +1724,10 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
     "ha_compare_config": ActionSpec("POST", "/v3/ha/compareConfig", passthrough_body=True),
     "ha_switching": ActionSpec("PUT", "/v3/ha/switching", passthrough_body=True),
     "ha_sync_config": ActionSpec("POST", "/v3/ha/syncConfig", passthrough_body=True),
-    "ha_sync_status": ActionSpec("GET", "/v3/ha/syncStatus"),
+    # OneSIG 文档：必填 syncId（由 ha_sync_config 返回的任务 ID）。
+    "ha_sync_status": ActionSpec(
+        "GET", "/v3/ha/syncStatus", body_keys=["syncId"], required=["syncId"]
+    ),
     # centralized control (OneCC)
     "onecc_status": ActionSpec("GET", "/v3/setting/oneccConfig/status"),
     "get_onecc_config": ActionSpec("GET", "/v3/setting/oneccConfig"),
@@ -1241,11 +1792,23 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
     "backup_import": ActionSpec(
         "POST", "/v3/backup/import", passthrough_body=True, multipart=True
     ),
-    "logaccess_list": ActionSpec("POST", "/v3/logAccess/list", passthrough_body=True),
+    # OneSIG 文档：必填 pageNo + pageSize + type（"DNS" 或 "DHCP"）。
+    "logaccess_list": ActionSpec(
+        "POST",
+        "/v3/logAccess/list",
+        passthrough_body=True,
+        required=["pageNo", "pageSize", "type"],
+    ),
     "logaccess_delete": ActionSpec("DELETE", "/v3/logAccess", passthrough_body=True),
     "logaccess_create": ActionSpec("POST", "/v3/logAccess", passthrough_body=True),
     "logaccess_update": ActionSpec("PUT", "/v3/logAccess", passthrough_body=True),
-    "logaccess_sample": ActionSpec("POST", "/v3/logAccess/sample", passthrough_body=True),
+    # OneSIG 文档：必填 srcIp + protocol + type（"DNS" 或 "DHCP"）。
+    "logaccess_sample": ActionSpec(
+        "POST",
+        "/v3/logAccess/sample",
+        passthrough_body=True,
+        required=["srcIp", "protocol", "type"],
+    ),
     "logaccess_test": ActionSpec("POST", "/v3/logAccess/test", passthrough_body=True),
     "logaccess_check": ActionSpec("GET", "/v3/logAccess/check", body_keys=["name"]),
     # system info
@@ -1288,8 +1851,13 @@ DEVICE_ACTION_SPECS: dict[str, ActionSpec] = {
 
 HELPER_ACTION_SPECS: dict[str, ActionSpec] = {
     "document_list": ActionSpec("POST", "/v3/document/list", passthrough_body=True),
+    # OneSIG 文档 helperDocs.md：query 必填 `id`（来自文档列表项），
+    # 而非 `fileName`。返回值是路径字符串（非对象），前端拼接 baseUrl 后 open。
     "document_preview": ActionSpec(
-        "GET", "/v3/document/preview", body_keys=["fileName"]
+        "GET",
+        "/v3/document/preview",
+        body_keys=["id"],
+        required=["id"],
     ),
     "product_news_get": ActionSpec("GET", "/v3/product/news"),
     "product_news_mark_read": ActionSpec(
