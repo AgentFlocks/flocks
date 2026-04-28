@@ -5,15 +5,37 @@ Complete reference for all agent-browser commands. For quick start and common pa
 ## Navigation
 
 ```bash
-agent-browser open <url>      # Navigate to URL (aliases: goto, navigate)
+agent-browser open            # Launch browser (no navigation); stays on about:blank.
+                              # Pair with `network route`, `cookies set --curl`, or
+                              # `addinitscript` to stage state before the first navigation.
+agent-browser open <url>      # Launch + navigate (aliases: goto, navigate)
                               # Supports: https://, http://, file://, about:, data://
                               # Auto-prepends https:// if no protocol given
 agent-browser back            # Go back
 agent-browser forward         # Go forward
 agent-browser reload          # Reload page
+agent-browser pushstate <url> # SPA client-side navigation. Auto-detects
+                              # window.next.router.push (triggers RSC fetch on Next.js);
+                              # falls back to history.pushState + popstate/navigate events.
 agent-browser close           # Close browser (aliases: quit, exit)
 agent-browser connect 9222    # Connect to browser via CDP port
 ```
+
+### Pre-navigation setup (one-turn batch)
+
+```bash
+agent-browser batch \
+  '["open"]' \
+  '["network","route","*","--abort","--resource-type","script"]' \
+  '["cookies","set","--curl","cookies.curl","--domain","localhost"]' \
+  '["navigate","http://localhost:3000/target"]'
+```
+
+`open` with no URL gives you a clean launch so any interception, cookies,
+or init scripts you register take effect on the *first* real navigation.
+Use for SSR-only debug (`--resource-type script`), protected-origin auth,
+or capturing fresh `react suspense`/`vitals` state without noise from a
+prior page.
 
 ## Snapshot (page analysis)
 
@@ -58,6 +80,7 @@ agent-browser get value @e1       # Get input value
 agent-browser get attr @e1 href   # Get attribute
 agent-browser get title           # Get page title
 agent-browser get url             # Get current URL
+agent-browser get cdp-url         # Get CDP WebSocket URL
 agent-browser get count ".item"   # Count matching elements
 agent-browser get box @e1         # Get bounding box
 agent-browser get styles @e1      # Get computed styles (font, color, bg, etc.)
@@ -129,6 +152,7 @@ agent-browser find nth 2 "a" hover
 
 ```bash
 agent-browser set viewport 1920 1080          # Set viewport size
+agent-browser set viewport 1920 1080 2        # 2x retina (same CSS size, higher res screenshots)
 agent-browser set device "iPhone 14"          # Emulate device
 agent-browser set geo 37.7749 -122.4194       # Set geolocation (alias: geolocation)
 agent-browser set offline on                  # Toggle offline mode
@@ -164,26 +188,82 @@ agent-browser network requests --filter api    # Filter requests
 ## Tabs and Windows
 
 ```bash
-agent-browser tab                 # List tabs
-agent-browser tab new [url]       # New tab
-agent-browser tab 2               # Switch to tab by index
-agent-browser tab close           # Close current tab
-agent-browser tab close 2         # Close tab by index
-agent-browser window new          # New window
+agent-browser tab                              # List tabs with tabId and label
+agent-browser tab new [url]                    # New tab
+agent-browser tab new --label docs [url]       # New tab with a memorable label
+agent-browser tab t2                           # Switch to tab by id
+agent-browser tab docs                         # Switch to tab by label
+agent-browser tab close                        # Close current tab
+agent-browser tab close t2                     # Close tab by id
+agent-browser tab close docs                   # Close tab by label
+agent-browser window new                       # New window
 ```
+
+Tab ids are stable strings of the form `t1`, `t2`, `t3`. They're never reused
+within a session, so the same id keeps referring to the same tab across
+commands. Positional integers are **not** accepted — `tab 2` errors with a
+teaching message; use `t2`.
+
+User-assigned labels (`docs`, `app`, `admin`) are interchangeable with ids
+everywhere a tab ref is accepted. Labels are the agent-friendly way to write
+multi-tab workflows:
+
+```bash
+agent-browser tab new --label docs https://docs.example.com
+agent-browser tab new --label app  https://app.example.com
+agent-browser tab docs                   # switch to docs
+agent-browser snapshot                   # populate refs for docs
+agent-browser click @e1                  # ref click on docs
+agent-browser tab app                    # switch to app
+agent-browser tab close docs             # close by label
+```
+
+Labels are never auto-generated, never rewritten on navigation, and must be
+unique within a session. To interact with another tab, switch to it first:
+the daemon maintains a single active tab, so refs (`@eN`) belong to the tab
+that was active when the snapshot ran.
 
 ## Frames
 
 ```bash
-agent-browser frame "#iframe"     # Switch to iframe
+agent-browser frame "#iframe"     # Switch to iframe by CSS selector
+agent-browser frame @e3           # Switch to iframe by element ref
 agent-browser frame main          # Back to main frame
 ```
 
+### Iframe support
+
+Iframes are detected automatically during snapshots. When the main-frame snapshot runs, `Iframe` nodes are resolved and their content is inlined beneath the iframe element in the output (one level of nesting; iframes within iframes are not expanded).
+
+```bash
+agent-browser snapshot -i
+# @e3 [Iframe] "payment-frame"
+#   @e4 [input] "Card number"
+#   @e5 [button] "Pay"
+
+# Interact directly — refs inside iframes already work
+agent-browser fill @e4 "4111111111111111"
+agent-browser click @e5
+
+# Or switch frame context for scoped snapshots
+agent-browser frame @e3               # Switch using element ref
+agent-browser snapshot -i             # Snapshot scoped to that iframe
+agent-browser frame main              # Return to main frame
+```
+
+The `frame` command accepts:
+- **Element refs** — `frame @e3` resolves the ref to an iframe element
+- **CSS selectors** — `frame "#payment-iframe"` finds the iframe by selector
+- **Frame name/URL** — matches against the browser's frame tree
+
 ## Dialogs
+
+By default, `alert` and `beforeunload` dialogs are automatically accepted so they never block the agent. `confirm` and `prompt` dialogs still require explicit handling. Use `--no-auto-dialog` to disable this behavior.
 
 ```bash
 agent-browser dialog accept [text]  # Accept dialog
 agent-browser dialog dismiss        # Dismiss dialog
+agent-browser dialog status         # Check if a dialog is currently open
 ```
 
 ## JavaScript
@@ -245,10 +325,54 @@ agent-browser console --clear             # Clear console
 agent-browser errors                      # View page errors
 agent-browser errors --clear              # Clear errors
 agent-browser highlight @e1               # Highlight element
+agent-browser inspect                     # Open Chrome DevTools for this session
 agent-browser trace start                 # Start recording trace
 agent-browser trace stop trace.zip        # Stop and save trace
 agent-browser profiler start              # Start Chrome DevTools profiling
 agent-browser profiler stop trace.json    # Stop and save profile
+```
+
+## React / Web Vitals
+
+Requires `--enable react-devtools` at launch for the `react ...` commands.
+`vitals` and `pushstate` are framework-agnostic.
+
+```bash
+agent-browser open --enable react-devtools <url>    # Launch with React hook installed
+agent-browser react tree                            # Full component tree
+agent-browser react inspect <fiberId>               # Props, hooks, state, source
+agent-browser react renders start                   # Begin re-render recording
+agent-browser react renders stop [--json]           # Stop and print render profile
+agent-browser react suspense [--only-dynamic] [--json]  # Suspense boundaries + classifier
+                                                         # --only-dynamic hides the "static" list
+agent-browser vitals [url] [--json]                 # LCP/CLS/TTFB/FCP/INP + hydration
+agent-browser pushstate <url>                       # SPA client-side nav (auto-detects Next router)
+```
+
+## Init scripts
+
+```bash
+agent-browser open --init-script <path>             # Register before first navigation (repeatable)
+agent-browser addinitscript <js>                    # Register at runtime (returns identifier)
+agent-browser removeinitscript <identifier>         # Remove a previously registered init script
+```
+
+## cURL cookie import
+
+```bash
+agent-browser cookies set --curl <file>                             # Auto-detects JSON/cURL/Cookie-header
+agent-browser cookies set --curl <file> --domain example.com        # Scope to a domain
+```
+
+Supported formats: JSON array of `{name, value}`, a cURL dump from
+DevTools -> Network -> Copy as cURL, or a bare Cookie header. Errors never
+echo cookie values.
+
+## Network route by resource type
+
+```bash
+agent-browser network route '*' --abort --resource-type script       # Block scripts only (SSR-lock pattern)
+agent-browser network route '*' --resource-type image,font --body '' # Stub images and fonts
 ```
 
 ## Environment Variables
@@ -257,7 +381,9 @@ agent-browser profiler stop trace.json    # Stop and save profile
 AGENT_BROWSER_SESSION="mysession"            # Default session name
 AGENT_BROWSER_EXECUTABLE_PATH="/path/chrome" # Custom browser path
 AGENT_BROWSER_EXTENSIONS="/ext1,/ext2"       # Comma-separated extension paths
+AGENT_BROWSER_INIT_SCRIPTS="/a.js,/b.js"     # Comma-separated init script paths
+AGENT_BROWSER_ENABLE="react-devtools"        # Comma-separated built-in init script features
 AGENT_BROWSER_PROVIDER="browserbase"         # Cloud browser provider
-AGENT_BROWSER_STREAM_PORT="9223"             # WebSocket streaming port
+AGENT_BROWSER_STREAM_PORT="9223"             # Override WebSocket streaming port (default: OS-assigned)
 AGENT_BROWSER_HOME="/path/to/agent-browser"  # Custom install location
 ```
