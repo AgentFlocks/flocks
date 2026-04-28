@@ -24,10 +24,10 @@ from flocks.utils.id import Identifier
 
 log = Log.create(service="tool.read")
 
-# Constants — keep output within the 10 K-char tool result budget
-DEFAULT_READ_LIMIT = 200
-MAX_LINE_LENGTH = 500
-MAX_BYTES = 8 * 1024  # 8 KB
+# Constants — keep file reads paginated while allowing larger local context.
+DEFAULT_READ_LIMIT = 2000
+MAX_LINE_LENGTH = 2000
+MAX_BYTES = 20 * 1024  # 20 KB
 
 # Binary file extensions
 BINARY_EXTENSIONS = {
@@ -47,9 +47,9 @@ Assume this tool is able to read all files on the machine. If the User provides 
 
 Usage:
 - The filePath parameter must be an absolute path, not a relative path
-- By default, it reads up to 200 lines starting from the beginning of the file
-- For files longer than 200 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=200, then offset=200 limit=200, etc.)
-- Any lines longer than 500 characters will be truncated
+- By default, it reads up to 2000 lines starting from the beginning of the file
+- For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
+- Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
@@ -194,7 +194,7 @@ async def _resolve_sandbox_file_path(ctx: ToolContext, filepath: str) -> tuple[O
         ToolParameter(
             name="limit",
             type=ParameterType.INTEGER,
-            description="The number of lines to read (defaults to 200)",
+            description="The number of lines to read (defaults to 2000)",
             required=False,
             default=DEFAULT_READ_LIMIT
         ),

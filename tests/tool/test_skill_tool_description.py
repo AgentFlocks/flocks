@@ -14,7 +14,7 @@ are exercised here:
    the FULL SKILL.md must come back unredacted. This is the load-on-demand
    counterpart of the truncated preview, mirroring hermes-agent's
    ``skill_view``. Without the explicit opt-out the registry would silently
-   crop SKILL.md at 10 KB / 200 lines (head-only), dropping the workflow
+   crop SKILL.md at 100 KB / 1000 lines (head-only), dropping the workflow
    steps and references that authors put at the file's tail.
 """
 
@@ -35,6 +35,8 @@ from flocks.tool.system.skill import (
     build_description,
     skill_tool_impl,
 )
+from flocks.tool.truncation import MAX_BYTES as REGISTRY_MAX_BYTES
+from flocks.tool.truncation import MAX_LINES as REGISTRY_MAX_LINES
 
 
 def _skill(name: str, description: str) -> SkillInfo:
@@ -163,7 +165,7 @@ class TestBuildDescription:
 @pytest.fixture
 def fake_skill_dir():
     """Create a temp directory with a SKILL.md that exceeds default truncation
-    limits (>10 KB AND >200 lines) so we can prove the registry's auto-truncate
+    limits so we can prove the registry's auto-truncate
     pass leaves it alone.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,14 +173,15 @@ def fake_skill_dir():
         skill_dir.mkdir()
 
         body_lines = [
-            f"## Step {i}: do something important and clearly identifiable" for i in range(1, 401)
+            f"## Step {i}: do something important and clearly identifiable"
+            for i in range(1, REGISTRY_MAX_LINES + 201)
         ]
         # Tail sentinel proves we kept the END of the file (where authors
         # typically put the operational steps and references).
         body_lines.append("# TAIL_SENTINEL: this line MUST survive end-to-end")
         body = "\n".join(body_lines)
-        # Pad with extra bytes so total comfortably exceeds the 10 KB cap.
-        padding = "x" * (15 * 1024)
+        # Pad with extra bytes so total comfortably exceeds the byte cap.
+        padding = "x" * (REGISTRY_MAX_BYTES + 1024)
 
         (skill_dir / "SKILL.md").write_text(
             f"""---
@@ -206,8 +209,8 @@ class TestSkillLoadNoTruncation:
         original = skill_md.read_text(encoding="utf-8")
         # Sanity-check the fixture: it MUST exceed the registry defaults,
         # otherwise the test isn't actually exercising the bypass.
-        assert len(original.encode("utf-8")) > 10 * 1024
-        assert original.count("\n") > 200
+        assert len(original.encode("utf-8")) > REGISTRY_MAX_BYTES
+        assert original.count("\n") > REGISTRY_MAX_LINES
 
         skill_info = SkillInfo(
             name="huge-skill",

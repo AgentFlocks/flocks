@@ -173,7 +173,7 @@ async def skill_tool_impl(
     # already handled it") to leave our payload alone. The `skill` tool is the
     # *load-on-demand* counterpart of the tiny preview that ships in the system
     # prompt -- if the model just decided to load this skill, it needs the
-    # FULL SKILL.md to act on. Cropping it at 10 KB / 200 lines (the
+    # FULL SKILL.md to act on. Cropping it at 100 KB / 1000 lines (the
     # registry's defaults) silently drops the workflow steps, references, and
     # constraints that authors typically place at the *end* of the file, which
     # is the exact bug users were hitting (skill.md tail "感觉就完全丢失了").
