@@ -4,6 +4,8 @@ Hook Pipeline
 Provides a lightweight hook registry and execution pipeline that mirrors
 oh-my-opencode's lifecycle stages:
 - chat.message
+- llm.call.before
+- llm.call.after
 - tool.execute.before
 - tool.execute.after
 - event
@@ -20,6 +22,8 @@ log = Log.create(service="hooks.pipeline")
 
 class HookStage:
     CHAT_MESSAGE = "chat.message"
+    LLM_BEFORE = "llm.call.before"
+    LLM_AFTER = "llm.call.after"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
     EVENT = "event"
@@ -37,6 +41,12 @@ class HookContext:
 
 class HookBase:
     async def chat_message(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def llm_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def llm_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def tool_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -97,6 +107,22 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.CHAT_MESSAGE, input_data, output_data)
+
+    @classmethod
+    async def run_llm_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.LLM_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_llm_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.LLM_AFTER, input_data, output_data)
 
     @classmethod
     async def run_tool_before(
@@ -174,6 +200,10 @@ class HookPipeline:
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:
         if stage == HookStage.CHAT_MESSAGE:
             return getattr(hook, "chat_message", None)
+        if stage == HookStage.LLM_BEFORE:
+            return getattr(hook, "llm_before", None)
+        if stage == HookStage.LLM_AFTER:
+            return getattr(hook, "llm_after", None)
         if stage == HookStage.TOOL_BEFORE:
             return getattr(hook, "tool_before", None)
         if stage == HookStage.TOOL_AFTER:

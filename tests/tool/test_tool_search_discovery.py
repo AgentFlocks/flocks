@@ -83,6 +83,30 @@ async def test_tool_search_supports_category_and_tag_matching(
 
 
 @pytest.mark.asyncio
+async def test_tool_search_supports_exact_batch_select_and_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = [
+        _tool("websearch", ToolCategory.BROWSER),
+        _tool("webfetch", ToolCategory.BROWSER),
+        _tool("read", ToolCategory.FILE),
+    ]
+    add_callable = AsyncMock(return_value={"websearch", "webfetch"})
+
+    monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
+    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
+
+    ctx = SimpleNamespace(session_id="session-select", event_publish_callback=AsyncMock())
+    result = await tool_search(ctx, query="select:WebSearchTool,webfetch", limit=5)
+
+    assert result.success is True
+    assert result.output["normalizedQuery"] == "websearch webfetch"
+    assert result.output["callableToolNames"] == ["webfetch", "websearch"]
+    assert [match["name"] for match in result.output["matches"]] == ["websearch", "webfetch"]
+    add_callable.assert_awaited_once_with("session-select", ["websearch", "webfetch"])
+
+
+@pytest.mark.asyncio
 async def test_tool_search_returns_user_plugin_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -7,6 +7,7 @@ is callable in a session; it only describes and searches the full catalog.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from pydantic import BaseModel, Field
@@ -112,11 +113,49 @@ def list_tool_catalog_infos(tool_names: Optional[Iterable[str]] = None) -> List[
     return result
 
 
+def canonical_tool_token(value: str) -> str:
+    """Normalize tool names and aliases for exact selection/search matching."""
+    canonical = "".join(ch.lower() for ch in value if ch.isalnum())
+    if canonical.endswith("tool"):
+        canonical = canonical[:-4]
+    return canonical
+
+
+def normalize_tool_search_query(query: str) -> str:
+    query = query.strip()
+    if query.lower().startswith("select:"):
+        query = query[len("select:"):]
+    return " ".join(
+        canonical_tool_token(term)
+        for term in re.split(r"[\s,]+", query)
+        if term
+    )
+
+
+def _format_tool_catalog_match(tool_info: Any, matched_tags: List[str], score: int) -> Dict[str, Any]:
+    metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
+    return {
+        "name": tool_info.name,
+        "description": tool_info.description,
+        "category": getattr(tool_info.category, "value", str(tool_info.category)),
+        "requires_confirmation": getattr(tool_info, "requires_confirmation", False),
+        "source": getattr(tool_info, "source", None),
+        "native": getattr(tool_info, "native", False),
+        "always_load": metadata.always_load,
+        "tags": metadata.tags,
+        "matchedTags": matched_tags,
+        "score": score,
+    }
+
+
 def _score_tool_catalog_match(query: str, category: Optional[str], tool_info: Any) -> Tuple[int, List[str]]:
     q = (query or "").strip().lower()
-    tokens = [token for token in q.split() if token]
+    tokens = [token for token in re.split(r"[\s,]+", q) if token]
+    canonical_tokens = [canonical_tool_token(token) for token in tokens]
     name = tool_info.name.lower()
+    canonical_name = canonical_tool_token(tool_info.name)
     desc = (tool_info.description or "").lower()
+    normalized_desc = normalize_tool_search_query(tool_info.description or "")
     source = (getattr(tool_info, "source", None) or "").lower()
     tool_category = getattr(tool_info.category, "value", str(tool_info.category)).lower()
     metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
@@ -128,11 +167,17 @@ def _score_tool_catalog_match(query: str, category: Optional[str], tool_info: An
         score += 10
     if q and q in name:
         score += 120
+    if canonical_tokens and any(token == canonical_name for token in canonical_tokens):
+        score += 140
     if q and any(token in name for token in tokens):
         score += 55
+    if canonical_tokens and any(token and token in canonical_name for token in canonical_tokens):
+        score += 65
     if q and q in desc:
         score += 40
     if q and any(token in desc for token in tokens):
+        score += 20
+    if canonical_tokens and any(token and token in normalized_desc for token in canonical_tokens):
         score += 20
     if q and q in source:
         score += 10
@@ -152,6 +197,45 @@ def _score_tool_catalog_match(query: str, category: Optional[str], tool_info: An
     return score, matched_tags
 
 
+def _select_tool_catalog(
+    query: str,
+    *,
+    category: Optional[str],
+    limit: int,
+) -> Optional[Tuple[List[Dict[str, Any]], List[str]]]:
+    lowered = (query or "").strip().lower()
+    if not lowered.startswith("select:"):
+        return None
+
+    wanted = [
+        canonical_tool_token(part)
+        for part in lowered[len("select:"):].split(",")
+        if part.strip()
+    ]
+    if not wanted:
+        return [], []
+
+    tools_by_canonical = {
+        canonical_tool_token(tool_info.name): tool_info
+        for tool_info in list_tool_catalog_infos()
+        if not category
+        or getattr(tool_info.category, "value", str(tool_info.category)).lower() == category.lower()
+    }
+
+    matches: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for canonical_name in wanted:
+        tool_info = tools_by_canonical.get(canonical_name)
+        if tool_info is None or tool_info.name in seen:
+            continue
+        seen.add(tool_info.name)
+        matches.append(_format_tool_catalog_match(tool_info, [], 10_000))
+        if len(matches) >= limit:
+            break
+
+    return matches, []
+
+
 def search_tool_catalog(
     query: Optional[str] = None,
     *,
@@ -159,6 +243,10 @@ def search_tool_catalog(
     limit: int = 8,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     limit = max(1, min(limit or 8, 20))
+    selected = _select_tool_catalog(query or "", category=category, limit=limit)
+    if selected is not None:
+        return selected
+
     ranked: List[Tuple[int, Any, List[str]]] = []
 
     for tool_info in list_tool_catalog_infos():
@@ -176,19 +264,7 @@ def search_tool_catalog(
     matched_tag_set: Set[str] = set()
 
     for score, tool_info, matched_tags in ranked[:limit]:
-        metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
         matched_tag_set.update(matched_tags)
-        matches.append({
-            "name": tool_info.name,
-            "description": tool_info.description,
-            "category": getattr(tool_info.category, "value", str(tool_info.category)),
-            "requires_confirmation": getattr(tool_info, "requires_confirmation", False),
-            "source": getattr(tool_info, "source", None),
-            "native": getattr(tool_info, "native", False),
-            "always_load": metadata.always_load,
-            "tags": metadata.tags,
-            "matchedTags": matched_tags,
-            "score": score,
-        })
+        matches.append(_format_tool_catalog_match(tool_info, matched_tags, score))
 
     return matches, sorted(matched_tag_set)
