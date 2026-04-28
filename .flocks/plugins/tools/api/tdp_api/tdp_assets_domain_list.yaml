@@ -1,6 +1,7 @@
 name: tdp_assets_domain_list
 description: >
-  查询 TDP 域名资产列表，支持按域名、活跃状态和暴露情况筛选。
+  查询 TDP 域名资产列表，支持按二级域名、域名或 IP、活跃状态、开放状态和暴露面筛选。
+  优先使用顶层语义化参数；`condition` / `page` 仅作为高级兼容入口。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -10,22 +11,48 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `second_level_domain`、`is_public`、`is_active`、
-        `has_login_api`、`has_upload_api`、`assets_group` 以及
-        `fuzzy`；适合做域名资产暴露面筛选。
-    page:
-      type: object
-      description: 分页对象，通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    created_in_3_days:
+      type: boolean
+      description: 是否近三天内上线。
+    has_login_api:
+      type: boolean
+      description: 是否存在登录入口。
+    domain_name_or_ip:
+      type: string
+      description: 域名或 IP 关键词。
+    has_privacy:
+      type: boolean
+      description: 是否存在敏感信息接口。
+    has_upload_api:
+      type: boolean
+      description: 是否存在文件上传接口。
+    is_active:
+      type: boolean
+      description: 是否活跃。
+    is_public:
+      type: boolean
+      description: 是否对外开放。
+    second_level_domain:
+      type: string
+      description: 二级域名，例如 `attack.com`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

@@ -1,6 +1,7 @@
 name: tdp_threat_inbound_attack
 description: >
-  查询 TDP 外部攻击相关数据，当前提供外部攻击严重性分布统计。
+  查询 TDP 外部攻击相关数据，当前提供外部攻击严重性分布统计。优先使用顶层语义化参数，
+  例如严重级别、攻击结果、级联资产组和关键词；`condition` 仅作为高级兼容入口。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -9,21 +10,35 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `severity`、`result_list`、`cascade_asset_group`
-        和 `fuzzy`。其中 `severity` 取值 0-4，`result_list`
-        常见值为 `success`、`failed`、`unknown`；`fuzzy`
-        通常为 `{keyword, fieldlist}` 结构，fieldlist 常见固定值为
-        `["threat.name","external_ip","machine","assets.name","data"]`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 严重级别列表；0=信息，1=低，2=中，3=高，4=严重。
+    result_list:
+      type: array
+      items:
+        type: string
+        enum: [success, failed, unknown]
+      description: 攻击结果列表；`success`=成功，`failed`=失败，`unknown`=尝试。
+    cascade_asset_group:
+      type: object
+      description: '级联资产组筛选对象，例如 `{"device-1": [-1]}`。'
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["threat.name","external_ip","machine","assets.name","data"]`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
   required: []
 handler:
   type: script

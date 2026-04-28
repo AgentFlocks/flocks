@@ -1,6 +1,8 @@
 name: tdp_asset_upload_api
 description: >
-  查询 TDP 上传接口相关数据。默认返回上传接口统计，也可通过 action 切换到域名列表和 API 列表。
+  查询 TDP 上传接口相关数据。`summary` 返回上传接口统计，`host_list` 返回域名列表，
+  `interface_list` 返回上传接口明细。优先使用顶层语义化参数；`fuzzy`、`condition` 和 `page`
+  仅用于高级兼容或复杂筛选。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -18,16 +20,6 @@ inputSchema:
         以及默认分页排序。
       enum: [summary, host_list, interface_list]
       default: summary
-    condition:
-      type: object
-      description: >
-        条件对象，主要用于 `interface_list`。常见字段包括
-        `time_from`、`time_to`、`search_for_upload`、`host`
-        和 `fuzzy`；其中 `fuzzy` 通常为 `{keyword, fieldlist}`
-        结构，用于按 URL、标题等条件搜索。
-    page:
-      type: object
-      description: 分页对象，主要用于 `interface_list`；通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_from`。可以使用python datetime动态计算。
@@ -43,6 +35,30 @@ inputSchema:
     fuzzy:
       type: object
       description: 模糊查询对象；`host_list` 使用根级 `fuzzy`，`interface_list` 会写入 `condition.fuzzy`。通常为 `{keyword, fieldlist}` 结构。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。`host_list` 会自动生成按主机字段过滤；`interface_list` 会自动生成
+        `condition.fuzzy.fieldlist=["url_pattern","title"]`。
+    cur_page:
+      type: integer
+      description: 页码，主要适用于 `interface_list`。
+    page_size:
+      type: integer
+      description: 每页条数，主要适用于 `interface_list`。
+    sort_by:
+      type: string
+      description: 排序字段，主要适用于 `interface_list`，默认 `last_upload_time`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，主要适用于 `interface_list`，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

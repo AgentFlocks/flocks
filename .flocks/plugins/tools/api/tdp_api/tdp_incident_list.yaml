@@ -1,7 +1,8 @@
 name: tdp_incident_list
 description: >
   查询 TDP 智能聚合相关接口。默认返回事件列表（注意不是告警），也可通过 action 切换到时间线、
-  结果分布、攻击实体、攻击者 IP 明细等子接口。
+  结果分布、攻击实体、攻击者 IP 明细等子接口。优先使用顶层语义化参数，不要手写
+  `condition.id`、`condition.duration`、`condition.fuzzy` 这类嵌套字段；只有在显式参数未覆盖时才使用 `condition` / `page`。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -21,18 +22,6 @@ inputSchema:
         `attacker_ip_detail` 需要传 `incident_id` 和 `attacker`。
       enum: [search, top_attacked_entity, result, timeline, alert_search, result_distribution, attacker_ip_list, attacker_ip_detail]
       default: search
-    condition:
-      type: object
-      description: >
-        条件对象。`search` 常用 `sql`、`refresh_rate`、`assets_group`、
-        `duration` 等筛选项；`alert_search` 使用 `condition.id`
-        传告警 ID 列表，并可补 `condition.include_risk`、
-        `condition.include_action`；`attacker_ip_list` 使用
-        `condition.incident_id`。如需时间范围，handler 会把根级
-        `time_from`、`time_to` 写入对应位置。
-    page:
-      type: object
-      description: 分页对象，适用于 `search`、`alert_search`、`attacker_ip_list` 等列表动作；通常包含 `cur_page`、`page_size`、`sort`，其中 `alert_search` 必填。
     incident_id:
       type: string
       description: 事件 ID，适用于 `top_attacked_entity`、`result`、`timeline`、`result_distribution`、`attacker_ip_detail`；应先从 `search` 返回结果中获取。
@@ -58,6 +47,56 @@ inputSchema:
       items:
         type: string
       description: 攻击者 IP 列表，适用于 `attacker_ip_detail`；通常先从 `attacker_ip_list` 返回结果中获取。
+    severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 严重级别列表，适用于 `search`。
+    phase:
+      type: array
+      items:
+        type: string
+      description: 攻击阶段列表，适用于 `search`，例如 `recon`、`exploit`、`control`、`attack_out`、`post_exploit`。
+    result:
+      type: array
+      items:
+        type: string
+        enum: [success, failed, unknown]
+      description: 攻击结果列表，适用于 `search`。
+    is_target_attack:
+      type: boolean
+      description: 是否只看针对性攻击事件，适用于 `search`。
+    begin_duration:
+      type: integer
+      description: 持续时间起始小时数，适用于 `search`，会写入 `condition.duration.begin_duration`。
+    end_duration:
+      type: integer
+      description: 持续时间结束小时数，适用于 `search`，会写入 `condition.duration.end_duration`。
+    keyword:
+      type: string
+      description: >
+        关键词搜索，适用于 `search`。handler 会自动组装
+        `condition.fuzzy.fieldlist=["attacker_ip","host_ip","attack_name","attack_tool","incident_id"]`。
+    cur_page:
+      type: integer
+      description: 页码，适用于 `search`、`alert_search`、`attacker_ip_list`。
+    page_size:
+      type: integer
+      description: 每页条数，适用于 `search`、`alert_search`、`attacker_ip_list`。
+    sort_by:
+      type: string
+      description: 排序字段，适用于列表类 action。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，适用于列表类 action。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。`alert_search` 如需复杂排序可直接透传。
   required: []
 handler:
   type: script

@@ -6,22 +6,22 @@
 
 | 用户意图 | 推荐 tool | 常用 action | 最小参数 |
 |---|---|---|---|
-| 看安全态势、趋势、TOP 统计 | `tdp_dashboard_status` | `status` / `security` / `threat_event` / `alert_level_trend` | 通常可空参 |
+| 看安全态势、趋势、TOP 统计 | `tdp_dashboard_status` | `status` / `security` / `threat_event` / `alert_level_trend` | 通常可空参；列表类 action 可补 `machine_type`、`severity`、分页参数 |
 | 查原始告警日志 | `tdp_log_search` | `search` | `time_from`、`time_to`、`sql` |
 | 查字段聚合统计 | `tdp_log_search` | `terms` | `time_from`、`time_to`、`term` |
-| 查威胁事件列表 | `tdp_incident_list` | `search` | `time_from`、`time_to` |
+| 查威胁事件列表 | `tdp_incident_list` | `search` | `time_from`、`time_to`；可补 `severity`、`phase`、`result`、`keyword`、分页参数 |
 | 看事件时间线 / 结果分布 / 攻击者明细 | `tdp_incident_list` | `timeline` / `result_distribution` / `attacker_ip_detail` | 通常先要 `incident_id` |
-| 查外部攻击严重性分布 | `tdp_threat_inbound_attack` | 默认 | `time_from`、`time_to` |
-| 查告警主机汇总 / 主机下事件 | `tdp_host_threat_list` | `summary` / `events` | `events` 至少要 `asset_machine` |
-| 查脆弱性 | `tdp_vulnerability_list` | 默认 | 常见补 `time_from`、`time_to`、`condition`、`page` |
-| 查弱口令 | `tdp_login_weakpwd_list` | 默认 | 常见补 `time_from`、`time_to` |
-| 查服务 / 主机 / 框架资产 | `tdp_machine_asset_list` | `service_list` / `host_asset_list` / `web_app_framework_list` | 可空参或补 `condition` |
-| 查域名资产 | `tdp_assets_domain_list` | 默认 | 可空参或补 `condition` |
-| 查登录入口 | `tdp_login_api_list` | `list` / `summary` / `category` | 常见补时间范围 |
-| 查上传接口 | `tdp_asset_upload_api` | `summary` / `host_list` / `interface_list` | 常见补时间范围 |
-| 查 API 接口 / API 风险 | `tdp_interface_list` / `tdp_interface_risk_list` | 默认 | 常见补 `condition`、`page` |
-| 查隐私拓扑 / 云服务访问 | `tdp_privacy_diagram` / `tdp_cloud_facilities` | `access_source` / `instance_list` 等 | 常见补时间范围 |
-| 查 MDR 研判列表 / 指标 | `tdp_mdr_alert_list` | `list` / `indicator` | 常见补时间范围 |
+| 查外部攻击严重性分布 | `tdp_threat_inbound_attack` | 默认 | `time_from`、`time_to`；可补 `severity`、`result_list`、`keyword` |
+| 查告警主机汇总 / 主机下事件 | `tdp_host_threat_list` | `summary` / `events` | `summary` 可补 `severity`、`direction`、`threat_type`、`keyword`；`events` 至少要 `asset_machine` |
+| 查脆弱性 | `tdp_vulnerability_list` | 默认 | 常见补 `time_from`、`time_to`、`severity`、`status`、`keyword`、分页参数 |
+| 查弱口令 | `tdp_login_weakpwd_list` | 默认 | 常见补 `time_from`、`time_to`、`data`、`result`、`app_class`、`keyword` |
+| 查服务 / 主机 / 框架资产 | `tdp_machine_asset_list` | `service_list` / `host_asset_list` / `web_app_framework_list` | 可空参；常见补 `service`、`service_class`、`is_public`、`keyword` |
+| 查域名资产 | `tdp_assets_domain_list` | 默认 | 可空参；常见补 `domain_name_or_ip`、`second_level_domain`、`is_public` |
+| 查登录入口 | `tdp_login_api_list` | `list` / `summary` / `category` | 常见补时间范围、`threat_tag`、`keyword`、`is_public` |
+| 查上传接口 | `tdp_asset_upload_api` | `summary` / `host_list` / `interface_list` | 常见补时间范围、`host`、`keyword`、分页参数 |
+| 查 API 接口 / API 风险 | `tdp_interface_list` / `tdp_interface_risk_list` | 默认 | 常见补 `host`、`methods`、`api_risk_type`、`keyword`、分页参数 |
+| 查隐私拓扑 / 云服务访问 | `tdp_privacy_diagram` / `tdp_cloud_facilities` | `access_source` / `instance_list` 等 | 常见补时间范围、`itag`、`methods`、`cloud_vendor`、`keyword` |
+| 查 MDR 研判列表 / 指标 | `tdp_mdr_alert_list` | `list` / `indicator` | 常见补时间范围、`section_list`、`threat_severity`、`judge_result_status`、`keyword` |
 | 查系统状态 | `tdp_system_status` | `all` / `core` / `database` 等 | 通常空参 |
 | 下载 PCAP / 恶意文件 | `tdp_pcap_download` / `tdp_file_download` | 默认 | `alert_id + occ_time` 或 `hash` |
 | 管理平台配置 / 策略 | `tdp_platform_config` / `tdp_policy_settings` | 多 action | 写操作，必须先获用户确认 |
@@ -49,18 +49,13 @@ today_end = int(datetime.datetime.combine(now.date(), datetime.time.max).timesta
 tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 ``` 
 
-## 通用调用方式
 
-TDP 的 tool 主要有 4 类：
+## 优先级原则：
 
-1. `action + 根级参数`
-   常见于 `tdp_dashboard_status`、`tdp_log_search`、`tdp_incident_list`、`tdp_mdr_alert_list`
-2. 仅根级参数
-   常见于 `tdp_vulnerability_list`、`tdp_assets_domain_list`、`tdp_interface_list`
-3. `condition` / `page` 组合
-   用于筛选和分页，tool 会把根级 `time_from`、`time_to` 自动写入 `condition`
-4. 下载或配置专用参数
-   例如 `tdp_pcap_download.alert_id`、`tdp_file_download.hash`、`tdp_platform_config.asset`
+- 优先使用 tool schema 暴露的顶层语义化参数。
+- `keyword` 会由 handler 自动转换成正确的 `condition.fuzzy.fieldlist`，不要手写 `fuzzy`。
+- `cur_page`、`page_size`、`sort_by`、`sort_order` 会由 handler 自动转换成 `page`，不要为了普通分页手写 `page`。
+- `condition` / `page` 只作为高级兼容入口；只有顶层参数没有覆盖目标底层字段时才使用。
 
 最常见的调用形态是：
 
@@ -72,17 +67,16 @@ TDP 的 tool 主要有 4 类：
 }
 ```
 
-或者：
+带筛选、关键词和分页时，优先这样传：
 
 ```json
 {
-  "condition": {
-    "severity": ["3", "4"]
-  },
-  "page": {
-    "cur_page": 1,
-    "page_size": 20
-  }
+  "severity": [3, 4],
+  "keyword": "nginx",
+  "cur_page": 1,
+  "page_size": 20,
+  "sort_by": "severity",
+  "sort_order": "desc"
 }
 ```
 
@@ -230,10 +224,6 @@ TDP 的 tool 主要有 4 类：
 
 字段、操作符或枚举值仍不确定时，再下钻查看 [instruction.md](instruction.md)。
 
-何时回退浏览器：
-
-- 需要在页面里继续点击事件、查看原始报文、下载 PCAP
-- 需要图形化详情或交互式下钻
 
 ### 3. 字段聚合统计
 
@@ -273,17 +263,18 @@ TDP 的 tool 主要有 4 类：
   "action": "search",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "sql": "(threat.level IN ('attack')) AND threat.type NOT IN ('recon')",
-    "refresh_rate": -1
-  },
-  "page": {
-    "cur_page": 1,
-    "page_size": 20,
-    "sort": [{"sort_by": "time", "sort_order": "desc"}]
-  }
+  "severity": [3, 4],
+  "phase": ["exploit"],
+  "result": ["success"],
+  "keyword": "sql",
+  "cur_page": 1,
+  "page_size": 20,
+  "sort_by": "time",
+  "sort_order": "desc"
 }
 ```
+
+如果必须传 `sql`、`refresh_rate` 等尚未提升到顶层的字段，再使用 `condition` 高级兼容参数。
 
 高频 action：
 
@@ -316,7 +307,10 @@ TDP 的 tool 主要有 4 类：
 ```json
 {
   "time_from": 1741536000,
-  "time_to": 1741622400
+  "time_to": 1741622400,
+  "severity": [3, 4],
+  "result_list": ["success"],
+  "keyword": "sqlmap"
 }
 ```
 
@@ -327,12 +321,15 @@ TDP 的 tool 主要有 4 类：
   "action": "summary",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "severity": ["high"],
-    "direction": "in"
-  }
+  "severity": [3, 4],
+  "direction": ["in"],
+  "keyword": "webshell",
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
+
+`summary` 默认覆盖全部常见威胁类型，且 `threat_characters` 默认不限制。用户明确要“失陷主机”时再传 `threat_characters=["is_compromised"]`。
 
 某主机下事件：
 
@@ -352,9 +349,12 @@ MDR 研判列表：
   "action": "list",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "judge_result_status": ["confirmed"]
-  }
+  "section_list": ["服务器"],
+  "threat_severity": [3, 4],
+  "judge_result_status": [2],
+  "keyword": "10.10.10.1",
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
 
@@ -364,7 +364,8 @@ MDR 研判列表：
 
 - 单接口工具通常直接传根级参数
 - 优先补齐根级 `time_from`、`time_to`
-- 若 tool 支持筛选和分页，再补 `condition`、`page`
+- 若 tool 支持筛选和分页，优先补顶层 `keyword`、`cur_page`、`page_size`、`sort_by`、`sort_order`
+- `condition` / `page` 只用于顶层参数未覆盖的底层字段
 
 脆弱性示例：
 
@@ -372,13 +373,14 @@ MDR 研判列表：
 {
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "page": {
-    "cur_page": 1,
-    "page_size": 20
-  },
-  "condition": {
-    "severity": ["3", "4"]
-  }
+  "assets_group": [237],
+  "severity": [3, 4],
+  "status": 0,
+  "keyword": "struts",
+  "cur_page": 1,
+  "page_size": 20,
+  "sort_by": "severity",
+  "sort_order": "desc"
 }
 ```
 
@@ -387,10 +389,12 @@ MDR 研判列表：
 ```json
 {
   "action": "service_list",
-  "condition": {
-    "is_public": true,
-    "fuzzy": "nginx"
-  }
+  "service": "nginx",
+  "service_class": "web",
+  "is_public": true,
+  "keyword": "10.0.0.5",
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
 
@@ -401,9 +405,41 @@ MDR 研判列表：
   "action": "list",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "threat_tag": "weak_password"
-  }
+  "threat_tag": ["弱口令"],
+  "keyword": "wp-login",
+  "is_public": 1,
+  "vulnerable": 1,
+  "cur_page": 1,
+  "page_size": 20
+}
+```
+
+弱口令列表示例：
+
+```json
+{
+  "time_from": 1741536000,
+  "time_to": 1741622400,
+  "data": "172.16.71.129:8080/wp-login.php",
+  "result": "success",
+  "app_class": ["CMS"],
+  "keyword": "admin",
+  "cur_page": 1,
+  "page_size": 20
+}
+```
+
+域名资产列表示例：
+
+```json
+{
+  "domain_name_or_ip": "example.com",
+  "second_level_domain": "example.com",
+  "is_public": true,
+  "has_login_api": true,
+  "has_upload_api": true,
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
 
@@ -414,7 +450,27 @@ MDR 研判列表：
   "action": "interface_list",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "host": "example.com"
+  "host": "example.com",
+  "search_for_upload": true,
+  "keyword": "upload",
+  "cur_page": 1,
+  "page_size": 20,
+  "sort_by": "last_upload_time",
+  "sort_order": "desc"
+}
+```
+
+API 接口列表示例：
+
+```json
+{
+  "host": "example.com",
+  "methods": ["POST"],
+  "privacy_tags": ["leak_phone"],
+  "is_public": true,
+  "keyword": "login",
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
 
@@ -424,9 +480,13 @@ API 风险列表示例：
 {
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "api_risk_type": ["sql_injection"]
-  }
+  "assets_group": [237],
+  "api_risk_type": "注入漏洞",
+  "keyword": "graphql",
+  "cur_page": 1,
+  "page_size": 20,
+  "sort_by": "last_occ_time",
+  "sort_order": "desc"
 }
 ```
 
@@ -446,10 +506,12 @@ API 风险列表示例：
 {
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "itag": ["phone"],
-    "methods": ["POST"]
-  }
+  "assets_group": [237],
+  "itag": ["phone"],
+  "methods": ["POST"],
+  "fuzzy_url_host": "example.com",
+  "fuzzy_url_path": "/submit",
+  "fuzzy_src_ip": "10.0.0.5"
 }
 ```
 
@@ -460,9 +522,25 @@ API 风险列表示例：
   "action": "access_source",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "condition": {
-    "cloud_vendor": "aliyun"
-  }
+  "cloud_vendor": "aliyun",
+  "cloud_service_class": "云服务器",
+  "keyword": "10.10.10.1",
+  "cur_page": 1,
+  "page_size": 20
+}
+```
+
+云实例访问明细示例：
+
+```json
+{
+  "action": "instance_access_list",
+  "time_from": 1741536000,
+  "time_to": 1741622400,
+  "cloud_instance": "i-zadG8d4l",
+  "keyword": "10.10.10.1",
+  "cur_page": 1,
+  "page_size": 20
 }
 ```
 

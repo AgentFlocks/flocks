@@ -19,6 +19,53 @@ SERVICE_ID = "tdp_api"
 DEFAULT_TIMEOUT = 30
 DEFAULT_BASE_URL = ""
 DEFAULT_NET_DATA_TYPES = ["attack", "risk", "action"]
+DEFAULT_HOST_THREAT_TYPES = [
+    "exploit",
+    "ransom",
+    "phishing",
+    "unknown_url",
+    "file",
+    "virus",
+    "tunneling",
+    "infil",
+    "dc",
+    "persistence",
+    "shell",
+    "c2",
+    "trojan",
+    "botnet",
+    "worm",
+    "rat",
+    "dga",
+    "mining",
+    "exfil",
+    "dnslog",
+    "attack_out",
+    "hfish_honeypot",
+    "cybercrime",
+    "post_exploit",
+]
+HOST_THREAT_CHARACTER_VALUES = [
+    "is_compromised",
+    "is_connected",
+    "is_apt",
+    "is_lateral",
+    "is_in_success",
+    "is_attack_out",
+    "is_webshell",
+    "is_ransom",
+]
+HOST_THREAT_FUZZY_FIELDS = ["threat.name", "external_ip", "machine", "assets.name", "data", "machine_name"]
+SERVICE_ASSET_FUZZY_FIELDS = ["machine", "assets.name"]
+VULNERABILITY_FUZZY_FIELDS = ["vulnerability_name", "ip"]
+API_RISK_FUZZY_FIELDS = ["threat.name", "url_pattern"]
+API_LIST_FUZZY_FIELDS = ["url_pattern", "title"]
+WEAK_PASSWORD_FUZZY_FIELDS = ["threat.params.username", "threat.params.weakpwd", "data", "net.src_ip"]
+INBOUND_ATTACK_FUZZY_FIELDS = ["threat.name", "external_ip", "machine", "assets.name", "data"]
+INCIDENT_SEARCH_FUZZY_FIELDS = ["attacker_ip", "host_ip", "attack_name", "attack_tool", "incident_id"]
+CLOUD_ACCESS_FUZZY_FIELDS = ["machine", "cloud_instance"]
+CLOUD_INSTANCE_ACCESS_FUZZY_FIELDS = ["cloud_instance", "external_ip", "machine"]
+MDR_FUZZY_FIELDS = ["task_id", "machine", "asset_info", "threat_name"]
 SYSTEM_STATUS_ENDPOINTS = {
     "core": "/api/v1/core-status",
     "ioc_update": "/api/v1/ioc-update-status",
@@ -395,7 +442,10 @@ def _dashboard_body(body: dict[str, Any]) -> dict[str, Any]:
 def _threat_host_summary_body(body: dict[str, Any]) -> dict[str, Any]:
     defaults = _body_with_condition_time(
         {
-            "condition": {"threat_characters": ["is_compromised"]},
+            "condition": {
+                "threat_type": list(DEFAULT_HOST_THREAT_TYPES),
+                "threat_characters": [],
+            },
             "page": {"cur_page": 1, "page_size": 20, "sort_by": "severity", "sort_flag": "desc"},
         }
     )
@@ -998,6 +1048,58 @@ def _set_if_present(target: dict[str, Any], key: str, value: Any) -> None:
         target[key] = value
 
 
+def _set_list_if_present(target: dict[str, Any], key: str, value: list[Any] | tuple[Any, ...] | None) -> None:
+    if value is not None:
+        target[key] = list(value)
+
+
+def _set_dict_if_present(target: dict[str, Any], key: str, value: dict[str, Any] | None) -> None:
+    if value is not None:
+        target[key] = dict(value)
+
+
+def _set_keyword_fuzzy(target: dict[str, Any], keyword: str | None, fieldlist: list[str]) -> None:
+    if keyword is not None:
+        target["fuzzy"] = {"keyword": keyword, "fieldlist": list(fieldlist)}
+
+
+def _set_page_overrides(
+    body: dict[str, Any],
+    *,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+) -> None:
+    if cur_page is None and page_size is None and sort_by is None and sort_order is None:
+        return
+    page_dict = body.setdefault("page", {})
+    _set_if_present(page_dict, "cur_page", cur_page)
+    _set_if_present(page_dict, "page_size", page_size)
+    if sort_by is None and sort_order is None:
+        return
+    normalized_sort_by = sort_by
+    normalized_sort_order = sort_order
+    if normalized_sort_by is None:
+        existing_sort = page_dict.get("sort")
+        if isinstance(existing_sort, list) and existing_sort and isinstance(existing_sort[0], dict):
+            normalized_sort_by = existing_sort[0].get("sort_by")
+        if normalized_sort_by is None:
+            normalized_sort_by = page_dict.get("sort_by")
+    if normalized_sort_order is None:
+        existing_sort = page_dict.get("sort")
+        if isinstance(existing_sort, list) and existing_sort and isinstance(existing_sort[0], dict):
+            normalized_sort_order = existing_sort[0].get("sort_order")
+        if normalized_sort_order is None:
+            normalized_sort_order = page_dict.get("sort_flag")
+    if normalized_sort_by is None:
+        return
+    normalized_sort_order = normalized_sort_order or "desc"
+    page_dict["sort_by"] = normalized_sort_by
+    page_dict["sort_flag"] = normalized_sort_order
+    page_dict["sort"] = [{"sort_by": normalized_sort_by, "sort_order": normalized_sort_order}]
+
+
 def _compose_payload(
     *,
     condition: Any = None,
@@ -1052,6 +1154,12 @@ async def dashboard_status(
     time_to: int | None = None,
     assets_group: list[Any] | None = None,
     is_new: bool | None = None,
+    machine_type: str | None = None,
+    severity: list[Any] | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "status")
@@ -1062,12 +1170,15 @@ async def dashboard_status(
         _set_if_present(condition_dict, "time_to", time_to)
         if assets_group is not None:
             condition_dict["assets_group"] = list(assets_group)
+        _set_if_present(condition_dict, "machine_type", machine_type)
+        _set_list_if_present(condition_dict, "severity", severity)
     else:
         _set_if_present(body, "time_from", time_from)
         _set_if_present(body, "time_to", time_to)
         if assets_group is not None:
             body["assets_group"] = list(assets_group)
         _set_if_present(body, "is_new", is_new)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     if selected_action in {
         "alert_sum",
         "unhandled_host_list",
@@ -1087,6 +1198,19 @@ async def threat_host_list(
     time_to: int | None = None,
     asset_machine: str | None = None,
     device_id: str | None = None,
+    severity: list[Any] | None = None,
+    threat_characters: list[Any] | None = None,
+    direction: list[Any] | None = None,
+    threat_type: list[Any] | None = None,
+    disposal_status: list[Any] | None = None,
+    asset_section: list[Any] | None = None,
+    assets_group: list[Any] | None = None,
+    host_type: list[Any] | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "summary")
@@ -1096,6 +1220,16 @@ async def threat_host_list(
     _set_if_present(condition_dict, "time_to", time_to)
     _set_if_present(condition_dict, "asset_machine", asset_machine)
     _set_if_present(condition_dict, "device_id", device_id)
+    _set_list_if_present(condition_dict, "severity", severity)
+    _set_list_if_present(condition_dict, "threat_characters", threat_characters)
+    _set_list_if_present(condition_dict, "direction", direction)
+    _set_list_if_present(condition_dict, "threat_type", threat_type)
+    _set_list_if_present(condition_dict, "disposal_status", disposal_status)
+    _set_list_if_present(condition_dict, "asset_section", asset_section)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_list_if_present(condition_dict, "host_type", host_type)
+    _set_keyword_fuzzy(condition_dict, keyword, HOST_THREAT_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     if selected_action == "events":
         validation_error = _validate_required_body_fields(selected_action, body, "condition.asset_machine")
         if validation_error:
@@ -1115,6 +1249,17 @@ async def incident_list(
     include_action: bool | None = None,
     alert_ids: list[Any] | None = None,
     attacker: list[Any] | None = None,
+    severity: list[Any] | None = None,
+    phase: list[Any] | None = None,
+    result: list[Any] | None = None,
+    is_target_attack: bool | None = None,
+    begin_duration: int | None = None,
+    end_duration: int | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "search")
@@ -1123,6 +1268,15 @@ async def incident_list(
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
         _set_if_present(condition_dict, "time_to", time_to)
+        _set_list_if_present(condition_dict, "severity", severity)
+        _set_list_if_present(condition_dict, "phase", phase)
+        _set_list_if_present(condition_dict, "result", result)
+        _set_if_present(condition_dict, "is_target_attack", is_target_attack)
+        if begin_duration is not None or end_duration is not None:
+            duration = condition_dict.setdefault("duration", {})
+            _set_if_present(duration, "begin_duration", begin_duration)
+            _set_if_present(duration, "end_duration", end_duration)
+        _set_keyword_fuzzy(condition_dict, keyword, INCIDENT_SEARCH_FUZZY_FIELDS)
     elif selected_action == "alert_search":
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
@@ -1143,6 +1297,7 @@ async def incident_list(
         _set_if_present(body, "include_risk", include_risk)
         if attacker is not None:
             body["attacker"] = list(attacker)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     validation_map: dict[str, tuple[str, ...]] = {
         "top_attacked_entity": ("incident_id",),
         "result": ("incident_id",),
@@ -1165,10 +1320,51 @@ async def service_asset_list(
     action: str = "service_list",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
+    assets_group: list[Any] | None = None,
+    port: int | None = None,
+    asset_section: str | None = None,
+    sub_type: str | None = None,
+    fuzzy_machine_name: str | None = None,
+    fuzzy_service_version: str | None = None,
+    fuzzy_service: str | None = None,
+    service: str | None = None,
+    service_class: str | None = None,
+    is_active: bool | None = None,
+    is_new: bool | None = None,
+    is_public: bool | None = None,
+    level: int | None = None,
+    host_type: list[Any] | None = None,
+    application: str | None = None,
+    sub_class: str | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
+    selected_action = _normalize_action(action, "service_list")
     body = _compose_payload(condition=condition, page=page)
-    return await _run_action_json_tool(SERVICE_ASSET_ACTIONS, default_action="service_list", action=action, body=body)
+    condition_dict = body.setdefault("condition", {})
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_if_present(condition_dict, "port", port)
+    _set_if_present(condition_dict, "asset_section", asset_section)
+    _set_if_present(condition_dict, "sub_type", sub_type)
+    _set_if_present(condition_dict, "fuzzy_machine_name", fuzzy_machine_name)
+    _set_if_present(condition_dict, "fuzzy_service_version", fuzzy_service_version)
+    _set_if_present(condition_dict, "fuzzy_service", fuzzy_service)
+    _set_if_present(condition_dict, "service", service)
+    _set_if_present(condition_dict, "service_class", service_class)
+    _set_if_present(condition_dict, "is_active", is_active)
+    _set_if_present(condition_dict, "is_new", is_new)
+    _set_if_present(condition_dict, "is_public", is_public)
+    _set_if_present(condition_dict, "level", level)
+    _set_list_if_present(condition_dict, "host_type", host_type)
+    _set_if_present(condition_dict, "application", application)
+    _set_if_present(condition_dict, "sub_class", sub_class)
+    _set_keyword_fuzzy(condition_dict, keyword, SERVICE_ASSET_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
+    return await _run_action_json_tool(SERVICE_ASSET_ACTIONS, default_action="service_list", action=selected_action, body=body)
 
 
 async def domain_asset_list(
@@ -1177,12 +1373,31 @@ async def domain_asset_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    created_in_3_days: bool | None = None,
+    has_login_api: bool | None = None,
+    domain_name_or_ip: str | None = None,
+    has_privacy: bool | None = None,
+    has_upload_api: bool | None = None,
+    is_active: bool | None = None,
+    is_public: bool | None = None,
+    second_level_domain: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_if_present(condition_dict, "created_in_3_days", created_in_3_days)
+    _set_if_present(condition_dict, "has_login_api", has_login_api)
+    _set_if_present(condition_dict, "domain_name_or_ip", domain_name_or_ip)
+    _set_if_present(condition_dict, "has_privacy", has_privacy)
+    _set_if_present(condition_dict, "has_upload_api", has_upload_api)
+    _set_if_present(condition_dict, "is_active", is_active)
+    _set_if_present(condition_dict, "is_public", is_public)
+    _set_if_present(condition_dict, "second_level_domain", second_level_domain)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size)
     return await _run_json_tool("domain_asset_search", "/api/v1/assets/domainName/search", _domain_body, body)
 
 
@@ -1192,12 +1407,23 @@ async def api_risk_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    assets_group: list[Any] | None = None,
+    api_risk_type: str | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_if_present(condition_dict, "api_risk_type", api_risk_type)
+    _set_keyword_fuzzy(condition_dict, keyword, API_RISK_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_json_tool("interface_risk_list", "/api/v1/interface/risk/getApiList", _api_risk_body, body)
 
 
@@ -1207,12 +1433,33 @@ async def api_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    host: str | None = None,
+    has_interface: int | None = None,
+    methods: list[Any] | None = None,
+    privacy_tags: list[Any] | None = None,
+    tags: list[Any] | None = None,
+    is_public: bool | None = None,
+    is_encrypted: bool | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_if_present(condition_dict, "host", host)
+    _set_if_present(condition_dict, "has_interface", has_interface)
+    _set_list_if_present(condition_dict, "methods", methods)
+    _set_list_if_present(condition_dict, "privacy_tags", privacy_tags)
+    _set_list_if_present(condition_dict, "tags", tags)
+    _set_if_present(condition_dict, "is_public", is_public)
+    _set_if_present(condition_dict, "is_encrypted", is_encrypted)
+    _set_keyword_fuzzy(condition_dict, keyword, API_LIST_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_json_tool("interface_list", "/api/v1/interface/list", _api_list_body, body)
 
 
@@ -1222,12 +1469,29 @@ async def weak_password_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    assets_group: list[Any] | None = None,
+    data: str | None = None,
+    weakpwd_source: str | None = None,
+    result: str | None = None,
+    app_class: list[Any] | None = None,
+    is_plaintext: bool | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_if_present(condition_dict, "data", data)
+    _set_if_present(condition_dict, "weakpwd_source", weakpwd_source)
+    _set_if_present(condition_dict, "result", result)
+    _set_list_if_present(condition_dict, "app_class", app_class)
+    _set_if_present(condition_dict, "is_plaintext", is_plaintext)
+    _set_keyword_fuzzy(condition_dict, keyword, WEAK_PASSWORD_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size)
     return await _run_json_tool("weak_password_list", "/api/v1/login/weakpwd/list", _weak_password_body, body)
 
 
@@ -1236,12 +1500,24 @@ async def privacy_overview(
     condition: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    assets_group: list[Any] | None = None,
+    itag: list[Any] | None = None,
+    methods: list[Any] | None = None,
+    fuzzy_url_path: str | None = None,
+    fuzzy_url_host: str | None = None,
+    fuzzy_src_ip: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_list_if_present(condition_dict, "itag", itag)
+    _set_list_if_present(condition_dict, "methods", methods)
+    _set_if_present(condition_dict, "fuzzy_url_path", fuzzy_url_path)
+    _set_if_present(condition_dict, "fuzzy_url_host", fuzzy_url_host)
+    _set_if_present(condition_dict, "fuzzy_src_ip", fuzzy_src_ip)
     return await _run_json_tool("privacy_diagram", "/api/v1/privacy/diagram", _privacy_body, body)
 
 
@@ -1250,12 +1526,20 @@ async def inbound_attack(
     condition: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    severity: list[Any] | None = None,
+    result_list: list[Any] | None = None,
+    cascade_asset_group: dict[str, Any] | None = None,
+    keyword: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "severity", severity)
+    _set_list_if_present(condition_dict, "result_list", result_list)
+    _set_dict_if_present(condition_dict, "cascade_asset_group", cascade_asset_group)
+    _set_keyword_fuzzy(condition_dict, keyword, INBOUND_ATTACK_FUZZY_FIELDS)
     return await _run_json_tool(
         "inbound_attack_severity_distribution",
         "/api/v1/threat/inbound-attack/severity-distribution",
@@ -1274,6 +1558,17 @@ async def login_entry_list(
     assets_group: list[Any] | None = None,
     app_class: str | None = None,
     category: str | None = None,
+    threat_tag: list[Any] | None = None,
+    keyword: str | None = None,
+    is_public: int | None = None,
+    is_new_online: int | None = None,
+    is_active: int | None = None,
+    result: str | None = None,
+    vulnerable: int | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
@@ -1286,6 +1581,13 @@ async def login_entry_list(
             condition_dict["assets_group"] = list(assets_group)
         _set_if_present(condition_dict, "app_class", app_class)
         _set_if_present(condition_dict, "category", category)
+        _set_list_if_present(condition_dict, "threat_tag", threat_tag)
+        _set_if_present(condition_dict, "is_public", is_public)
+        _set_if_present(condition_dict, "is_new_online", is_new_online)
+        _set_if_present(condition_dict, "is_active", is_active)
+        _set_if_present(condition_dict, "result", result)
+        _set_if_present(condition_dict, "vulnerable", vulnerable)
+        _set_keyword_fuzzy(condition_dict, keyword, ["data", "net.http.reqs_referer"])
     else:
         _set_if_present(body, "time_from", time_from)
         _set_if_present(body, "time_to", time_to)
@@ -1293,6 +1595,7 @@ async def login_entry_list(
             body["assets_group"] = list(assets_group)
         _set_if_present(body, "app_class", app_class)
         _set_if_present(body, "category", category)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_action_json_tool(LOGIN_ENTRY_ACTIONS, default_action="list", action=selected_action, body=body)
 
 
@@ -1344,6 +1647,11 @@ async def upload_api(
     search_for_upload: bool | None = None,
     host: str | None = None,
     fuzzy: Any = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "summary")
@@ -1354,6 +1662,8 @@ async def upload_api(
         _set_if_present(body, "search_for_upload", search_for_upload)
         if fuzzy is not None:
             body["fuzzy"] = fuzzy
+        elif keyword is not None and selected_action == "host_list":
+            body["fuzzy"] = {"keyword": keyword, "fieldlist": ["host"]}
     else:
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
@@ -1362,6 +1672,9 @@ async def upload_api(
         _set_if_present(condition_dict, "host", host)
         if fuzzy is not None:
             condition_dict["fuzzy"] = fuzzy
+        elif keyword is not None:
+            condition_dict["fuzzy"] = {"keyword": keyword, "fieldlist": ["url_pattern", "title"]}
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_action_json_tool(UPLOAD_API_ACTIONS, default_action="summary", action=selected_action, body=body)
 
 
@@ -1371,12 +1684,25 @@ async def vulnerability_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    assets_group: list[Any] | None = None,
+    severity: list[Any] | None = None,
+    status: int | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_list_if_present(condition_dict, "severity", severity)
+    _set_if_present(condition_dict, "status", status)
+    _set_keyword_fuzzy(condition_dict, keyword, VULNERABILITY_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_json_tool(
         "vulnerability_list",
         "/api/v1/vulnerability/vulnerabilityList",
@@ -1393,6 +1719,16 @@ async def cloud_service(
     time_from: int | None = None,
     time_to: int | None = None,
     source_ip: str | None = None,
+    assets_group: list[Any] | None = None,
+    cloud_vendor: list[Any] | str | None = None,
+    cloud_service: list[Any] | None = None,
+    cloud_service_class: list[Any] | str | None = None,
+    cloud_instance: str | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "access_source")
@@ -1401,8 +1737,27 @@ async def cloud_service(
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
     _set_if_present(condition_dict, "source_ip", source_ip)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    if isinstance(cloud_vendor, list):
+        condition_dict["cloud_vendor"] = list(cloud_vendor)
+    else:
+        _set_if_present(condition_dict, "cloud_vendor", cloud_vendor)
+    _set_list_if_present(condition_dict, "cloud_service", cloud_service)
+    if isinstance(cloud_service_class, list):
+        condition_dict["cloud_service_class"] = list(cloud_service_class)
+    else:
+        _set_if_present(condition_dict, "cloud_service_class", cloud_service_class)
+    _set_if_present(condition_dict, "cloud_instance", cloud_instance)
+    if keyword is not None:
+        fuzzy_fields = CLOUD_ACCESS_FUZZY_FIELDS if selected_action != "instance_access_list" else CLOUD_INSTANCE_ACCESS_FUZZY_FIELDS
+        condition_dict["fuzzy"] = {"keyword": keyword, "fieldlist": fuzzy_fields}
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     if selected_action == "assets_info":
         validation_error = _validate_required_body_fields(selected_action, body, "condition.source_ip")
+        if validation_error:
+            return validation_error
+    if selected_action == "instance_access_list":
+        validation_error = _validate_required_body_fields(selected_action, body, "condition.cloud_instance")
         if validation_error:
             return validation_error
     return await _run_action_json_tool(CLOUD_SERVICE_ACTIONS, default_action="access_source", action=selected_action, body=body)
@@ -1462,12 +1817,25 @@ async def mdr_alert_list(
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
     time_to: int | None = None,
+    section_list: list[Any] | None = None,
+    threat_severity: list[Any] | None = None,
+    judge_result_status: list[Any] | None = None,
+    keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
     _set_if_present(condition_dict, "time_to", time_to)
+    _set_list_if_present(condition_dict, "section_list", section_list)
+    _set_list_if_present(condition_dict, "threat_severity", threat_severity)
+    _set_list_if_present(condition_dict, "judge_result_status", judge_result_status)
+    _set_keyword_fuzzy(condition_dict, keyword, MDR_FUZZY_FIELDS)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     return await _run_action_json_tool(MDR_ACTIONS, default_action="list", action=action, body=body)
 
 

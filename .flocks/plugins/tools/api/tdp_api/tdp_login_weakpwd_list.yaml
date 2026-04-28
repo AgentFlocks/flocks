@@ -1,6 +1,7 @@
 name: tdp_login_weakpwd_list
 description: >
-  查询 TDP 弱口令列表，可结合登录入口和结果条件筛选。
+  查询 TDP 弱口令列表，可结合登录入口、攻击结果、应用分类和关键词筛选。优先使用顶层语义化参数；
+  `condition` / `page` 仅作为高级兼容入口。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -10,22 +11,52 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `result`、`app_class`、`is_plaintext`、
-        `assets_group`、`fuzzy`。其中 `result` 常见值为
-        `success`、`failed`、`unknown`。
-    page:
-      type: object
-      description: 分页对象，通常包含 `cur_page`、`page_size`，必要时可补排序信息。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    data:
+      type: string
+      description: 登录接口，例如 `172.16.71.129:8080/wp-login.php`。
+    weakpwd_source:
+      type: string
+      description: 归属字典或检出来源，留空表示全部。
+    result:
+      type: string
+      enum: [success, failed, unknown]
+      description: 攻击结果；`success`=成功，`failed`=失败，`unknown`=尝试。
+    app_class:
+      type: array
+      items:
+        type: string
+      description: 登录入口应用分类列表，例如 `OA`、`CMS`、`FTP`、`管理工具`。
+    is_plaintext:
+      type: boolean
+      description: 是否明文显示用户名和密码。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["threat.params.username","threat.params.weakpwd","data","net.src_ip"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。仅在需要复杂排序或特殊分页时使用。
   required: []
 handler:
   type: script
