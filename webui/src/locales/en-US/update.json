@@ -7,7 +7,7 @@
   "releaseNotes": "Release Notes",
   "details": "Details",
   "newVersionTitle": "New version available",
-  "newVersionDesc": "Upgrade now to get the latest features and fixes.",
+  "newVersionDesc": "This update includes new capabilities, experience improvements, and fixes. Upgrade to review the highlights.",
   "confirmUpgrade": "Upgrade to v{{version}}?",
   "confirmUpgradeDesc": "The service will briefly restart during the upgrade, and the page will refresh automatically when it is ready.",
   "confirmAction": "Confirm upgrade",

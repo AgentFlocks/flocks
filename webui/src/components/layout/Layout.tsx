@@ -23,13 +23,17 @@ import { useTranslation } from 'react-i18next';
 import LanguageSwitcher from '@/components/common/LanguageSwitcher';
 import OnboardingModal, { isOnboardingDismissed } from '@/components/common/OnboardingModal';
 import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
+import NotificationModal from '@/components/common/NotificationModal';
 import { checkUpdate } from '@/api/update';
+import { ackNotification, getActiveNotifications, type UserNotification } from '@/api/notifications';
+import { useAuth } from '@/contexts/AuthContext';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 60_000;
 
 export default function Layout() {
   const location = useLocation();
+  const { user } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const isHome = location.pathname === '/';
@@ -42,6 +46,9 @@ export default function Layout() {
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
+  const [notifications, setNotifications] = useState<UserNotification[]>([]);
+  const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
+  const lastNotificationFetchKeyRef = useRef<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -126,6 +133,71 @@ export default function Layout() {
     };
   }, [refreshUpdateStatus]);
 
+  useEffect(() => {
+    if (!user?.id) {
+      setNotifications([]);
+      setAcknowledgingNotificationIds([]);
+      lastNotificationFetchKeyRef.current = null;
+      return;
+    }
+
+    const fetchKey = `${user.id}:${i18n.language}:${currentVersion ?? 'pending-version'}`;
+    if (lastNotificationFetchKeyRef.current === fetchKey) return;
+    const previousFetchKey = lastNotificationFetchKeyRef.current;
+    lastNotificationFetchKeyRef.current = fetchKey;
+
+    let cancelled = false;
+    void getActiveNotifications(i18n.language, currentVersion)
+      .then((items) => {
+        if (cancelled) return;
+        setNotifications((prev) => {
+          const byId = new Map(prev.map((item) => [item.id, item]));
+          for (const item of items) {
+            byId.set(item.id, item);
+          }
+          return Array.from(byId.values()).sort((a, b) => a.priority - b.priority);
+        });
+      })
+      .catch(() => {
+        // Notification failures should never block the main product surface.
+        if (lastNotificationFetchKeyRef.current === fetchKey) {
+          lastNotificationFetchKeyRef.current = previousFetchKey;
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentVersion, i18n.language, user?.id]);
+
+  const visibleNotifications = !showOnboarding && !showUpdate && notifications.length > 0
+    ? notifications
+    : [];
+
+  const removeNotifications = useCallback((items: UserNotification[]) => {
+    const visibleIds = new Set(items.map((item) => item.id));
+    setNotifications((prev) => prev.filter((item) => !visibleIds.has(item.id)));
+  }, []);
+
+  const closeVisibleNotification = useCallback((notification?: UserNotification) => {
+    if (visibleNotifications.length === 0 || acknowledgingNotificationIds.length > 0) return;
+    removeNotifications(notification ? [notification] : visibleNotifications);
+  }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
+
+  const dismissVisibleNotificationForever = useCallback(async () => {
+    if (acknowledgingNotificationIds.length > 0) return;
+    if (visibleNotifications.length === 0) return;
+    setAcknowledgingNotificationIds(visibleNotifications.map((item) => item.id));
+    try {
+      await Promise.all(visibleNotifications.map((item) => ackNotification(item.id)));
+    } catch {
+      // Keep the UI moving; the server will retry visibility on the next login if dismiss failed.
+    } finally {
+      removeNotifications(visibleNotifications);
+      setAcknowledgingNotificationIds([]);
+    }
+  }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
+
 
   const navigation = [
     {
@@ -178,6 +250,15 @@ export default function Layout() {
         <UpdateModal
           onClose={() => setShowUpdate(false)}
           onDismiss={() => setShowUpdate(false)}
+        />
+      )}
+      {visibleNotifications.length > 0 && (
+        <NotificationModal
+          notifications={visibleNotifications}
+          acknowledgingIds={acknowledgingNotificationIds}
+          onAcknowledge={closeVisibleNotification}
+          onClose={closeVisibleNotification}
+          onDismissForever={dismissVisibleNotificationForever}
         />
       )}
 
