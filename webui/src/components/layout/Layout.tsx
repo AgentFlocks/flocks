@@ -47,7 +47,7 @@ export default function Layout() {
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
   const [notifications, setNotifications] = useState<UserNotification[]>([]);
-  const [acknowledgingNotification, setAcknowledgingNotification] = useState(false);
+  const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
@@ -134,10 +134,16 @@ export default function Layout() {
   }, [refreshUpdateStatus]);
 
   useEffect(() => {
-    if (!user?.id) return;
+    if (!user?.id) {
+      setNotifications([]);
+      setAcknowledgingNotificationIds([]);
+      lastNotificationFetchKeyRef.current = null;
+      return;
+    }
 
     const fetchKey = `${user.id}:${i18n.language}:${currentVersion ?? 'pending-version'}`;
     if (lastNotificationFetchKeyRef.current === fetchKey) return;
+    const previousFetchKey = lastNotificationFetchKeyRef.current;
     lastNotificationFetchKeyRef.current = fetchKey;
 
     let cancelled = false;
@@ -154,6 +160,9 @@ export default function Layout() {
       })
       .catch(() => {
         // Notification failures should never block the main product surface.
+        if (lastNotificationFetchKeyRef.current === fetchKey) {
+          lastNotificationFetchKeyRef.current = previousFetchKey;
+        }
       });
 
     return () => {
@@ -165,25 +174,29 @@ export default function Layout() {
     ? notifications
     : [];
 
-  const closeVisibleNotification = useCallback(() => {
-    if (visibleNotifications.length === 0 || acknowledgingNotification) return;
-    const visibleIds = new Set(visibleNotifications.map((item) => item.id));
+  const removeNotifications = useCallback((items: UserNotification[]) => {
+    const visibleIds = new Set(items.map((item) => item.id));
     setNotifications((prev) => prev.filter((item) => !visibleIds.has(item.id)));
-  }, [acknowledgingNotification, visibleNotifications]);
+  }, []);
+
+  const closeVisibleNotification = useCallback((notification?: UserNotification) => {
+    if (visibleNotifications.length === 0 || acknowledgingNotificationIds.length > 0) return;
+    removeNotifications(notification ? [notification] : visibleNotifications);
+  }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
   const dismissVisibleNotificationForever = useCallback(async () => {
-    if (visibleNotifications.length === 0 || acknowledgingNotification) return;
-    setAcknowledgingNotification(true);
-    const visibleIds = new Set(visibleNotifications.map((item) => item.id));
+    if (acknowledgingNotificationIds.length > 0) return;
+    if (visibleNotifications.length === 0) return;
+    setAcknowledgingNotificationIds(visibleNotifications.map((item) => item.id));
     try {
       await Promise.all(visibleNotifications.map((item) => ackNotification(item.id)));
     } catch {
       // Keep the UI moving; the server will retry visibility on the next login if dismiss failed.
     } finally {
-      setNotifications((prev) => prev.filter((item) => !visibleIds.has(item.id)));
-      setAcknowledgingNotification(false);
+      removeNotifications(visibleNotifications);
+      setAcknowledgingNotificationIds([]);
     }
-  }, [acknowledgingNotification, visibleNotifications]);
+  }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
 
   const navigation = [
@@ -242,7 +255,7 @@ export default function Layout() {
       {visibleNotifications.length > 0 && (
         <NotificationModal
           notifications={visibleNotifications}
-          acknowledging={acknowledgingNotification}
+          acknowledgingIds={acknowledgingNotificationIds}
           onAcknowledge={closeVisibleNotification}
           onClose={closeVisibleNotification}
           onDismissForever={dismissVisibleNotificationForever}

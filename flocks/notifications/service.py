@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -36,8 +36,12 @@ class NotificationContent(BaseModel):
     summary: str | None = None
     body: str | None = None
     highlights: list[str] = Field(default_factory=list)
-    primary_action: NotificationAction | None = Field(default=None, alias="primaryAction")
-    secondary_action: NotificationAction | None = Field(default=None, alias="secondaryAction")
+    primary_action: NotificationAction | None = Field(
+        default=None, alias="primaryAction"
+    )
+    secondary_action: NotificationAction | None = Field(
+        default=None, alias="secondaryAction"
+    )
 
     model_config = {"populate_by_name": True}
 
@@ -48,7 +52,11 @@ class NotificationConfig(BaseModel):
     enabled: bool = True
     priority: int = 100
     version: str | None = None
+    starts_at: str | None = Field(default=None, alias="startsAt")
+    expires_at: str | None = Field(default=None, alias="expiresAt")
     locales: dict[str, NotificationContent]
+
+    model_config = {"populate_by_name": True}
 
 
 class NotificationResponse(BaseModel):
@@ -75,6 +83,8 @@ DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
         id="token-free-period-extended-2026-04",
         kind="benefit",
         priority=10,
+        starts_at="2026-03-30T00:00:00+08:00",
+        expires_at="2026-04-30T00:00:00+08:00",
         locales={
             "zh-CN": NotificationContent(
                 title="Token 免费期已延长",
@@ -157,6 +167,51 @@ class NotificationService:
         return f"notifications/dismissed/{user_id}/{notification_id}"
 
     @classmethod
+    def _parse_window_time(cls, value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            log.warn("notifications.time_window.invalid", {"value": value})
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    @classmethod
+    def _is_in_time_window(cls, notification: NotificationConfig, now: datetime) -> bool:
+        starts_at = cls._parse_window_time(notification.starts_at)
+        expires_at = cls._parse_window_time(notification.expires_at)
+        if starts_at and now < starts_at:
+            return False
+        if expires_at and now >= expires_at:
+            return False
+        return True
+
+    @classmethod
+    def _resolve_current_version(cls, current_version: str | None) -> str | None:
+        if current_version:
+            return current_version
+        try:
+            from flocks.updater import get_current_version
+
+            version = get_current_version()
+            return version if version and version != "unknown" else None
+        except Exception as exc:
+            log.warn("notifications.version.resolve_failed", {"error": str(exc)})
+            return None
+
+    @classmethod
+    def _notification_sort_key(
+        cls,
+        notification: NotificationConfig,
+        config_ids: set[str],
+    ) -> tuple[int, int]:
+        # Config entries must win over built-ins with the same id, regardless of priority.
+        return (0 if notification.id in config_ids else 1, notification.priority)
+
+    @classmethod
     async def _load_config_notifications(cls) -> list[NotificationConfig]:
         try:
             config = await Config.get()
@@ -168,7 +223,10 @@ class NotificationService:
         if not raw_notifications:
             return []
         if not isinstance(raw_notifications, list):
-            log.warn("notifications.config.invalid", {"reason": "notifications must be a list"})
+            log.warn(
+                "notifications.config.invalid",
+                {"reason": "notifications must be a list"},
+            )
             return []
 
         notifications: list[NotificationConfig] = []
@@ -192,17 +250,29 @@ class NotificationService:
         current_version: str | None = None,
     ) -> list[NotificationResponse]:
         target_locale = _normalize_locale(locale)
-        notifications = [*DEFAULT_NOTIFICATIONS]
-        if current_version:
-            notifications.append(_default_whats_new(current_version))
-        notifications.extend(await cls._load_config_notifications())
+        resolved_version = cls._resolve_current_version(current_version)
+        config_notifications = await cls._load_config_notifications()
+        config_ids = {notification.id for notification in config_notifications}
+
+        notifications = [
+            *config_notifications,
+            *(notification for notification in DEFAULT_NOTIFICATIONS if notification.id not in config_ids),
+        ]
+        if resolved_version and f"whats-new-{resolved_version}" not in config_ids:
+            notifications.append(_default_whats_new(resolved_version))
 
         active: list[NotificationResponse] = []
         seen_ids: set[str] = set()
-        for notification in sorted(notifications, key=lambda item: item.priority):
+        now = datetime.now(UTC)
+        for notification in sorted(
+            notifications,
+            key=lambda item: cls._notification_sort_key(item, config_ids),
+        ):
             if not notification.enabled or notification.id in seen_ids:
                 continue
             seen_ids.add(notification.id)
+            if not cls._is_in_time_window(notification, now):
+                continue
             if await cls._is_acknowledged(user_id, notification.id):
                 continue
 
@@ -232,11 +302,32 @@ class NotificationService:
         return active
 
     @classmethod
-    async def acknowledge(cls, *, user_id: str, notification_id: str) -> NotificationAck:
+    async def acknowledge(
+        cls, *, user_id: str, notification_id: str
+    ) -> NotificationAck:
         ack = NotificationAck(
             user_id=user_id,
             notification_id=notification_id,
             acknowledged_at=_iso_now(),
         )
-        await Storage.set(cls._ack_key(user_id, notification_id), ack.model_dump())
+        await Storage.set(cls._ack_key(user_id, notification_id), ack)
+        if notification_id.startswith("whats-new-"):
+            await cls._prune_whats_new_acknowledgements(user_id=user_id, keep=5)
         return ack
+
+    @classmethod
+    async def _prune_whats_new_acknowledgements(cls, *, user_id: str, keep: int) -> None:
+        prefix = f"notifications/dismissed/{user_id}/whats-new-"
+        entries = await Storage.list_entries(prefix)
+        if len(entries) <= keep:
+            return
+
+        def acknowledged_at(entry: tuple[str, object]) -> str:
+            value = entry[1]
+            if isinstance(value, dict):
+                raw = value.get("acknowledged_at")
+                return raw if isinstance(raw, str) else ""
+            return ""
+
+        for key, _ in sorted(entries, key=acknowledged_at, reverse=True)[keep:]:
+            await Storage.delete(key)
