@@ -13,6 +13,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Set, Tuple
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
+from flocks.hooks.pipeline import HookPipeline
 from flocks.tool.catalog import get_tool_catalog_metadata, list_tool_catalog_infos
 from flocks.tool.registry import ToolRegistry, ToolResult
 from flocks.utils.langfuse import generation_scope, trace_scope
@@ -1796,6 +1798,64 @@ Please address this message and continue with your tasks.
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
+        def _summarize_content(content: Any) -> Dict[str, Any]:
+            if isinstance(content, str):
+                return {
+                    "type": "text",
+                    "length": len(content),
+                    "preview": content[:500],
+                }
+            if isinstance(content, list):
+                part_summaries = []
+                for part in content[:5]:
+                    if isinstance(part, dict):
+                        part_summary = {"type": part.get("type", "object")}
+                        text_value = part.get("text")
+                        if isinstance(text_value, str):
+                            part_summary["textLength"] = len(text_value)
+                            part_summary["textPreview"] = text_value[:160]
+                        mime_type = part.get("mimeType")
+                        if mime_type:
+                            part_summary["mimeType"] = mime_type
+                        part_summaries.append(part_summary)
+                    else:
+                        part_summaries.append({"type": type(part).__name__})
+                return {
+                    "type": "parts",
+                    "partCount": len(content),
+                    "parts": part_summaries,
+                }
+            return {
+                "type": type(content).__name__,
+                "preview": str(content)[:500],
+            }
+
+        def _summarize_message(message: ChatMessage) -> Dict[str, Any]:
+            tool_calls = getattr(message, "tool_calls", None) or []
+            tool_call_names = []
+            for tool_call in tool_calls[:20]:
+                if isinstance(tool_call, dict):
+                    tool_call_names.append(tool_call.get("function", {}).get("name", ""))
+            reasoning = getattr(message, "reasoning", None) or ""
+            return {
+                "role": message.role,
+                "content": _summarize_content(message.content),
+                "toolCallCount": len(tool_calls),
+                "toolCallNames": tool_call_names,
+                "reasoningLength": len(reasoning),
+            }
+
+        def _summarize_tools(tool_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            summaries = []
+            for tool in tool_list[:50]:
+                function_meta = tool.get("function", {}) if isinstance(tool, dict) else {}
+                summaries.append({
+                    "name": function_meta.get("name", ""),
+                    "description": (function_meta.get("description", "") or "")[:240],
+                    "hasParameters": bool(function_meta.get("parameters")),
+                })
+            return summaries
+
         # Create stream processor
         main_session_key = self.session.id
         config_data: Dict[str, Any] = {}
@@ -1932,101 +1992,144 @@ Please address this message and continue with your tasks.
                 "tool_count": len(tools),
             })
 
-        async for chunk in _iter_with_chunk_timeout(
-            provider.chat_stream(
-                model_id=self.model_id,
-                messages=messages,
-                tools=provider_tools,
-                # session_id is forwarded via kwargs so providers that need
-                # to look up persisted session data (e.g. Gemini's DB-backed
-                # reasoning replay) can do so.  Providers that don't care
-                # simply ignore unknown kwargs.
-                session_id=self.session.id,
-                **provider_options,
-            ),
-            first_chunk_timeout_s=LLM_STREAM_FIRST_CHUNK_TIMEOUT_S,
-            ongoing_chunk_timeout_s=LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S,
-        ):
-            chunk_counts["total"] += 1
-            
-            chunk_finish = getattr(chunk, 'finish_reason', None)
-            if chunk_finish:
-                stream_finish_reason = chunk_finish
-            
-            # Capture usage from chunk (providers may include it in the final chunk)
-            if hasattr(chunk, 'usage') and chunk.usage:
-                stream_usage = chunk.usage
-            
-            # Check for abort
-            if self.is_aborted:
-                break
-            
-            # Determine event type from chunk.  A single chunk may carry any
-            # combination of reasoning / text / tool_calls (e.g. Gemini bundles
-            # them).  We must not drop non-reasoning content when reasoning is
-            # present, and we must not double-emit `delta` as text when the
-            # provider used `event_type == 'reasoning'` to overload `delta` for
-            # reasoning text.
-            event_type = getattr(chunk, 'event_type', None)
+        llm_hook_input = {
+            "sessionID": self.session.id,
+            "messageID": assistant_msg.id,
+            "workspace": self.session.directory,
+            "agent": agent.name,
+            "step": self._step,
+            "model": {
+                "providerID": self.provider_id,
+                "modelID": self.model_id,
+            },
+            "request": {
+                "messageCount": len(messages),
+                "messages": [_summarize_message(message) for message in messages],
+                "toolCount": len(tools),
+                "tools": _summarize_tools(tools),
+                "providerOptions": dict(provider_options),
+                "providerToolsEnabled": provider_tools is not None,
+            },
+        }
+        try:
+            await HookPipeline.run_llm_before(llm_hook_input)
+        except Exception as exc:
+            log.debug("runner.hook.llm_before.error", {"error": str(exc)})
 
-            chunk_reasoning = getattr(chunk, 'reasoning', None) or None
-            if not chunk_reasoning and event_type == 'reasoning':
-                # Older providers signal reasoning via event_type and put the
-                # reasoning text in `delta` (no separate `reasoning` field).
-                chunk_reasoning = getattr(chunk, 'delta', '') or None
+        llm_call_started_at = time.perf_counter()
+        try:
+            async for chunk in _iter_with_chunk_timeout(
+                provider.chat_stream(
+                    model_id=self.model_id,
+                    messages=messages,
+                    tools=provider_tools,
+                    # session_id is forwarded via kwargs so providers that need
+                    # to look up persisted session data (e.g. Gemini's DB-backed
+                    # reasoning replay) can do so.  Providers that don't care
+                    # simply ignore unknown kwargs.
+                    session_id=self.session.id,
+                    **provider_options,
+                ),
+                first_chunk_timeout_s=LLM_STREAM_FIRST_CHUNK_TIMEOUT_S,
+                ongoing_chunk_timeout_s=LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S,
+            ):
+                chunk_counts["total"] += 1
+                
+                chunk_finish = getattr(chunk, 'finish_reason', None)
+                if chunk_finish:
+                    stream_finish_reason = chunk_finish
+                
+                # Capture usage from chunk (providers may include it in the final chunk)
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    stream_usage = chunk.usage
+                
+                # Check for abort
+                if self.is_aborted:
+                    break
+                
+                # Determine event type from chunk.  A single chunk may carry any
+                # combination of reasoning / text / tool_calls (e.g. Gemini bundles
+                # them).  We must not drop non-reasoning content when reasoning is
+                # present, and we must not double-emit `delta` as text when the
+                # provider used `event_type == 'reasoning'` to overload `delta` for
+                # reasoning text.
+                event_type = getattr(chunk, 'event_type', None)
 
-            # Treat `delta` as text only when it isn't already consumed as
-            # reasoning above.  This preserves backward compatibility with
-            # providers that emit reasoning-only chunks via `event_type`.
-            chunk_text = ''
-            if event_type != 'reasoning' or getattr(chunk, 'reasoning', None):
-                chunk_text = getattr(chunk, 'delta', '') or ''
+                chunk_reasoning = getattr(chunk, 'reasoning', None) or None
+                if not chunk_reasoning and event_type == 'reasoning':
+                    # Older providers signal reasoning via event_type and put the
+                    # reasoning text in `delta` (no separate `reasoning` field).
+                    chunk_reasoning = getattr(chunk, 'delta', '') or None
 
-            chunk_tool_calls = getattr(chunk, 'tool_calls', None)
+                # Treat `delta` as text only when it isn't already consumed as
+                # reasoning above.  This preserves backward compatibility with
+                # providers that emit reasoning-only chunks via `event_type`.
+                chunk_text = ''
+                if event_type != 'reasoning' or getattr(chunk, 'reasoning', None):
+                    chunk_text = getattr(chunk, 'delta', '') or ''
 
-            # 1) Process reasoning delta (start reasoning block on first sight).
-            if chunk_reasoning:
-                chunk_counts["reasoning"] += 1
-                log.debug("runner.reasoning.received", {
-                    "length": len(chunk_reasoning),
-                    "text_preview": chunk_reasoning[:50],
-                })
-                if not hasattr(self, '_current_reasoning_id'):
-                    reasoning_id_counter += 1
-                    self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                    await processor.process_event(ReasoningStartEvent(
-                        id=self._current_reasoning_id
+                chunk_tool_calls = getattr(chunk, 'tool_calls', None)
+
+                # 1) Process reasoning delta (start reasoning block on first sight).
+                if chunk_reasoning:
+                    chunk_counts["reasoning"] += 1
+                    log.debug("runner.reasoning.received", {
+                        "length": len(chunk_reasoning),
+                        "text_preview": chunk_reasoning[:50],
+                    })
+                    if not hasattr(self, '_current_reasoning_id'):
+                        reasoning_id_counter += 1
+                        self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                        await processor.process_event(ReasoningStartEvent(
+                            id=self._current_reasoning_id
+                        ))
+
+                    await processor.process_event(ReasoningDeltaEvent(
+                        id=self._current_reasoning_id,
+                        text=chunk_reasoning,
                     ))
 
-                await processor.process_event(ReasoningDeltaEvent(
-                    id=self._current_reasoning_id,
-                    text=chunk_reasoning,
-                ))
+                # 2) End reasoning block when this chunk also carries non-reasoning
+                #    content (or once the stream moves away from reasoning).
+                if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
+                    await processor.process_event(ReasoningEndEvent(
+                        id=self._current_reasoning_id
+                    ))
+                    delattr(self, '_current_reasoning_id')
 
-            # 2) End reasoning block when this chunk also carries non-reasoning
-            #    content (or once the stream moves away from reasoning).
-            if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
-                await processor.process_event(ReasoningEndEvent(
-                    id=self._current_reasoning_id
-                ))
-                delattr(self, '_current_reasoning_id')
+                # 3) Process text delta.
+                if chunk_text:
+                    chunk_counts["text"] += 1
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
 
-            # 3) Process text delta.
-            if chunk_text:
-                chunk_counts["text"] += 1
-                if not text_started:
-                    await processor.process_event(TextStartEvent())
-                    text_started = True
+                    await processor.process_event(TextDeltaEvent(
+                        text=chunk_text,
+                    ))
 
-                await processor.process_event(TextDeltaEvent(
-                    text=chunk_text,
-                ))
-
-            # 4) Process tool calls.
-            if chunk_tool_calls:
-                chunk_counts["tool"] += 1
-                for tc in chunk_tool_calls:
-                    await tool_accumulator.feed_chunk(tc)
+                # 4) Process tool calls.
+                if chunk_tool_calls:
+                    chunk_counts["tool"] += 1
+                    for tc in chunk_tool_calls:
+                        await tool_accumulator.feed_chunk(tc)
+        except Exception as exc:
+            try:
+                await HookPipeline.run_llm_after(
+                    llm_hook_input,
+                    {
+                        "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                        "error": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                        "usage": stream_usage,
+                        "chunkCounts": dict(chunk_counts),
+                    },
+                )
+            except Exception as hook_exc:
+                log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            raise
         
         log.info("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
@@ -2103,6 +2206,27 @@ Please address this message and continue with your tasks.
             )
             for tc_state in processor.tool_calls.values()
         ]
+        result_action = "continue" if tool_calls_for_result else "stop"
+        try:
+            await HookPipeline.run_llm_after(
+                llm_hook_input,
+                {
+                    "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                    "finishReason": processor.get_finish_reason(),
+                    "contentLength": len(content),
+                    "reasoningLength": len(reasoning),
+                    "toolCallCount": len(tool_calls_for_result),
+                    "toolCalls": [
+                        {"id": tool_call.id, "name": tool_call.name}
+                        for tool_call in tool_calls_for_result[:30]
+                    ],
+                    "usage": stream_usage,
+                    "chunkCounts": dict(chunk_counts),
+                    "action": result_action,
+                },
+            )
+        except Exception as exc:
+            log.debug("runner.hook.llm_after.error", {"error": str(exc)})
         
         if tool_calls_for_result:
             self._end_observability(
@@ -2127,7 +2251,7 @@ Please address this message and continue with your tasks.
                 },
             )
             return StepResult(
-                action="continue",
+                action=result_action,
                 content=content,
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
@@ -2152,7 +2276,7 @@ Please address this message and continue with your tasks.
                 "finish_reason": processor.get_finish_reason(),
             },
         )
-        return StepResult(action="stop", content=content, usage=stream_usage)
+        return StepResult(action=result_action, content=content, usage=stream_usage)
     
     @staticmethod
     def _end_observability(
