@@ -1,6 +1,8 @@
 name: tdp_machine_asset_list
 description: >
-  查询 TDP 服务资产相关接口。默认返回全部服务列表，也可通过 action 切换到主机资产视图或 Web 应用框架列表。
+  查询 TDP 服务资产相关接口。`service_list` 适合按服务、分类、端口、是否活跃和是否对外开放筛选；
+  `host_asset_list` 更适合按主机资产视角查看；`web_app_framework_list` 用于按 Web 应用和框架维度筛选。
+  优先使用顶层语义化参数，不要直接手写 `condition` / `page`。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -18,14 +20,92 @@ inputSchema:
         `condition.af_class=web_application` 与按最近发现时间排序。
       enum: [service_list, host_asset_list, web_app_framework_list]
       default: service_list
+    time_from:
+      type: integer
+      description: >
+        兼容参数。服务资产、主机资产和 Web 应用框架是当前资产视图，TDP API 文档不支持按时间筛选；
+        handler 接受但不会写入请求体。
+    time_to:
+      type: integer
+      description: >
+        兼容参数。服务资产、主机资产和 Web 应用框架是当前资产视图，TDP API 文档不支持按时间筛选；
+        handler 接受但不会写入请求体。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    port:
+      type: integer
+      description: 服务端口。
+    asset_section:
+      type: string
+      description: 主机类型，例如 `server` 或 `endpoint`。
+    sub_type:
+      type: string
+      description: 主机子类型，例如 `loadbalance`、`dns`、`proxy`、`bastionhost`、`scanner`。
+    fuzzy_machine_name:
+      type: string
+      description: 按主机名模糊搜索。
+    fuzzy_service_version:
+      type: string
+      description: 按服务版本模糊搜索。
+    fuzzy_service:
+      type: string
+      description: 按服务类型模糊搜索，主要适用于 `host_asset_list`。
+    service:
+      type: string
+      description: 服务名称，例如 `nginx`、`ssh`。
+    service_class:
+      type: string
+      description: 服务分类，例如 `web`、`rlogin`。
+    is_active:
+      type: boolean
+      description: 是否活跃。
+    is_new:
+      type: boolean
+      description: 是否新上线。
+    is_public:
+      type: boolean
+      description: 是否对外开放。
+    level:
+      type: integer
+      description: 资产级别，常见值 `1`=普通，`2`=重要。
+    host_type:
+      type: array
+      items:
+        type: string
+      description: 资产类型列表，主要适用于 `web_app_framework_list`。
+    application:
+      type: string
+      description: 应用名称，例如 `泛微e-cology`。
+    sub_class:
+      type: string
+      description: 应用子类，例如 `OA`。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["machine","assets.name"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向。
     condition:
       type: object
-      description: >
-        条件对象。常用筛选包括 `fuzzy`、`service`、`service_class`、
-        `asset_section`、`is_public`、`is_active`。
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
     page:
       type: object
-      description: 分页对象。
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

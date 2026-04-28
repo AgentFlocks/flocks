@@ -1,6 +1,8 @@
 name: tdp_login_api_list
 description: >
-  查询 TDP 登录入口相关数据。默认返回登录入口列表，也可通过 action 切换到顶部汇总和类别统计子接口。
+  查询 TDP 登录入口相关数据。`summary` 返回登录入口头部统计，`category` 返回分类统计，
+  `list` 返回登录入口明细列表。优先使用顶层语义化参数，例如业务组、分类、风险标签和布尔筛选；
+  `condition` / `page` 仅用于高级兼容。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -17,15 +19,6 @@ inputSchema:
         `condition.time_from`、`condition.time_to` 和默认分页排序。
       enum: [summary, category, list]
       default: list
-    condition:
-      type: object
-      description: >
-        条件对象。`list` 常用 `threat_tag`、`app_class`、
-        `category`、`assets_group`、`fuzzy`。其中 `threat_tag`
-        可用于筛选弱口令、撞库、爆破、密码喷洒等风险类别。
-    page:
-      type: object
-      description: 分页对象，主要用于 `list`；通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_from`。可以使用python datetime动态计算。
@@ -43,6 +36,54 @@ inputSchema:
     category:
       type: string
       description: 登录入口分类，例如 `web`、`remote_login`、`file_share`、`db`、`email`。
+    threat_tag:
+      type: array
+      items:
+        type: string
+      description: 风险类别列表，例如 `弱口令`、`撞库`、`爆破`、`密码喷洒`、`异常时间登录`。
+    keyword:
+      type: string
+      description: >
+        关键词搜索，适用于 `list`。handler 会自动组装
+        `condition.fuzzy.fieldlist=["data","net.http.reqs_referer"]`。
+    is_public:
+      type: integer
+      enum: [0, 1]
+      description: 是否对外开放，适用于 `list`；`1`=是，`0`=未知。
+    is_new_online:
+      type: integer
+      enum: [1]
+      description: 是否新上线，适用于 `list`；传 `1` 表示仅看新上线。
+    is_active:
+      type: integer
+      enum: [1]
+      description: 是否活跃，适用于 `list`；传 `1` 表示仅看活跃。
+    result:
+      type: string
+      description: 登录结果，适用于 `list`，常见值如 `success`。
+    vulnerable:
+      type: integer
+      enum: [1]
+      description: 是否存在风险，适用于 `list`；传 `1` 表示仅看存在风险。
+    cur_page:
+      type: integer
+      description: 页码，适用于 `list`，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，适用于 `list`，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段，适用于 `list`，默认 `threat_tag_count`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，适用于 `list`，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

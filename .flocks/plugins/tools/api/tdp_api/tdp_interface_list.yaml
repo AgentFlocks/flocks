@@ -1,6 +1,7 @@
 name: tdp_interface_list
 description: >
-  查询 TDP API 接口列表，支持按域名、方法和敏感标签筛选。
+  查询 TDP API 接口列表，支持按域名、请求方法、敏感标签、是否对外开放和关键词筛选。
+  优先使用顶层语义化参数；`condition` / `page` 仅用于传递尚未暴露的底层字段。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -10,22 +11,64 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `host`、`methods`、`privacy_tags`、`tags`、
-        `is_public`、`has_interface`、`is_encrypted` 以及
-        `fuzzy`；适合筛选 API 接口、敏感信息暴露和请求方法。
-    page:
-      type: object
-      description: 分页对象，通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    host:
+      type: string
+      description: 域名或站点，留空表示全部。
+    has_interface:
+      type: integer
+      enum: [0, 1]
+      description: 是否要求存在接口信息；`1`=有，`0`=没有。
+    methods:
+      type: array
+      items:
+        type: string
+      description: HTTP 方法列表，例如 `GET`、`POST`、`PUT`、`DELETE`。
+    privacy_tags:
+      type: array
+      items:
+        type: string
+      description: 敏感标签列表，例如 `leak_identify`、`leak_phone`、`leak_card`、`leak_email`。
+    tags:
+      type: array
+      items:
+        type: string
+      description: 接口标签列表。
+    is_public:
+      type: boolean
+      description: 是否对外开放。
+    is_encrypted:
+      type: boolean
+      description: 是否对敏感信息做加密显示；`true` 时敏感内容会加密返回。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["url_pattern","title"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段，默认 `url_pattern`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，默认 `asc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。仅在需要自定义复杂 `page.sort` 时使用。
   required: []
 handler:
   type: script

@@ -424,6 +424,63 @@ async def test_tdp_vulnerability_list_uses_vulnerability_endpoint():
 
 
 @pytest.mark.asyncio
+async def test_tdp_interface_risk_list_invokes_handler_via_yaml_tool_loader():
+    """Loads YAML → yaml_to_tool → handler(context, **kwargs), same path as Flocks runtime."""
+    tool = _load_tool("tdp_interface_risk_list.yaml")
+
+    assert tool.info.name == "tdp_interface_risk_list"
+    assert tool.info.provider == "tdp_api"
+
+    fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": {"items": []}})])
+
+    with (
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:tdp_api_key}",
+                "secret": "{secret:tdp_secret}",
+                "base_url": "https://tdp.local",
+            },
+        ),
+        patch(
+            "flocks.security.get_secret_manager",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=lambda key: {"tdp_api_key": "demo-api", "tdp_secret": "demo-secret"}.get(key))
+            ),
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            time_from=1700000000,
+            time_to=1700003600,
+            api_risk_type="注入漏洞",
+            keyword="graphql",
+            cur_page=2,
+            page_size=15,
+            sort_by="last_occ_time",
+            sort_order="asc",
+        )
+
+    assert result.success is True
+    assert result.metadata["api"] == "interface_risk_list"
+    method, request_url, request_kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert request_url == "https://tdp.local/api/v1/interface/risk/getApiList"
+    req_json = request_kwargs["json"]
+    assert req_json["condition"]["time_from"] == 1700000000
+    assert req_json["condition"]["time_to"] == 1700003600
+    assert req_json["condition"]["api_risk_type"] == "注入漏洞"
+    assert req_json["condition"]["fuzzy"] == {
+        "keyword": "graphql",
+        "fieldlist": ["threat.name", "url_pattern"],
+    }
+    assert req_json["page"]["cur_page"] == 2
+    assert req_json["page"]["page_size"] == 15
+    assert req_json["page"]["sort"] == [{"sort_by": "last_occ_time", "sort_order": "asc"}]
+
+
+@pytest.mark.asyncio
 async def test_tdp_cloud_facilities_can_switch_to_instance_access_list_action():
     tool = _load_tool("tdp_cloud_facilities.yaml")
     fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": {"items": [{"cloud_instance": "i-zadG8d4l"}]}})])
@@ -445,7 +502,11 @@ async def test_tdp_cloud_facilities_can_switch_to_instance_access_list_action():
         ),
         patch("aiohttp.ClientSession", return_value=fake_session),
     ):
-        result = await tool.handler(ToolContext(session_id="test", message_id="test"), action="instance_access_list")
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="instance_access_list",
+            cloud_instance="i-zadG8d4l",
+        )
 
     assert result.success is True
     assert result.metadata["api"] == "cloud_facilities_instance_access_list"

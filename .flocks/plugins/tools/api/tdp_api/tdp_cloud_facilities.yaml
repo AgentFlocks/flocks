@@ -1,6 +1,8 @@
 name: tdp_cloud_facilities
 description: >
-  查询 TDP 云服务相关数据。默认返回访问源主机列表，也可通过 action 切换到访问源详情、实例列表和实例访问详情。
+  查询 TDP 云服务相关数据。`access_source` 返回访问源主机列表；`assets_info` 查询某个访问源主机的云服务访问详情；
+  `instance_list` 返回云实例列表；`instance_access_list` 查询指定云实例的访问明细。优先使用顶层语义化参数，`condition` / `page`
+  仅用于高级兼容。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -14,19 +16,9 @@ inputSchema:
       description: >
         云服务子接口动作。各动作都会自动补齐 condition.time_from、
         condition.time_to 和默认分页排序；其中 `assets_info`
-        额外要求传 `source_ip`。
+        额外要求传 `source_ip`；`instance_access_list` 通常还应提供 `cloud_instance`。
       enum: [access_source, assets_info, instance_list, instance_access_list]
       default: access_source
-    condition:
-      type: object
-      description: >
-        条件对象。常用字段包括 `cloud_vendor`、`cloud_service_class`、
-        `cloud_service`、`cloud_instance`、`fuzzy`；不同 action
-        使用的字段不同，时间范围会自动写入 `condition.time_from`
-        和 `condition.time_to`。
-    page:
-      type: object
-      description: 分页对象，通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
@@ -36,6 +28,58 @@ inputSchema:
     source_ip:
       type: string
       description: 访问源 IP，`assets_info` 动作必填；用于查看某个访问源主机的云服务访问详情。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    cloud_vendor:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+      description: 云厂商名称。不同 action 可能接受单值或列表。
+    cloud_service:
+      type: array
+      items:
+        type: string
+      description: 云服务英文类型列表，例如 `BCC`、`UHost`、`CVM`。
+    cloud_service_class:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+      description: 云服务中文类型，例如 `云服务器`、`云函数`。不同 action 可能接受单值或列表。
+    cloud_instance:
+      type: string
+      description: 云实例名称；`instance_access_list` 常用且通常必填。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会根据 action 自动选择固定 fieldlist：
+        `access_source` / `instance_list` 使用 `["machine","cloud_instance"]`，
+        `instance_access_list` 使用 `["cloud_instance","external_ip","machine"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段，默认 `connect_times`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

@@ -31,7 +31,10 @@ inputSchema:
     sql:
       type: string
       default: "threat.level = 'attack'"
-      description: TDP 的高级查询语句；默认值为 `threat.level = 'attack'`。`search` 直接执行日志检索，`terms` 会把它当作聚合前的过滤条件。字段名、操作符和枚举值需与 TDP 查询语法一致。
+      description: >
+        TDP 的高级查询过滤表达式，不是完整 SQL 语句；禁止使用 `SELECT * FROM ...`。
+        `search` 未传时默认使用 `threat.level = 'attack'`，`terms` 可不传。
+        正确示例：`threat.level = 'attack' AND threat.result = 'success'`。
     columns:
       type: array
       items:
@@ -52,11 +55,11 @@ inputSchema:
       description: 聚合字段，适用于 `terms`，例如 `threat.name`、`net.src_ip`、`net.dest_ip`、`net.http.url`。
     size:
       type: integer
-      description: 返回数量控制参数；`search` 用于限制返回日志条数，`terms` 用于限制聚合桶数量，默认值为 `10`。
+      description: 返回数量控制参数；`search` 用于限制返回日志条数，`terms` 用于限制聚合桶数量，默认值为 `10`。注意本工具不支持 `page_size`。
     log_ip:
       type: string
       description: 日志节点 IP，适用于 `terms`，用于指定某个日志节点做聚合统计。
-  required: [sql]
+  required: []
 handler:
   type: script
   script_file: tdp.handler.py
