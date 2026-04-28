@@ -37,6 +37,25 @@ async def test_tdp_incident_timeline_requires_incident_id():
     assert "incident_id" in result.error
 
 
+async def test_tdp_incident_timeline_defaults_show_attack_true():
+    module = _load_module("test_tdp_handler_incident_timeline_show_attack", _TDP_HANDLER)
+    mock_result = ToolResult(success=True, output={"status": 200})
+
+    with patch.object(module, "_run_action_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
+        result = await module.incident_list(
+            _ctx(),
+            action="timeline",
+            incident_id="incident-1",
+            time_from=1700000000,
+            time_to=1700003600,
+        )
+
+    assert result.success is True
+    body = mock_run.await_args.kwargs["body"]
+    assert body["incident_id"] == "incident-1"
+    assert body["show_attack"] is True
+
+
 async def test_tdp_incident_alert_search_requires_page():
     module = _load_module("test_tdp_handler_incident_alert_page", _TDP_HANDLER)
 
@@ -107,6 +126,17 @@ async def test_tdp_platform_cascade_children_maps_keyword_to_root_payload():
     assert default_action == "asset_list"
     assert action == "cascade_children"
     assert body == {"keyword": "node-001"}
+
+
+async def test_tdp_platform_config_exposes_disposal_log_list():
+    module = _load_module("test_tdp_handler_platform_disposal_log", _TDP_HANDLER)
+    mock_result = ToolResult(success=True, output={"status": 200})
+
+    with patch.object(module, "_run_action_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
+        result = await module.platform_config(_ctx(), action="disposal_log_list")
+
+    assert result.success is True
+    assert mock_run.await_args.kwargs["action"] == "disposal_log_list"
 
 
 async def test_tdp_policy_ip_reputation_delete_requires_non_empty_ids():
@@ -253,6 +283,44 @@ async def test_tdp_log_terms_maps_explicit_params_to_root_payload():
     assert body["cascade_asset_group"] == {"device-1": [0, 237]}
 
 
+async def test_tdp_log_terms_allows_missing_sql():
+    module = _load_module("test_tdp_handler_log_terms_no_sql", _TDP_HANDLER)
+    mock_result = ToolResult(success=True, output={"status": 200})
+
+    with patch.object(module, "_run_action_json_tool", AsyncMock(return_value=mock_result)) as mock_run:
+        result = await module.log_search(
+            _ctx(),
+            action="terms",
+            time_from=1777266076,
+            time_to=1777352476,
+            term="alert_type",
+        )
+
+    assert result.success is True
+    body = mock_run.await_args.kwargs["body"]
+    assert body["time_from"] == 1777266076
+    assert body["time_to"] == 1777352476
+    assert body["term"] == "alert_type"
+    assert "sql" not in body
+
+
+async def test_tdp_log_search_rejects_full_sql_statement():
+    module = _load_module("test_tdp_handler_log_search_full_sql", _TDP_HANDLER)
+
+    result = await module.log_search(
+        _ctx(),
+        action="search",
+        time_from=1777266076,
+        time_to=1777352476,
+        sql="select * from alert",
+        size=5,
+    )
+
+    assert result.success is False
+    assert "filter expression" in result.error
+    assert "SELECT/FROM" in result.error
+
+
 async def test_tdp_high_priority_query_tools_map_semantic_filters():
     module = _load_module("test_tdp_handler_high_priority_mappings", _TDP_HANDLER)
     mock_result = ToolResult(success=True, output={"status": 200})
@@ -327,6 +395,24 @@ async def test_tdp_high_priority_query_tools_map_semantic_filters():
         assert payload["condition"]["api_risk_type"] == "注入漏洞"
         assert payload["condition"]["fuzzy"] == {"keyword": "graphql", "fieldlist": ["threat.name", "url_pattern"]}
         assert payload["page"]["sort"] == [{"sort_by": "last_occ_time", "sort_order": "asc"}]
+
+        mock_run.reset_mock()
+        result = await module.api_risk_list(
+            _ctx(),
+            time_from=1700000000,
+            time_to=1700003600,
+            page_size=10,
+        )
+        assert result.success is True
+        api_name, path, payload = _built_json_payload(mock_run)
+        assert api_name == "interface_risk_list"
+        assert path == "/api/v1/interface/risk/getApiList"
+        assert payload["condition"]["time_from"] == 1700000000
+        assert payload["condition"]["time_to"] == 1700003600
+        assert payload["condition"]["api_risk_type"] == ""
+        assert payload["condition"]["assets_group"] == []
+        assert payload["condition"]["fuzzy"] == {"keyword": "", "fieldlist": ["threat.name", "url_pattern"]}
+        assert payload["page"]["page_size"] == 10
 
         mock_run.reset_mock()
         result = await module.weak_password_list(
@@ -437,6 +523,8 @@ async def test_tdp_medium_query_tools_map_semantic_filters():
         result = await module.service_asset_list(
             _ctx(),
             action="web_app_framework_list",
+            time_from=1777266076,
+            time_to=1777352476,
             assets_group=[0],
             host_type=["终端"],
             application="泛微e-cology",
@@ -451,6 +539,8 @@ async def test_tdp_medium_query_tools_map_semantic_filters():
         assert result.success is True
         body = mock_run.await_args.kwargs["body"]
         assert mock_run.await_args.kwargs["action"] == "web_app_framework_list"
+        assert "time_from" not in body["condition"]
+        assert "time_to" not in body["condition"]
         assert body["condition"]["assets_group"] == [0]
         assert body["condition"]["host_type"] == ["终端"]
         assert body["condition"]["application"] == "泛微e-cology"
@@ -670,7 +760,7 @@ def test_tdp_query_yaml_promotes_semantic_top_level_fields():
         "tdp_assets_domain_list.yaml": {"domain_name_or_ip", "has_login_api", "second_level_domain"},
         "tdp_privacy_diagram.yaml": {"itag", "methods", "fuzzy_url_host"},
         "tdp_threat_inbound_attack.yaml": {"severity", "result_list", "keyword"},
-        "tdp_machine_asset_list.yaml": {"service", "service_class", "application", "keyword"},
+        "tdp_machine_asset_list.yaml": {"time_from", "time_to", "service", "service_class", "application", "keyword"},
         "tdp_mdr_alert_list.yaml": {"section_list", "threat_severity", "keyword"},
         "tdp_cloud_facilities.yaml": {"cloud_vendor", "cloud_instance", "keyword"},
         "tdp_login_api_list.yaml": {"threat_tag", "keyword", "is_public"},
@@ -696,6 +786,7 @@ def test_tdp_platform_yaml_uses_keyword_and_requires_confirmation():
     assert raw["requires_confirmation"] is True
     assert "keyword" in raw["inputSchema"]["properties"]
     assert "device_id" not in raw["inputSchema"]["properties"]
+    assert "disposal_log_list" in raw["inputSchema"]["properties"]["action"]["enum"]
 
 
 def test_tdp_policy_yaml_requires_confirmation_and_uses_object_ioc_list():
@@ -717,6 +808,7 @@ def test_tdp_log_yaml_uses_object_columns_and_supports_cascade_asset_group():
 
     assert tool.info.name == "tdp_log_search"
     assert tool.info.provider == "tdp_api"
+    assert raw["inputSchema"].get("required") == []
     assert raw["inputSchema"]["properties"]["columns"]["items"]["type"] == "object"
     assert "cascade_asset_group" in raw["inputSchema"]["properties"]
 

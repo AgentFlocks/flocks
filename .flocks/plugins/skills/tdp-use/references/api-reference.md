@@ -54,7 +54,9 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 
 - 优先使用 tool schema 暴露的顶层语义化参数。
 - `keyword` 会由 handler 自动转换成正确的 `condition.fuzzy.fieldlist`，不要手写 `fuzzy`。
-- `cur_page`、`page_size`、`sort_by`、`sort_order` 会由 handler 自动转换成 `page`，不要为了普通分页手写 `page`。
+- 列表类工具的 `cur_page`、`page_size`、`sort_by`、`sort_order` 会由 handler 自动转换成 `page`，不要为了普通分页手写 `page`。
+- `tdp_log_search` 是特例：日志搜索没有 `cur_page` / `page_size`，控制返回条数必须用 `size`。
+- 外部攻击严重性分布是特例：攻击结果参数名必须用 `result_list`，不要写成 `result`。
 - `condition` / `page` 只作为高级兼容入口；只有顶层参数没有覆盖目标底层字段时才使用。
 
 最常见的调用形态是：
@@ -79,6 +81,16 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
   "sort_order": "desc"
 }
 ```
+
+易错参数速查：
+
+| tool | 正确参数 | 不要使用 | 说明 |
+|---|---|---|---|
+| `tdp_log_search` | `size` | `page_size`、`cur_page` | `/api/v1/log/searchBySql` 只支持返回数量控制，不支持分页参数 |
+| `tdp_log_search.sql` | 过滤表达式 | `SELECT * FROM alert` | TDP 只接受类似 WHERE 条件的表达式，不接受完整 SQL 查询 |
+| `tdp_log_search(action="terms")` | 可只传 `term` | 强制补 `sql` | `/api/v1/log/terms` 的 `sql` 是可选过滤条件 |
+| `tdp_threat_inbound_attack` | `result_list` | `result` | API 文档字段为 `condition.result_list` |
+| `tdp_incident_list` | `result` | `result_list` | 事件搜索 API 文档字段为 `condition.result` |
 
 
 示例：
@@ -160,6 +172,15 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 
 如果只是常规查告警，直接按本节示例构造查询即可；只有在 SQL 操作符、字段名、枚举值不确定时，再查看 [instruction.md](instruction.md)。
 
+注意：这里的 `sql` 不是数据库 SQL，不支持 `SELECT * FROM alert`、`FROM`、`JOIN` 这类完整查询语句。它只接受 TDP 日志查询过滤表达式，例如：
+
+```sql
+threat.level = 'attack'
+threat.level = 'attack' AND threat.result = 'success'
+threat.name LIKE '%SQL注入%'
+machine = '192.168.1.100'
+```
+
 最小可运行参数集：
 
 - `action=search` 时 `sql` 为必填
@@ -170,9 +191,12 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
   "time_from": 1741536000,
   "time_to": 1741622400,
   "sql": "threat.level = 'attack'",
-  "net_data_type": ["attack", "risk", "action"]
+  "net_data_type": ["attack", "risk", "action"],
+  "size": 10
 }
 ```
+
+注意：`tdp_log_search` 不支持 `page_size`，限制返回条数要用 `size`。
 
 按页面常见字段返回的示例：
 
@@ -189,7 +213,8 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
     {"label": "威胁名称", "value": "threat.name"},
     {"label": "源IP", "value": "net.src_ip"},
     {"label": "目的IP", "value": "net.dest_ip"}
-  ]
+  ],
+  "size": 10
 }
 ```
 
@@ -201,7 +226,8 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
   "time_from": 1741536000,
   "time_to": 1741622400,
   "sql": "threat.id = '1769'",
-  "net_data_type": ["attack", "risk", "action"]
+  "net_data_type": ["attack", "risk", "action"],
+  "size": 10
 }
 ```
 
@@ -239,10 +265,11 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
   "action": "terms",
   "time_from": 1741536000,
   "time_to": 1741622400,
-  "sql": "threat.level = 'attack'",
   "term": "threat.name"
 }
 ```
+
+`terms` 的 `sql` 是可选过滤条件；用户只想按字段聚合时，不要为了凑参数强行补 `sql`。
 
 适合：
 
@@ -287,6 +314,19 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
 - `attacker_ip_list`: 攻击者 IP 列表
 - `attacker_ip_detail`: 攻击者 IP 详情
 
+时间线示例：
+
+```json
+{
+  "action": "timeline",
+  "incident_id": "b62899499fec914d6246137eed3b6ec4-1777334454",
+  "time_from": 1777305600,
+  "time_to": 1777391999
+}
+```
+
+`timeline` 会默认传 `show_attack=true`。如果 TDP 仍返回 `show_attack is false`，说明该事件当前不支持攻击过程展开，改用 `result`、`alert_search` 或回退浏览器查看事件详情。
+
 返回结果重点关注：
 
 - 事件 ID
@@ -313,6 +353,8 @@ tdp_log_search(time_from=today_start, time_to=today_end, sql="...")
   "keyword": "sqlmap"
 }
 ```
+
+注意：这里的攻击结果字段是 `result_list`，来自 API 文档的 `condition.result_list`；不要使用事件列表里的 `result` 参数名。
 
 告警主机汇总：
 
@@ -363,7 +405,7 @@ MDR 研判列表：
 常见思路：
 
 - 单接口工具通常直接传根级参数
-- 优先补齐根级 `time_from`、`time_to`
+- 优先补齐根级 `time_from`、`time_to`，但服务/主机/Web 应用框架资产是当前资产视图，不需要时间范围
 - 若 tool 支持筛选和分页，优先补顶层 `keyword`、`cur_page`、`page_size`、`sort_by`、`sort_order`
 - `condition` / `page` 只用于顶层参数未覆盖的底层字段
 
@@ -490,6 +532,8 @@ API 风险列表示例：
 }
 ```
 
+`tdp_interface_risk_list` 会自动补齐 API 文档示例里的空 `api_risk_type`、空 `assets_group` 和空 `fuzzy`；如果后端仍返回 `No message available`，先缩小时间范围或去掉 `api_risk_type` 再查。
+
 资产类结果常看字段：
 
 - 名称
@@ -601,6 +645,8 @@ PCAP 下载：
   "action": "disposal_log_list"
 }
 ```
+
+处置日志可直接走 `tdp_platform_config(action="disposal_log_list")`；handler 会补默认时间范围、分页和 `cts` 倒序。
 
 ## 高风险与低风险
 

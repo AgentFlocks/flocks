@@ -494,6 +494,11 @@ def _domain_body(body: dict[str, Any]) -> dict[str, Any]:
 def _api_risk_body(body: dict[str, Any]) -> dict[str, Any]:
     defaults = _body_with_condition_time(
         {
+            "condition": {
+                "api_risk_type": "",
+                "assets_group": [],
+                "fuzzy": {"keyword": "", "fieldlist": list(API_RISK_FUZZY_FIELDS)},
+            },
             "page": {"cur_page": 1, "page_size": 20, "sort": [{"sort_by": "last_occ_time", "sort_order": "desc"}]},
         }
     )
@@ -888,6 +893,7 @@ PLATFORM_CONFIG_ACTIONS: JsonActionMap = {
         _cascade_children_body,
         "device_cascade_platform_children",
     ),
+    "disposal_log_list": ("/api/v1/disposal/log/list", _disposal_log_list_body, "disposal_log_list"),
 }
 
 POLICY_SETTINGS_ACTIONS: JsonActionMap = {
@@ -1028,6 +1034,21 @@ def _validate_resolve_host_body(action: str, body: Any) -> ToolResult | None:
         return validation_error
     if _body_value(_normalize_body(body), "status") == 3:
         return _validate_required_body_fields(action, body, "sub_status")
+    return None
+
+
+def _validate_log_sql_expression(action: str, sql: str | None) -> ToolResult | None:
+    if not isinstance(sql, str) or not sql.strip():
+        return None
+    if re.match(r"^\s*(select|with)\b", sql, flags=re.IGNORECASE):
+        return ToolResult(
+            success=False,
+            error=(
+                "TDP log search sql must be a filter expression, not a full SQL statement. "
+                "Do not use SELECT/FROM. Example: `threat.level = 'attack'` or "
+                "`threat.level = 'attack' AND threat.result = 'success'`."
+            ),
+        )
     return None
 
 
@@ -1246,6 +1267,7 @@ async def incident_list(
     time_from: int | None = None,
     time_to: int | None = None,
     include_risk: bool | None = None,
+    show_attack: bool | None = None,
     include_action: bool | None = None,
     alert_ids: list[Any] | None = None,
     attacker: list[Any] | None = None,
@@ -1295,6 +1317,8 @@ async def incident_list(
         _set_if_present(body, "time_from", time_from)
         _set_if_present(body, "time_to", time_to)
         _set_if_present(body, "include_risk", include_risk)
+        if selected_action == "timeline":
+            body["show_attack"] = True if show_attack is None else show_attack
         if attacker is not None:
             body["attacker"] = list(attacker)
     _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
@@ -1320,6 +1344,8 @@ async def service_asset_list(
     action: str = "service_list",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
+    time_from: int | None = None,
+    time_to: int | None = None,
     assets_group: list[Any] | None = None,
     port: int | None = None,
     asset_section: str | None = None,
@@ -1343,6 +1369,7 @@ async def service_asset_list(
     sort_order: str | None = None,
 ) -> ToolResult:
     del context
+    del time_from, time_to  # Machine asset APIs are current-state inventory queries.
     selected_action = _normalize_action(action, "service_list")
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
@@ -1605,7 +1632,7 @@ async def log_search(
     time_from: int | None = None,
     time_to: int | None = None,
     net_data_type: list[Any] | None = None,
-    sql: str | None = "threat.level = 'attack'",
+    sql: str | None = None,
     columns: list[Any] | None = None,
     assets_group: list[Any] | None = None,
     cascade_asset_group: dict[str, Any] | None = None,
@@ -1620,6 +1647,11 @@ async def log_search(
     _set_if_present(body, "time_to", time_to)
     if net_data_type is not None:
         body["net_data_type"] = list(net_data_type)
+    if selected_action == "search" and sql is None:
+        sql = "threat.level = 'attack'"
+    validation_error = _validate_log_sql_expression(selected_action, sql)
+    if validation_error:
+        return validation_error
     _set_if_present(body, "sql", sql)
     if columns is not None:
         body["columns"] = list(columns)

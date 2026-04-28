@@ -27,7 +27,7 @@ inputSchema:
       items:
         type: string
         enum: [success, failed, unknown]
-      description: 攻击结果列表；`success`=成功，`failed`=失败，`unknown`=尝试。
+      description: 攻击结果列表；`success`=成功，`failed`=失败，`unknown`=尝试。参数名必须是 `result_list`，不要写成 `result`。
     cascade_asset_group:
       type: object
       description: '级联资产组筛选对象，例如 `{"device-1": [-1]}`。'

@@ -20,6 +20,16 @@ inputSchema:
         `condition.af_class=web_application` 与按最近发现时间排序。
       enum: [service_list, host_asset_list, web_app_framework_list]
       default: service_list
+    time_from:
+      type: integer
+      description: >
+        兼容参数。服务资产、主机资产和 Web 应用框架是当前资产视图，TDP API 文档不支持按时间筛选；
+        handler 接受但不会写入请求体。
+    time_to:
+      type: integer
+      description: >
+        兼容参数。服务资产、主机资产和 Web 应用框架是当前资产视图，TDP API 文档不支持按时间筛选；
+        handler 接受但不会写入请求体。
     assets_group:
       type: array
       items:

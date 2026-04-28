@@ -34,6 +34,11 @@ inputSchema:
     include_risk:
       type: boolean
       description: 是否包含风险告警；`timeline` 等动作写入根级，`alert_search` 写入 `condition.include_risk`。
+    show_attack:
+      type: boolean
+      description: >
+        是否展示攻击过程，适用于 `timeline`。handler 默认传 `true`；
+        若显式传 `false`，TDP 可能返回 `show_attack is false`。
     include_action:
       type: boolean
       description: 是否包含事件告警，适用于 `alert_search`，会写入 `condition.include_action`。

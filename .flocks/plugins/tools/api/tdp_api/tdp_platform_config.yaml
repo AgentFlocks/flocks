@@ -1,7 +1,7 @@
 name: tdp_platform_config
 description: >
   管理 TDP 平台配置相关接口，覆盖资产配置、白名单过滤和级联平台管理。
-  通过 action 可切换到资产列表、资产增删改、白名单搜索与维护、子节点列表等子接口；
+  通过 action 可切换到资产列表、资产增删改、白名单搜索与维护、子节点列表和处置日志等子接口；
   其中 `asset_add`、`asset_update`、`asset_delete`、`white_rule_add`、
   `white_rule_update`、`white_rule_delete` 属于写操作，调用前应确认影响范围。
 category: custom
@@ -28,13 +28,14 @@ inputSchema:
         - white_rule_update
         - white_rule_delete
         - cascade_children
+        - disposal_log_list
       default: asset_list
     condition:
       type: object
-      description: 条件对象，适用于 `asset_list`、`white_rule_search`。
+      description: 条件对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
     page:
       type: object
-      description: 分页对象，适用于 `asset_list`、`white_rule_search`。
+      description: 分页对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
     asset:
       type: object
       description: 资产对象。`asset_add` 直接作为请求体；`asset_update` 会写入 `asset` 字段。

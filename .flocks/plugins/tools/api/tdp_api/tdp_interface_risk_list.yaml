@@ -2,6 +2,7 @@ name: tdp_interface_risk_list
 description: >
   查询 TDP API 风险列表，适合排查注入、敏感接口等风险。优先使用顶层语义化参数，
   例如风险类型、业务组、关键词和分页；`condition` / `page` 仅作为高级兼容入口。
+  handler 会补齐 API 文档要求的默认 `api_risk_type=""`、空业务组和空 fuzzy 条件。
 category: custom
 enabled: true
 requires_confirmation: false
