@@ -1,6 +1,8 @@
 name: tdp_interface_risk_list
 description: >
-  查询 TDP API 风险列表，适合排查注入、敏感接口等风险。
+  查询 TDP API 风险列表，适合排查注入、敏感接口等风险。优先使用顶层语义化参数，
+  例如风险类型、业务组、关键词和分页；`condition` / `page` 仅作为高级兼容入口。
+  handler 会补齐 API 文档要求的默认 `api_risk_type=""`、空业务组和空 fuzzy 条件。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -10,22 +12,44 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `api_risk_type`、`fuzzy`、`assets_group`。
-        其中 `api_risk_type` 用于限定风险类型，`fuzzy`
-        一般为 `{keyword, fieldlist}` 结构，适合按 URL、标题或接口关键字搜索。
-    page:
-      type: object
-      description: 分页对象，通常包含 `cur_page`、`page_size`、`sort`。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    api_risk_type:
+      type: string
+      description: 风险类型，例如注入漏洞、敏感接口等；为空表示全部。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["threat.name","url_pattern"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段，默认 `last_occ_time`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。仅在需要自定义复杂 `page.sort` 时使用。
   required: []
 handler:
   type: script

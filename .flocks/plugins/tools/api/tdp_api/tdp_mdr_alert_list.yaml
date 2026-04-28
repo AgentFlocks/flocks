@@ -1,6 +1,8 @@
 name: tdp_mdr_alert_list
 description: >
-  查询 TDP 的 MDR 告警研判相关接口。默认返回研判结果列表，也可通过 action 切换到指标汇总。
+  查询 TDP 的 MDR 告警研判相关接口。`indicator` 返回时间范围内的研判指标汇总；
+  `list` 返回研判结果列表，适合按资产类型、严重级别、处置结果和关键词筛选。
+  优先使用顶层语义化参数，`condition` / `page` 仅用于高级兼容。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -17,22 +19,53 @@ inputSchema:
         会额外补齐默认分页和按 `alert_judge_time` 倒序排序。
       enum: [indicator, list]
       default: list
-    condition:
-      type: object
-      description: >
-        条件对象。`list` 常用 `section_list`、`threat_severity`、
-        `judge_result_status`、`fuzzy`；其中 `section_list`
-        常用于区分终端/服务器，`threat_severity` 取值通常为 0-4，
-        `judge_result_status` 常见值为 1=处理中、2=已处理。
-    page:
-      type: object
-      description: 分页对象，主要用于 `list`；通常包含 `cur_page`、`page_size`、`sort`，默认按 `alert_judge_time` 倒序。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    section_list:
+      type: array
+      items:
+        type: string
+      description: 资产类型列表，例如 `终端`、`服务器`。
+    threat_severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 严重级别列表；0=信息，1=低，2=中，3=高，4=严重。
+    judge_result_status:
+      type: array
+      items:
+        type: integer
+        enum: [1, 2]
+      description: 处置结果列表；`1`=处理中，`2`=已处理。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。handler 会自动组装
+        `condition.fuzzy.fieldlist=["task_id","machine","asset_info","threat_name"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段，默认 `alert_judge_time`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
   required: []
 handler:
   type: script

@@ -1,6 +1,7 @@
 name: tdp_privacy_diagram
 description: >
-  查询 TDP 明文敏感信息拓扑概览，返回标签、站点、接口和访问源关系。
+  查询 TDP 明文敏感信息拓扑概览，返回标签、站点、接口和访问源关系。优先使用顶层语义化参数，
+  例如敏感标签、HTTP 方法、业务组和 URL/IP 模糊条件；`condition` 仅作为高级兼容入口。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -10,20 +11,40 @@ provider: tdp_api
 inputSchema:
   type: object
   properties:
-    condition:
-      type: object
-      description: >
-        条件对象。不传时会使用内置默认值；传入后会与默认值合并。
-        常用字段包括 `itag`、`methods`、`assets_group`、
-        `fuzzy_url_path`、`fuzzy_url_host`、`fuzzy_src_ip`。
-        其中 `itag` 常见值包括 `phone`、`email`、`identify`、
-        `card`，`methods` 为 HTTP 方法列表。
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
     time_to:
       type: integer
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表。
+    itag:
+      type: array
+      items:
+        type: string
+        enum: [phone, email, identify, card]
+      description: 敏感标签列表，例如 `phone`、`email`、`identify`、`card`。
+    methods:
+      type: array
+      items:
+        type: string
+      description: HTTP 方法列表，例如 `GET`、`POST`、`HEAD`、`PUT`、`DELETE`。
+    fuzzy_url_path:
+      type: string
+      description: 按接口 URL 模糊搜索。
+    fuzzy_url_host:
+      type: string
+      description: 按站点模糊搜索。
+    fuzzy_src_ip:
+      type: string
+      description: 按访问源 IP 模糊搜索。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
   required: []
 handler:
   type: script
