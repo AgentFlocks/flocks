@@ -1,11 +1,13 @@
 name: sangfor_sip
 service_id: sangfor_sip
+version: "9.2"
 description: >
-  Sangfor SIP (Security Intelligence Platform) third-party data pull API.
-  Supports pulling asset, security event, risk, and vulnerability data via
-  token-based authentication with auth3 SHA1 signing.
+  Sangfor SIP (Security Intelligence Platform) third-party data pull API
+  (v9.2 / "92 version" spec). Supports pulling asset, security event, risk,
+  and vulnerability data via token-based authentication with auth3 SHA1
+  signing.
 description_cn: >
-  深信服 SIP（安全智能平台）第三方数据拉取 API。
+  深信服 SIP（安全智能平台）第三方数据拉取 API（v9.2，对应「92 版」接口规范）。
   支持拉取受监控IP、服务器资产、终端资产、安全事件、风险业务/终端
   及脆弱性（弱密码、漏洞、明文传输）等数据。
   使用 auth3（SHA1）签名认证，Token 有有效期，过期后自动重新认证。
@@ -56,6 +58,7 @@ credential_fields:
 defaults:
   timeout: 60
   category: custom
+  product_version: "9.2"
 notes: |
   深信服 SIP 配置说明：
   1. 在 SIP 端"更多 → 开发共享"页面新增第三方平台配置：

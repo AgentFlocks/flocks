@@ -6,15 +6,16 @@ Auth flow:
   2. Carry token= in all subsequent GET /sangforinter/v1/data/* requests.
   Token has an expiry; on 401/403 the handler re-authenticates automatically.
 
-Endpoints covered:
-  /sangforinter/v1/data/ipgroup            - 受监控IP模块
-  /sangforinter/v1/data/business           - 已配置服务器相关信息
-  /sangforinter/v1/data/terminal           - 资产信息-终端
-  /sangforinter/v1/data/riskBusiness       - 风险业务/终端
-  /sangforinter/v1/data/secEvent           - 安全事件
-  /sangforinter/v1/data/weakPassword       - 脆弱性-弱密码
-  /sangforinter/v1/data/vulInfo            - 脆弱性-漏洞信息
-  /sangforinter/v1/data/plainTextInfo      - 脆弱性-明文传输信息
+Endpoints covered (per 92 version SIP API spec):
+  /sangforinter/v1/data/ipgroup                 - 受监控IP模块
+  /sangforinter/v1/data/business                - 已配置服务器相关信息 (classfy1_id=1,6,9,10,11)
+  /sangforinter/v1/data/terminal                - 资产信息-终端 (classfy1_id=2,7,8)
+  /sangforinter/v1/data/riskbusiness            - 风险业务
+  /sangforinter/v1/data/riskterminal            - 风险终端
+  /sangforinter/v1/data/riskevent               - 安全事件
+  /sangforinter/v1/data/weakpasswd              - 脆弱性-弱密码
+  /sangforinter/v1/data/hole                    - 脆弱性-漏洞信息
+  /sangforinter/v1/data/plaintexttransmission   - 脆弱性-明文传输信息
 """
 
 from __future__ import annotations
@@ -208,11 +209,11 @@ async def _login(cfg: RuntimeConfig, session: aiohttp.ClientSession) -> str:
         "clientProduct": client_product,
         "clientVersion": client_version,
         "clientId": client_id,
-        "desc": "",
+        "desc": auth_desc,
         "auth": auth_str,
         "platformName": cfg.platform_name,
     }
-    login_url = f"{cfg.base_url}/sangforinter/v1/auth/party/login"
+    login_url = f"{cfg.base_url}/sangforinter/v1/auth/party/login?verify=false"
     async with session.post(login_url, json=payload) as resp:
         try:
             data = await resp.json(content_type=None)
@@ -252,12 +253,18 @@ async def _fetch_data(
     to_time: int,
     max_count: int,
     extra_params: Optional[dict[str, Any]] = None,
+    is_vuln: bool = False,
 ) -> dict[str, Any]:
     """
     GET /sangforinter/v1/data/<endpoint>?token=...&fromActionTime=...&toActionTime=...&maxCount=...
     Auto-retries once on 401/403 by re-authenticating.
+    Per spec: maxCount capped at 10000 (5000 for vulnerability modules).
     """
     url = f"{cfg.base_url}/sangforinter/v1/data/{endpoint}"
+
+    max_limit = 5000 if is_vuln else 10000
+    if max_count > max_limit:
+        max_count = max_limit
 
     for attempt in range(2):
         token = await _get_token(cfg, session)
@@ -347,50 +354,57 @@ async def handle_ipgroup(cfg: RuntimeConfig, session: aiohttp.ClientSession, par
 async def handle_server(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
     """已配置服务器相关信息 – GET /sangforinter/v1/data/business"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
-    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
+    max_count = int(params.get("max_count", params.get("maxCount", 10000)))
     return await _fetch_data(cfg, session, "business", from_ts, to_ts, max_count)
 
 
 async def handle_terminal(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
     """资产信息-终端 – GET /sangforinter/v1/data/terminal"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
-    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
+    max_count = int(params.get("max_count", params.get("maxCount", 10000)))
     return await _fetch_data(cfg, session, "terminal", from_ts, to_ts, max_count)
 
 
 async def handle_risk_business(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
-    """风险业务/终端 – GET /sangforinter/v1/data/riskBusiness"""
+    """风险业务 – GET /sangforinter/v1/data/riskbusiness"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
     max_count = int(params.get("max_count", params.get("maxCount", 2000)))
-    return await _fetch_data(cfg, session, "riskBusiness", from_ts, to_ts, max_count)
+    return await _fetch_data(cfg, session, "riskbusiness", from_ts, to_ts, max_count)
+
+
+async def handle_risk_terminal(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
+    """风险终端 – GET /sangforinter/v1/data/riskterminal"""
+    from_ts, to_ts = _resolve_time_range(params, default_hours=24)
+    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
+    return await _fetch_data(cfg, session, "riskterminal", from_ts, to_ts, max_count)
 
 
 async def handle_sec_event(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
-    """安全事件 – GET /sangforinter/v1/data/secEvent"""
+    """安全事件 – GET /sangforinter/v1/data/riskevent"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
     max_count = int(params.get("max_count", params.get("maxCount", 2000)))
-    return await _fetch_data(cfg, session, "secEvent", from_ts, to_ts, max_count)
+    return await _fetch_data(cfg, session, "riskevent", from_ts, to_ts, max_count)
 
 
 async def handle_weak_password(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
-    """脆弱性-弱密码 – GET /sangforinter/v1/data/weakPassword"""
+    """脆弱性-弱密码 – GET /sangforinter/v1/data/weakpasswd"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
-    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
-    return await _fetch_data(cfg, session, "weakPassword", from_ts, to_ts, max_count)
+    max_count = int(params.get("max_count", params.get("maxCount", 5000)))
+    return await _fetch_data(cfg, session, "weakpasswd", from_ts, to_ts, max_count, is_vuln=True)
 
 
 async def handle_vuln_info(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
-    """脆弱性-漏洞信息 – GET /sangforinter/v1/data/vulInfo"""
+    """脆弱性-漏洞信息 – GET /sangforinter/v1/data/hole"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
-    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
-    return await _fetch_data(cfg, session, "vulInfo", from_ts, to_ts, max_count)
+    max_count = int(params.get("max_count", params.get("maxCount", 5000)))
+    return await _fetch_data(cfg, session, "hole", from_ts, to_ts, max_count, is_vuln=True)
 
 
 async def handle_plain_text(cfg: RuntimeConfig, session: aiohttp.ClientSession, params: dict[str, Any]) -> dict[str, Any]:
-    """脆弱性-明文传输信息 – GET /sangforinter/v1/data/plainTextInfo"""
+    """脆弱性-明文传输信息 – GET /sangforinter/v1/data/plaintexttransmission"""
     from_ts, to_ts = _resolve_time_range(params, default_hours=24)
-    max_count = int(params.get("max_count", params.get("maxCount", 2000)))
-    return await _fetch_data(cfg, session, "plainTextInfo", from_ts, to_ts, max_count)
+    max_count = int(params.get("max_count", params.get("maxCount", 5000)))
+    return await _fetch_data(cfg, session, "plaintexttransmission", from_ts, to_ts, max_count, is_vuln=True)
 
 
 # ── Dispatch map ──────────────────────────────────────────────────────────────
@@ -400,6 +414,7 @@ _ACTION_MAP = {
     "server": handle_server,
     "terminal": handle_terminal,
     "risk_business": handle_risk_business,
+    "risk_terminal": handle_risk_terminal,
     "sec_event": handle_sec_event,
     "weak_password": handle_weak_password,
     "vuln_info": handle_vuln_info,
@@ -442,7 +457,9 @@ async def run_events(ctx: ToolContext) -> ToolResult:
 
 
 async def run_risk(ctx: ToolContext) -> ToolResult:
-    return await _run("risk_business", dict(ctx.params))
+    params = dict(ctx.params)
+    action = params.pop("action", "risk_business")
+    return await _run(action, params)
 
 
 async def run_vuln(ctx: ToolContext) -> ToolResult:
