@@ -30,8 +30,10 @@ from flocks.cli.commands.update import update_command
 from flocks.cli.service_manager import (
     ServiceConfig,
     ServiceError,
+    read_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
+    runtime_paths,
     show_logs,
     show_status,
     start_all,
@@ -121,6 +123,10 @@ def _service_config(
     server_port: Optional[int] = None,
     webui_host: Optional[str] = None,
     webui_port: Optional[int] = None,
+    default_server_host: Optional[str] = None,
+    default_server_port: Optional[int] = None,
+    default_webui_host: Optional[str] = None,
+    default_webui_port: Optional[int] = None,
 ) -> ServiceConfig:
     """Build service config from environment and CLI toggles."""
     global_config = Config.get_global()
@@ -128,23 +134,23 @@ def _service_config(
         backend_host=_resolve_host(
             cli_value=server_host,
             env_names=("FLOCKS_SERVER_HOST", "FLOCKS_BACKEND_HOST"),
-            default=global_config.server_host,
+            default=default_server_host or global_config.server_host,
         ),
         backend_port=_resolve_port(
             cli_value=server_port,
             env_names=("FLOCKS_SERVER_PORT", "FLOCKS_BACKEND_PORT"),
-            default=global_config.server_port,
+            default=default_server_port or global_config.server_port,
             label="server",
         ),
         frontend_host=_resolve_host(
             cli_value=webui_host,
             env_names=("FLOCKS_WEBUI_HOST", "FLOCKS_FRONTEND_HOST"),
-            default="127.0.0.1",
+            default=default_webui_host or "127.0.0.1",
         ),
         frontend_port=_resolve_port(
             cli_value=webui_port,
             env_names=("FLOCKS_WEBUI_PORT", "FLOCKS_FRONTEND_PORT"),
-            default=5173,
+            default=default_webui_port or 5173,
             label="webui",
         ),
         no_browser=no_browser,
@@ -181,6 +187,45 @@ def _resolve_port(
         except ValueError as error:
             raise ServiceError(f"{label} port from {env_name} must be an integer.") from error
     return default
+
+
+def _restart_runtime_defaults() -> dict[str, Any]:
+    """Load host/port defaults from the last recorded service runtime."""
+    paths = runtime_paths()
+    backend = read_runtime_record(paths.backend_pid)
+    frontend = read_runtime_record(paths.frontend_pid)
+    defaults: dict[str, Any] = {}
+    if backend is not None:
+        if backend.host:
+            defaults["default_server_host"] = backend.host
+        if backend.port is not None:
+            defaults["default_server_port"] = backend.port
+    if frontend is not None:
+        if frontend.host:
+            defaults["default_webui_host"] = frontend.host
+        if frontend.port is not None:
+            defaults["default_webui_port"] = frontend.port
+    return defaults
+
+
+def _restart_service_config(
+    no_browser: bool = False,
+    skip_webui_build: bool = False,
+    server_host: Optional[str] = None,
+    server_port: Optional[int] = None,
+    webui_host: Optional[str] = None,
+    webui_port: Optional[int] = None,
+) -> ServiceConfig:
+    """Build restart config, reusing recorded host/port when CLI/env omit them."""
+    return _service_config(
+        no_browser=no_browser,
+        skip_webui_build=skip_webui_build,
+        server_host=server_host,
+        server_port=server_port,
+        webui_host=webui_host,
+        webui_port=webui_port,
+        **_restart_runtime_defaults(),
+    )
 
 
 def _handle_service_error(error: Exception) -> None:
@@ -250,7 +295,7 @@ def restart(
     """
     try:
         restart_all(
-            _service_config(
+            _restart_service_config(
                 no_browser=no_browser,
                 skip_webui_build=skip_webui_build,
                 server_host=server_host,
