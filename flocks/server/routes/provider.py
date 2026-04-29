@@ -20,6 +20,7 @@ from flocks.security.secrets import SecretManager
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
+from flocks.tool.tool_loader import extract_provider_version
 
 
 router = APIRouter()
@@ -870,6 +871,7 @@ class APIServiceSummary(BaseModel):
     """API service summary for the Tool API page."""
     id: str
     name: str
+    version: Optional[str] = None
     enabled: bool = True
     status: str = "unknown"
     message: Optional[str] = None
@@ -1273,9 +1275,12 @@ def _build_api_service_summary(
         verify_ssl = verify_ssl_raw.strip().lower() in {"1", "true", "yes", "on"}
     else:
         verify_ssl = bool(verify_ssl_raw)
+    version = extract_provider_version(meta)
+
     return APIServiceSummary(
         id=provider_id,
         name=meta.get("name", provider_id),
+        version=version,
         enabled=enabled,
         status=status,
         message=cached_status.get("message"),
@@ -1542,6 +1547,7 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
         return {
             "name": prov.get("name", provider_id),
             "service_id": prov.get("service_id", provider_id),
+            "version": extract_provider_version(prov),
             "description": prov.get("description"),
             "description_cn": prov.get("description_cn"),
             "auth": prov.get("auth"),

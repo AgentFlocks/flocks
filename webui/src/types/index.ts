@@ -211,6 +211,8 @@ export interface MCPServer {
 export interface APIServiceSummary {
   id: string;
   name: string;
+  /** Provider/service version, e.g. "9.2", sourced from _provider.yaml */
+  version?: string;
   enabled: boolean;
   status: string;
   message?: string;

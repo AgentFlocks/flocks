@@ -58,6 +58,29 @@ log = Log.create(service="session.runner")
 TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
 TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
 TOOL_RESULT_MIN_CHAR_BUDGET = 8_000
+
+
+def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) -> str:
+    """Append a provider-version annotation so the LLM sees which service version backs the tool.
+
+    Returns the original description (or empty string) unchanged when the tool
+    has no ``provider_version``. Format::
+
+        <original description>
+
+        [Provider: <provider> | Version: <version>]
+
+    The original ``ToolInfo`` is never mutated — a new string is returned.
+    """
+    base = description or ""
+    provider_version = getattr(tool_info, "provider_version", None)
+    if not provider_version:
+        return base
+    provider_label = getattr(tool_info, "provider", None) or "service"
+    note = f"[Provider: {provider_label} | Version: {provider_version}]"
+    if not base.strip():
+        return note
+    return f"{base.rstrip()}\n\n{note}"
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 
@@ -1417,7 +1440,11 @@ Please address this message and continue with your tasks.
                     "skill_count": len(skills),
                     "description_preview": description[:100]
                 })
-            
+
+            # Surface provider/service version to the model so it can pick
+            # version-appropriate parameters (e.g. SIP v9.2 vs older spec).
+            description = _annotate_with_provider_version(tool_info, description)
+
             schema = tool_info.get_schema()
             tool_def = {
                 "type": "function",

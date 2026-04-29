@@ -81,6 +81,30 @@ def _load_provider_config(yaml_path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def extract_provider_version(provider_cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Extract a provider/service version string from a ``_provider.yaml`` dict.
+
+    Lookup order (first non-null wins):
+    1. top-level ``version``
+    2. ``defaults.product_version``
+    3. ``defaults.version``
+
+    Always coerces the result to ``str`` so YAML-decoded floats like ``9.2``
+    (which would otherwise round-trip lossy) are stable.
+    Returns ``None`` when no version is declared anywhere.
+    """
+    if not isinstance(provider_cfg, dict):
+        return None
+    raw = provider_cfg.get("version")
+    if raw is None:
+        defaults = provider_cfg.get("defaults") or {}
+        if isinstance(defaults, dict):
+            raw = defaults.get("product_version") or defaults.get("version")
+    if raw is None:
+        return None
+    return str(raw)
+
+
 def _merge_provider_defaults(raw: dict, provider: Optional[Dict[str, Any]]) -> dict:
     """Apply provider defaults (base_url, timeout, category, auth) to a tool config."""
     if provider is None:
@@ -544,6 +568,8 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     if not provider_name and provider_cfg:
         provider_name = provider_cfg.get("name")
 
+    provider_version = extract_provider_version(provider_cfg)
+
     cat_str = raw.get("category", "custom")
     try:
         category = ToolCategory(cat_str)
@@ -578,17 +604,20 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         enabled=raw.get("enabled", True),
         requires_confirmation=requires_confirm,
         provider=provider_name,
+        provider_version=provider_version,
         source=source,
     )
 
     tool = Tool(info=info, handler=handler)
     tool._yaml_path = yaml_path  # type: ignore[attr-defined]
     tool._provider = provider_name  # type: ignore[attr-defined]
+    tool._provider_version = provider_version  # type: ignore[attr-defined]
     tool._source = source or "yaml_plugin"  # type: ignore[attr-defined]
 
     log.info("tool.yaml.loaded", {
         "name": name,
         "provider": provider_name,
+        "provider_version": provider_version,
         "handler_type": handler_type,
         "path": str(yaml_path),
     })
