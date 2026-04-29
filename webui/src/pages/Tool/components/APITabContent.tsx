@@ -341,6 +341,14 @@ export default function APITabContent({
                       {statusLabel}
                     </span>
                     <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
+                    {service.version && (
+                      <span
+                        className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-200 text-xs font-medium rounded-full shrink-0"
+                        title={t('serviceInfo.version')}
+                      >
+                        v{service.version.replace(/^v/i, '')}
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed min-h-[40px]">
                     {cardDescription}
