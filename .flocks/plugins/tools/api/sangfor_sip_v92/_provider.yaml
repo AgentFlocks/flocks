@@ -1,11 +1,13 @@
 name: sangfor_sip
 service_id: sangfor_sip
+version: "9.2"
 description: >
-  Sangfor SIP (Security Intelligence Platform) third-party data pull API.
-  Supports pulling asset, security event, risk, and vulnerability data via
-  token-based authentication with auth3 SHA1 signing.
+  Sangfor SIP (Security Intelligence Platform) third-party data pull API
+  (v9.2 / "92 version" spec). Supports pulling asset, security event, risk,
+  and vulnerability data via token-based authentication with auth3 SHA1
+  signing.
 description_cn: >
-  深信服 SIP（安全智能平台）第三方数据拉取 API。
+  深信服 SIP（安全智能平台）第三方数据拉取 API（v9.2，对应「92 版」接口规范）。
   支持拉取受监控IP、服务器资产、终端资产、安全事件、风险业务/终端
   及脆弱性（弱密码、漏洞、明文传输）等数据。
   使用 auth3（SHA1）签名认证，Token 有有效期，过期后自动重新认证。
@@ -46,16 +48,10 @@ credential_fields:
     input_type: text
     required: false
     default: "7443"
-  - key: verify_ssl
-    label: Verify SSL
-    storage: config
-    config_key: verify_ssl
-    input_type: text
-    required: false
-    default: "false"
 defaults:
   timeout: 60
   category: custom
+  product_version: "9.2"
 notes: |
   深信服 SIP 配置说明：
   1. 在 SIP 端"更多 → 开发共享"页面新增第三方平台配置：
@@ -65,10 +61,18 @@ notes: |
      - IP 地址：来拉取数据的设备 IP（填写即可，无严格校验）
      - 数据类型：需勾选想要拉取的数据类型，否则对应接口返回空数据
   2. 服务端口为 7443，非 HTTPS 标准 443 端口。
-  3. 若证书过期提示，请将 verify_ssl 设为 false。
+  3. 若证书过期或自签证书，请关闭表单底部的「SSL 验证」开关
+     （默认即关闭；与 onesec / onesig / qingteng 行为一致）。
   4. Token 有有效期，过期后 Handler 会自动重新认证。
   5. 配置文件方式也可写入：
      - api_services.sangfor_sip.host = "192.168.1.100"
      - api_services.sangfor_sip.platform_name = "your_platform_name"
      - api_services.sangfor_sip.username = "your_username"
      - sangfor_sip_password = "your_password"（secret）
+
+  `verify_ssl` 由表单底部「SSL 验证」开关控制，下列字段都会被
+  识别为 SSL 验证开关，按以下优先级取值：
+    1. `verify_ssl`                  （主键）
+    2. `ssl_verify`                  （兼容别名）
+    3. `custom_settings.verify_ssl`  （WebUI 表单写入位置）
+    4. 兜底默认值 `False`（**默认关闭证书验证**，与 onesec / onesig 一致）
