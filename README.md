@@ -21,6 +21,7 @@ Flocks is an AI-driven SecOps platform built with Python, featuring multi-agent 
 - 🔌 **MCP Support** - Model Context Protocol
 - 🖼️ **WebUI** - Browser-based web user interface
 - 🎨 **TUI Interface** - Modern terminal user interface
+- 🧬 **Pluggable Self-Evolution** - Optional 4-layer evolution stack: capability acquirer / skill author / usage tracker / curator. Agents can sediment successful approaches into reusable skills and a background curator keeps the skill library lean. See [`flocks/evolution/README.md`](flocks/evolution/README.md). Disabled by default; existing installs see no behaviour change.
 
 ## 3. Installation & Usage
 

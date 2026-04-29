@@ -287,6 +287,66 @@ async def delegate_task_tool(
             })
             return prev
 
+    # ── Evolution L1: pluggable capability acquirer interception ──
+    # When subagent_type=='self-enhance' and the configured acquirer is a
+    # real plugin (not NoOp / not the builtin passthrough sentinel), forward
+    # the request to acquirer.acquire() instead of running the bundled
+    # subagent. The interception sits AFTER ctx.ask + dedup so permission
+    # prompts and dedup table behaviour are identical to the native path.
+    if subagent_type == "self-enhance":
+        try:
+            from flocks.evolution import EvolutionEngine
+            from flocks.evolution.types import AcquireContext, CapabilityGap
+            engine = EvolutionEngine.get()
+            acq = engine.acquirer
+            if not acq.is_noop and not getattr(acq, "passthrough", False):
+                gap = CapabilityGap.from_prompt(prompt, context={
+                    "description": description,
+                    "load_skills": load_skills,
+                })
+                acq_ctx = AcquireContext(
+                    session_id=ctx.session_id,
+                    message_id=ctx.message_id,
+                    agent=ctx.agent,
+                    extra={"call_id": ctx.call_id},
+                )
+                log.info("delegate_task.evolution_acquirer", {
+                    "acquirer": acq.name,
+                    "session_id": ctx.session_id,
+                })
+                result = await acq.acquire(gap, acq_ctx)
+                output_lines = []
+                if result.notes:
+                    output_lines.append(result.notes)
+                if result.attempted:
+                    output_lines.append(
+                        "Attempted: " + ", ".join(result.attempted)
+                    )
+                if result.tool_name:
+                    output_lines.append(f"Acquired tool: {result.tool_name}")
+                output = "\n\n".join(output_lines) or (
+                    "Capability acquisition succeeded." if result.acquired
+                    else "No capability acquired."
+                )
+                return ToolResult(
+                    success=result.acquired,
+                    output=output,
+                    error=result.error,
+                    title=description,
+                    metadata={
+                        "evolution_acquirer": acq.name,
+                        "acquired": result.acquired,
+                        "tool_name": result.tool_name,
+                    },
+                )
+        except Exception as e:
+            # Acquirer crash must not break the agent; fall through to the
+            # bundled self-enhance subagent path so the user still gets help.
+            log.warn("delegate_task.evolution_acquirer_failed", {
+                "error": str(e),
+                "fallback": "native_self_enhance_subagent",
+            })
+
     skill_result = await _resolve_skill_content(load_skills)
     if skill_result["error"]:
         return ToolResult(success=False, error=skill_result["error"])

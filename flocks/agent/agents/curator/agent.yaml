@@ -1,0 +1,35 @@
+name: evolution-curator
+description: >-
+  Background skill maintenance agent. Reviews agent-created skills, identifies
+  redundant or stale procedures, merges related skills into umbrella skills,
+  and archives skills that have not been used. Triggered by the L4 evolution
+  curator when the configured idle window elapses; runs in a hidden top-level
+  session and writes a markdown report under
+  ~/.flocks/data/evolution/curator/{stamp}/REPORT.md.
+mode: subagent
+hidden: true
+tags: [system, evolution]
+color: "#8E44AD"
+delegatable: false
+steps: 30
+tools:
+  - read
+  - list
+  - glob
+  - grep
+  - skill
+  - skill_manage
+prompt_metadata:
+  category: evolution
+  cost: low
+  prompt_alias: Evolution-Curator
+  triggers:
+    - domain: Background skill maintenance
+      trigger: L4 curator idle-trigger fired
+  use_when:
+    - The L4 BuiltinIdleCurator's run_llm_review() helper requested a pass
+    - User invoked `flocks evolution curate --llm`
+  avoid_when:
+    - The user is in an active conversation with Rex
+    - There are fewer than 3 agent-authored skills in the manifest
+  key_trigger: "L4 idle window elapsed -> consolidate agent-created skills"

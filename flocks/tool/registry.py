@@ -1192,8 +1192,8 @@ class ToolRegistry:
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — background tasks, questions, model config, memory, skill, batch, session management, slash commands
             ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill", "batch", "session_manage", "slash_command", "tool_search"]),
-            # skill/ — skill management (search, install, status, deps, remove)
-            ("flocks.tool.skill", ["flocks_skills"]),
+            # skill/ — skill management (search, install, status, deps, remove + L2 author)
+            ("flocks.tool.skill", ["flocks_skills", "skill_manage"]),
             # channel/ — IM platform messaging
             ("flocks.tool.channel", ["channel_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）

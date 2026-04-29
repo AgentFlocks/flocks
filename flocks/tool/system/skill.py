@@ -184,6 +184,17 @@ async def skill_tool_impl(
         "lines": output.count("\n") + 1,
     })
 
+    # Evolution L3: record this load as a use. NoOp tracker silently
+    # swallows the call so this branch is safe even when evolution is
+    # disabled. Tracker exceptions must NEVER affect skill loading —
+    # the call is wrapped so a corrupted usage file can't break the agent.
+    try:
+        from flocks.evolution import EvolutionEngine
+        scope = "project" if skill.source == "project" else "user"
+        EvolutionEngine.get().tracker.bump_use(skill.name, scope=scope)
+    except Exception as e:  # pragma: no cover - defensive
+        log.debug("skill.tracker_bump_failed", {"name": skill.name, "error": str(e)})
+
     return ToolResult(
         success=True,
         output=output,

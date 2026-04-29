@@ -122,6 +122,24 @@ async def lifespan(app: FastAPI):
         # Hook registration failure should not stop server startup
         log.warn("hooks.register_failed", {"error": str(e)})
 
+    # Bootstrap pluggable evolution module. Always called even when
+    # disabled so ExtensionPoints register before PluginLoader.load_all()
+    # runs from ToolRegistry/AgentRegistry. NoOp strategies are wired
+    # when evolution.enabled is false (the default), so behaviour is
+    # unchanged for existing installs.
+    try:
+        from flocks.evolution import EvolutionEngine
+        config = await Config.get()
+        evo_cfg = getattr(config, "evolution", None)
+        if evo_cfg is not None:
+            evo_dict = evo_cfg.model_dump(exclude_none=False) if hasattr(evo_cfg, "model_dump") else dict(evo_cfg)
+        else:
+            evo_dict = {}
+        EvolutionEngine.get().bootstrap(evo_dict)
+        log.info("evolution.bootstrapped", {"status": EvolutionEngine.get().status()["active"]})
+    except Exception as e:
+        log.warn("evolution.bootstrap_failed", {"error": str(e)})
+
     # Migrate env-var credentials to .secret.json (idempotent)
     try:
         from flocks.provider.credential import migrate_env_credentials

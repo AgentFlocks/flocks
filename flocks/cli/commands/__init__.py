@@ -12,6 +12,7 @@ from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
 from flocks.cli.commands.task import task_app
 from flocks.cli.commands.admin import admin_app
+from flocks.cli.commands.evolution import evolution_app
 
 __all__ = [
     "session_app",
@@ -22,4 +23,5 @@ __all__ = [
     "task_app",
     "skill_app",
     "admin_app",
+    "evolution_app",
 ]

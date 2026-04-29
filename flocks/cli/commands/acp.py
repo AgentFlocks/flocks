@@ -120,6 +120,22 @@ class ACPServer:
         except Exception as e:
             # Hook registration failure should not stop server startup
             log.warn("acp.hooks.register_failed", {"error": str(e)})
+
+        # Bootstrap pluggable evolution module (parallels server.app).
+        # Defaults to NoOp when evolution.enabled is false; ExtensionPoints
+        # are still registered so PluginLoader.load_all() can discover them.
+        try:
+            from flocks.evolution import EvolutionEngine
+            config = await Config.get()
+            evo_cfg = getattr(config, "evolution", None)
+            if evo_cfg is not None:
+                evo_dict = evo_cfg.model_dump(exclude_none=False) if hasattr(evo_cfg, "model_dump") else dict(evo_cfg)
+            else:
+                evo_dict = {}
+            EvolutionEngine.get().bootstrap(evo_dict)
+            log.info("acp.evolution.bootstrapped", {"status": EvolutionEngine.get().status()["active"]})
+        except Exception as e:
+            log.warn("acp.evolution.bootstrap_failed", {"error": str(e)})
         
         # Start internal HTTP server for SDK
         config = uvicorn.Config(

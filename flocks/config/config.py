@@ -53,6 +53,14 @@ class PermissionConfig(BaseModel):
     call_omo_agent: Optional[PermissionRule] = None
     background_output: Optional[PermissionRule] = None
     background_cancel: Optional[PermissionRule] = None
+    skill_manage: Optional[PermissionRule] = Field(
+        None,
+        description=(
+            "Permission for the L2 evolution skill_manage tool. Controls whether "
+            "agents may create / edit / delete user or project skills. Defaults "
+            "to 'ask' if unset and the tool is enabled."
+        ),
+    )
 
 
 # ==================== Agent Configuration ====================
@@ -349,6 +357,81 @@ class UpdaterConfig(BaseModel):
     )
 
 
+# ==================== Evolution Configuration ====================
+
+class EvolutionLayerConfig(BaseModel):
+    """One layer of the evolution stack (acquirer / author / tracker / curator).
+
+    Selection rules at runtime:
+      - ``enabled=False`` → NoOp (layer fully disabled)
+      - ``use=None``      → NoOp (layer enabled but no strategy chosen)
+      - ``use="builtin"`` → built-in implementation
+      - ``use="<plugin>"``→ third-party plugin registered with EvolutionEngine
+
+    Unknown ``use`` values fall back to NoOp with a warning rather than
+    raising, so a misconfigured optional layer never blocks server startup.
+    """
+
+    model_config = {"extra": "allow"}
+
+    enabled: bool = Field(True, description="Set to false to force NoOp regardless of 'use'.")
+    use: Optional[str] = Field(
+        None,
+        description=(
+            "Strategy factory name to instantiate. 'builtin' for the bundled "
+            "implementation, or any string registered via "
+            "EvolutionEngine.register_<layer>()."
+        ),
+    )
+    settings: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Strategy-specific kwargs passed to the factory constructor.",
+    )
+
+
+class EvolutionConfig(BaseModel):
+    """Top-level configuration for the pluggable evolution module.
+
+    Maps directly onto ``EvolutionEngine.bootstrap(config)``. When
+    ``enabled=False`` (the default), all 4 layers stay on NoOp and the
+    rest of Flocks is unaffected.
+    """
+
+    model_config = {"extra": "allow"}
+
+    enabled: bool = Field(
+        False,
+        description=(
+            "Master switch for the evolution module. Defaults to false so "
+            "existing installs see no behaviour change after upgrade."
+        ),
+    )
+    acquirer: Optional[EvolutionLayerConfig] = Field(
+        None,
+        description=(
+            "L1 capability acquirer. When configured with use!='self_enhance', "
+            "delegate_task(subagent_type='self-enhance') is intercepted and "
+            "routed to this strategy instead of the original subagent."
+        ),
+    )
+    author: Optional[EvolutionLayerConfig] = Field(
+        None,
+        description="L2 skill author. Powers the skill_manage tool.",
+    )
+    tracker: Optional[EvolutionLayerConfig] = Field(
+        None,
+        description="L3 usage tracker. Telemetry consumed by the curator.",
+    )
+    curator: Optional[EvolutionLayerConfig] = Field(
+        None,
+        description=(
+            "L4 background curator. Subscribes to command:new with strict "
+            "throttling; only operates on agent-created skills listed in "
+            "~/.flocks/data/evolution/authored.jsonl."
+        ),
+    )
+
+
 # ==================== Channel Configuration ====================
 
 class ChannelAccountConfig(BaseModel):
@@ -575,6 +658,16 @@ class ConfigInfo(BaseModel):
     updater: Optional[UpdaterConfig] = Field(
         None,
         description="Self-update configuration (GitHub repo, git remote, etc.)",
+    )
+
+    # Evolution configuration (pluggable agent self-evolution module)
+    evolution: Optional[EvolutionConfig] = Field(
+        None,
+        description=(
+            "Pluggable agent self-evolution. Wires 4 layers: capability "
+            "acquirer / skill author / usage tracker / curator. Defaults to "
+            "disabled; existing installs see no behaviour change."
+        ),
     )
 
     @model_validator(mode='after')

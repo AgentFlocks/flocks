@@ -61,5 +61,32 @@
     "gitee_token": null,
     "archive_format": "auto",
     "backup_retain_count": 5
+  },
+  "evolution": {
+    "enabled": false,
+    "acquirer": {
+      "enabled": true,
+      "use": "builtin",
+      "settings": {}
+    },
+    "author": {
+      "enabled": true,
+      "use": "builtin",
+      "settings": {}
+    },
+    "tracker": {
+      "enabled": true,
+      "use": "builtin",
+      "settings": {}
+    },
+    "curator": {
+      "enabled": true,
+      "use": "builtin",
+      "settings": {
+        "min_idle_hours": 24,
+        "stale_after_days": 14,
+        "archive_after_days": 60
+      }
+    }
   }
 }
