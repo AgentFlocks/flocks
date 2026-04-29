@@ -500,6 +500,142 @@ def pid_is_running(pid: int | None) -> bool:
     return True
 
 
+def _windows_tasklist_process_name(pid: int) -> str | None:
+    """Return the Windows image name for a pid via tasklist when possible."""
+    if sys.platform != "win32" or pid <= 0:
+        return None
+    completed = subprocess.run(
+        ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    line = completed.stdout.strip()
+    if not line or line.startswith("INFO:"):
+        return None
+    with contextlib.suppress(Exception):
+        import csv
+
+        rows = list(csv.reader([line]))
+        if rows and rows[0]:
+            value = rows[0][0].strip()
+            return value or None
+    return None
+
+
+def _windows_process_snapshot(pid: int) -> dict[str, str] | None:
+    """Return lightweight process details for Windows pid identity checks."""
+    if sys.platform != "win32" or pid <= 0:
+        return None
+
+    powershell = which("powershell") or which("powershell.exe")
+    if powershell:
+        script = (
+            f'$p = Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+            'if ($null -eq $p) { exit 1 }; '
+            '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; '
+            '[PSCustomObject]@{'
+            'Name = $p.Name; '
+            'CommandLine = $p.CommandLine; '
+            'ExecutablePath = $p.ExecutablePath'
+            '} | ConvertTo-Json -Compress'
+        )
+        completed = subprocess.run(
+            [powershell, "-NoProfile", "-Command", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            with contextlib.suppress(json.JSONDecodeError):
+                payload = json.loads(completed.stdout.strip() or "{}")
+                if isinstance(payload, dict):
+                    return {
+                        "name": str(payload.get("Name") or ""),
+                        "command_line": str(payload.get("CommandLine") or ""),
+                        "executable_path": str(payload.get("ExecutablePath") or ""),
+                    }
+
+    name = _windows_tasklist_process_name(pid)
+    if name is None:
+        return None
+    return {"name": name, "command_line": "", "executable_path": ""}
+
+
+def _expected_windows_images(record: RuntimeRecord) -> set[str]:
+    """Return plausible Windows image names for a runtime record."""
+    if not record.command:
+        return set()
+
+    executable = Path(record.command[0]).name.lower()
+    result = {executable} if executable else set()
+    if executable.endswith((".cmd", ".bat")):
+        result.add("cmd.exe")
+    if executable.startswith("python"):
+        result.update({"python.exe", "python"})
+    if executable.startswith("npm"):
+        result.update({"cmd.exe", "node.exe", "npm.cmd", "npm.exe"})
+    return result
+
+
+def _windows_identity_clauses(record: RuntimeRecord) -> list[tuple[str, ...]]:
+    """Return command-line token clauses that strongly identify a service pid."""
+    payload = " ".join(record.command).lower()
+    clauses: list[tuple[str, ...]] = []
+    if "flocks.cli.main" in payload:
+        clauses.append(("flocks.cli.main", "serve"))
+    elif record.command and Path(record.command[0]).name.lower().startswith("flocks"):
+        clauses.append(("flocks", "serve"))
+
+    if record.command and Path(record.command[0]).name.lower().startswith("npm"):
+        clauses.append(("npm", "preview"))
+    return clauses
+
+
+def _windows_runtime_record_matches_pid(
+    record: RuntimeRecord,
+    pid: int,
+    listeners: Iterable[int] | None = None,
+) -> bool:
+    """Return True when a Windows pid still looks like the recorded service."""
+    if sys.platform != "win32":
+        return False
+    if pid <= 0 or not pid_is_running(pid):
+        return False
+
+    listener_set = set(listeners or [])
+    if listener_set and pid in listener_set:
+        return True
+    if not record.command:
+        return True
+
+    snapshot = _windows_process_snapshot(pid)
+    if snapshot is None:
+        # If Windows refuses to provide identity details, keep the record to
+        # avoid tearing down a healthy service based on incomplete evidence.
+        return True
+
+    name = snapshot.get("name", "").strip().lower()
+    command_line = snapshot.get("command_line", "").strip().lower()
+    executable_path = snapshot.get("executable_path", "").strip().lower()
+
+    expected_images = _expected_windows_images(record)
+    actual_image = Path(executable_path).name.lower() if executable_path else name
+    if actual_image and actual_image in expected_images:
+        return True
+
+    if command_line:
+        for clause in _windows_identity_clauses(record):
+            if all(token in command_line for token in clause):
+                return True
+
+    if not name and not command_line and not executable_path:
+        return True
+    return False
+
+
 def _process_group_member_pids(pgid: int) -> list[int]:
     """Return pids that belong to a Unix process group."""
     if sys.platform == "win32" or pgid <= 0:
@@ -554,6 +690,9 @@ def runtime_record_is_running(record: RuntimeRecord | None) -> bool:
     """Return True if the tracked pid or process group is still alive."""
     if record is None:
         return False
+    if sys.platform == "win32":
+        listeners = port_owner_pids(record.port) if record.port is not None else []
+        return _windows_runtime_record_matches_pid(record, record.pid, listeners)
     return pid_is_running(record.pid) or process_group_is_running(record.pgid)
 
 
@@ -952,6 +1091,16 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
     if tracked_pid is not None:
         target_pids = append_unique_pids(target_pids, collect_process_tree_pids(tracked_pid))
     target_pids = append_unique_pids(target_pids, listeners)
+    if sys.platform == "win32" and runtime_record is not None:
+        filtered_targets: list[int] = []
+        for pid in target_pids:
+            if pid in listeners:
+                filtered_targets = append_unique_pids(filtered_targets, [pid])
+                continue
+            if pid == runtime_record.pid and not _windows_runtime_record_matches_pid(runtime_record, pid, listeners):
+                continue
+            filtered_targets = append_unique_pids(filtered_targets, [pid])
+        target_pids = filtered_targets
 
     group_running = process_group_is_running(runtime_record.pgid if runtime_record else None)
     if not target_pids and not group_running:

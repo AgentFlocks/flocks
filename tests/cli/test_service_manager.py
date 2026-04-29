@@ -281,6 +281,36 @@ def test_cleanup_stale_pid_file_keeps_live_process_group(monkeypatch, tmp_path: 
     assert pid_file.exists()
 
 
+def test_cleanup_stale_pid_file_removes_reused_windows_pid(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(
+            pid=1232,
+            host="127.0.0.1",
+            port=8000,
+            command=("python.exe", "-m", "flocks.cli.main", "serve"),
+        ),
+    )
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 1232)
+    monkeypatch.setattr(
+        service_manager,
+        "_windows_process_snapshot",
+        lambda _pid: {
+            "name": "svchost.exe",
+            "command_line": r"C:\Windows\System32\svchost.exe -k netsvcs",
+            "executable_path": r"C:\Windows\System32\svchost.exe",
+        },
+    )
+
+    service_manager.cleanup_stale_pid_file(pid_file)
+
+    assert not pid_file.exists()
+
+
 def test_selected_log_paths_support_specific_targets(tmp_path: Path) -> None:
     paths = service_manager.RuntimePaths(
         root=tmp_path,
@@ -1315,6 +1345,44 @@ def test_stop_one_uses_taskkill_on_windows(monkeypatch, tmp_path: Path) -> None:
         ["taskkill", "/PID", "111", "/T", "/F"],
         ["taskkill", "/PID", "222", "/T", "/F"],
     ]
+
+
+def test_stop_one_skips_taskkill_for_reused_windows_pid(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    service_manager.write_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(
+            pid=111,
+            host="127.0.0.1",
+            port=8000,
+            command=("python.exe", "-m", "flocks.cli.main", "serve"),
+        ),
+    )
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [111])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 111)
+    monkeypatch.setattr(
+        service_manager,
+        "_windows_process_snapshot",
+        lambda _pid: {
+            "name": "svchost.exe",
+            "command_line": r"C:\Windows\System32\svchost.exe -k netsvcs",
+            "executable_path": r"C:\Windows\System32\svchost.exe",
+        },
+    )
+    monkeypatch.setattr(
+        service_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("taskkill should not run")),
+    )
+
+    service_manager.stop_one(8000, pid_file, "后端", console)
+
+    assert console.messages[-1] == "[flocks] 后端 未运行。"
+    assert not pid_file.exists()
 
 
 def test_stop_one_force_kill_refreshes_process_group_members(monkeypatch, tmp_path: Path) -> None:
