@@ -6,8 +6,8 @@ from flocks.tool.registry import ToolContext, ToolResult
 from flocks.tool.tool_loader import _read_yaml_raw, yaml_to_tool
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-_TDP_HANDLER = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api/tdp.handler.py"
-_SKYEYE_HANDLER = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/skyeye_api/skyeye.handler.py"
+_TDP_HANDLER = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10/tdp.handler.py"
+_SKYEYE_HANDLER = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/skyeye_v4_0_14_0_SP2/skyeye.handler.py"
 
 
 def _load_module(module_name: str, module_path: Path):
@@ -737,7 +737,7 @@ async def test_skyeye_alarm_list_forwards_extended_filters():
 
 
 def test_tdp_incident_yaml_loads_with_provider():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api/tdp_incident_list.yaml"
+    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10/tdp_incident_list.yaml"
     raw = _read_yaml_raw(yaml_path)
     tool = yaml_to_tool(raw, yaml_path)
 
@@ -769,7 +769,7 @@ def test_tdp_query_yaml_promotes_semantic_top_level_fields():
     }
 
     for filename, fields in expected_fields.items():
-        yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api" / filename
+        yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10" / filename
         raw = _read_yaml_raw(yaml_path)
         properties = raw["inputSchema"]["properties"]
         for field in fields:
@@ -777,7 +777,7 @@ def test_tdp_query_yaml_promotes_semantic_top_level_fields():
 
 
 def test_tdp_platform_yaml_uses_keyword_and_requires_confirmation():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api/tdp_platform_config.yaml"
+    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10/tdp_platform_config.yaml"
     raw = _read_yaml_raw(yaml_path)
     tool = yaml_to_tool(raw, yaml_path)
 
@@ -790,7 +790,7 @@ def test_tdp_platform_yaml_uses_keyword_and_requires_confirmation():
 
 
 def test_tdp_policy_yaml_requires_confirmation_and_uses_object_ioc_list():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api/tdp_policy_settings.yaml"
+    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10/tdp_policy_settings.yaml"
     raw = _read_yaml_raw(yaml_path)
     tool = yaml_to_tool(raw, yaml_path)
 
@@ -802,7 +802,7 @@ def test_tdp_policy_yaml_requires_confirmation_and_uses_object_ioc_list():
 
 
 def test_tdp_log_yaml_uses_object_columns_and_supports_cascade_asset_group():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_api/tdp_log_search.yaml"
+    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/tdp_v3_3_10/tdp_log_search.yaml"
     raw = _read_yaml_raw(yaml_path)
     tool = yaml_to_tool(raw, yaml_path)
 
@@ -814,7 +814,7 @@ def test_tdp_log_yaml_uses_object_columns_and_supports_cascade_asset_group():
 
 
 def test_skyeye_alarm_list_yaml_loads_with_provider():
-    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/skyeye_api/skyeye_alarm_list.yaml"
+    yaml_path = _WORKSPACE_ROOT / ".flocks/plugins/tools/api/skyeye_v4_0_14_0_SP2/skyeye_alarm_list.yaml"
     raw = _read_yaml_raw(yaml_path)
     tool = yaml_to_tool(raw, yaml_path)
 

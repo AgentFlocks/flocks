@@ -1,5 +1,6 @@
 name: ngtip
 service_id: ngtip_api
+version: "5.1.5"
 description: >
   NGTIP (Next Generation Threat Intelligence Platform) API service.
   Covers two endpoint categories: intelligence query (port 8090) and
@@ -36,6 +37,7 @@ defaults:
   query_base_url: "http://YOUR_NGTIP_IP:8090"
   timeout: 60
   category: custom
+  product_version: "5.1.5"
 notes: |
   NGTIP API 分为两类，Base URL 不同，务必在配置中均填写：
     - 平台功能接口：base_url（如 http://192.168.1.100）

@@ -9,7 +9,7 @@ from flocks.tool.tool_loader import yaml_to_tool
 
 
 def _load_tool(yaml_name: str):
-    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "skyeye_api" / yaml_name
+    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "skyeye_v4_0_14_0_SP2" / yaml_name
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     return yaml_to_tool(raw, yaml_path)
 

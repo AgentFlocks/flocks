@@ -15,7 +15,7 @@ def _load_tool(yaml_name: str):
         / "plugins"
         / "tools"
         / "api"
-        / "ngtip_api"
+        / "ngtip_v5_1_5"
         / yaml_name
     )
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
