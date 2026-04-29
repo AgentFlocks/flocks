@@ -468,6 +468,58 @@ class TestYamlToTool:
 
         assert tool.info.source is None
 
+    def test_provider_version_from_provider_yaml(self, tmp_path: Path, monkeypatch):
+        """`version` in _provider.yaml should be propagated to ToolInfo.provider_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "sangfor_sip_v92"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "sangfor_sip",
+            "version": "9.2",
+            "defaults": {"base_url": "https://sip.test/api"},
+        })
+        data = _make_tool_yaml(name="sangfor_sip_assets", url="{base_url}/assets")
+        yaml_path = _write_yaml(api_dir / "sangfor_sip_assets.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider == "sangfor_sip"
+        assert tool.info.provider_version == "9.2"
+        assert getattr(tool, "_provider_version", None) == "9.2"
+
+    def test_provider_version_falls_back_to_defaults_product_version(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When top-level `version` is missing, fall back to defaults.product_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "legacy_provider"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "legacy_provider",
+            "defaults": {"base_url": "https://x.test", "product_version": "8.1"},
+        })
+        data = _make_tool_yaml(name="legacy_tool", url="{base_url}/x")
+        yaml_path = _write_yaml(api_dir / "legacy_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version == "8.1"
+
+    def test_provider_version_absent_when_not_declared(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """No `version` anywhere → provider_version stays None."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "no_version"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {"name": "no_version"})
+        data = _make_tool_yaml(name="no_version_tool")
+        yaml_path = _write_yaml(api_dir / "no_version_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version is None
+
 
 # ---------------------------------------------------------------------------
 # CRUD helpers
