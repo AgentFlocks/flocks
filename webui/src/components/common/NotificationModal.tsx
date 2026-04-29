@@ -90,7 +90,7 @@ export default function NotificationModal({
 
   return createPortal(
     <>
-      <div className="fixed inset-0 z-[90] bg-black/30" onClick={onClose} />
+      <div className="fixed inset-0 z-[90] bg-black/30" onClick={() => onClose()} />
       <div className="fixed inset-0 z-[100] flex items-center justify-center pointer-events-none">
         <div
           className={`pointer-events-auto w-full max-w-lg mx-4 overflow-hidden rounded-2xl border ${accent.ring} bg-white shadow-2xl`}
@@ -108,7 +108,7 @@ export default function NotificationModal({
               <p className={`mt-1 text-sm leading-6 ${accent.text}`}>{t('subtitle')}</p>
             </div>
             <button
-              onClick={onClose}
+              onClick={() => onClose()}
               disabled={isBusy}
               className="rounded p-1 text-gray-400 transition-colors hover:text-gray-600 disabled:cursor-not-allowed disabled:opacity-50"
               aria-label={t('close')}
@@ -144,7 +144,7 @@ export default function NotificationModal({
                     </div>
 
                     {notification.body && (
-                      <p className="mt-3 text-sm leading-6 text-gray-600">{notification.body}</p>
+                      <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-gray-600">{notification.body}</p>
                     )}
 
                     {notification.highlights.length > 0 && (

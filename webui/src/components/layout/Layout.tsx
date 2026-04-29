@@ -24,12 +24,42 @@ import LanguageSwitcher from '@/components/common/LanguageSwitcher';
 import OnboardingModal, { isOnboardingDismissed } from '@/components/common/OnboardingModal';
 import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
 import NotificationModal from '@/components/common/NotificationModal';
-import { checkUpdate } from '@/api/update';
-import { ackNotification, getActiveNotifications, type UserNotification } from '@/api/notifications';
+import { checkUpdate, type VersionInfo } from '@/api/update';
+import {
+  ackNotification,
+  getActiveNotifications,
+  getNotificationAckStatus,
+  type UserNotification,
+} from '@/api/notifications';
 import { useAuth } from '@/contexts/AuthContext';
+import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 60_000;
+
+function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
+  const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
+  if (!info || info.error || !releaseNotes) return null;
+
+  const version = info.latest_version ?? info.current_version;
+  if (!version || version === 'unknown') return null;
+
+  const isZh = language.toLowerCase().startsWith('zh');
+  return {
+    id: `whats-new-${version}`,
+    kind: 'whats_new',
+    title: isZh ? `Flocks v${version} 更新内容` : `What's new in Flocks v${version}`,
+    summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
+    body: releaseNotes,
+    highlights: [],
+    primary_action: {
+      label: isZh ? '开始体验' : 'Start exploring',
+      url: info.release_url,
+    },
+    version,
+    priority: 20,
+  };
+}
 
 export default function Layout() {
   const location = useLocation();
@@ -43,10 +73,15 @@ export default function Layout() {
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<VersionInfo | null>(null);
+  const [hasCompletedUpdateCheck, setHasCompletedUpdateCheck] = useState(false);
   const lastUpdateCheckAtRef = useRef(0);
   const checkingUpdateRef = useRef(false);
   const lastPromptedVersionRef = useRef<string | null>(null);
   const [notifications, setNotifications] = useState<UserNotification[]>([]);
+  const [updateNotification, setUpdateNotification] = useState<UserNotification | null>(null);
+  const [backendNotificationsReady, setBackendNotificationsReady] = useState(false);
+  const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
@@ -74,6 +109,7 @@ export default function Layout() {
 
     try {
       const info = await checkUpdate(i18n.language);
+      setUpdateInfo(info);
 
       if (info.current_version) {
         setCurrentVersion(info.current_version);
@@ -101,6 +137,7 @@ export default function Layout() {
       // Keep the last known update state on transient failures.
     } finally {
       checkingUpdateRef.current = false;
+      setHasCompletedUpdateCheck(true);
     }
   }, [i18n.language]);
 
@@ -136,15 +173,20 @@ export default function Layout() {
   useEffect(() => {
     if (!user?.id) {
       setNotifications([]);
+      setUpdateNotification(null);
+      setBackendNotificationsReady(false);
+      setUpdateNotificationReady(false);
       setAcknowledgingNotificationIds([]);
       lastNotificationFetchKeyRef.current = null;
       return;
     }
+    if (!hasCompletedUpdateCheck) return;
 
     const fetchKey = `${user.id}:${i18n.language}:${currentVersion ?? 'pending-version'}`;
     if (lastNotificationFetchKeyRef.current === fetchKey) return;
     const previousFetchKey = lastNotificationFetchKeyRef.current;
     lastNotificationFetchKeyRef.current = fetchKey;
+    setBackendNotificationsReady(false);
 
     let cancelled = false;
     void getActiveNotifications(i18n.language, currentVersion)
@@ -157,26 +199,68 @@ export default function Layout() {
           }
           return Array.from(byId.values()).sort((a, b) => a.priority - b.priority);
         });
+        setBackendNotificationsReady(true);
       })
       .catch(() => {
         // Notification failures should never block the main product surface.
         if (lastNotificationFetchKeyRef.current === fetchKey) {
           lastNotificationFetchKeyRef.current = previousFetchKey;
         }
+        if (!cancelled) {
+          setBackendNotificationsReady(true);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [currentVersion, i18n.language, user?.id]);
+  }, [currentVersion, hasCompletedUpdateCheck, i18n.language, user?.id]);
 
-  const visibleNotifications = !showOnboarding && !showUpdate && notifications.length > 0
-    ? notifications
+  useEffect(() => {
+    if (!user?.id) {
+      setUpdateNotification(null);
+      setUpdateNotificationReady(false);
+      return;
+    }
+    if (!hasCompletedUpdateCheck) return;
+
+    setUpdateNotificationReady(false);
+    const notification = buildUpdateNotification(updateInfo, i18n.language);
+    if (!notification) {
+      setUpdateNotification(null);
+      setUpdateNotificationReady(true);
+      return;
+    }
+
+    let cancelled = false;
+    void getNotificationAckStatus(notification.id)
+      .then((status) => {
+        if (cancelled) return;
+        setUpdateNotification(status.acknowledged ? null : notification);
+        setUpdateNotificationReady(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setUpdateNotification(notification);
+        setUpdateNotificationReady(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasCompletedUpdateCheck, i18n.language, updateInfo, user?.id]);
+
+  const allNotifications = updateNotification
+    ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
+    : notifications;
+  const visibleNotifications = backendNotificationsReady && updateNotificationReady && !showOnboarding && !showUpdate && allNotifications.length > 0
+    ? allNotifications
     : [];
 
   const removeNotifications = useCallback((items: UserNotification[]) => {
     const visibleIds = new Set(items.map((item) => item.id));
     setNotifications((prev) => prev.filter((item) => !visibleIds.has(item.id)));
+    setUpdateNotification((prev) => (prev && visibleIds.has(prev.id) ? null : prev));
   }, []);
 
   const closeVisibleNotification = useCallback((notification?: UserNotification) => {
@@ -248,6 +332,7 @@ export default function Layout() {
       )}
       {showUpdate && (
         <UpdateModal
+          initialInfo={updateInfo}
           onClose={() => setShowUpdate(false)}
           onDismiss={() => setShowUpdate(false)}
         />

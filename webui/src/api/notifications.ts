@@ -26,6 +26,12 @@ export interface NotificationAck {
   acknowledged_at: string;
 }
 
+export interface NotificationAckStatus {
+  notification_id: string;
+  user_id: string;
+  acknowledged: boolean;
+}
+
 export const getActiveNotifications = async (
   locale?: string,
   currentVersion?: string | null,
@@ -41,6 +47,15 @@ export const getActiveNotifications = async (
 
 export const ackNotification = async (notificationId: string): Promise<NotificationAck> => {
   const response = await client.post<NotificationAck>(
+    `/api/notifications/${encodeURIComponent(notificationId)}/ack`,
+  );
+  return response.data;
+};
+
+export const getNotificationAckStatus = async (
+  notificationId: string,
+): Promise<NotificationAckStatus> => {
+  const response = await client.get<NotificationAckStatus>(
     `/api/notifications/${encodeURIComponent(notificationId)}/ack`,
   );
   return response.data;

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress } from '@/api/update';
+import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 // ------------------------------------------------------------------ //
 
@@ -26,19 +27,21 @@ const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
 interface UpdateModalProps {
+  initialInfo?: VersionInfo | null;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
+export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
-  const [info, setInfo] = useState<VersionInfo | null>(null);
+  const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
   const [upgrading, setUpgrading] = useState(false);
   const [steps, setSteps] = useState<UpdateProgress[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
+  const localizedReleaseNotes = getLocalizedReleaseNotes(info?.release_notes, i18n.language);
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -46,10 +49,6 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
     restartingRef.current = val;
     setRestarting(val);
   };
-
-  useEffect(() => {
-    fetchVersion();
-  }, []);
 
   const fetchVersion = useCallback(async () => {
     setChecking(true);
@@ -64,6 +63,12 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
       setChecking(false);
     }
   }, [i18n.language, t]);
+
+  useEffect(() => {
+    if (!initialInfo) {
+      fetchVersion();
+    }
+  }, [fetchVersion, initialInfo]);
 
   const handleUpgrade = useCallback(async () => {
     if (!info?.has_update) return;
@@ -336,7 +341,7 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
             </div>
           </div>
 
-          {info?.has_update && info.release_notes && (
+          {info?.has_update && localizedReleaseNotes && (
             <div className="px-4 pb-3">
               <button
                 onClick={() => setShowReleaseNotes((prev) => !prev)}
@@ -366,7 +371,7 @@ export default function UpdateModal({ onClose, onDismiss }: UpdateModalProps) {
                     )}
                   </div>
                   <pre className="text-xs text-gray-500 bg-gray-50 rounded-lg p-2.5 whitespace-pre-wrap max-h-32 overflow-y-auto leading-relaxed">
-                    {info.release_notes.trim()}
+                    {localizedReleaseNotes}
                   </pre>
                 </div>
               )}

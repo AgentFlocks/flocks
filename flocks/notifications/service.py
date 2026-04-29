@@ -78,6 +78,12 @@ class NotificationAck(BaseModel):
     acknowledged_at: str
 
 
+class NotificationAckStatus(BaseModel):
+    notification_id: str
+    user_id: str
+    acknowledged: bool
+
+
 DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
     NotificationConfig(
         id="token-free-period-extended-2026-04",
@@ -115,50 +121,6 @@ DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
     ),
 )
 
-
-def _default_whats_new(current_version: str) -> NotificationConfig:
-    return NotificationConfig(
-        id=f"whats-new-{current_version}",
-        kind="whats_new",
-        priority=20,
-        version=current_version,
-        locales={
-            "zh-CN": NotificationContent(
-                title=f"已升级到 Flocks v{current_version}",
-                summary="这里是本次版本值得关注的新功能和变化。",
-                body="升级完成后，你可以先快速浏览重点变化，再继续回到工作区。",
-                highlights=[
-                    "账号与鉴权：新增本地登录账号模块。更新到新版本后，需要在页面上设置账密信息",
-                    "钉钉渠道：使用 Python Stream Mode 插件替换原官方插件。因收到较多钉钉问题反馈，我们移除了官方插件并重写了钉钉 Channel",
-                    "Windows 安装与升级：修复内置 Chrome 浏览器路径覆盖等问题",
-                    "工具体系优化：严格 schema 预校验，skill 工具改为渐进式加载",
-                    "优化 OneSEC API 工具参数",
-                    "统一输入与命令",
-                    "新增独立的 SQLite 数据库恢复脚本",
-                    "新增 Gemini 3 稳健支持",
-                ],
-                primaryAction=NotificationAction(label="开始体验"),
-            ),
-            "en-US": NotificationContent(
-                title=f"Flocks upgraded to v{current_version}",
-                summary="Here are the highlights from this version.",
-                body="Take a quick look at what changed, then continue your work.",
-                highlights=[
-                    "Accounts and authentication: added local login accounts. After upgrading, users need to set account credentials on the page",
-                    "DingTalk channel: replaced the previous official plugin with a Python Stream Mode plugin. Based on user feedback about DingTalk issues, we removed the official plugin and rewrote the DingTalk Channel",
-                    "Windows installation and upgrade: fixed issues including built-in Chrome browser path overrides",
-                    "Tooling improvements: stricter schema pre-validation and progressive loading for skill tools",
-                    "Optimized OneSEC API tool parameters",
-                    "Unified input and commands",
-                    "Added a standalone SQLite database recovery script",
-                    "Added robust Gemini 3 support",
-                ],
-                primaryAction=NotificationAction(label="Start exploring"),
-            ),
-        },
-    )
-
-
 class NotificationService:
     """Load active notifications and track per-user acknowledgements."""
 
@@ -188,19 +150,6 @@ class NotificationService:
         if expires_at and now >= expires_at:
             return False
         return True
-
-    @classmethod
-    def _resolve_current_version(cls, current_version: str | None) -> str | None:
-        if current_version:
-            return current_version
-        try:
-            from flocks.updater import get_current_version
-
-            version = get_current_version()
-            return version if version and version != "unknown" else None
-        except Exception as exc:
-            log.warn("notifications.version.resolve_failed", {"error": str(exc)})
-            return None
 
     @classmethod
     def _notification_sort_key(
@@ -242,6 +191,16 @@ class NotificationService:
         return await Storage.get(cls._ack_key(user_id, notification_id)) is not None
 
     @classmethod
+    async def acknowledgement_status(
+        cls, *, user_id: str, notification_id: str
+    ) -> NotificationAckStatus:
+        return NotificationAckStatus(
+            user_id=user_id,
+            notification_id=notification_id,
+            acknowledged=await cls._is_acknowledged(user_id, notification_id),
+        )
+
+    @classmethod
     async def list_active(
         cls,
         *,
@@ -250,7 +209,6 @@ class NotificationService:
         current_version: str | None = None,
     ) -> list[NotificationResponse]:
         target_locale = _normalize_locale(locale)
-        resolved_version = cls._resolve_current_version(current_version)
         config_notifications = await cls._load_config_notifications()
         config_ids = {notification.id for notification in config_notifications}
 
@@ -258,8 +216,6 @@ class NotificationService:
             *config_notifications,
             *(notification for notification in DEFAULT_NOTIFICATIONS if notification.id not in config_ids),
         ]
-        if resolved_version and f"whats-new-{resolved_version}" not in config_ids:
-            notifications.append(_default_whats_new(resolved_version))
 
         active: list[NotificationResponse] = []
         seen_ids: set[str] = set()

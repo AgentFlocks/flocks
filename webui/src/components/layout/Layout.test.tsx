@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import Layout from './Layout';
@@ -16,6 +16,7 @@ const {
   sessionApi,
   getActiveNotifications,
   ackNotification,
+  getNotificationAckStatus,
   useAuth,
   useStats,
 } = vi.hoisted(() => ({
@@ -41,6 +42,7 @@ const {
   },
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
+  getNotificationAckStatus: vi.fn(),
   useAuth: vi.fn(),
   useStats: vi.fn(),
 }));
@@ -70,6 +72,7 @@ vi.mock('@/api/update', () => ({
 vi.mock('@/api/notifications', () => ({
   getActiveNotifications,
   ackNotification,
+  getNotificationAckStatus,
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -150,6 +153,14 @@ async function flushEffects() {
   });
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe('Layout onboarding entry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -163,6 +174,11 @@ describe('Layout onboarding entry', () => {
       error: null,
     });
     getActiveNotifications.mockResolvedValue([]);
+    getNotificationAckStatus.mockResolvedValue({
+      notification_id: 'whats-new-0.2.0',
+      user_id: 'user-1',
+      acknowledged: false,
+    });
     ackNotification.mockResolvedValue({
       notification_id: 'notice-1',
       user_id: 'user-1',
@@ -295,5 +311,137 @@ describe('Layout onboarding entry', () => {
     });
     await flushEffects();
     expect(checkUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('reuses update check release notes for the notification modal', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: '2026.04.28',
+      current_version: '2026.04.28',
+      release_notes: [
+        '## 中文',
+        '中文更新 1',
+        '中文更新 2',
+        '',
+        '## English',
+        'English update 1',
+      ].join('\n'),
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+    getNotificationAckStatus.mockResolvedValue({
+      notification_id: 'whats-new-2026.04.28',
+      user_id: 'user-1',
+      acknowledged: false,
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks v2026.04.28 更新内容')).toBeInTheDocument();
+    expect(screen.getByText(/中文更新 1/)).toBeInTheDocument();
+    expect(screen.queryByText(/English update 1/)).not.toBeInTheDocument();
+    expect(getActiveNotifications).toHaveBeenCalledTimes(1);
+    expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.04.28');
+    expect(checkUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show acknowledged update release notes again', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: '2026.04.28',
+      current_version: '2026.04.28',
+      release_notes: 'Release line 1\nRelease line 2',
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+    getNotificationAckStatus.mockResolvedValue({
+      notification_id: 'whats-new-2026.04.28',
+      user_id: 'user-1',
+      acknowledged: true,
+    });
+
+    renderHomeWithLayout();
+
+    await waitFor(() => {
+      expect(getNotificationAckStatus).toHaveBeenCalledWith('whats-new-2026.04.28');
+    });
+    expect(screen.queryByText('Flocks v2026.04.28 更新内容')).not.toBeInTheDocument();
+  });
+
+  it('closes the notification modal from the top-right close button', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    getActiveNotifications.mockResolvedValue([
+      {
+        id: 'notice-1',
+        kind: 'announcement',
+        title: 'Notice title',
+        summary: null,
+        body: 'Notice body',
+        highlights: [],
+        primary_action: null,
+        secondary_action: null,
+        version: null,
+        priority: 10,
+      },
+    ]);
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('Notice title')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'close' }));
+    expect(screen.queryByText('Notice title')).not.toBeInTheDocument();
+  });
+
+  it('waits for benefit and release notifications before opening the combined modal', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: '2026.04.28',
+      current_version: '2026.04.28',
+      release_notes: 'Release line 1',
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+    const ackStatus = deferred<{
+      notification_id: string;
+      user_id: string;
+      acknowledged: boolean;
+    }>();
+    getNotificationAckStatus.mockReturnValue(ackStatus.promise);
+    getActiveNotifications.mockResolvedValue([
+      {
+        id: 'token-free-period-extended-2026-04',
+        kind: 'benefit',
+        title: 'Token 免费期已延长',
+        summary: null,
+        body: '福利内容',
+        highlights: [],
+        primary_action: null,
+        secondary_action: null,
+        version: null,
+        priority: 10,
+      },
+    ]);
+
+    renderHomeWithLayout();
+
+    await waitFor(() => {
+      expect(getActiveNotifications).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByText('Token 免费期已延长')).not.toBeInTheDocument();
+
+    await act(async () => {
+      ackStatus.resolve({
+        notification_id: 'whats-new-2026.04.28',
+        user_id: 'user-1',
+        acknowledged: false,
+      });
+    });
+
+    expect(await screen.findByText('Token 免费期已延长')).toBeInTheDocument();
+    expect(screen.getByText('Flocks v2026.04.28 更新内容')).toBeInTheDocument();
   });
 });
