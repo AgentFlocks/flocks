@@ -1,0 +1,169 @@
+name: ngsoc_alarms
+description: >
+  NGSOC threat-alarm grouped tool. Use the `action` parameter to query
+  alarm lists, fetch alarm details, change alarm dispose state, request
+  raw alarms / evidence logs, kick off PCAP downloads, and drive the AI
+  alarm-judgment workflow under `/alarms/*` and
+  `/app-ai-alarm-judgment/*` routes (manual §5.1).
+description_cn: >
+  NGSOC 威胁告警分组工具，对应手册「5.1 威胁告警」章节的 14 个接口。
+  通过 `action` 调用告警列表 / 详情、批量处置、原始告警、相关日志、
+  PCAP 下载（含进度查询）以及 AI 研判（首次研判 / 重新研判 / 拉取
+  研判结果 / 修改研判结论 / 变更记录）。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Alarms 分组动作名（手册 §5.1 各小节）：
+        - alarm_ticket_state_update     PUT  /alarms/ticket-state/{ticket-id}    告警工单状态变更
+        - alarm_pcap_export             POST /alarms/kvstore/export-file         告警 PCAP 异步下载
+        - alarm_evidence_get            GET  /alarms/{raw-alarm-id}/evidence     告警相关日志展示
+        - alarm_list_data               POST /alarms/list-data                    获取告警（轻量字段）
+        - alarm_detail_summary          GET  /alarms/detail/summary/{uuid}       告警详情字段
+        - alarm_dispose_state           PUT  /alarms/dispose-state                批量处置告警
+        - alarm_list                    POST /alarms/list                         获取/筛选告警
+        - alarm_raw_alarms              GET  /alarms/{alarm-id}/raw-alarms       获取告警对应的原始告警列表
+        - alarm_list_total              POST /alarms/list-total                   获取告警总数
+        - alarm_pcap_export_status      GET  /alarms/kvstore/export-file/status  告警 PCAP 下载进度
+        - alarm_ai_judge                GET  /app-ai-alarm-judgment/judge/{merge-alarm-id}/{judge-type}  告警 AI 研判（SSE）
+        - alarm_ai_judge_result         GET  /app-ai-alarm-judgment/result/{merge-alarm-id}              获取 AI 研判结果
+        - alarm_judgment_record_update  POST /alarms/judgment-record              修改告警智能研判结论
+        - alarm_judgment_record_list    GET  /alarms/judgment-record              获取智能研判结论变更记录
+      enum:
+        - alarm_ticket_state_update
+        - alarm_pcap_export
+        - alarm_evidence_get
+        - alarm_list_data
+        - alarm_detail_summary
+        - alarm_dispose_state
+        - alarm_list
+        - alarm_raw_alarms
+        - alarm_list_total
+        - alarm_pcap_export_status
+        - alarm_ai_judge
+        - alarm_ai_judge_result
+        - alarm_judgment_record_update
+        - alarm_judgment_record_list
+    ticket-id:
+      type: string
+      description: 工单 ID（alarm_ticket_state_update 必填，纯数字）。
+    state:
+      type: integer
+      description: |
+        - alarm_ticket_state_update 必填——工单状态（手册 §5.1.1 BODY 表）：
+          0-未关联工单、1-待下发、3-待处置、5-处置中、10-已撤销、
+          15-已处置、20-已完成、-1-无。
+        - alarm_dispose_state 必填——告警处置状态（手册 §3.3「处置状态字典」），
+          常见取值：1-待处置、2-处置中、3-已处置、4-不处置、5-误报、
+          6-待处置（复现）。
+    fileName:
+      type: string
+      description: 文件名（alarm_pcap_export 必填）。
+    latestTimestamp:
+      type: integer
+      description: 告警最新一次发生时间（毫秒）。
+    messages:
+      type: array
+      description: |
+        相关日志数组（alarm_pcap_export 必填）。每个元素需包含
+        `msgId` 与 `occurTime`（手册 §5.1.2 BODY 参数表）。
+      items:
+        type: object
+    uuid:
+      type: string
+      description: 告警 uuid（alarm_pcap_export / alarm_detail_summary 必填）。
+    smallFileSuffix:
+      type: string
+    raw-alarm-id:
+      type: string
+      description: 原始告警 uuid（alarm_evidence_get 必填）。
+    page:
+      type: integer
+    size:
+      type: integer
+    type:
+      type: string
+      description: 日志类型（alarm_evidence_get 必填，如 `unix`）。
+    view:
+      type: string
+    timestamp:
+      type: integer
+      description: 时间戳（毫秒）；alarm_evidence_get / alarm_raw_alarms 必填。
+    ruleId:
+      type: string
+      description: 规则 id（alarm_evidence_get 必填，UUID 格式）。
+    domainId:
+      type: string
+    orderBy:
+      type: string
+    queryParams:
+      type: object
+      description: |
+        查询参数对象，alarm_list / alarm_list_data / alarm_list_total
+        必填。结构遵循手册 §5.1.4 / §5.1.7：
+        ```
+        {
+          "timestamp": {"stime": <ms>, "etime": <ms>},
+          "latestTimestamp": {"stime": <ms>, "etime": <ms>},
+          "uuid": "...", "maxSeq": ..., "disposeState": ...,
+        }
+        ```
+        其中 `timestamp` 与 `latestTimestamp` 至少一组必填且单次查询时间
+        跨度不超过 30 天。
+    isDrill:
+      type: boolean
+    alarm-id:
+      type: string
+      description: 告警 uuid（alarm_raw_alarms 必填）。
+    params:
+      type: string
+      description: 模糊查询参数，alarm_raw_alarms 可选。
+    alarmIds:
+      type: string
+      description: 多个 alarmId 逗号分隔（alarm_dispose_state 必填）。
+    desc:
+      type: string
+      description: 处置描述（alarm_dispose_state 可选）。
+    startTime:
+      type: integer
+    endTime:
+      type: integer
+      description: 最新一次告警发生时间（alarm_dispose_state 必填）。
+    token:
+      type: string
+      description: PCAP 下载 token（alarm_pcap_export_status 必填）。
+    merge-alarm-id:
+      type: string
+      description: 告警 uuid（alarm_ai_judge / alarm_ai_judge_result 必填）。
+    judge-type:
+      type: integer
+      description: 研判类型，2-首次研判 3-重新研判（alarm_ai_judge 必填）。
+    alarmId:
+      type: string
+      description: |
+        告警 uuid（alarm_judgment_record_update / alarm_judgment_record_list
+        必填）。
+    triageResult:
+      type: string
+      description: 研判结果（alarm_judgment_record_update 必填）。
+    judgmentReason:
+      type: string
+    creatorId:
+      type: string
+    creatorName:
+      type: string
+    recordId:
+      type: string
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: alarms

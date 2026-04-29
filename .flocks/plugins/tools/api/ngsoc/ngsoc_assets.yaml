@@ -1,0 +1,49 @@
+name: ngsoc_assets
+description: >
+  NGSOC asset center grouped tool. Use the `action` parameter to fetch
+  per-asset detail, list asset-IDs grouped by asset-group, and traverse
+  the asset-group view tree under `/assets/*` (manual §5.2).
+description_cn: >
+  NGSOC 资产中心分组工具，对应手册「5.2 资产中心」3 个接口。
+  通过 `action` 调用单资产详情、资产组下资产 id 列表、资产组列表
+  （含视图维度过滤）。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Assets 分组动作名（手册 §5.2）：
+        - asset_get          GET /assets/asset/{id}            获取单资产详情
+        - asset_id_list      GET /assets/id-list               获取资产组下所有资产 id
+        - asset_group_list   GET /assets/asset-group-list      获取资产组列表
+      enum:
+        - asset_get
+        - asset_id_list
+        - asset_group_list
+    id:
+      type: integer
+      description: 资产 id（asset_get 必填）。
+    groupId:
+      type: string
+      description: 资产组 id，多个逗号分隔（asset_id_list 必填）。
+    viewId:
+      type: integer
+      description: 视图 id，默认查询网段分组（asset_group_list 可选）。
+    domainIds:
+      type: string
+      description: 组织 ID 集合（逗号分隔，纯数字）。
+    showNative:
+      type: boolean
+      description: 是否只展示本机数据，默认展示下级。
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: assets

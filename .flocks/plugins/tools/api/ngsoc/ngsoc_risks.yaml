@@ -1,0 +1,111 @@
+name: ngsoc_risks
+description: >
+  NGSOC risk management grouped tool. Use the `action` parameter to fetch
+  the asset risk list and per-asset risk-score detail under `/risks/*`
+  (manual §5.4).
+description_cn: >
+  NGSOC 风险管理分组工具，对应手册「5.4 风险管理」2 个接口。
+  通过 `action` 调用单资产风险列表（POST 带 18 个 query 过滤字段 +
+  3 个 body 字段）与单资产风险评分详情。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Risks 分组动作名（手册 §5.4）：
+        - asset_risks_list   POST /risks/asset/asset-risks          单资产风险列表
+        - asset_risk_get     GET  /risks/asset/{assetId}/asset-risk 单资产风险详情
+      enum:
+        - asset_risks_list
+        - asset_risk_get
+    assetId:
+      type: integer
+      description: 资产 id（asset_risk_get 必填，REST 参数；纯数字）。
+    # ---- BODY 参数（asset_risks_list，手册 §5.4.1 表 5.4-1）----------
+    groupIds:
+      type: array
+      description: 资产组 id 集合（asset_risks_list body 可选）。
+      items:
+        type: integer
+    networkSegmentId:
+      type: string
+      description: 网段 id（asset_risks_list body 可选；手册 §5.4.1 标为 string）。
+    domainId:
+      type: string
+      description: 组织 id（asset_risks_list body 可选；手册 §5.4.1 标为 string）。
+    # ---- QUERY 参数（asset_risks_list，手册 §5.4.1 表 5.4-2）---------
+    page:
+      type: integer
+      description: 第几页（asset_risks_list query 可选，默认 1）。
+    size:
+      type: integer
+      description: 每页条数（asset_risks_list query 可选，默认 10）。
+    orderBy:
+      type: string
+      description: |
+        排序字段（asset_risks_list query 可选）。前缀 `-` 表示倒序，
+        例 `-risk` 按风险值倒序。
+    compromiseState:
+      type: boolean
+      description: |
+        失陷状态筛选（asset_risks_list query 可选）。手册支持 `all` /
+        `true` / `false` 三态——传 boolean 时由 SDK 转为 `"true"`/`"false"`，
+        若需 `all` 行为请省略该字段。
+    assetName:
+      type: string
+      description: 资产名称模糊匹配（asset_risks_list query 可选）。
+    assetIp:
+      type: string
+      description: 资产 IP（asset_risks_list query 可选，IP 字符串）。
+    risk:
+      type: string
+      description: |
+        风险值过滤（asset_risks_list query 可选，纯数字字符串；
+        若传两个值用 `-` 连接，例 `10-20`）。
+    principal:
+      type: string
+      description: 责任人（asset_risks_list query 可选）。
+    principalDepartment:
+      type: string
+      description: 责任部门（asset_risks_list query 可选）。
+    viewId:
+      type: integer
+      description: 左侧树结构维度 id（asset_risks_list query 必填，默认 1）。
+    riskLevel:
+      type: string
+      description: |
+        风险等级过滤（asset_risks_list query 可选，多个逗号分隔），
+        取值参见手册附录字典（如 1,2,3）。
+    alarmNum:
+      type: string
+      description: 告警数区间（asset_risks_list query 可选，纯数字，例 `1,2`）。
+    vulnerabilityNum:
+      type: string
+      description: 脆弱性数量区间（asset_risks_list query 可选，纯数字，例 `1,2`）。
+    classifyId:
+      type: string
+      description: 资产分类 ID 列表（asset_risks_list query 可选，多个逗号分隔）。
+    registerStatus:
+      type: integer
+      description: |
+        注册状态（asset_risks_list query 可选）：
+        默认全部；1-只展示已注册；0-只展示未注册。
+      enum: [0, 1]
+    abnormalGrades:
+      type: number
+      description: 异常得分（asset_risks_list query 可选）。
+    assetValue:
+      type: integer
+      description: 资产价值（asset_risks_list query 可选）。
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: risks

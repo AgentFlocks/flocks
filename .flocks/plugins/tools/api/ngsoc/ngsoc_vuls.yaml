@@ -1,0 +1,135 @@
+name: ngsoc_vuls
+description: >
+  NGSOC vulnerability management grouped tool. Use the `action` parameter
+  to fetch per-asset vulnerabilities, per-asset configuration-check
+  results, the global vulnerability list (with optional CNNVD merge),
+  the web-vulnerability list, and the weak-password list under `/vuls/*`
+  (manual §5.3).
+description_cn: >
+  NGSOC 漏洞管理分组工具，对应手册「5.3 漏洞管理」5 个接口。
+  通过 `action` 调用单资产漏洞 / 配置核查列表，以及漏洞视角下
+  漏洞列表、Web 漏洞列表、弱口令列表。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Vuls 分组动作名（手册 §5.3）：
+        - vuls_by_assetid          GET  /vuls/vuls-by-assetid           获取单资产漏洞列表
+        - vuls_config_by_assetid   GET  /vuls/config/vuls-by-assetid    获取单资产配置核查列表
+        - vuls_raw_data_list       POST /vuls/raw-data-vul-list         获取漏洞视角中漏洞列表
+        - vuls_web_raw_data        POST /vuls/web-raw-data              获取 web 漏洞列表
+        - vuls_pwd_raw_data        POST /vuls/pwd/raw-data              获取弱口令列表
+      enum:
+        - vuls_by_assetid
+        - vuls_config_by_assetid
+        - vuls_raw_data_list
+        - vuls_web_raw_data
+        - vuls_pwd_raw_data
+    page:
+      type: integer
+    size:
+      type: integer
+    orderBy:
+      type: string
+    foundTime:
+      type: string
+      description: 最近出现时间，毫秒时间戳；区间用 `start-end`。
+    createTime:
+      type: string
+    assetId:
+      type: string
+      description: 资产 id（vuls_by_assetid / vuls_config_by_assetid 必填）。
+    assetStatus:
+      type: string
+      description: 处置状态 1-待处置 2-处置中 3-已处置 4-不处置 5-误报 6-待处置（复现）。
+    domainId:
+      type: integer
+    severity:
+      type: string
+      description: 危害等级 1-低危 2-中危 3-高危 4-危急。
+    selectAll:
+      type: boolean
+    vulName:
+      type: string
+    cve:
+      type: string
+    cnnvd:
+      type: string
+    poc:
+      type: string
+    affectAssets:
+      type: string
+    firstFoundTime:
+      type: string
+    cnnvdOrder:
+      type: boolean
+      description: 是否按 cnnvd 归并（vuls_raw_data_list 必填）。
+    vulType:
+      type: string
+    name:
+      type: string
+    url:
+      type: string
+    latestFoundTime:
+      type: string
+    type:
+      type: string
+    foundTimes:
+      type: string
+    handleStatus:
+      type: string
+    taskType:
+      type: string
+    dataSource:
+      type: string
+    registerStatus:
+      type: string
+    method:
+      type: string
+    verifiability:
+      type: string
+    clusterId:
+      type: string
+    safetyResponsiblePerson:
+      type: string
+    leakTime:
+      type: string
+    linkAssetFlag:
+      type: boolean
+    viewId:
+      type: integer
+    groupId:
+      type: string
+    labels:
+      type: string
+    workOrderName:
+      type: string
+    assetName:
+      type: string
+    ip:
+      type: string
+    serviceType:
+      type: string
+    userName:
+      type: string
+    srcVul:
+      type: string
+    taskReportName:
+      type: string
+    scannerName:
+      type: string
+    networkSegment:
+      type: string
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: vuls
