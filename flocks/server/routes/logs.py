@@ -4,6 +4,7 @@ Log viewing routes for WebUI.
 Provides endpoints to list and read log files from ~/.flocks/logs.
 """
 
+from collections import deque
 from pathlib import Path
 from typing import List
 
@@ -95,14 +96,17 @@ async def read_log(
 
 def _read_log_file(path: Path, tail: int) -> LogContentResponse:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        lines: deque[str] = deque(maxlen=tail)
+        total = 0
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                total += 1
+                lines.append(line.rstrip("\n"))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read log: {e}")
 
-    lines = text.splitlines()
-    total = len(lines)
     truncated = total > tail
-    content = "\n".join(lines[-tail:]) if truncated else text
+    content = "\n".join(lines)
 
     return LogContentResponse(
         filename=path.name,

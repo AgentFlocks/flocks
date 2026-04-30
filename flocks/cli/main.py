@@ -337,7 +337,7 @@ def logs(
 
 
 def _uvicorn_log_config() -> dict[str, Any]:
-    """Uvicorn logging with wall-clock timestamps (visible in ``backend.log`` when daemonized)."""
+    """Uvicorn logging with timestamps, but without noisy access logs."""
     import copy
 
     from uvicorn.config import LOGGING_CONFIG
@@ -348,6 +348,8 @@ def _uvicorn_log_config() -> dict[str, Any]:
         formatter = cfg["formatters"][name]
         formatter["fmt"] = "%(asctime)s | " + formatter["fmt"]
         formatter["datefmt"] = stamp_fmt
+    cfg["loggers"]["uvicorn.access"]["handlers"] = []
+    cfg["loggers"]["uvicorn.access"]["propagate"] = False
     return cfg
 
 
@@ -374,6 +376,7 @@ def serve(
         reload=reload,
         log_level="info",
         log_config=_uvicorn_log_config(),
+        access_log=False,
     )
 
 
