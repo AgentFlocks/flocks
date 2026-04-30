@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "hunting-for-persistence-via-wmi-subscriptions",
+  "type": "skill",
+  "name": "hunting-for-persistence-via-wmi-subscriptions",
+  "description": "Hunt for adversary persistence through Windows Management Instrumentation event subscriptions by monitoring WMI consumer, filter, and binding creation events that execute malicious code triggered by system events.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "windows",
+    "ioc"
+  ],
+  "useCases": [
+    "threat-detection"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/hunting-for-persistence-via-wmi-subscriptions"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

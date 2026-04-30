@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "implementing-web-application-logging-with-modsecurity",
+  "type": "skill",
+  "name": "implementing-web-application-logging-with-modsecurity",
+  "description": "Configure ModSecurity WAF with OWASP Core Rule Set (CRS) for web application logging, tune rules to reduce false positives, analyze audit logs for attack detection, and implement custom SecRules for application-specific threats. The analyst configures SecRuleEngine, SecAuditEngine, and CRS paranoia levels to balance security coverage with operational stability. Activates for requests involving WAF configuration, ModSecurity rule tuning, web application audit logging, or CRS deployment.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "detection",
+  "tags": [
+    "waf",
+    "web-security"
+  ],
+  "useCases": [
+    "log-analysis"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent",
+    "file-analysis",
+    "network-access"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-web-application-logging-with-modsecurity"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

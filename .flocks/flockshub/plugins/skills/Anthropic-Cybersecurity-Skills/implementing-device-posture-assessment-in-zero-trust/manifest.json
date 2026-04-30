@@ -1,0 +1,58 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "implementing-device-posture-assessment-in-zero-trust",
+  "type": "skill",
+  "name": "implementing-device-posture-assessment-in-zero-trust",
+  "description": "Implementing device posture assessment as a zero trust access control by integrating endpoint health signals from CrowdStrike ZTA, Microsoft Intune, and Jamf into conditional access policies that enforce compliance before granting resource access.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "edr",
+    "ioc"
+  ],
+  "useCases": [
+    "endpoint-forensics"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-device-posture-assessment-in-zero-trust"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

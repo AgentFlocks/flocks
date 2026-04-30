@@ -1,0 +1,57 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "performing-threat-modeling-with-owasp-threat-dragon",
+  "type": "skill",
+  "name": "performing-threat-modeling-with-owasp-threat-dragon",
+  "description": "Use OWASP Threat Dragon to create data flow diagrams, identify threats using STRIDE and LINDDUN methodologies, and generate threat model reports for secure design review.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "ioc"
+  ],
+  "useCases": [
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/performing-threat-modeling-with-owasp-threat-dragon"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

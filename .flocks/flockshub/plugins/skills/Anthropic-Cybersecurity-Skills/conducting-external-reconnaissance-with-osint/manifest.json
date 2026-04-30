@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "conducting-external-reconnaissance-with-osint",
+  "type": "skill",
+  "name": "conducting-external-reconnaissance-with-osint",
+  "description": "Conducts external reconnaissance using Open Source Intelligence (OSINT) techniques to map an organization's external attack surface without directly interacting with target systems. The tester gathers information from public sources including DNS records, certificate transparency logs, search engines, social media, code repositories, and data breach databases to build a comprehensive target profile. Activates for requests involving OSINT reconnaissance, external footprinting, attack surface mapping, or passive information gathering.",
+  "version": "1.0.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "detection",
+  "tags": [
+    "ioc"
+  ],
+  "useCases": [
+    "log-analysis"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/conducting-external-reconnaissance-with-osint"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

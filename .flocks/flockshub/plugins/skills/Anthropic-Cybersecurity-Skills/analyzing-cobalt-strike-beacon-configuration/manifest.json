@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "analyzing-cobalt-strike-beacon-configuration",
+  "type": "skill",
+  "name": "analyzing-cobalt-strike-beacon-configuration",
+  "description": "Extract and analyze Cobalt Strike beacon configuration from PE files and memory dumps to identify C2 infrastructure, malleable profiles, and operator tradecraft.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "detection",
+  "tags": [
+    "ioc"
+  ],
+  "useCases": [
+    "endpoint-forensics"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent",
+    "file-analysis"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/analyzing-cobalt-strike-beacon-configuration"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

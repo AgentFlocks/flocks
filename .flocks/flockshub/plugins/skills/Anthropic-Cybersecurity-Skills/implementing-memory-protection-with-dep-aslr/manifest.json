@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "implementing-memory-protection-with-dep-aslr",
+  "type": "skill",
+  "name": "implementing-memory-protection-with-dep-aslr",
+  "description": "Implements memory protection mechanisms including DEP (Data Execution Prevention), ASLR (Address Space Layout Randomization), CFG (Control Flow Guard), and other exploit mitigations to prevent memory corruption attacks. Use when hardening endpoints against buffer overflow exploits, ROP chains, and code injection. Activates for requests involving memory protection, exploit mitigation, DEP, ASLR, or CFG configuration.",
+  "version": "1.0.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "detection",
+  "tags": [
+    "vulnerability"
+  ],
+  "useCases": [
+    "endpoint-forensics"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent",
+    "file-analysis"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-memory-protection-with-dep-aslr"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

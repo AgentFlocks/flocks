@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "performing-wifi-password-cracking-with-aircrack",
+  "type": "skill",
+  "name": "performing-wifi-password-cracking-with-aircrack",
+  "description": "Captures WPA/WPA2 handshakes and performs offline password cracking using aircrack-ng, hashcat, and dictionary attacks during authorized wireless security assessments to evaluate passphrase strength and wireless network security posture.",
+  "version": "1.0",
+  "author": "mahipal",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "iam",
+    "ioc",
+    "vulnerability"
+  ],
+  "useCases": [
+    "vulnerability-management"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent",
+    "network-access"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/performing-wifi-password-cracking-with-aircrack"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

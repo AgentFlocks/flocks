@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "implementing-data-loss-prevention-with-microsoft-purview",
+  "type": "skill",
+  "name": "implementing-data-loss-prevention-with-microsoft-purview",
+  "description": "Implements data loss prevention policies using Microsoft Purview to protect sensitive information across Exchange Online, SharePoint, OneDrive, Teams, endpoint devices, and Power BI. The analyst configures sensitivity labels with encryption and content marking, creates DLP policies using built-in and custom sensitive information types with regex patterns, deploys endpoint DLP rules to control file operations on Windows and macOS devices, and monitors policy effectiveness through Activity Explorer and DLP alert management. Uses PowerShell cmdlets and the Microsoft Graph API for programmatic policy management. Activates for requests involving DLP policy creation, sensitivity label configuration, data classification, endpoint data protection, or Microsoft Purview compliance administration.",
+  "version": "1.0.0",
+  "author": "mukul975",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "edr",
+    "email-security",
+    "windows",
+    "api-security"
+  ],
+  "useCases": [
+    "endpoint-forensics"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-data-loss-prevention-with-microsoft-purview"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

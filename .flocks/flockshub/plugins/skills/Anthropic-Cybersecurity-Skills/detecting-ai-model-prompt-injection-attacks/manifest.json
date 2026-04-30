@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "detecting-ai-model-prompt-injection-attacks",
+  "type": "skill",
+  "name": "detecting-ai-model-prompt-injection-attacks",
+  "description": "Detects prompt injection attacks targeting LLM-based applications using a multi-layered defense combining regex pattern matching for known attack signatures, heuristic scoring for structural anomalies, and transformer-based classification with DeBERTa models. The detector analyzes user inputs before they reach the LLM, flagging direct injections (system prompt overrides, role-play escapes, instruction hijacking) and indirect injections (encoded payloads, multi-language obfuscation, delimiter-based escapes). Based on the OWASP LLM Top 10 (LLM01:2025 Prompt Injection) and Simon Willison's prompt injection taxonomy. Activates for requests involving prompt injection detection, LLM input sanitization, AI security scanning, or prompt attack classification.",
+  "version": "1.0.0",
+  "author": "mukul975",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "iam",
+    "ioc"
+  ],
+  "useCases": [
+    "threat-detection"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/detecting-ai-model-prompt-injection-attacks"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "implementing-hardware-security-key-authentication",
+  "type": "skill",
+  "name": "implementing-hardware-security-key-authentication",
+  "description": "Implements FIDO2/WebAuthn hardware security key authentication including registration ceremonies, authentication flows, YubiKey enrollment, and passkey migration strategies. Builds a complete relying party server using the python-fido2 library that supports cross-platform authenticators, resident key (discoverable credential) workflows, and user verification policies. Activates for requests involving FIDO2 implementation, WebAuthn registration, hardware security key enrollment, YubiKey integration, or passkey migration from password-based authentication.",
+  "version": "1.0.0",
+  "author": "mukul975",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "iam",
+    "ioc"
+  ],
+  "useCases": [
+    "threat-intelligence"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent",
+    "network-access"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/implementing-hardware-security-key-authentication"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "Contains authorized security testing or incident response procedures that may require explicit scope and approval."
+    ]
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

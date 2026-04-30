@@ -1,0 +1,14 @@
+{
+  "name": "quick_alert_summary",
+  "description": "将告警输入快速归一化为简短摘要。",
+  "start": "summarize",
+  "nodes": [
+    {
+      "id": "summarize",
+      "type": "python",
+      "description": "提取告警基础字段并生成摘要。",
+      "code": "import json\n\nalert = inputs.get('alert', inputs.get('alert_data', {}))\nif isinstance(alert, str):\n    try:\n        alert = json.loads(alert)\n    except Exception:\n        alert = {'raw': alert}\nif not isinstance(alert, dict):\n    alert = {'raw': str(alert)}\n\nsummary = {\n    'title': alert.get('name') or alert.get('alert_type') or 'unknown alert',\n    'severity': alert.get('severity') or alert.get('level') or 'unknown',\n    'src_ip': alert.get('src_ip') or alert.get('attacker') or '',\n    'dst_ip': alert.get('dst_ip') or alert.get('victim') or '',\n    'recommendation': '请结合资产重要性、请求响应和同源告警继续核查。'\n}\noutputs['summary'] = summary\noutputs['text'] = f\"{summary['title']} [{summary['severity']}] {summary['src_ip']} -> {summary['dst_ip']}\""
+    }
+  ],
+  "edges": []
+}

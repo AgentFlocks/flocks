@@ -18,6 +18,7 @@ const WorkflowEditor = lazy(() => import('@/pages/WorkflowEditor'));
 const WorkflowDetail = lazy(() => import('@/pages/WorkflowDetail'));
 const TaskPage = lazy(() => import('@/pages/Task'));
 const ToolPage = lazy(() => import('@/pages/Tool'));
+const HubPage = lazy(() => import('@/pages/Hub'));
 const ModelPage = lazy(() => import('@/pages/Model'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
 const ConfigPage = lazy(() => import('@/pages/Config'));
@@ -103,6 +104,7 @@ export function Routes() {
         
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
+        <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
         <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
         <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
         {/* MCP 已整合到工具清单页面 */}

@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "alert-triage-agent",
+  "type": "agent",
+  "name": "Alert Triage Agent",
+  "description": "面向安全告警分诊的轻量子 Agent，适合把原始告警转为可执行研判结论。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem"
+  ],
+  "useCases": [
+    "alert-triage"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/agents/alert-triage-agent"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [
+      "ndr-alert-analysis"
+    ],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [
+      "read",
+      "list",
+      "grep",
+      "websearch",
+      "webfetch"
+    ],
+    "network": true,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": [
+      "May use network search tools for enrichment."
+    ]
+  },
+  "entrypoints": [
+    "agent.yaml",
+    "prompt.md"
+  ],
+  "checksums": {}
+}

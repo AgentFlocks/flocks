@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "performing-ai-driven-osint-correlation",
+  "type": "skill",
+  "name": "performing-ai-driven-osint-correlation",
+  "description": "Use AI and LLM-based reasoning to correlate findings across multiple OSINT sources—username enumeration, email lookups, social media profiles, domain records, breach databases, and dark-web mentions—into unified intelligence profiles with confidence scoring and link analysis.",
+  "version": "1.0",
+  "author": "juliosuas",
+  "license": "Apache-2.0",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "email-security",
+    "web-security",
+    "ioc"
+  ],
+  "useCases": [
+    "incident-response"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "llm-agent"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/Anthropic-Cybersecurity-Skills/performing-ai-driven-osint-correlation"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}

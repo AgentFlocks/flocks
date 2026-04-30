@@ -634,6 +634,7 @@ from flocks.server.routes.tui import router as tui_router
 from flocks.server.routes.workflow import router as workflow_router
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
+from flocks.server.routes.hub import router as hub_router
 # WebUI: Hook management routes
 from flocks.server.routes.hooks import router as hooks_router
 # Model management: Default model, Usage routes
@@ -680,6 +681,8 @@ app.include_router(mcp_router, prefix="/api/mcp", tags=["MCP"])
 app.include_router(workflow_router, prefix="/api", tags=["Workflow"])
 # WebUI: Skill & Command routes
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
+# WebUI: Hub routes
+app.include_router(hub_router, prefix="/api", tags=["Hub"])
 # WebUI: Hook management routes
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes

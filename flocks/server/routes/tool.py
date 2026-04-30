@@ -1091,6 +1091,10 @@ async def delete_tool(name: str):
     # Refresh plugin tools so stale decorator-registered python tools are removed too.
     ToolRegistry.refresh_plugin_tools()
 
+    from flocks.hub import local as hub_local
+
+    hub_local.remove_installed_record("tool", name)
+
     return {"status": "success", "message": f"Tool {name} deleted"}
 
 

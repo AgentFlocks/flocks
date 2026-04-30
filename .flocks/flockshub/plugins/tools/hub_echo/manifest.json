@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "hub_echo",
+  "type": "tool",
+  "name": "Hub Echo Tool",
+  "description": "用于验证 Hub 工具安装链路的本地 echo 工具。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "devtools",
+  "tags": [],
+  "useCases": [
+    "other"
+  ],
+  "domains": [
+    "devops"
+  ],
+  "capabilities": [],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/tools/hub_echo"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "hub_echo.yaml",
+    "hub_echo.handler.py"
+  ],
+  "checksums": {}
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "ndr-alert-analysis",
+  "type": "skill",
+  "name": "NDR Alert Analysis",
+  "description": "用于 NDR（网络检测与响应）告警的自动化研判分析，覆盖情报查询、资产关联、payload 分析和处置建议。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "threat-intel",
+  "tags": [
+    "ndr",
+    "ioc"
+  ],
+  "useCases": [
+    "incident-response"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "file-analysis",
+    "llm-agent"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": ".flocks/flockshub/plugins/skills/ndr-alert-analysis"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "SKILL.md"
+  ],
+  "checksums": {}
+}
