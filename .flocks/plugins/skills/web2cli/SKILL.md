@@ -1,6 +1,6 @@
 ---
 name: web2cli
-description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者通过 `browser-use` 复用用户 Chrome 登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
+description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者通过 `browser-use` 的 `browser-harness` 内核复用用户 Chrome 登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
 required: browser-use
 ---
 
@@ -25,17 +25,23 @@ required: browser-use
 
 ### `cdp-direct`
 
-适用于需要复用用户 Chrome 登录态、使用 CDP Proxy 持久注入、或者希望保留用户原有 tab 不受影响的场景。
+适用于需要复用用户 Chrome 登录态、通过 `browser-use` 的 `browser-harness` 内核直连 CDP、或者希望保留用户原有 tab 不受影响的场景。
 
 使用此模式前必须：
 
 1. 加载 `browser-use` skill，并按其中规则明确选择 `cdp-direct` 模式。
-2. 立即阅读 `.flocks/plugins/skills/browser-use/references/cdp-direct.md`。
-3. 运行：
+2. 在 `.flocks/plugins/skills/browser-use` 目录运行 doctor。
+3. doctor 通过后，立即阅读 `.flocks/plugins/skills/browser-use/references/cdp-direct.md`。
+4. 后续所有 `cdp-direct` 命令都通过 `uv run python -m scripts.run -c '...'` 执行。
 
 ```bash
-node .flocks/plugins/skills/browser-use/scripts/check-cdp.mjs
+(
+  cd .flocks/plugins/skills/browser-use &&
+  uv run python -m scripts.run --doctor
+)
 ```
+
+如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，按 `browser-use` 的规则提示用户开启 Chrome remote debugging 后重试，不要继续使用旧 CDP proxy。
 
 ## 输出目录约定
 
@@ -48,6 +54,8 @@ MODE="${MODE:-agent-browser}"
 CAPTURE_NAME="<name>"
 TODAY="$(date +%F)"
 CAPTURE_ROOT="$HOME/.flocks/workspace/outputs/$TODAY/web2cli/$CAPTURE_NAME"
+BROWSER_USE_SKILL=".flocks/plugins/skills/browser-use"
+WEB2CLI_SKILL=".flocks/plugins/skills/web2cli"
 mkdir -p "$CAPTURE_ROOT/captures"
 ```
 
@@ -73,7 +81,15 @@ agent-browser --headed --session-name "$CAPTURE_NAME" open "<URL>"
 `cdp-direct` 模式：
 
 ```bash
-TARGET_ID=$(curl -s "http://localhost:3456/new?url=<URL>" | jq -r '.targetId')
+TARGET_ID=$(
+  cd "$BROWSER_USE_SKILL" &&
+  uv run python -m scripts.run -c '
+tid = new_tab("<URL>")
+wait_for_load()
+print(tid)
+' | tail -n 1
+)
+echo "Created tab: $TARGET_ID"
 ```
 
 ### 2. 等待用户手动登录
@@ -81,7 +97,7 @@ TARGET_ID=$(curl -s "http://localhost:3456/new?url=<URL>" | jq -r '.targetId')
 要求用户在可见浏览器中完成登录、验证码、二次确认等人工步骤。
 
 - `agent-browser`：在当前会话窗口中完成登录。
-- `cdp-direct`：在用户的 Chrome 中完成登录
+- `cdp-direct`：在刚创建的 Chrome tab 中完成登录，必要时让用户手动处理验证码、TOTP 或授权弹窗。
 
 登录完成后告知 agent 继续。
 
@@ -99,20 +115,43 @@ agent-browser --session-name "$CAPTURE_NAME" eval --stdin < .flocks/plugins/skil
 `cdp-direct` 模式：
 
 ```bash
-# 持久注入，确保后续导航不丢失
-curl -s -X POST "http://localhost:3456/inject?target=$TARGET_ID" \
-  --data-binary @".flocks/plugins/skills/web2cli/scripts/inject-hook-simple.js"
+WEB2CLI_HOOK="$(pwd)/$WEB2CLI_SKILL/scripts/inject-hook-simple.js"
 
-# 验证是否已注入
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'typeof window.__apiCapture !== "undefined" ? "installed v" + window.__apiCapture.version : "NOT installed"'
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" WEB2CLI_HOOK="$WEB2CLI_HOOK" uv run python -m scripts.run -c '
+import os
+from pathlib import Path
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+source = Path(os.environ["WEB2CLI_HOOK"]).read_text(encoding="utf-8")
+cdp("Page.addScriptToEvaluateOnNewDocument", source=source)
+js(source)
+print(js("typeof window.__apiCapture !== \"undefined\" ? \"installed v\" + window.__apiCapture.version : \"NOT installed\""))
+'
+)
 ```
 
 如果 `cdp-direct` 返回 `NOT installed`，再立即对当前页面补一次：
 
 ```bash
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  --data-binary @".flocks/plugins/skills/web2cli/scripts/inject-hook-simple.js"
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" WEB2CLI_HOOK="$WEB2CLI_HOOK" uv run python -m scripts.run -c '
+import os
+from pathlib import Path
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+js(Path(os.environ["WEB2CLI_HOOK"]).read_text(encoding="utf-8"))
+print(js("typeof window.__apiCapture !== \"undefined\" ? \"installed v\" + window.__apiCapture.version : \"NOT installed\""))
+'
+)
 ```
 
 注入后默认从 `window.__capturedRequests` 读取结果。
@@ -135,8 +174,19 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__apiCapture.config.ca
 `cdp-direct` 模式：
 
 ```bash
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'window.__apiCapture.config.captureMode = "all"'
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+import os
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+js("window.__apiCapture.config.captureMode = \"all\"")
+print(js("window.__apiCapture.config.captureMode"))
+'
+)
 ```
 
 ### 4. 等待用户执行业务操作
@@ -154,8 +204,18 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.len
 `cdp-direct` 模式：
 
 ```bash
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'window.__capturedRequests.length'
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+import os
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+print(js("window.__capturedRequests.length"))
+'
+)
 ```
 
 ### 5. 提取捕获数据
@@ -171,8 +231,18 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.len
 `cdp-direct` 模式：
 
 ```bash
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'window.__capturedRequests.length'
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+import os
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+print(js("window.__capturedRequests.length"))
+'
+)
 ```
 
 然后导出：
@@ -186,39 +256,55 @@ agent-browser --session-name "$CAPTURE_NAME" eval "JSON.stringify(window.__captu
 `cdp-direct` 模式：
 
 ```bash
-CAPTURED_DATA=$(curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'JSON.stringify(window.__capturedRequests)')
+CAPTURE_OUT="$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 
-CAPTURED_DATA="$CAPTURED_DATA" uv run python - <<'PY' > "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" uv run python -m scripts.run -c '
 import json
 import os
 
-wrapped = json.loads(os.environ.get('CAPTURED_DATA', '{}'))
-value = wrapped.get('value', '[]') if isinstance(wrapped, dict) else wrapped
-data = json.loads(value) if isinstance(value, str) else value
-print(json.dumps(data, ensure_ascii=False, indent=2))
-PY
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+raw = js("JSON.stringify(window.__capturedRequests || [])")
+data = json.loads(raw or "[]")
+out = os.environ["CAPTURE_OUT"]
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+print(f"Saved {len(data)} requests to {out}")
+'
+)
 ```
 
-如果 `cdp-direct` 模式下数据量过大导致 `eval` 响应截断，可分段导出：
+如果 `cdp-direct` 模式下数据量过大导致 `Runtime.evaluate` 响应截断，可分段导出：
 
 ```bash
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'JSON.stringify(window.__capturedRequests.slice(0, 50))' > /tmp/cap_part1.json
-curl -s -X POST "http://localhost:3456/eval?target=$TARGET_ID" \
-  -d 'JSON.stringify(window.__capturedRequests.slice(50, 100))' > /tmp/cap_part2.json
-uv run python - <<'PY' > "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
-import json
+CAPTURE_OUT="$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 
-parts = []
-for f in ['/tmp/cap_part1.json', '/tmp/cap_part2.json']:
-    with open(f) as fh:
-        wrapped = json.load(fh)
-    value = wrapped.get('value', '[]') if isinstance(wrapped, dict) else wrapped
-    part = json.loads(value) if isinstance(value, str) else value
-    parts.extend(part)
-print(json.dumps(parts, ensure_ascii=False, indent=2))
-PY
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" uv run python -m scripts.run -c '
+import json
+import os
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+total = int(js("window.__capturedRequests.length") or 0)
+data = []
+for start in range(0, total, 50):
+    raw = js(f"JSON.stringify(window.__capturedRequests.slice({start}, {start + 50}))")
+    data.extend(json.loads(raw or "[]"))
+
+out = os.environ["CAPTURE_OUT"]
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+print(f"Saved {len(data)} requests to {out}")
+'
+)
 ```
 
 ### 6. 保存认证状态
@@ -232,38 +318,37 @@ agent-browser --session-name "$CAPTURE_NAME" state save "$CAPTURE_ROOT/auth-stat
 `cdp-direct` 模式：
 
 ```bash
-python3 -c "
-import json, subprocess
+AUTH_OUT="$CAPTURE_ROOT/auth-state.json"
 
-target = '$TARGET_ID'
-out = '$CAPTURE_ROOT/auth-state.json'
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" AUTH_OUT="$AUTH_OUT" uv run python -m scripts.run -c '
+import json
+import os
 
-r = subprocess.run(
-    ['curl', '-s', '-X', 'POST',
-     f'http://localhost:3456/eval?target={target}',
-     '-d', 'JSON.stringify(document.cookie.split(\";\").filter(Boolean).map(c=>{const p=c.split(\"=\");return{name:p[0].trim(),value:p.slice(1).join(\"=\")}}))'],
-    capture_output=True,
-    text=True,
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+
+info = page_info()
+cookies = cdp("Network.getCookies", urls=[info["url"]]).get("cookies", [])
+local_storage = json.loads(js("JSON.stringify(Object.entries(localStorage).map(([name, value]) => ({name, value})))") or "[]")
+session_storage = json.loads(js("JSON.stringify(Object.entries(sessionStorage).map(([name, value]) => ({name, value})))") or "[]")
+
+state = {
+    "cookies": cookies,
+    "localStorage": local_storage,
+    "sessionStorage": session_storage,
+}
+out = os.environ["AUTH_OUT"]
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(state, f, ensure_ascii=False, indent=2)
+print(f"Saved {len(cookies)} cookies, {len(local_storage)} localStorage items, {len(session_storage)} sessionStorage items to {out}")
+'
 )
-cookies = json.loads(json.loads(r.stdout).get('value', '[]'))
-
-r2 = subprocess.run(
-    ['curl', '-s', '-X', 'POST',
-     f'http://localhost:3456/eval?target={target}',
-     '-d', 'JSON.stringify(Object.entries(localStorage).map(([k,v])=>({name:k,value:v})))'],
-    capture_output=True,
-    text=True,
-)
-local_storage = json.loads(json.loads(r2.stdout).get('value', '[]'))
-
-state = {'cookies': cookies, 'localStorage': local_storage}
-with open(out, 'w') as f:
-    json.dump(state, f, indent=2)
-print(f'Saved {len(cookies)} cookies, {len(local_storage)} localStorage items to {out}')
-"
 ```
 
-将 cookie 和 localStorage 保存为后续 CLI 调用的认证输入。
+将 cookie、localStorage 和 sessionStorage 保存为后续 CLI 调用的认证输入。认证文件包含敏感值，只能写入 `$CAPTURE_ROOT` 这类工作区输出目录，不要写入代码仓库。
 
 ### 7. 关闭浏览器或 Tab
 
@@ -276,7 +361,17 @@ agent-browser --session-name "$CAPTURE_NAME" close
 `cdp-direct` 模式：
 
 ```bash
-curl -s "http://localhost:3456/close?target=$TARGET_ID"
+(
+  cd "$BROWSER_USE_SKILL" &&
+  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+import os
+
+target_id = os.environ.get("TARGET_ID")
+if target_id:
+    switch_tab(target_id)
+close_tab()
+'
+)
 ```
 
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
@@ -350,17 +445,3 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
 
 - `agent-browser`：重新登录后再次执行保存状态命令。
 - `cdp-direct`：重新登录后再次执行步骤 6 保存认证状态。
-
-### `cdp-direct` 的 CDP Proxy 未启动
-
-运行：
-
-```bash
-node .flocks/plugins/skills/browser-use/scripts/check-cdp.mjs
-```
-
-确保：
-
-- Node.js 22+ 可用
-- Chrome 主版本 > 144
-- Chrome 已开启远程调试

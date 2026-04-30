@@ -1,215 +1,241 @@
-# CDP 直连
+# CDP 直连（browser-harness 内核）
 
-通过 CDP 直连用户日常 Chrome，复用现有登录态和真实浏览器上下文。适合登录后页面、内部系统、动态页面、复杂 DOM 操作、媒体资源提取等任务。
+本文件是 `browser-use` 的 CDP 模式参考文档。只有当 `browser-use/SKILL.md` 判定应使用 `CDP 直连` 时，才读取并遵循本文件；不要和 `references/agent-browser.md` 同时加载。
 
-## 何时使用
+## 使用入口
 
-优先用于以下场景：
+`browser-harness` 是一个薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。当前内核作为 `browser-use/scripts` 随 skill 分发，不依赖 `browser-harness` console script。
 
-- 目标内容依赖用户当前 Chrome 的登录态
-- 需要访问内部系统或用户已在浏览器中可见的页面
-- 需要直接执行 JS 读取或操控 DOM
-- 需要提取媒体 URL、视频帧或页面内隐藏内容
-- 用户明确要求走 CDP
+所有命令都必须在当前 skill 目录（即 `.flocks/plugins/skills/browser-use`）执行；如果当前目录不确定，先切到 `<skill-dir>` 再运行 `uv run python -m scripts.run ...`。
+
+## 适用范围
+
+使用 CDP 直连处理这些任务：
+
+- 打开网页、点击、填写表单、上传文件、打印/下载、抓取动态页面内容。
+- 需要复用用户当前 Chrome 登录态、访问内网页面、登录后页面或复杂 SPA。
+- 需要比普通浏览器自动化更底层的 CDP 能力，例如 raw CDP、iframe/shadow DOM/cross-origin 点击、网络状态判断。
+
+如果任务涉及账号、资金、生产环境配置、删除/发布/提交等高风险动作，先向用户确认再执行。遇到登录页、验证码、TOTP、授权弹窗或需要输入密码时，可以停下来提示用户操作。
 
 ## 操作原则
 
-- 默认不要直接操作用户已有 tab。
-- 优先用 `/new` 创建自己的后台 tab，在其中完成任务。
+- 默认不要直接操作用户已有 tab。优先 `new_tab(url)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
 - 只关闭自己创建的 tab，不关闭用户原有 tab。
-- 不建议主动停止 proxy；重启后可能需要用户重新授权 Chrome 调试连接。
+- 不要主动停止或重启 Chrome。daemon stale 时可以 `restart_daemon()` 一次；杀 Chrome 只能作为最后排障手段并先说明影响。
+- 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权 Chrome 调试连接。
+- 每个可见动作后立即用 `page_info()` 或 `js(...)` 重新观察并验证，不要凭假设继续。
+- 优先读取 DOM、文本、可交互元素、URL、网络状态等结构化信息。
+- 只有用户明确需要视觉证据、调试像素坐标或外部流程可查看图片文件时，才用 `capture_screenshot(...)` 生成截图文件。
+- CDP 坐标是 CSS 像素；如果必须坐标点击，先用 DOM/布局信息确认目标位置，必要时用 `js("window.devicePixelRatio")` 理解设备像素比例。
 
-## 页面探索方法
+## 快速开始
 
-CDP 模式下，`/eval` 是主要观察和操作入口：
-
-- 先用 `/eval` 了解页面结构、文本、链接、按钮、媒体资源
-- 再根据结果决定是否使用 `/click`、`/clickAt`、`/scroll`
-- 提取大量结构化数据时，优先在页面里组装为 JSON 后返回
-- 判断内容是否已在 DOM 中，不要只盯着“当前可见区域”
-
-推荐流程：
-
-1. `/new` 打开目标页面
-2. `/info` 查看标题、URL、加载状态
-3. `/eval` 读取 DOM 中的目标信息
-4. 必要时 `/click`、`/clickAt`、`/scroll` 或 `/navigate`
-5. 如需视觉结果，用 `/screenshot`
-6. 结束后 `/close`
-
-## 页面内导航策略
-
-页面内跳转有两种常见方式：
-
-- `/click`：在当前 tab 内点击元素，适合展开、翻页、进入详情页
-- `/new` + 完整 URL：在新 tab 打开已提取出的完整链接，适合并行访问多个详情页
-
-提取链接时保留完整 URL 和全部查询参数，不要自行裁剪。
-
-## 登录判断
-
-用户日常 Chrome 通常已带登录态。打开页面后先尝试获取目标内容，只有在确认内容拿不到且登录能够解决问题时，才让用户接管登录。
-
-可直接提示：
-
-```text
-当前页面在未登录状态下无法获取[具体内容]，请在你的 Chrome 中登录 [网站名]，完成后告诉我继续。
-```
-
-用户登录完成后，直接刷新或继续当前 tab，无需重启 proxy。
-
-## 媒体与视频
-
-- 图片内容：优先用 `/eval` 从 DOM 中直接提取图片 URL
-- 视频内容：可用 `/eval` 控制 `<video>`，例如读取时长、seek、暂停，再配合 `/screenshot` 采样画面
-- 懒加载页面：滚动到底前，部分媒体资源可能还未出现在可提取状态
-
-## API 端点
-
-基础地址：
-
-```text
-http://localhost:3456
-```
-
-### 健康检查
+先确认 harness 可用：
 
 ```bash
-curl -s http://localhost:3456/health
+uv run python -m scripts.run --doctor
 ```
 
-### 列出当前页面
+基本用法：
 
 ```bash
-curl -s http://localhost:3456/targets
+uv run python -m scripts.run -c '
+tid = new_tab("https://example.com")
+wait_for_load()
+print(page_info())
+'
 ```
 
-返回所有已打开的 page target，可用于识别 `targetId`。
+`uv run python -m scripts.run -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chrome。
 
-### 创建新后台 tab
+常用 helpers：
+
+- `new_tab(url)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
+- `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(x, y, dy=-300)`
+- `js(expression)`, `cdp("Domain.method", **params)`, `drain_events()`
+- `list_tabs(include_chrome=False)`, `current_tab()`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
+- `upload_file(selector, path)`, `http_get(url, headers=None)`
+- `capture_screenshot(path="/tmp/shot.png", full=False, max_dim=1800)` 仅用于可查看图片文件的调试或交付场景
+
+## 标准工作流
+
+`browser-harness` 的基础循环是：打开页面 -> 读取结构化状态 -> 执行动作 -> 重新读取状态验证。
+
+1. 如果是具体网站任务，先搜索已存在的站点经验。优先看 harness 的 `agent-workspace/domain-skills/`；如果没有，再自己探索。
+2. 创建自己的 tab，等待加载，并读取页面基础状态与候选交互元素：
 
 ```bash
-curl -s "http://localhost:3456/new?url=https://example.com"
+uv run python -m scripts.run -c '
+tid = new_tab("https://example.com")
+wait_for_load()
+print(page_info())
+
+state = js("""
+(() => ({
+  title: document.title,
+  url: location.href,
+  text: document.body.innerText.slice(0, 2000),
+  controls: Array.from(document.querySelectorAll("a,button,input,textarea,select"))
+    .slice(0, 40)
+    .map((el, index) => ({
+      index,
+      tag: el.tagName,
+      text: (el.innerText || el.value || el.placeholder || el.ariaLabel || el.href || "").trim(),
+      disabled: el.disabled || el.getAttribute("aria-disabled") === "true"
+    }))
+}))()
+""")
+print(state)
+'
 ```
 
-返回：
-
-```json
-{"targetId":"TARGET_ID"}
-```
-
-### 关闭 tab
+3. 执行动作并验证。能稳定定位 DOM 时，优先用 `js(...)`；必须操作可见但 DOM 难以稳定定位的控件时，再使用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
 
 ```bash
-curl -s "http://localhost:3456/close?target=TARGET_ID"
+uv run python -m scripts.run -c '
+js("document.querySelector(\"button[type=submit]\")?.click()")
+wait(0.5)
+print(page_info())
+'
 ```
 
-### 导航到新页面
+4. 需要提取数据时用 `js(...)` 或 `http_get(...)`。静态页面/接口批量抓取优先 `http_get`，不要浪费浏览器。
+5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明。
+
+注意：
+
+- 每次点击、输入、提交、弹窗处理、导航、滚动或重渲染后，都重新调用 `page_info()` 或 `js(...)`。
+- 页面变化后，之前读取到的元素状态、坐标和文本都可能过期，必须重新观察。
+- 提取大量结构化数据时，优先在页面内用 `js(...)` 组装 JSON 后返回。
+- 判断内容是否已在 DOM 中，不要只依赖当前可见区域；懒加载或虚拟列表再配合 `scroll(...)` 分段读取。
+
+## Tab 与可见性
+
+- `new_tab(url)` 会创建并 attach 到新 tab；这是默认入口，避免污染用户当前 tab。
+- `switch_tab(target_id)` 会 attach 到目标 tab，但用户是否看见取决于 Chrome 可见状态；必要时再用 `cdp("Target.activateTarget", targetId=target_id)`。
+- `list_tabs()` 默认会包含 `chrome://`、`about:` 等内部页面；要面向用户页面时用 `list_tabs(include_chrome=False)`。
+- 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
+- 当当前 session stale、内部页或不可见时，先 `ensure_real_tab()`。
+
+## 结构化观察与点击
+
+默认先用 `page_info()` 与 `js(...)` 观察页面，不依赖截图：
+
+```python
+print(page_info())
+print(js("document.body.innerText.slice(0, 2000)"))
+```
+
+能稳定定位 DOM 时，优先通过页面内 JS 或 selector 相关能力操作；需要穿过 iframe、shadow DOM、cross-origin 或自定义控件时，再使用 compositor 级坐标点击：
+
+```python
+click_at_xy(x, y)
+```
+
+坐标点击前尽量用 DOM 布局信息确认目标位置，例如 `getBoundingClientRect()`。坐标点击不稳定、目标不可见或需要隐藏 input 时，改用 DOM、iframe target 或 raw CDP。
+
+截图仅作为可选调试产物：
+
+```python
+capture_screenshot("/tmp/shot.png", max_dim=1800)
+```
+
+如果启用点击调试：
 
 ```bash
-curl -s "http://localhost:3456/navigate?target=TARGET_ID&url=https://example.com"
+uv run python -m scripts.run --debug-clicks -c '
+click_at_xy(420, 315)
+'
 ```
 
-### 后退
+## 对话框与阻塞状态
+
+浏览器原生 `alert`、`confirm`、`prompt`、`beforeunload` 会冻结 JS 线程。动作后如果 `page_info()` 返回 `{"dialog": ...}`，先处理对话框：
+
+```python
+cdp("Page.handleJavaScriptDialog", accept=True)   # OK / Leave
+cdp("Page.handleJavaScriptDialog", accept=False)  # Cancel / Stay
+```
+
+需要读取历史事件时：
+
+```python
+for event in drain_events():
+    if event["method"] == "Page.javascriptDialogOpening":
+        print(event["params"]["type"], event["params"]["message"])
+```
+
+不要在未确认语义时自动接受会导致提交、删除、支付或离开未保存页面的弹窗。
+
+## 文件上传与下载
+
+上传优先使用真实 file input：
+
+```python
+upload_file("input[type=file]", "/absolute/path/to/file")
+```
+
+如果页面用自定义上传控件，先用 `js(...)` 找按钮、label、隐藏 input 或 dropzone，再点击触发；必要时用 DOM 找隐藏 input。下载任务需要证明下载确实开始或文件已落盘；如果资源可直接访问，优先 `http_get(url)` 保存到输出目录或 `/tmp/`。
+
+## 登录与认证状态
+
+`browser-harness` 复用用户当前 Chrome profile。cookies、localStorage、sessionStorage 会自然保留；用户完成登录后，同一 profile 下的新 tab 通常自动带登录态。
+
+- 先打开目标页判断是否已登录；需要密码、验证码、TOTP 或授权确认时，让用户在 Chrome 中操作。
+- 用户完成后刷新或重新打开目标 URL，再用 `page_info()` / `js(...)` 验证目标内容是否可见。
+- 可以用 CDP 读写 cookies，用 `js(...)` 读写 localStorage / sessionStorage；默认不要打印 value。
+- 不要记录或沉淀 cookie value、token、Authorization header、密码、验证码等敏感值。
+
+检查登录态时只看 cookie 名称和 storage key：
 
 ```bash
-curl -s "http://localhost:3456/back?target=TARGET_ID"
+uv run python -m scripts.run -c '
+tid = new_tab("https://example.com")
+wait_for_load()
+cookies = cdp("Network.getCookies", urls=["https://example.com"]).get("cookies", [])
+print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(localStorage)")})
+'
 ```
 
-### 获取页面信息
+恢复测试登录态时可用 `cdp("Network.setCookie", ...)` 或 `js("localStorage.setItem(...)")`，写入后刷新验证。不要把完整 cookies/localStorage 导出到仓库；临时迁移只写 `/tmp/`。
+
+## 安装与连接排障
+
+如果 `uv run python -m scripts.run` 不可用或连接失败：
+
+1. 先运行 `uv run python -m scripts.run --doctor` 看版本、安装模式、daemon 和 Chrome 状态。
+2. 首次安装或冷启动优先运行 `uv run python -m scripts.run --setup`。
+3. Chrome 未运行时只启动 Chrome，再重试；不要直接让用户改设置。
+4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开 `chrome://inspect/#remote-debugging` 并勾选 Allow remote debugging。
+5. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是 Chrome 正在启动，轮询等待，不要重启。
+6. stale websocket / stale socket 时执行一次：
 
 ```bash
-curl -s "http://localhost:3456/info?target=TARGET_ID"
+uv run python -m scripts.run -c 'restart_daemon()'
 ```
 
-返回页面标题、URL、`readyState`。
+7. 如果看到 `[browser-harness] update available`，可运行 `uv run python -m scripts.run --update -y`。若 editable clone 有未提交改动导致 update 拒绝，告诉用户处理工作区，不要强行覆盖。
 
-### 执行 JavaScript
+## 沉淀可复用经验
 
-```bash
-curl -s -X POST "http://localhost:3456/eval?target=TARGET_ID" -d 'document.title'
-```
+如果在某个网站上学到了可复用信息，优先沉淀到 harness 的 `agent-workspace/domain-skills/<site>/`：
 
-要点：
+- URL 模式、必要 query 参数、能跳过 loader 的直接路由。
+- 私有 API、请求方法、payload 结构、认证依赖。
+- 稳定 selector、语义结构、滚动容器、虚拟列表规则。
+- 框架交互怪癖、必须等待的状态、容易踩坑的弹窗或 beforeunload。
 
-- POST body 为任意 JS 表达式
-- 支持 `awaitPromise`
-- 返回值必须可序列化
-- 大量数据可先 `JSON.stringify()` 再返回
+不要写入 secrets、cookies、token、用户个人数据、原始像素坐标或本次任务流水账。
 
-示例：提取页面里所有链接
+## 相关脚本
 
-```bash
-curl -s -X POST "http://localhost:3456/eval?target=TARGET_ID" -d '
-JSON.stringify(
-  Array.from(document.querySelectorAll("a"))
-    .map(a => ({ text: (a.textContent || "").trim(), href: a.href }))
-    .filter(x => x.href)
-)'
-```
+`browser-use/scripts/` 是当前 CDP 直连模式使用的本地 `browser-harness` 内核实现：
 
-### 持久注入脚本
+- `_ipc.py`：daemon IPC 通信。
+- `daemon.py`：CDP WebSocket 持有与命令转发。
+- `helpers.py`：`uv run python -m scripts.run -c` 中预加载的页面操作 helper。
+- `admin.py`：doctor、setup、update、daemon 管理与 profile/cloud 相关辅助能力。
+- `run.py`：CLI 入口。
 
-```bash
-curl -s -X POST "http://localhost:3456/inject?target=TARGET_ID&identifier=default" -d 'window.__browserUse = true'
-```
-
-注册后脚本会在该 tab 后续新文档加载时自动注入。
-
-### JS 层点击
-
-```bash
-curl -s -X POST "http://localhost:3456/click?target=TARGET_ID" -d 'button.submit'
-```
-
-适合简单点击，内部会 `scrollIntoView()` 后调用 `el.click()`。
-
-### 真实鼠标点击
-
-```bash
-curl -s -X POST "http://localhost:3456/clickAt?target=TARGET_ID" -d 'button.upload'
-```
-
-适合需要真实用户手势的场景，例如触发文件选择器。
-
-### 文件上传
-
-```bash
-curl -s -X POST "http://localhost:3456/setFiles?target=TARGET_ID" -d '{"selector":"input[type=file]","files":["/path/to/file.png"]}'
-```
-
-### 页面滚动
-
-```bash
-curl -s "http://localhost:3456/scroll?target=TARGET_ID&y=3000"
-curl -s "http://localhost:3456/scroll?target=TARGET_ID&direction=bottom"
-```
-
-滚动后会短暂等待，以触发懒加载。
-
-### 截图
-
-```bash
-curl -s "http://localhost:3456/screenshot?target=TARGET_ID&file=/tmp/shot.png"
-```
-
-可选 `format=jpeg`。
-
-## 常见错误
-
-| 错误 | 原因 | 处理 |
-|------|------|------|
-| `Chrome 未开启远程调试端口` | Chrome 未允许 remote debugging | 让用户打开 `chrome://inspect/#remote-debugging` 并勾选 Allow |
-| `attach 失败` | `targetId` 已失效或 tab 已关闭 | 重新调用 `/targets` 获取最新 target |
-| `CDP 命令超时` | 页面长时间未响应 | 重试，或先用 `/info` / `/targets` 确认状态 |
-| `端口已被占用` | 已有 proxy 或其他程序占用监听端口 | 若是已有 proxy 可复用，否则更换 `CDP_PROXY_PORT` |
-
-## 结束清理
-
-任务完成后，关闭自己创建的 tab：
-
-```bash
-curl -s "http://localhost:3456/close?target=TARGET_ID"
-```
-
-保留用户已有 tab，不要误关闭。Proxy 可保持运行，供后续任务复用。
+日常浏览器任务只按本文件中的 `uv run python -m scripts.run -c '...'` 使用 helpers；只有排障、升级或维护内核时才需要阅读脚本源码。

@@ -18,25 +18,20 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 C
 
 默认先尝试 `CDP 直连`，不要一开始就把两种模式都读一遍。
 
-### 第一步：先跑 CDP 可用性检测脚本
+### 第一步：先跑 CDP 可用性检测
 
 先执行：
 
 ```bash
-node "<skill-dir>/scripts/check-cdp.mjs"
+# 该命令必须在当前 skill 目录（即 `.flocks/plugins/skills/browser-use`）执行
+uv run python -m <skill-dir>/scripts.run --doctor
 ```
 
-其中 `<skill-dir>` 是当前 skill 目录。
-
-这个脚本会检查：
-
-1. Node.js 版本是否 `>= 22`
-2. Chrome 主版本是否 `> 144`
-3. Chrome 是否已开启 remote debugging
+该命令会检查 `browser-harness` 是否可用、Chrome/Edge 是否运行、daemon 是否存活，以及当前是否有可用的浏览器连接。
 
 ### 第二步：根据检测结果决定模式
 
-#### 结果 A：1、2、3 全部满足
+#### 结果 A：doctor 通过
 
 这时立即确定使用 `CDP 直连`，然后马上阅读：
 
@@ -44,24 +39,26 @@ node "<skill-dir>/scripts/check-cdp.mjs"
 
 之后只按 CDP 流程执行，不再切到 `agent-browser`。
 
-#### 结果 B：1、2 满足，但 3 不满足
+#### 结果 B：Chrome 已运行，但 daemon 或 active browser connection 不可用
 
 必须直接提示用户：
 
 ```text
 chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://inspect/#remote-debugging 并勾选 Allow remote debugging
+或
+不使用 CDP 模式，使用agent-browser
 ```
 
-然后等待用户完成操作。用户确认已开启后，重新运行同一个检测脚本。
+然后等待用户进一步指示。如果用户确认已开启后，重新运行同一个检测命令。
 
 - 如果重新检测通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
-- 如果仍未通过：继续提示用户检查 remote debugging，不切到 `agent-browser`
+- 如果仍未通过：继续提示用户检查 remote debugging，或提示切到 `agent-browser`
 
-#### 结果 C：1 或 2 不满足
+#### 结果 C：`browser-harness` 不可用，或当前机器没有可用 Chrome/Edge
 
 说明当前环境不适合 `CDP 直连`。此时要：
 
-1. 明确告诉用户是哪一项不满足, 提示需要做什么操作才能达到要求
+1. 明确告诉用户是哪一项不满足，提示需要做什么操作才能达到要求
 2. 切换到 `agent-browser` 模式
 3. 立即阅读：
    - `references/agent-browser.md`
@@ -79,5 +76,5 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 
 ## References
 
-- `references/cdp-direct.md`：CDP 直连用户 Chrome 的启动方式、API、页面探索策略、错误处理
+- `references/cdp-direct.md`：以 `browser-harness` 作为 CDP 直连内核的启动方式、API、页面探索策略、错误处理
 - `references/agent-browser.md`：agent-browser 的 snapshot/ref 工作流、交互命令、等待、截图、排障
