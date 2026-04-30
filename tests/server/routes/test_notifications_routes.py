@@ -29,24 +29,12 @@ async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
     )
     assert response.status_code == 200, response.text
     items = response.json()
-    assert [item["id"] for item in items] == [
-        "token-free-period-extended-2026-04",
-        "whats-new-2026.04.27",
-    ]
+    assert [item["id"] for item in items] == ["token-free-period-extended-2026-04"]
     assert items[0]["kind"] == "benefit"
-    assert items[1]["kind"] == "whats_new"
 
     ack_response = await client.post("/api/notifications/token-free-period-extended-2026-04/ack")
     assert ack_response.status_code == 200, ack_response.text
 
-    response = await client.get(
-        "/api/notifications/active",
-        params={"locale": "zh-CN", "current_version": "2026.04.27"},
-    )
-    assert response.status_code == 200, response.text
-    assert [item["id"] for item in response.json()] == ["whats-new-2026.04.27"]
-
-    await client.post("/api/notifications/whats-new-2026.04.27/ack")
     response = await client.get(
         "/api/notifications/active",
         params={"locale": "zh-CN", "current_version": "2026.04.27"},
@@ -59,7 +47,7 @@ async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
         params={"locale": "zh-CN", "current_version": "2026.05.01"},
     )
     assert response.status_code == 200, response.text
-    assert [item["id"] for item in response.json()] == ["whats-new-2026.05.01"]
+    assert response.json() == []
 
 
 @pytest.mark.asyncio
@@ -146,19 +134,17 @@ async def test_notification_time_window_filters_expired(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_notifications_fallback_to_backend_current_version(monkeypatch):
-    monkeypatch.setattr(
-        NotificationService,
-        "_resolve_current_version",
-        lambda current_version: current_version or "2026.06.01",
-    )
+async def test_arbitrary_whats_new_ack_status(client: AsyncClient):
+    status_response = await client.get("/api/notifications/whats-new-2026.04.28/ack")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["acknowledged"] is False
 
-    items = await NotificationService.list_active(
-        user_id="user-a",
-        locale="zh-CN",
-        current_version=None,
-    )
-    assert "whats-new-2026.06.01" in {item.id for item in items}
+    ack_response = await client.post("/api/notifications/whats-new-2026.04.28/ack")
+    assert ack_response.status_code == 200, ack_response.text
+
+    status_response = await client.get("/api/notifications/whats-new-2026.04.28/ack")
+    assert status_response.status_code == 200, status_response.text
+    assert status_response.json()["acknowledged"] is True
 
 
 @pytest.mark.asyncio
