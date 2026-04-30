@@ -49,6 +49,8 @@ _CN_NPM_REGISTRY = "https://registry.npmmirror.com/"
 _CN_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
 _CN_PIP_INDEX_URL = _CN_UV_DEFAULT_INDEX
 _CURL_USER_AGENT = "curl/8.7.1"
+_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
+_FRONTEND_BUILD_TIMEOUT_SECONDS = 300
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -1967,15 +1969,32 @@ async def perform_update(
         if npm:
             yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
             npm_env = _build_frontend_subprocess_env(npm_registry=profile.npm_registry)
-            code, _, err = await _run_async(
-                [npm, "install"],
-                cwd=staged_webui_dir,
-                timeout=180,
-                env=npm_env,
-            )
+            install_subcommand = "ci" if (staged_webui_dir / "package-lock.json").exists() else "install"
+            install_cmd = [npm, install_subcommand]
+            install_label = f"npm {install_subcommand}"
+            try:
+                code, _, err = await _run_async(
+                    install_cmd,
+                    cwd=staged_webui_dir,
+                    timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                    env=npm_env,
+                )
+            except subprocess.TimeoutExpired:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                _fe_dep_timeout = (
+                    "Frontend dependency install timed out after "
+                    f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
+                )
+                _record_update_journal(f"ERROR {_fe_dep_timeout}")
+                yield UpdateProgress(
+                    stage="error",
+                    message=_fe_dep_timeout,
+                    success=False,
+                )
+                return
             if code != 0:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                _fe_dep = f"Frontend dependency install failed: {err}"
+                _fe_dep = f"Frontend dependency install failed ({install_label}): {err}"
                 _record_update_journal(f"ERROR {_fe_dep}")
                 yield UpdateProgress(
                     stage="error",
@@ -1985,12 +2004,25 @@ async def perform_update(
                 return
 
             yield UpdateProgress(stage="building", message="Building frontend...")
-            code, _, err = await _run_async(
-                [npm, "run", "build"],
-                cwd=staged_webui_dir,
-                timeout=300,
-                env=npm_env,
-            )
+            try:
+                code, _, err = await _run_async(
+                    [npm, "run", "build"],
+                    cwd=staged_webui_dir,
+                    timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
+                    env=npm_env,
+                )
+            except subprocess.TimeoutExpired:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                _fe_build_timeout = (
+                    f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
+                )
+                _record_update_journal(f"ERROR {_fe_build_timeout}")
+                yield UpdateProgress(
+                    stage="error",
+                    message=_fe_build_timeout,
+                    success=False,
+                )
+                return
             if code != 0:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 _fe_build = f"Frontend build failed: {err}"
@@ -2144,6 +2176,19 @@ async def perform_update(
         code, _, err = await _run_async(
             uv_cmd, cwd=install_root, timeout=180, env=sync_env,
         )
+    if code != 0 and profile.uv_default_index:
+        log.warning(
+            "updater.dependencies.sync_retry_default_index",
+            {
+                "first_error": err,
+                "default_index": profile.uv_default_index,
+            },
+        )
+        await asyncio.sleep(3)
+        uv_cmd = [uv_path, "sync"]
+        code, _, err = await _run_async(
+            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
+        )
     if code != 0:
         log.warning("updater.dependencies.sync_retry", {"first_error": err})
         await asyncio.sleep(3)
@@ -2220,7 +2265,7 @@ async def perform_update(
             handover_active = False
         yield UpdateProgress(
             stage="error",
-            message=_rb_msg,
+            message=f"Failed to build restart command: {exc}",
             success=False,
         )
         return
@@ -2251,7 +2296,7 @@ async def perform_update(
                 handover_active = False
             yield UpdateProgress(
                 stage="error",
-                message=_rs_win,
+                message=f"Failed to restart service: {exc}",
                 success=False,
             )
             return
@@ -2269,7 +2314,7 @@ async def perform_update(
             handover_active = False
         yield UpdateProgress(
             stage="error",
-            message=_rs_unix,
+            message=f"Failed to restart service: {exc}",
             success=False,
         )
         return
