@@ -483,8 +483,12 @@ class TestYamlToTool:
         yaml_path = _write_yaml(api_dir / "sangfor_sip_assets.yaml", data)
         tool = yaml_to_tool(data, yaml_path)
 
-        assert tool.info.provider == "sangfor_sip"
+        # ``info.provider`` is the storage key (service_id + version) so that
+        # ``api_services`` lookups can keep multiple versions side-by-side.
+        # The unversioned ``service_id`` is preserved on the Tool instance.
+        assert tool.info.provider == "sangfor_sip_v9_2"
         assert tool.info.provider_version == "9.2"
+        assert getattr(tool, "_service_id", None) == "sangfor_sip"
         assert getattr(tool, "_provider_version", None) == "9.2"
 
     def test_provider_version_falls_back_to_defaults_product_version(

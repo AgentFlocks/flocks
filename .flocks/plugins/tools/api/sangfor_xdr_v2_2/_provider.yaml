@@ -1,5 +1,6 @@
 name: sangfor_xdr
 service_id: sangfor_xdr
+version: "2.2"
 description: >
   Sangfor XDR (Extended Detection and Response) Open API.
   Provides unified security operations including alert/incident management,
@@ -43,6 +44,7 @@ credential_fields:
 defaults:
   timeout: 60
   category: custom
+  product_version: "2.2"
 notes: |
   深信服 XDR 配置说明：
   1. 登录 XDR 平台，从页面 URL 获取平台 Host 地址

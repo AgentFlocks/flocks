@@ -1297,6 +1297,7 @@ def _build_api_service_summary(
 async def list_api_services() -> List[APIServiceSummary]:
     try:
         from flocks.tool.registry import ToolRegistry
+        from flocks.config.api_versioning import shadowed_legacy_ids
 
         ToolRegistry.init()
 
@@ -1305,6 +1306,10 @@ async def list_api_services() -> List[APIServiceSummary]:
         raw_statuses = await _read_api_service_status_cache()
 
         service_ids = configured_services | discovered_services
+        # Hide each legacy ``api_services[<service_id>]`` block once its
+        # versioned ``<service_id>_v<version>`` counterpart exists, so
+        # the user does not see duplicate entries after migration.
+        service_ids -= shadowed_legacy_ids(service_ids)
         summaries = [
             _build_api_service_summary(provider_id, raw_statuses)
             for provider_id in service_ids
@@ -1476,73 +1481,48 @@ async def get_api_service_metadata(provider_id: str):
 
 
 def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load metadata from a _provider.yaml file for YAML-based API tools."""
+    """Load ``_provider.yaml`` metadata for an API plugin.
+
+    ``provider_id`` may be either the storage_key (the post-versioning
+    canonical id, e.g. ``tdp_api_v3_3_10``) or the bare unversioned
+    ``service_id`` (legacy callers). Discovery is delegated to
+    :func:`discover_api_service_descriptors`, so plugin directories
+    whose name does not match ``provider_id`` (e.g. ``tdp_v3_3_10``
+    for ``service_id`` ``tdp_api``) still resolve correctly.
+    """
     try:
-        from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+        from flocks.config.api_versioning import discover_api_service_descriptors
         import yaml
 
-        api_roots = [
-            Path.cwd() / ".flocks" / "plugins" / "tools" / "api",
-            DEFAULT_PLUGIN_ROOT / "tools" / "api",
-        ]
-        api_dir: Optional[Path] = None
-        for api_root in api_roots:
-            direct_dir = api_root / provider_id
-            if direct_dir.is_dir():
-                api_dir = direct_dir
-                break
-
-            if not api_root.is_dir():
-                continue
-
-            for candidate in api_root.iterdir():
-                if not candidate.is_dir():
-                    continue
-                provider_file = candidate / "_provider.yaml"
-                if not provider_file.is_file():
-                    continue
-                try:
-                    candidate_provider = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.provider_read_failed", {
-                        "provider_id": provider_id, "dir": str(candidate), "error": str(e),
-                    })
-                    continue
-
-                if (
-                    isinstance(candidate_provider, dict)
-                    and candidate_provider.get("service_id") == provider_id
-                ):
-                    api_dir = candidate
-                    break
-
-            if api_dir is not None:
-                break
-        if api_dir is None:
+        descriptor = next(
+            (d for d in discover_api_service_descriptors()
+             if provider_id in (d.storage_key, d.service_id)),
+            None,
+        )
+        if descriptor is None:
             return None
 
-        provider_file = api_dir / "_provider.yaml"
-        if not provider_file.is_file():
-            return None
-
-        prov = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
+        api_dir = descriptor.provider_yaml.parent
+        prov = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
         if not isinstance(prov, dict):
             return None
 
-        tool_apis = []
+        tool_apis: List[Dict[str, Any]] = []
         for item in sorted(api_dir.iterdir()):
-            if item.suffix in (".yaml", ".yml") and not item.name.startswith("_"):
-                try:
-                    tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
-                    if isinstance(tool_data, dict) and tool_data.get("name"):
-                        tool_apis.append({
-                            "name": tool_data["name"],
-                            "description": tool_data.get("description", ""),
-                        })
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.tool_read_failed", {
-                        "provider_id": provider_id, "file": item.name, "error": str(e),
-                    })
+            if item.suffix not in (".yaml", ".yml") or item.name.startswith("_"):
+                continue
+            try:
+                tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.debug("provider.yaml_metadata.tool_read_failed", {
+                    "provider_id": provider_id, "file": item.name, "error": str(e),
+                })
+                continue
+            if isinstance(tool_data, dict) and tool_data.get("name"):
+                tool_apis.append({
+                    "name": tool_data["name"],
+                    "description": tool_data.get("description", ""),
+                })
 
         return {
             "name": prov.get("name", provider_id),

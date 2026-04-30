@@ -9,7 +9,7 @@ from flocks.tool.tool_loader import yaml_to_tool
 
 
 def _load_tool(yaml_name: str):
-    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "skyeye_api" / yaml_name
+    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "skyeye_v4_0_14_0_SP2" / yaml_name
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     return yaml_to_tool(raw, yaml_path)
 
@@ -91,7 +91,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
         result = await tool.handler(ToolContext(session_id="test", message_id="test"))
 
     assert tool.info.source == "api"
-    assert tool.info.provider == "skyeye_api"
+    assert tool.info.provider == "skyeye_api_v4_0_14_0_SP2"
     assert result.success is True
     assert result.output["data"]["items"] == {"value": 42}
     assert result.metadata["api"] == "monitor_center_dashboard_view"

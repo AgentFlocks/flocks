@@ -1,5 +1,6 @@
 name: qingteng
 service_id: qingteng
+version: "3.4.1.66"
 description: 青藤云安全平台 - 主机安全、漏洞检测、入侵检测
 auth:
   type: session
@@ -29,6 +30,7 @@ defaults:
   base_url: "http://{secret:qingteng_host}:80"
   timeout: 30
   category: custom
+  product_version: "3.4.1.66"
 notes: |
   青藤云 API 需要认证:
   1. 登录获取 jwt token 和 signKey

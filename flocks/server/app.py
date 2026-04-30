@@ -83,6 +83,18 @@ async def lifespan(app: FastAPI):
         log.info("config.files.checked")
     except Exception as e:
         log.warning("config.files.check_failed", {"error": str(e)})
+
+    # Migrate ``api_services`` blocks to versioned storage keys. Idempotent:
+    # cheap re-run on every startup, copies legacy ``service_id`` entries to
+    # ``<service_id>_v<version>`` once the plugin declares a version.
+    try:
+        from flocks.config.api_versioning import migrate_api_services
+        actions = migrate_api_services()
+        copied = [k for k, v in actions.items() if v == "copied"]
+        if copied:
+            log.info("config.api_services.migrated", {"copied": copied})
+    except Exception as e:
+        log.warning("config.api_services.migrate_failed", {"error": str(e)})
     
     # Initialize storage
     await Storage.init()

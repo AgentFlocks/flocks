@@ -1,5 +1,6 @@
 name: SkyEye
 service_id: skyeye_api
+version: "4.0.14.0.SP2"
 description: SkyEye monitoring platform API for dashboard views, alarm retrieval, and related downloads.
 description_cn: SkyEye 威胁监测平台接口，提供仪表板视图、告警检索、枚举值查询和相关下载能力。
 auth:
@@ -32,3 +33,4 @@ defaults:
   base_url: "https://{secret:skyeye_host}:443"
   timeout: 30
   category: custom
+  product_version: "4.0.14.0.SP2"

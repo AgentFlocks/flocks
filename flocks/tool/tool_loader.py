@@ -564,11 +564,22 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     provider_cfg = _load_provider_config(yaml_path)
     raw = _merge_provider_defaults(raw, provider_cfg)
 
-    provider_name = raw.get("provider")
-    if not provider_name and provider_cfg:
-        provider_name = provider_cfg.get("name")
+    service_id = raw.get("provider")
+    if not service_id and provider_cfg:
+        service_id = provider_cfg.get("name")
 
     provider_version = extract_provider_version(provider_cfg)
+
+    # ``info.provider`` is the lookup key in ``flocks.json`` ``api_services``.
+    # When the plugin declares a version, promote it to a storage key so
+    # multiple versions of the same product can keep credentials side-by-side
+    # (see :mod:`flocks.config.api_versioning`). Without a version
+    # the storage key collapses back to ``service_id`` for full back-compat.
+    if service_id and provider_version:
+        from flocks.config.api_versioning import derive_storage_key
+        storage_key: Optional[str] = derive_storage_key(service_id, provider_version)
+    else:
+        storage_key = service_id
 
     cat_str = raw.get("category", "custom")
     try:
@@ -603,20 +614,22 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         parameters=parameters,
         enabled=raw.get("enabled", True),
         requires_confirmation=requires_confirm,
-        provider=provider_name,
+        provider=storage_key,
         provider_version=provider_version,
         source=source,
     )
 
     tool = Tool(info=info, handler=handler)
     tool._yaml_path = yaml_path  # type: ignore[attr-defined]
-    tool._provider = provider_name  # type: ignore[attr-defined]
+    tool._provider = storage_key  # type: ignore[attr-defined]
+    tool._service_id = service_id  # type: ignore[attr-defined]
     tool._provider_version = provider_version  # type: ignore[attr-defined]
     tool._source = source or "yaml_plugin"  # type: ignore[attr-defined]
 
     log.info("tool.yaml.loaded", {
         "name": name,
-        "provider": provider_name,
+        "service_id": service_id,
+        "storage_key": storage_key,
         "provider_version": provider_version,
         "handler_type": handler_type,
         "path": str(yaml_path),
