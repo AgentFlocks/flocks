@@ -10,8 +10,7 @@ required: browser-use
 
 ## 使用的资源
 
-- 默认注入脚本：`scripts/inject-hook-simple.js`
-- 可选增强脚本：`scripts/inject-hook.js`
+- 默认注入脚本：`scripts/inject-hook-base.js`
 - CLI 生成器：`.flocks/plugins/skills/web2cli/scripts/generate-cli.py`
 - 支持两种模式：
   - `MODE=agent-browser`
@@ -54,6 +53,7 @@ mkdir -p "$CAPTURE_ROOT/captures"
 - 浏览器内存中的原始捕获数据：`window.__capturedRequests`
 - 导出的接口抓包 JSON：`$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json`
 - 浏览器认证状态：`$CAPTURE_ROOT/auth-state.json`
+- 站点自适应 Hook（仅当 base 失败时创建）：`$CAPTURE_ROOT/hook.js`
 - 生成的 CLI 工具：`$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，`generate-cli.py` 会把 `-` 等非 Python 模块名字符替换为 `_`
 - 生成的接口文档：`$CAPTURE_ROOT/${CAPTURE_NAME}_api.md`
 - 生成的 Postman 集合：`$CAPTURE_ROOT/${CAPTURE_NAME}_postman.json`
@@ -92,19 +92,19 @@ echo "Created tab: $TARGET_ID"
 
 ### 3. 注入 Hook
 
-默认使用 `scripts/inject-hook-simple.js`。如果确实需要更强的上下文推断和导出能力，再切换 `scripts/inject-hook.js`。
+默认使用 `scripts/inject-hook-base.js`。这是通用基线脚本，负责捕获 XHR/Fetch、页面上下文、最近用户动作与导航信息，并提供更完整的调试输出。
 
 `agent-browser` 模式：
 
 ```bash
 agent-browser --session-name "$CAPTURE_NAME" wait --load networkidle
-agent-browser --session-name "$CAPTURE_NAME" eval --stdin < .flocks/plugins/skills/web2cli/scripts/inject-hook-simple.js
+agent-browser --session-name "$CAPTURE_NAME" eval --stdin < .flocks/plugins/skills/web2cli/scripts/inject-hook-base.js
 ```
 
 `cdp-direct` 模式：
 
 ```bash
-WEB2CLI_HOOK="$(pwd)/$WEB2CLI_SKILL/scripts/inject-hook-simple.js"
+WEB2CLI_HOOK="$(pwd)/$WEB2CLI_SKILL/scripts/inject-hook-base.js"
 
 export TARGET_ID WEB2CLI_HOOK
 flocks browser -c '
@@ -157,9 +157,10 @@ print(js("window.__apiCapture.config.captureMode"))
 )
 ```
 
-### 4. 等待用户执行业务操作
+### 4. 明确需要捕获的功能/操作
 
-要求用户完成要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
+- 要求用户完成要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
+- 或请求用户描述需要 hook 的操作，便于你直接去页面代替用户执行
 
 需要确认捕获是否开始时：
 
@@ -313,7 +314,55 @@ print(f"Saved {len(cookies)} cookies, {len(local_storage)} localStorage items, {
 
 将 cookie、localStorage 和 sessionStorage 保存为后续 CLI 调用的认证输入。认证文件包含敏感值，只能写入 `$CAPTURE_ROOT` 这类工作区输出目录，不要写入代码仓库。
 
-### 7. 关闭浏览器或 Tab
+### 7. 分析捕获的 web API
+
+至少执行端点去重分析：
+
+```bash
+jq -r '.[].url' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sed 's/?.*$//' | sort -u
+```
+
+需要进一步分析时，可补充：
+
+```bash
+jq 'length' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
+jq -r '.[].method' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sort | uniq -c
+jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
+```
+
+### 8. 生成 CLI 工具
+
+基于 `"$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"` 与 `"$CAPTURE_ROOT/auth-state.json"` 生成新的 CLI 工具。
+
+```bash
+uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
+  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
+  --format python \
+  --base-url "https://example.com" \
+  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py"
+```
+
+如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成器会自动规范化输出文件名，例如 `test-domain_cli.py` 会写为 `test_domain_cli.py`，并在命令输出中打印实际路径。
+
+如需同时产出文档可继续执行：
+
+```bash
+uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
+  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
+  --format markdown \
+  --title "${CAPTURE_NAME} API Documentation" \
+  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
+```
+
+### 9. CLI工具验证 和浏览器关闭
+
+根据生成的 CLI ，任意选择一个接口调用测试可用性
+- CLI 工具可用性
+- 认证状态可用性
+
+当验证完成，确保 CLI 可用后关闭浏览器或 Tab
+
+#### 关闭浏览器或 Tab
 
 `agent-browser` 模式：
 
@@ -339,63 +388,28 @@ else:
 
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
 
-### 8. 分析 API
-
-至少执行端点去重分析：
-
-```bash
-jq -r '.[].url' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sed 's/?.*$//' | sort -u
-```
-
-需要进一步分析时，可补充：
-
-```bash
-jq 'length' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
-jq -r '.[].method' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sort | uniq -c
-jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
-```
-
-### 9. 生成 CLI 工具
-
-基于 `"$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"` 与 `"$CAPTURE_ROOT/auth-state.json"` 生成新的 CLI 工具。
-
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
-  --format python \
-  --base-url "https://example.com" \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py"
-```
-
-如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成器会自动规范化输出文件名，例如 `tdp118-51_cli.py` 会写为 `tdp118_51_cli.py`，并在命令输出中打印实际路径。
-
-如需同时产出文档或 Postman 集合，可继续执行：
-
-```bash
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
-  --format markdown \
-  --title "${CAPTURE_NAME} API Documentation" \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
-
-uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
-  --format postman \
-  --base-url "https://example.com" \
-  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_postman.json"
-```
 
 ### 10. summary
 
-总结当前 生成 的CLI 工具有哪些能力，然后可提示用户：
-- 调用CLI 工具，验证可用性
+总结当前 生成 的CLI 工具有哪些能力，然后可提示用户下一步操作：
+- 保存为对应的 skill 方便后续操作
 - 精简 CLI
+- 进一步丰富 CLI 工具，重新开始 web2cli标准流程
 
 ## 故障处理
 
 ### Hook 注入报错
 
-优先继续使用 `scripts/inject-hook-simple.js`。这是默认脚本，兼容性高于旧版增强脚本。
+默认脚本 `scripts/inject-hook-base.js` 失败时，必须根据目标站点的实际情况自适应创建新的 `hook.js` 文件，并保存到 `$CAPTURE_ROOT/hook.js` 后再注入。创建时遵循以下原则：
+
+1. 先保留 base Hook 的核心能力：XHR/Fetch 捕获、页面上下文、动作追踪、调试接口。
+2. 再针对站点特征补充适配逻辑，例如：
+   - 请求被框架二次封装，需要额外 hook Axios、`$.ajax`、自定义 SDK。
+   - 页面在 iframe、shadow DOM、微前端容器内运行，需要调整注入位置或元素定位方式。
+   - 站点有特殊过滤规则、CSP、长连接、二进制请求或加密包装，需要定制白名单/忽略规则与序列化逻辑。
+3. 新建的 `$CAPTURE_ROOT/hook.js` 必须只为当前站点服务，不要反向覆盖仓库中的 base Hook。
+
+创建完成后，改为注入 `$CAPTURE_ROOT/hook.js`，直至完成当前 hook 任务。
 
 ### 没有捕获到请求
 
@@ -405,8 +419,10 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
 2. `window.__capturedRequests` 是否存在。
 3. 目标请求是否被脚本中的过滤规则排除。
 4. 必要时切换 `window.__apiCapture.config.captureMode = 'all'` 后重试。
+5. 修改sameOriginOnly 参数
+6. 以上方法都不可行时，按照Hook 注入报错的原则，自定义hook.js
 
 ### 认证失效
 
 - `agent-browser`：重新登录后再次执行保存状态命令。
-- `cdp-direct`：重新登录后再次执行步骤 6 保存认证状态。
+- `cdp-direct`：重新登录后再次执行保存认证状态。

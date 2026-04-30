@@ -4,9 +4,7 @@
 
 ## 使用入口
 
-`flocks browser` 是 Flocks 内置的薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。源码位于 `flocks/browser/`，通过 `flocks browser ...` 调用。
-
-所有命令默认在仓库根目录执行；如果当前目录不在仓库根目录，先切到项目根目录再运行 `flocks browser ...`。
+`flocks browser` 是 Flocks 内置的薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。通过 `flocks browser ...` 调用。
 
 ## 适用范围
 
@@ -219,11 +217,9 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 flocks browser -c 'restart_daemon()'
 ```
 
-7. 如果需要更新当前实现，可运行 `flocks browser --update -y`。若 editable clone 有未提交改动导致 update 拒绝，告诉用户处理工作区，不要强行覆盖。
-
 ## 沉淀可复用经验
 
-如果在某个网站上学到了可复用信息，优先沉淀到 `~/.flocks/workspace/domain-skills/<site>/`：
+针对特定网站的多次操作，如果有可复用信息，优先沉淀到 `~/.flocks/workspace/domain-skills/<site>/`：
 
 - URL 模式、必要 query 参数、能跳过 loader 的直接路由。
 - 私有 API、请求方法、payload 结构、认证依赖。
@@ -232,14 +228,8 @@ flocks browser -c 'restart_daemon()'
 
 不要写入 secrets、cookies、token、用户个人数据、原始像素坐标或本次任务流水账。
 
-## 相关源码
-
+## The self-heal loop 自修复/扩展 循环
+> 终极模式（非必要不进入）
 `flocks/browser/` 是当前 CDP 直连模式使用的内核实现：
-
-- `_ipc.py`：daemon IPC 通信。
-- `daemon.py`：CDP WebSocket 持有与命令转发。
-- `helpers.py`：`flocks browser -c` 中预加载的页面操作 helper。
-- `admin.py`：doctor、setup、update、daemon 管理与 profile/cloud 相关辅助能力。
-- `run.py`：CLI 入口。
-
-日常浏览器任务只按本文件中的 `flocks browser -c '...'` 使用 helpers；只有排障、升级或维护内核时才需要阅读源码。
+- `helpers.py`：该文件是浏览器操作的行为实现，支持增减、修改函数实现自定义功能，具备生长能力
+- 其他源码文件是支撑`helpers.py`运行的设施，不支持修改
