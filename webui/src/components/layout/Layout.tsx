@@ -52,10 +52,6 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
     summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
     body: releaseNotes,
     highlights: [],
-    primary_action: {
-      label: isZh ? '开始体验' : 'Start exploring',
-      url: info.release_url,
-    },
     version,
     priority: 20,
   };
