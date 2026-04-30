@@ -6,6 +6,7 @@ Main HTTP API server for AI-Native SecOps Platform
 
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -329,6 +330,35 @@ app = FastAPI(
 log = Log.create(service="server")
 
 
+_REQUEST_LOG_SKIP_EXACT = frozenset({
+    "/health",
+    "/api/health",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+    "/api/event",
+    "/api/session/status",
+})
+
+
+def _is_noisy_request_path(path: str) -> bool:
+    """Return True for high-frequency polling endpoints that are noisy on success."""
+    if path in _REQUEST_LOG_SKIP_EXACT:
+        return True
+    if path.startswith("/api/session/") and path.endswith("/message"):
+        return True
+    if path.startswith("/api/question/session/") and path.endswith("/pending"):
+        return True
+    return False
+
+
+def _should_log_request(path: str, status_code: int) -> bool:
+    """Keep abnormal responses visible while suppressing successful polling noise."""
+    if status_code >= 400:
+        return True
+    return not _is_noisy_request_path(path)
+
+
 # CORS Configuration
 #
 # Priority order:
@@ -493,33 +523,31 @@ async def instance_context_middleware(request: Request, call_next):
 # Request Logging Middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log all incoming requests"""
-    # Skip logging for certain paths
-    skip_paths = {"/health", "/docs", "/redoc", "/openapi.json"}
-    
-    if request.url.path not in skip_paths:
-        log.info("request.start", {
-            "method": request.method,
-            "path": request.url.path,
-            "client": request.client.host if request.client else None,
-        })
-    
-    # Time the request
-    timer = log.time("request.complete", {
-        "method": request.method,
-        "path": request.url.path,
-    })
-    
-    with timer:
+    """Log one completion line for useful requests; suppress successful polling noise."""
+    path = request.url.path
+    started_at = time.monotonic()
+
+    try:
         response = await call_next(request)
-    
-    if request.url.path not in skip_paths:
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        log.error("request.error", {
+            "method": request.method,
+            "path": path,
+            "duration": duration_ms,
+            "error": str(exc),
+        })
+        raise
+
+    if _should_log_request(path, response.status_code):
+        duration_ms = int((time.monotonic() - started_at) * 1000)
         log.info("request.complete", {
             "method": request.method,
-            "path": request.url.path,
+            "path": path,
             "status": response.status_code,
+            "duration": duration_ms,
         })
-    
+
     return response
 
 

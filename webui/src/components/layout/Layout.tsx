@@ -29,7 +29,7 @@ import { ackNotification, getActiveNotifications, type UserNotification } from '
 import { useAuth } from '@/contexts/AuthContext';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
-const UPDATE_CHECK_MIN_GAP_MS = 60_000;
+const UPDATE_CHECK_MIN_GAP_MS = 600_000;
 
 export default function Layout() {
   const location = useLocation();
