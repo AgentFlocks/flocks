@@ -34,6 +34,29 @@ _FRAME_CACHE_MAX = 500
 _DEFAULT_RECONNECT_TIMEOUT_SECONDS = 60.0
 
 
+class _WeComSdkLogger:
+    """Bridge wecom-aibot-sdk logs into Flocks logs while dropping heartbeat debug noise."""
+
+    def debug(self, message: str, *args: Any) -> None:
+        return None
+
+    def info(self, message: str, *args: Any) -> None:
+        return None
+
+    def warn(self, message: str, *args: Any) -> None:
+        log.warning("wecom.sdk.warn", {"message": _format_sdk_log_message(message, args)})
+
+    def error(self, message: str, *args: Any) -> None:
+        log.error("wecom.sdk.error", {"message": _format_sdk_log_message(message, args)})
+
+
+def _format_sdk_log_message(message: str, args: tuple[Any, ...]) -> str:
+    if not args:
+        return str(message)
+    extra = " ".join(str(arg) for arg in args)
+    return f"{message} {extra}"
+
+
 def _parse_reconnect_timeout_seconds(raw: Any) -> tuple[float, Optional[str]]:
     """Parse and validate the reconnect watchdog timeout."""
     if raw is None:
@@ -125,6 +148,7 @@ class WeComChannel(ChannelPlugin):
             heartbeat_interval=30_000,
             scene=1,            # SCENE_WECOM_OPENCLAW — 标识为 OpenClaw 连接，MCP 能力依赖此字段
             plug_version="1.0.0",  # 企微服务端用于下发 MCP Server URL 时的版本校验
+            logger=_WeComSdkLogger(),
         )
 
         self._ws_client.on("authenticated", self._handle_authenticated)

@@ -270,7 +270,7 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(2);
   });
 
-  it('enforces a one-minute minimum gap for focus-triggered update checks', async () => {
+  it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {
     vi.useFakeTimers();
 
     renderHomeWithLayout();
@@ -279,7 +279,7 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(59_000);
+      await vi.advanceTimersByTimeAsync(599_000);
     });
     act(() => {
       window.dispatchEvent(new Event('focus'));

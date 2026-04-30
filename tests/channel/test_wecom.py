@@ -20,6 +20,7 @@ from flocks.channel.base import (
 )
 from flocks.channel.builtin.wecom.channel import (
     WeComChannel,
+    _WeComSdkLogger,
     _extract_content,
     _extract_mixed,
     _parse_frame,
@@ -176,6 +177,39 @@ class TestWeComSendText:
 # ------------------------------------------------------------------
 
 class TestWeComReconnectWatchdog:
+    def test_sdk_logger_drops_debug_and_info_stdout(self, capsys):
+        logger = _WeComSdkLogger()
+
+        logger.debug("Heartbeat sent")
+        logger.info("Connected")
+
+        assert capsys.readouterr().out == ""
+
+    async def test_start_passes_quiet_sdk_logger(self):
+        class FakeWSClient:
+            last_kwargs = None
+
+            def __init__(self, *args, **kwargs):
+                self.handlers = {}
+                self.disconnect = AsyncMock()
+                FakeWSClient.last_kwargs = kwargs
+
+            def on(self, event, handler):
+                self.handlers[event] = handler
+
+            async def connect(self):
+                return None
+
+        ch = WeComChannel()
+        abort_event = asyncio.Event()
+        abort_event.set()
+        config = {"botId": "bot-1", "secret": "secret-1"}
+
+        with patch("wecom_aibot_sdk.WSClient", FakeWSClient):
+            await ch.start(config, AsyncMock(), abort_event)
+
+        assert isinstance(FakeWSClient.last_kwargs["logger"], _WeComSdkLogger)
+
     async def test_watchdog_sets_timeout_event(self):
         ch = WeComChannel()
         ch._ws_client = object()
