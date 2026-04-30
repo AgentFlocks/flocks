@@ -90,7 +90,6 @@ DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
         kind="benefit",
         priority=10,
         starts_at="2026-03-30T00:00:00+08:00",
-        expires_at="2026-04-30T00:00:00+08:00",
         locales={
             "zh-CN": NotificationContent(
                 title="Token 免费期已延长",
@@ -120,6 +119,7 @@ DEFAULT_NOTIFICATIONS: tuple[NotificationConfig, ...] = (
         },
     ),
 )
+
 
 class NotificationService:
     """Load active notifications and track per-user acknowledgements."""
