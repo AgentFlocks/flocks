@@ -1,4 +1,11 @@
-const CHINESE_SECTION_ALIASES = new Set(['中文', '简体中文', 'zh-cn', 'zh_cn', 'chinese']);
+const CHINESE_SECTION_ALIASES = new Set([
+  '中文',
+  '简体中文',
+  'zh-cn',
+  'zh_cn',
+  'chinese',
+  'chinese release notes',
+]);
 const ENGLISH_SECTION_ALIASES = new Set(['english', 'en-us', 'en_us']);
 
 interface DetailsSection {

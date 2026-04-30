@@ -36,6 +36,38 @@ describe('getLocalizedReleaseNotes', () => {
     expect(getLocalizedReleaseNotes(notes, 'zh-CN')).toBe('### 更新内容\n\n- 中文更新 1\n- 中文更新 2');
   });
 
+  it('recognizes Chinese Release Notes as a Chinese details summary', () => {
+    const notes = [
+      '## What\'s Changed',
+      '',
+      '### Authentication & Session',
+      '',
+      '- English update 1',
+      '',
+      '<details>',
+      '',
+      '<summary>Chinese Release Notes</summary>',
+      '## 更新内容',
+      '',
+      '### 认证与会话',
+      '',
+      '- 中文更新 1',
+      '',
+      '</details>',
+    ].join('\n');
+
+    expect(getLocalizedReleaseNotes(notes, 'zh-CN')).toBe('## 更新内容\n\n### 认证与会话\n\n- 中文更新 1');
+    expect(getLocalizedReleaseNotes(notes, 'en-US')).toBe(
+      [
+        '## What\'s Changed',
+        '',
+        '### Authentication & Session',
+        '',
+        '- English update 1',
+      ].join('\n'),
+    );
+  });
+
   it('removes Chinese details blocks for English release notes', () => {
     const notes = [
       '### What\'s Changed',
