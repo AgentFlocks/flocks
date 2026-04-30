@@ -61,7 +61,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
@@ -78,7 +78,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
@@ -194,7 +194,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
@@ -211,7 +211,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
@@ -1202,7 +1202,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
@@ -1219,7 +1219,7 @@
         },
         "limits": {
           "context_window": 196608,
-          "max_output_tokens": 196608
+          "max_output_tokens": 128000
         },
         "pricing": {
           "input": 2.1,
