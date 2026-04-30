@@ -93,7 +93,7 @@
       "retry": "Retry upload",
       "dropHint": "Drop document files to upload",
       "waiting": "Files are still uploading. Please wait before sending.",
-      "invalidType": "Only txt, md, json, yaml, yml, xml, csv, pdf, doc, and docx files are supported",
+      "invalidType": "Only txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, and xlsx files are supported",
       "errorGeneric": "Upload failed. Please try again."
     },
     "tool": {

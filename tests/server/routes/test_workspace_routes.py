@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from fastapi import status
 from httpx import AsyncClient
+from tests.utils.file_type_samples import ALL_SUPPORTED_UPLOAD_FILENAMES, create_sample_file
 
 
 # ===========================================================================
@@ -277,6 +278,30 @@ class TestWorkspaceUpload:
         result = resp.json()["uploaded"][0]
         assert "Unsupported file type" in result["error"]
         assert not (mock_workspace / "archive.zip").exists()
+
+    @pytest.mark.parametrize("filename", ALL_SUPPORTED_UPLOAD_FILENAMES)
+    @pytest.mark.asyncio
+    async def test_chat_upload_accepts_all_supported_file_types(
+        self,
+        client: AsyncClient,
+        mock_workspace: Path,
+        filename: str,
+    ):
+        """Chat uploads accept every file type advertised by the UI."""
+        source = mock_workspace / "fixtures" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        create_sample_file(source)
+        resp = await client.post(
+            "/api/workspace/upload",
+            params={"purpose": "chat"},
+            files={"files": (filename, io.BytesIO(source.read_bytes()), "application/octet-stream")},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        result = resp.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+        assert (mock_workspace / filename).exists()
 
     @pytest.mark.asyncio
     async def test_upload_overwrites_duplicate_file_without_chat_purpose(

@@ -1,6 +1,5 @@
 import datetime as dt
 import textwrap
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -8,6 +7,11 @@ from defusedxml.common import DefusedXmlException
 
 from flocks.tool.registry import ToolContext, ToolRegistry
 from flocks.workspace.manager import WorkspaceManager
+from tests.utils.file_type_samples import (
+    PARSER_SUPPORTED_FILENAMES,
+    create_sample_file,
+    expected_text_for_suffix,
+)
 
 def _load_module():
     import flocks.tool.file.doc_parser as module
@@ -15,53 +19,20 @@ def _load_module():
     return module
 
 
-def _write_minimal_docx(path: Path, document_xml: str | None = None) -> None:
-    content_types = textwrap.dedent("""\
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-          <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-          <Default Extension="xml" ContentType="application/xml"/>
-          <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
-          <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
-        </Types>
-    """)
-    rels = textwrap.dedent("""\
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-          <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
-        </Relationships>
-    """)
-    styles = textwrap.dedent("""\
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-          <w:style w:type="paragraph" w:styleId="Heading1">
-            <w:name w:val="heading 1"/>
-          </w:style>
-          <w:style w:type="paragraph" w:styleId="Normal">
-            <w:name w:val="Normal"/>
-          </w:style>
-        </w:styles>
-    """)
-    document = document_xml or textwrap.dedent("""\
-        <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-        <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-          <w:body>
-            <w:p>
-              <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
-              <w:r><w:t>合同标题</w:t></w:r>
-            </w:p>
-            <w:p>
-              <w:r><w:t>第一段内容</w:t></w:r>
-            </w:p>
-          </w:body>
-        </w:document>
-    """)
+def _replace_zip_entry(path: Path, entry_name: str, payload: str) -> None:
+    from zipfile import ZIP_DEFLATED, ZipFile
 
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("[Content_Types].xml", content_types)
-        archive.writestr("_rels/.rels", rels)
-        archive.writestr("word/document.xml", document)
-        archive.writestr("word/styles.xml", styles)
+    original_entries: dict[str, bytes] = {}
+    with ZipFile(path) as archive:
+        for info in archive.infolist():
+            if info.filename == entry_name:
+                continue
+            original_entries[info.filename] = archive.read(info.filename)
+
+    with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+        for filename, content in original_entries.items():
+            archive.writestr(filename, content)
+        archive.writestr(entry_name, payload)
 
 
 @pytest.fixture(scope="module")
@@ -104,12 +75,13 @@ def test_resolve_input_path_uses_workspace_dir_for_relative_paths(tmp_path, monk
     assert resolved == source.resolve()
 
 
+@pytest.mark.parametrize("filename", PARSER_SUPPORTED_FILENAMES)
 @pytest.mark.asyncio
-async def test_doc_parser_writes_docx_markdown(tmp_path, doc_parser_module):
-    source = tmp_path / "sample.docx"
-    _write_minimal_docx(source)
+async def test_doc_parser_writes_real_file_markdown(tmp_path, doc_parser_module, filename):
+    source = tmp_path / filename
+    create_sample_file(source)
 
-    output = tmp_path / "sample.md"
+    output = tmp_path / f"{source.stem}.md"
     result = await doc_parser_module.doc_parser(
         ToolContext(session_id="test", message_id="test"),
         input_path=str(source),
@@ -119,10 +91,9 @@ async def test_doc_parser_writes_docx_markdown(tmp_path, doc_parser_module):
     assert result.success is True
     assert output.exists()
     content = output.read_text(encoding="utf-8")
-    assert "# 合同标题" in content
-    assert "第一段内容" in content
+    assert expected_text_for_suffix(source.suffix) in content
     assert result.output["output_path"] == str(output)
-    assert result.output["parser"] in {"markitdown", "docx-xml", "pandoc"}
+    assert result.output["parser"]
 
 
 @pytest.mark.asyncio
@@ -150,6 +121,7 @@ def test_normalize_markdown_preserves_fenced_code_block(doc_parser_module):
 
 def test_docx_xml_fallback_preserves_soft_line_breaks(tmp_path, doc_parser_module):
     source = tmp_path / "soft-break.docx"
+    create_sample_file(source)
     document = textwrap.dedent("""\
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
@@ -162,7 +134,7 @@ def test_docx_xml_fallback_preserves_soft_line_breaks(tmp_path, doc_parser_modul
           </w:body>
         </w:document>
     """)
-    _write_minimal_docx(source, document_xml=document)
+    _replace_zip_entry(source, "word/document.xml", document)
 
     content = doc_parser_module._extract_docx_with_zipxml(source)
 
@@ -171,6 +143,7 @@ def test_docx_xml_fallback_preserves_soft_line_breaks(tmp_path, doc_parser_modul
 
 def test_docx_xml_fallback_rejects_xml_entities(tmp_path, doc_parser_module):
     source = tmp_path / "entity.docx"
+    create_sample_file(source)
     document = textwrap.dedent("""\
         <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         <!DOCTYPE w:document [
@@ -184,7 +157,7 @@ def test_docx_xml_fallback_rejects_xml_entities(tmp_path, doc_parser_module):
           </w:body>
         </w:document>
     """)
-    _write_minimal_docx(source, document_xml=document)
+    _replace_zip_entry(source, "word/document.xml", document)
 
     with pytest.raises(DefusedXmlException):
         doc_parser_module._extract_docx_with_zipxml(source)
@@ -218,3 +191,50 @@ def test_doc_fallback_prefers_pandoc_before_olefile(monkeypatch, tmp_path, doc_p
     assert parser_name == "pandoc"
     assert errors == ["markitdown: extracted empty content"]
     assert calls == ["markitdown", "pandoc"]
+
+
+@pytest.mark.parametrize(
+    ("suffix", "replacement", "preferred_parser"),
+    [
+        (".ppt", "_extract_ppt_with_olefile", "olefile"),
+        (".xls", "_extract_xls_with_olefile", "olefile"),
+    ],
+)
+def test_legacy_office_fallback_uses_olefile_after_pandoc(
+    monkeypatch,
+    tmp_path,
+    doc_parser_module,
+    suffix,
+    replacement,
+    preferred_parser,
+):
+    source = tmp_path / f"legacy{suffix}"
+    source.write_bytes(b"legacy-office")
+
+    calls: list[str] = []
+
+    def fake_markitdown(_: Path) -> str:
+        calls.append("markitdown")
+        return ""
+
+    def fake_pandoc(_: Path) -> str:
+        calls.append("pandoc")
+        return ""
+
+    def fake_ole(_: Path) -> str:
+        calls.append("olefile")
+        return "legacy text"
+
+    monkeypatch.setattr(doc_parser_module, "_extract_with_markitdown", fake_markitdown)
+    monkeypatch.setattr(doc_parser_module, "_extract_with_pandoc", fake_pandoc)
+    monkeypatch.setattr(doc_parser_module, replacement, fake_ole)
+
+    content, parser_name, errors = doc_parser_module._run_extractors(source)
+
+    assert content == "legacy text"
+    assert parser_name == preferred_parser
+    assert errors == [
+        "markitdown: extracted empty content",
+        "pandoc: extracted empty content",
+    ]
+    assert calls == ["markitdown", "pandoc", "olefile"]
