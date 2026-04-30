@@ -473,53 +473,18 @@ class ConfigWriter:
     def get_api_service_raw(cls, service_id: str) -> Optional[Dict[str, Any]]:
         """Read a single ``api_services`` entry (raw, secrets unresolved).
 
-        Version-aware lookup — see :mod:`flocks.config.api_service_versioning`:
-
-        1. **Versioned shadow first.** When ``service_id`` is an
-           unversioned id but a single versioned storage key exists for
-           it (e.g. ``qingteng`` shadowed by ``qingteng_v3_4_1_66``),
-           return the shadow. This lets handlers that hard-code an
-           unversioned ``SERVICE_ID`` see post-migration credential
-           updates without any code change.
-        2. **Direct hit** on ``service_id`` (storage-key callers, or
-           unversioned services without any versioned shadow).
-        3. **Legacy fallback** when ``service_id`` looks like a versioned
-           storage key but no entry exists yet — try the underlying
-           unversioned id. Covers the case where startup migration has
-           not run (isolated tests, partially upgraded environments).
-
-        Returns:
-            The service config dict, or ``None`` if not found.
+        Version-aware: delegates the storage-key/legacy-id resolution to
+        :func:`flocks.config.api_versioning.resolve_api_service`.
+        Falls back to a plain dict lookup if the versioning module is
+        unavailable, so a bug there cannot break credential reads.
         """
-        # Tolerate ``"api_services": null`` or non-dict garbage in flocks.json
-        # so a malformed user config never raises AttributeError on the
-        # ``services.get(...)`` calls below.
-        services = cls._read_raw().get("api_services") or {}
-        if not isinstance(services, dict):
-            services = {}
-
-        legacy_resolver = None
+        raw = cls._read_raw().get("api_services")
+        services = raw if isinstance(raw, dict) else {}
         try:
-            from flocks.config.api_service_versioning import (
-                legacy_service_id_for,
-                versioned_storage_key_for,
-            )
-            legacy_resolver = legacy_service_id_for
-            shadow = versioned_storage_key_for(service_id)
-            if shadow and shadow != service_id and shadow in services:
-                return services[shadow]
+            from flocks.config.api_versioning import resolve_api_service
+            return resolve_api_service(service_id, services)
         except Exception:
-            pass
-
-        direct = services.get(service_id)
-        if direct is not None:
-            return direct
-
-        if legacy_resolver is not None:
-            legacy = legacy_resolver(service_id)
-            if legacy and legacy != service_id:
-                return services.get(legacy)
-        return None
+            return services.get(service_id)
 
     @classmethod
     def list_api_services_raw(cls) -> Dict[str, Any]:
@@ -538,41 +503,23 @@ class ConfigWriter:
                 {"apiKey": "{secret:threatbook_api_key}"},
             )
 
-        Args:
-            service_id: Storage key in ``api_services``. New callers should
-                pass the versioned storage key (e.g. ``tdp_api_v3_3_10``);
-                see :mod:`flocks.config.api_service_versioning`.
-                Writes go to the literal key — they are NOT redirected to a
-                versioned shadow even when one exists. A warning is logged
-                in that case to surface the asymmetry against
-                :meth:`get_api_service_raw`, which DOES prefer the shadow.
-            service_config: Config dict; use ``"apiKey": "{secret:<id>}"`` to
-                            reference a secret stored in .secret.json.
+        ``service_id`` is the literal storage key — writes are NOT redirected
+        to a versioned shadow even when one exists. New callers should pass
+        the versioned storage key (e.g. ``tdp_api_v3_3_10``); see
+        :mod:`flocks.config.api_versioning`. Writes that target a
+        shadowed legacy id emit a warning, since
+        :meth:`get_api_service_raw` would prefer the shadow and silently
+        ignore them.
         """
         data = cls._read_raw()
-        if "api_services" not in data:
-            data["api_services"] = {}
-        data["api_services"][service_id] = service_config
+        services = data.setdefault("api_services", {})
+        services[service_id] = service_config
         cls._write_raw(data)
         log.info("config_writer.api_service_set", {"service_id": service_id})
 
-        # Surface the read/write asymmetry early: writing to a legacy id
-        # while a versioned shadow exists means subsequent reads via
-        # ``get_api_service_raw`` (which prefers the shadow) will not see
-        # this update. Almost always indicates the caller should be using
-        # the storage key instead.
         try:
-            from flocks.config.api_service_versioning import versioned_storage_key_for
-            shadow = versioned_storage_key_for(service_id)
-            if shadow and shadow != service_id and shadow in data["api_services"]:
-                log.warning("config_writer.api_service_set.shadowed", {
-                    "service_id": service_id,
-                    "shadow": shadow,
-                    "hint": (
-                        "Writes to the legacy id are invisible to readers — "
-                        "pass the versioned storage key instead."
-                    ),
-                })
+            from flocks.config.api_versioning import warn_if_shadowing_legacy
+            warn_if_shadowing_legacy(service_id, services)
         except Exception:
             pass
 

@@ -1,10 +1,10 @@
-"""Tests for ``flocks.config.api_service_versioning``.
+"""Tests for ``flocks.config.api_versioning``.
 
 Covers:
 - ``derive_storage_key`` shape and edge cases
 - Plugin descriptor discovery + cache invalidation
 - ``legacy_service_id_for`` resolution (registry + heuristic)
-- ``is_legacy_shadowed`` behaviour
+- ``shadowed_legacy_ids`` behaviour
 - ``migrate_api_services`` copy-only semantics, idempotence, backup
 - ``ConfigWriter.get_api_service_raw`` legacy fallback
 """
@@ -17,11 +17,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from flocks.config import api_service_versioning as versioning
-from flocks.config.api_service_versioning import (
+from flocks.config import api_versioning as versioning
+from flocks.config.api_versioning import (
     derive_storage_key,
     discover_api_service_descriptors,
-    is_legacy_shadowed,
     legacy_service_id_for,
     migrate_api_services,
     shadowed_legacy_ids,
@@ -146,7 +145,7 @@ class TestDiscovery:
 
 
 # ---------------------------------------------------------------------------
-# legacy_service_id_for / is_legacy_shadowed
+# legacy_service_id_for / shadowed_legacy_ids
 # ---------------------------------------------------------------------------
 
 class TestLegacyResolution:
@@ -169,21 +168,21 @@ class TestLegacyResolution:
         versioning._reset_descriptor_cache()
         assert legacy_service_id_for("plain_name") is None
 
-    def test_is_legacy_shadowed_true(self, api_root):
+    def test_shadowed_when_versioned_key_present(self, api_root):
         _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
         versioning._reset_descriptor_cache()
-        assert is_legacy_shadowed("tdp_api", {"tdp_api", "tdp_api_v3_3_10"}) is True
+        assert shadowed_legacy_ids({"tdp_api", "tdp_api_v3_3_10"}) == {"tdp_api"}
 
-    def test_is_legacy_shadowed_false_when_no_versioned_counterpart(self, api_root):
+    def test_not_shadowed_when_no_versioned_counterpart(self, api_root):
         _write_provider_yaml(api_root / "qingteng", service_id="qingteng", version=None)
         versioning._reset_descriptor_cache()
-        assert is_legacy_shadowed("qingteng", {"qingteng"}) is False
+        assert shadowed_legacy_ids({"qingteng"}) == set()
 
-    def test_is_legacy_shadowed_false_when_versioned_key_absent(self, api_root):
+    def test_not_shadowed_when_versioned_key_absent(self, api_root):
         _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
         versioning._reset_descriptor_cache()
         # Versioned key not present in flocks.json -> legacy block stays visible.
-        assert is_legacy_shadowed("tdp_api", {"tdp_api"}) is False
+        assert shadowed_legacy_ids({"tdp_api"}) == set()
 
     def test_shadowed_legacy_ids_batch(self, api_root):
         _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
@@ -448,7 +447,7 @@ class TestConfigWriterFallback:
 
         # Flocks logs structured records to stderr; assert against that.
         captured = capsys.readouterr()
-        assert "config_writer.api_service_set.shadowed" in captured.err, (
+        assert "api_service.write.shadowed_legacy" in captured.err, (
             f"expected a shadow warning in stderr; got: {captured.err}"
         )
 
@@ -465,7 +464,7 @@ class TestConfigWriterFallback:
         ConfigWriter.set_api_service("qingteng_v3_4_1_66", {"base_url": "ok"})
 
         captured = capsys.readouterr()
-        assert "config_writer.api_service_set.shadowed" not in captured.err
+        assert "api_service.write.shadowed_legacy" not in captured.err
 
     def test_get_api_service_raw_handles_null_api_services(self, isolated_env, api_root):
         """``"api_services": null`` in flocks.json must not crash the reader."""

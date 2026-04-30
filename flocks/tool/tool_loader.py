@@ -573,10 +573,10 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     # ``info.provider`` is the lookup key in ``flocks.json`` ``api_services``.
     # When the plugin declares a version, promote it to a storage key so
     # multiple versions of the same product can keep credentials side-by-side
-    # (see :mod:`flocks.config.api_service_versioning`). Without a version
+    # (see :mod:`flocks.config.api_versioning`). Without a version
     # the storage key collapses back to ``service_id`` for full back-compat.
     if service_id and provider_version:
-        from flocks.config.api_service_versioning import derive_storage_key
+        from flocks.config.api_versioning import derive_storage_key
         storage_key: Optional[str] = derive_storage_key(service_id, provider_version)
     else:
         storage_key = service_id

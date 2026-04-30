@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
     # cheap re-run on every startup, copies legacy ``service_id`` entries to
     # ``<service_id>_v<version>`` once the plugin declares a version.
     try:
-        from flocks.config.api_service_versioning import migrate_api_services
+        from flocks.config.api_versioning import migrate_api_services
         actions = migrate_api_services()
         copied = [k for k, v in actions.items() if v == "copied"]
         if copied:

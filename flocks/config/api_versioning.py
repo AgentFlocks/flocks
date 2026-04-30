@@ -159,23 +159,13 @@ def versioned_storage_key_for(service_id: str) -> Optional[str]:
     return None
 
 
-def is_legacy_shadowed(service_id: str, present_keys: Iterable[str]) -> bool:
-    """True if ``service_id`` is the legacy id of some versioned key in ``present_keys``.
-
-    Used by listing endpoints to hide a legacy ``api_services`` block once
-    its versioned counterpart exists, so the user does not see duplicate
-    entries after migration.
-
-    For batch filtering, prefer :func:`shadowed_legacy_ids` to avoid
-    re-walking the descriptor registry per call.
-    """
-    return service_id in shadowed_legacy_ids(present_keys)
-
-
 def shadowed_legacy_ids(present_keys: Iterable[str]) -> Set[str]:
-    """Return all legacy ``service_id``\u200bs that are shadowed by an entry in
-    ``present_keys``. Single descriptor scan — O(N) batch alternative to
-    repeated :func:`is_legacy_shadowed` calls.
+    """Return legacy ``service_id``\u200bs that are shadowed by a versioned key
+    present in ``present_keys``.
+
+    Listing endpoints use this to hide a legacy ``api_services`` block once
+    its versioned counterpart exists, so the WebUI does not show duplicate
+    entries after migration.
     """
     present = set(present_keys)
     return {
@@ -183,6 +173,56 @@ def shadowed_legacy_ids(present_keys: Iterable[str]) -> Set[str]:
         for d in discover_api_service_descriptors()
         if d.storage_key != d.service_id and d.storage_key in present
     }
+
+
+def resolve_api_service(
+    service_id: str, services: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Three-step version-aware lookup into an ``api_services`` mapping.
+
+    1. **Versioned shadow** — when ``service_id`` is unversioned but a
+       single versioned storage key exists for it, prefer the shadow so
+       handlers that hard-code ``SERVICE_ID = "qingteng"`` transparently
+       see the post-migration credentials.
+    2. **Direct hit** — typical case (caller already passed the storage_key).
+    3. **Legacy fallback** — caller passed a versioned key but only the
+       unversioned block exists yet (partially-upgraded environments
+       and isolated tests).
+
+    Returns ``None`` when no entry matches.
+    """
+    shadow = versioned_storage_key_for(service_id)
+    if shadow and shadow != service_id and shadow in services:
+        return services[shadow]
+
+    direct = services.get(service_id)
+    if direct is not None:
+        return direct
+
+    legacy = legacy_service_id_for(service_id)
+    if legacy and legacy != service_id:
+        return services.get(legacy)
+    return None
+
+
+def warn_if_shadowing_legacy(service_id: str, services: Dict[str, Any]) -> None:
+    """Log a warning when writing to a legacy id whose versioned shadow
+    is already present.
+
+    Subsequent reads via :func:`resolve_api_service` would prefer the
+    shadow, so the just-written value would be silently invisible —
+    almost always a sign the caller should be using the storage_key.
+    """
+    shadow = versioned_storage_key_for(service_id)
+    if shadow and shadow != service_id and shadow in services:
+        log.warning("api_service.write.shadowed_legacy", {
+            "service_id": service_id,
+            "shadow": shadow,
+            "hint": (
+                "Writes to the legacy id are invisible to readers — "
+                "pass the versioned storage key instead."
+            ),
+        })
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +361,7 @@ def _extract_version(provider_cfg: Dict[str, Any]) -> Optional[str]:
         defaults = provider_cfg.get("defaults") or {}
         if isinstance(defaults, dict):
             raw = defaults.get("product_version") or defaults.get("version")
-    if raw is None:
-        return None
-    return str(raw)
+    return str(raw) if raw is not None else None
 
 
 def _resolve_config_path() -> Path:
