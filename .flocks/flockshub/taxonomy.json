@@ -1,0 +1,198 @@
+{
+  "schemaVersion": "hub.taxonomy.v1",
+  "categories": [
+    {
+      "id": "detection",
+      "name": "Detection",
+      "nameCn": "检测",
+      "description": "Detection, investigation, log analysis, endpoint evidence, and threat discovery workflows."
+    },
+    {
+      "id": "threat-intel",
+      "name": "Threat Intelligence",
+      "nameCn": "威胁情报",
+      "description": "IOC enrichment, intelligence lookup, and context building."
+    },
+    {
+      "id": "workflow-automation",
+      "name": "Workflow Automation",
+      "nameCn": "工作流自动化",
+      "description": "Reusable automation for repeatable investigation and operations tasks."
+    },
+    {
+      "id": "integration",
+      "name": "Integration",
+      "nameCn": "集成",
+      "description": "Data integration and device integration plugins for connecting external systems, platforms, and equipment."
+    },
+    {
+      "id": "devtools",
+      "name": "Developer Tools",
+      "nameCn": "开发工具",
+      "description": "Utilities for development, testing, and local productivity."
+    }
+  ],
+  "tags": [
+    "ndr",
+    "edr",
+    "hids",
+    "siem",
+    "waf",
+    "email-security",
+    "iam",
+    "cloud",
+    "kubernetes",
+    "linux",
+    "windows",
+    "active-directory",
+    "api-security",
+    "web-security",
+    "ioc",
+    "vulnerability"
+  ],
+  "useCases": [
+    "threat-detection",
+    "alert-triage",
+    "incident-response",
+    "log-analysis",
+    "endpoint-forensics",
+    "vulnerability-management",
+    "threat-intelligence",
+    "security-reporting",
+    "integration",
+    "other"
+  ],
+  "domains": [
+    "security-ops",
+    "it-ops",
+    "devops"
+  ],
+  "capabilities": [
+    "external-api",
+    "file-analysis",
+    "llm-agent",
+    "network-access",
+    "scheduled-task",
+    "workflow"
+  ],
+  "trustLevels": [
+    "official",
+    "verified",
+    "community",
+    "experimental",
+    "deprecated"
+  ],
+  "riskLevels": [
+    "low",
+    "medium",
+    "high"
+  ],
+  "tagLabels": {
+    "ndr": {
+      "name": "NDR",
+      "nameCn": "NDR"
+    },
+    "edr": {
+      "name": "EDR",
+      "nameCn": "EDR"
+    },
+    "hids": {
+      "name": "HIDS",
+      "nameCn": "HIDS"
+    },
+    "siem": {
+      "name": "SIEM",
+      "nameCn": "SIEM"
+    },
+    "waf": {
+      "name": "WAF",
+      "nameCn": "WAF"
+    },
+    "email-security": {
+      "name": "Email Security",
+      "nameCn": "邮件安全"
+    },
+    "iam": {
+      "name": "IAM",
+      "nameCn": "身份访问"
+    },
+    "cloud": {
+      "name": "Cloud",
+      "nameCn": "云安全"
+    },
+    "kubernetes": {
+      "name": "Kubernetes",
+      "nameCn": "Kubernetes"
+    },
+    "linux": {
+      "name": "Linux",
+      "nameCn": "Linux"
+    },
+    "windows": {
+      "name": "Windows",
+      "nameCn": "Windows"
+    },
+    "active-directory": {
+      "name": "Active Directory",
+      "nameCn": "Active Directory"
+    },
+    "api-security": {
+      "name": "API Security",
+      "nameCn": "API 安全"
+    },
+    "web-security": {
+      "name": "Web Security",
+      "nameCn": "Web 安全"
+    },
+    "ioc": {
+      "name": "IOC",
+      "nameCn": "失陷指标"
+    },
+    "vulnerability": {
+      "name": "Vulnerability",
+      "nameCn": "漏洞"
+    }
+  },
+  "useCaseLabels": {
+    "threat-detection": {
+      "name": "Threat Detection",
+      "nameCn": "威胁检测"
+    },
+    "alert-triage": {
+      "name": "Alert Triage",
+      "nameCn": "告警分诊"
+    },
+    "incident-response": {
+      "name": "Incident Response",
+      "nameCn": "事件响应"
+    },
+    "log-analysis": {
+      "name": "Log Analysis",
+      "nameCn": "日志分析"
+    },
+    "endpoint-forensics": {
+      "name": "Endpoint Forensics",
+      "nameCn": "终端取证"
+    },
+    "vulnerability-management": {
+      "name": "Vulnerability Management",
+      "nameCn": "漏洞管理"
+    },
+    "threat-intelligence": {
+      "name": "Threat Intelligence",
+      "nameCn": "威胁情报"
+    },
+    "security-reporting": {
+      "name": "Security Reporting",
+      "nameCn": "安全报告"
+    },
+    "integration": {
+      "name": "Integration",
+      "nameCn": "集成"
+    },
+    "other": {
+      "name": "Other",
+      "nameCn": "其他"
+    }
+  }
+}

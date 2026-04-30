@@ -509,6 +509,9 @@ async def delete_skill(name: str):
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
 
+        from flocks.hub import local as hub_local
+
+        hub_local.remove_installed_record("skill", name)
         Skill.clear_cache()
         await _refresh_agents_for_skill_change()
 

@@ -790,6 +790,10 @@ async def delete_workflow(workflow_id: str):
         # Remove from filesystem (source of truth)
         _delete_workflow_from_fs(workflow_id)
 
+        from flocks.hub import local as hub_local
+
+        hub_local.remove_installed_record("workflow", workflow_id)
+
         # Clean up runtime data from Storage
         try:
             await Storage.remove(_workflow_stats_key(workflow_id))

@@ -528,6 +528,10 @@ async def delete_agent(name: str):
                 detail=f"Custom agent {name} not found or is a built-in agent",
             )
 
+        from flocks.hub import local as hub_local
+
+        hub_local.remove_installed_record("agent", name)
+
         # Sync: remove from in-memory agent cache
         from flocks.agent.registry import Agent as AgentRegistry
         AgentRegistry.unregister(name)

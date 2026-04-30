@@ -31,8 +31,11 @@ jobs:
       - name: Python lint
         run: uv run ruff check flocks/cli/main.py flocks/cli/service_manager.py
 
+      - name: Validate bundled Hub
+        run: uv run python scripts/validate_flockshub.py
+
       - name: Python test
-        run: uv run pytest tests/scripts
+        run: uv run pytest tests/scripts tests/hub
 
 
   frontend:
