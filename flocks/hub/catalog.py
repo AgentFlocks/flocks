@@ -230,8 +230,19 @@ def _workflow_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest
     )
 
 
+def _has_direct_tool_payload(root: Path) -> bool:
+    return any(
+        path.is_file()
+        and (
+            (path.suffix in {".yaml", ".yml"} and not path.name.startswith("_"))
+            or (path.suffix == ".py" and path.name != "__init__.py")
+        )
+        for path in root.iterdir()
+    )
+
+
 def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
-    if not local.has_install_payload("tool", root):
+    if not _has_direct_tool_payload(root):
         return None
     provider = _read_yaml(root / "_provider.yaml") if (root / "_provider.yaml").is_file() else {}
     yaml_files = sorted(path for path in root.glob("*.y*ml") if not path.name.startswith("_"))
