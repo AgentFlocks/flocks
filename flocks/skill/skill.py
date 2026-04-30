@@ -364,7 +364,10 @@ class Skill:
         if cls._cache is None:
             cls._cache = cls._discover()
 
-        return cls._cache.get(name)
+        skill = cls._cache.get(name)
+        if not skill:
+            return None
+        return skill
 
     @classmethod
     def clear_cache(cls) -> None:
