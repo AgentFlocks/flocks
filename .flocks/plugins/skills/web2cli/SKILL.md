@@ -1,6 +1,6 @@
 ---
 name: web2cli
-description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者通过 `browser-use` 的 `browser-harness` 内核复用用户 Chrome 登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
+description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chrome 登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
 required: browser-use
 ---
 
@@ -23,25 +23,16 @@ required: browser-use
 
 适用于需要独立浏览器会话、命令式浏览器自动化、和 `agent-browser --session-name` 工作流的场景。
 
-### `cdp-direct`
+### `cdp-direct`（默认模式）
 
-适用于需要复用用户 Chrome 登录态、通过 `browser-use` 的 `browser-harness` 内核直连 CDP、或者希望保留用户原有 tab 不受影响的场景。
+适用于需要复用用户 Chrome 登录态、通过 `browser-use` 的 `flocks browser` 内核直连 CDP 的场景。
 
-使用此模式前必须：
-
-1. 加载 `browser-use` skill，并按其中规则明确选择 `cdp-direct` 模式。
-2. 在 `.flocks/plugins/skills/browser-use` 目录运行 doctor。
-3. doctor 通过后，立即阅读 `.flocks/plugins/skills/browser-use/references/cdp-direct.md`。
-4. 后续所有 `cdp-direct` 命令都通过 `uv run python -m scripts.run -c '...'` 执行。
-
+使用此模式前必须检查可用性：
 ```bash
-(
-  cd .flocks/plugins/skills/browser-use &&
-  uv run python -m scripts.run --doctor
-)
+flocks browser --doctor
 ```
 
-如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，按 `browser-use` 的规则提示用户开启 Chrome remote debugging 后重试，不要继续使用旧 CDP proxy。
+如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，按 `browser-use` 的规则提示用户开启 Chrome remote debugging 后重试。
 
 ## 输出目录约定
 
@@ -54,7 +45,6 @@ MODE="${MODE:-agent-browser}"
 CAPTURE_NAME="<name>"
 TODAY="$(date +%F)"
 CAPTURE_ROOT="$HOME/.flocks/workspace/outputs/$TODAY/web2cli/$CAPTURE_NAME"
-BROWSER_USE_SKILL=".flocks/plugins/skills/browser-use"
 WEB2CLI_SKILL=".flocks/plugins/skills/web2cli"
 mkdir -p "$CAPTURE_ROOT/captures"
 ```
@@ -64,7 +54,7 @@ mkdir -p "$CAPTURE_ROOT/captures"
 - 浏览器内存中的原始捕获数据：`window.__capturedRequests`
 - 导出的接口抓包 JSON：`$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json`
 - 浏览器认证状态：`$CAPTURE_ROOT/auth-state.json`
-- 生成的 CLI 工具：`$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py`
+- 生成的 CLI 工具：`$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，`generate-cli.py` 会把 `-` 等非 Python 模块名字符替换为 `_`
 - 生成的接口文档：`$CAPTURE_ROOT/${CAPTURE_NAME}_api.md`
 - 生成的 Postman 集合：`$CAPTURE_ROOT/${CAPTURE_NAME}_postman.json`
 
@@ -82,9 +72,8 @@ agent-browser --headed --session-name "$CAPTURE_NAME" open "<URL>"
 
 ```bash
 TARGET_ID=$(
-  cd "$BROWSER_USE_SKILL" &&
-  uv run python -m scripts.run -c '
-tid = new_tab("<URL>")
+  flocks browser -c '
+tid = new_tab("<URL>", activate=True)
 wait_for_load()
 print(tid)
 ' | tail -n 1
@@ -117,9 +106,8 @@ agent-browser --session-name "$CAPTURE_NAME" eval --stdin < .flocks/plugins/skil
 ```bash
 WEB2CLI_HOOK="$(pwd)/$WEB2CLI_SKILL/scripts/inject-hook-simple.js"
 
-(
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" WEB2CLI_HOOK="$WEB2CLI_HOOK" uv run python -m scripts.run -c '
+export TARGET_ID WEB2CLI_HOOK
+flocks browser -c '
 import os
 from pathlib import Path
 
@@ -127,31 +115,12 @@ target_id = os.environ.get("TARGET_ID")
 if target_id:
     switch_tab(target_id)
 
-source = Path(os.environ["WEB2CLI_HOOK"]).read_text(encoding="utf-8")
+hook_path = os.environ.get("WEB2CLI_HOOK", "")
+source = Path(hook_path).read_text(encoding="utf-8")
 cdp("Page.addScriptToEvaluateOnNewDocument", source=source)
 js(source)
 print(js("typeof window.__apiCapture !== \"undefined\" ? \"installed v\" + window.__apiCapture.version : \"NOT installed\""))
-'
-)
-```
-
-如果 `cdp-direct` 返回 `NOT installed`，再立即对当前页面补一次：
-
-```bash
-(
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" WEB2CLI_HOOK="$WEB2CLI_HOOK" uv run python -m scripts.run -c '
-import os
-from pathlib import Path
-
-target_id = os.environ.get("TARGET_ID")
-if target_id:
-    switch_tab(target_id)
-
-js(Path(os.environ["WEB2CLI_HOOK"]).read_text(encoding="utf-8"))
-print(js("typeof window.__apiCapture !== \"undefined\" ? \"installed v\" + window.__apiCapture.version : \"NOT installed\""))
-'
-)
+' 
 ```
 
 注入后默认从 `window.__capturedRequests` 读取结果。
@@ -175,13 +144,12 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__apiCapture.config.ca
 
 ```bash
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" flocks browser -c '
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 js("window.__apiCapture.config.captureMode = \"all\"")
 print(js("window.__apiCapture.config.captureMode"))
@@ -205,13 +173,12 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.len
 
 ```bash
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" flocks browser -c '
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 print(js("window.__capturedRequests.length"))
 '
@@ -232,13 +199,12 @@ agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.len
 
 ```bash
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" flocks browser -c '
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 print(js("window.__capturedRequests.length"))
 '
@@ -259,14 +225,13 @@ agent-browser --session-name "$CAPTURE_NAME" eval "JSON.stringify(window.__captu
 CAPTURE_OUT="$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" flocks browser -c '
 import json
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 raw = js("JSON.stringify(window.__capturedRequests || [])")
 data = json.loads(raw or "[]")
@@ -284,14 +249,13 @@ print(f"Saved {len(data)} requests to {out}")
 CAPTURE_OUT="$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" CAPTURE_OUT="$CAPTURE_OUT" flocks browser -c '
 import json
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 total = int(js("window.__capturedRequests.length") or 0)
 data = []
@@ -321,14 +285,13 @@ agent-browser --session-name "$CAPTURE_NAME" state save "$CAPTURE_ROOT/auth-stat
 AUTH_OUT="$CAPTURE_ROOT/auth-state.json"
 
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" AUTH_OUT="$AUTH_OUT" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" AUTH_OUT="$AUTH_OUT" flocks browser -c '
 import json
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
+    attach_tab(target_id)
 
 info = page_info()
 cookies = cdp("Network.getCookies", urls=[info["url"]]).get("cookies", [])
@@ -362,14 +325,14 @@ agent-browser --session-name "$CAPTURE_NAME" close
 
 ```bash
 (
-  cd "$BROWSER_USE_SKILL" &&
-  TARGET_ID="$TARGET_ID" uv run python -m scripts.run -c '
+  TARGET_ID="$TARGET_ID" flocks browser -c '
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
-    switch_tab(target_id)
-close_tab()
+    close_tab(target_id, activate_next=False)
+else:
+    close_tab(activate_next=False)
 '
 )
 ```
@@ -403,6 +366,8 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
   --base-url "https://example.com" \
   --output "$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py"
 ```
+
+如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成器会自动规范化输出文件名，例如 `tdp118-51_cli.py` 会写为 `tdp118_51_cli.py`，并在命令输出中打印实际路径。
 
 如需同时产出文档或 Postman 集合，可继续执行：
 

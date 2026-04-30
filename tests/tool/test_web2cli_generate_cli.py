@@ -1,4 +1,6 @@
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 
@@ -70,3 +72,42 @@ def test_generate_postman_collection_uses_endpoint_path():
 
     assert request["url"]["raw"] == "{{base_url}}/api/items/list"
     assert request["url"]["path"] == ["api", "items", "list"]
+
+
+def test_sanitize_python_output_path_returns_importable_filename():
+    module = _load_module()
+
+    assert module.sanitize_python_output_path("tdp118-51_cli.py") == "tdp118_51_cli.py"
+    assert module.sanitize_python_output_path("123-client.py") == "_123_client.py"
+    assert module.sanitize_python_output_path("class.py") == "class_.py"
+
+
+def test_python_output_normalizes_explicit_filename(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    input_path = tmp_path / "captured.json"
+    requested_output = tmp_path / "tdp118-51_cli.py"
+    expected_output = tmp_path / "tdp118_51_cli.py"
+
+    input_path.write_text(json.dumps(_sample_requests()), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate-cli.py",
+            str(input_path),
+            "--format",
+            "python",
+            "--output",
+            str(requested_output),
+            "--base-url",
+            "https://example.com",
+        ],
+    )
+
+    module.main()
+
+    captured = capsys.readouterr()
+    assert not requested_output.exists()
+    assert expected_output.exists()
+    assert f"Written to {expected_output}" in captured.out
+    assert f"{requested_output} -> {expected_output}" in captured.err

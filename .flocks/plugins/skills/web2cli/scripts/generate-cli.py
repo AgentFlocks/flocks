@@ -9,6 +9,7 @@ Usage:
 
 import json
 import argparse
+import keyword
 import re
 import sys
 from pathlib import Path
@@ -24,7 +25,19 @@ def sanitize_name(name: str) -> str:
     name = name.strip('_')
     if name and name[0].isdigit():
         name = '_' + name
-    return name.lower() or 'endpoint'
+    name = name.lower() or 'endpoint'
+    if keyword.iskeyword(name):
+        name = f'{name}_'
+    return name
+
+
+def sanitize_python_output_path(output_path: str) -> str:
+    """Return a Python output path whose filename is importable as a module."""
+    path = Path(output_path)
+    suffix = path.suffix or '.py'
+    stem = path.stem if path.suffix else path.name
+    safe_stem = sanitize_name(stem)
+    return str(path.with_name(f'{safe_stem}{suffix}'))
 
 
 def parse_endpoint(url: str) -> Dict[str, Any]:
@@ -408,10 +421,17 @@ def main():
         output = generate_markdown_docs(requests, args.title)
 
     # Write output
-    if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
+    output_path = args.output
+    if output_path and args.format == 'python':
+        safe_output_path = sanitize_python_output_path(output_path)
+        if safe_output_path != output_path:
+            print(f"Python output filename normalized: {output_path} -> {safe_output_path}", file=sys.stderr)
+        output_path = safe_output_path
+
+    if output_path:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(output)
-        print(f"Written to {args.output}")
+        print(f"Written to {output_path}")
     else:
         print(output)
 

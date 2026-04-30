@@ -1,12 +1,12 @@
-# CDP 直连（browser-harness 内核）
+# CDP 直连（flocks browser 内核）
 
 本文件是 `browser-use` 的 CDP 模式参考文档。只有当 `browser-use/SKILL.md` 判定应使用 `CDP 直连` 时，才读取并遵循本文件；不要和 `references/agent-browser.md` 同时加载。
 
 ## 使用入口
 
-`browser-harness` 是一个薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。当前内核作为 `browser-use/scripts` 随 skill 分发，不依赖 `browser-harness` console script。
+`flocks browser` 是 Flocks 内置的薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。源码位于 `flocks/browser/`，通过 `flocks browser ...` 调用。
 
-所有命令都必须在当前 skill 目录（即 `.flocks/plugins/skills/browser-use`）执行；如果当前目录不确定，先切到 `<skill-dir>` 再运行 `uv run python -m scripts.run ...`。
+所有命令默认在仓库根目录执行；如果当前目录不在仓库根目录，先切到项目根目录再运行 `flocks browser ...`。
 
 ## 适用范围
 
@@ -20,7 +20,8 @@
 
 ## 操作原则
 
-- 默认不要直接操作用户已有 tab。优先 `new_tab(url)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
+- 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
+- 后续命令恢复同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(target_id)` 抢用户当前浏览器焦点。只有需要让用户看到页面、登录、授权或手动操作时才使用 `switch_tab(target_id)`。
 - 只关闭自己创建的 tab，不关闭用户原有 tab。
 - 不要主动停止或重启 Chrome。daemon stale 时可以 `restart_daemon()` 一次；杀 Chrome 只能作为最后排障手段并先说明影响。
 - 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权 Chrome 调试连接。
@@ -31,43 +32,43 @@
 
 ## 快速开始
 
-先确认 harness 可用：
+先确认 `flocks browser` 可用：
 
 ```bash
-uv run python -m scripts.run --doctor
+flocks browser --doctor
 ```
 
 基本用法：
 
 ```bash
-uv run python -m scripts.run -c '
-tid = new_tab("https://example.com")
+flocks browser -c '
+tid = new_tab("https://example.com", activate=True)
 wait_for_load()
 print(page_info())
 '
 ```
 
-`uv run python -m scripts.run -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chrome。
+`flocks browser -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chrome。
 
 常用 helpers：
 
-- `new_tab(url)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
+- `new_tab(url, activate=True)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
 - `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(x, y, dy=-300)`
 - `js(expression)`, `cdp("Domain.method", **params)`, `drain_events()`
-- `list_tabs(include_chrome=False)`, `current_tab()`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
+- `list_tabs(include_chrome=False)`, `current_tab()`, `attach_tab(target_id)`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
 - `upload_file(selector, path)`, `http_get(url, headers=None)`
 - `capture_screenshot(path="/tmp/shot.png", full=False, max_dim=1800)` 仅用于可查看图片文件的调试或交付场景
 
 ## 标准工作流
 
-`browser-harness` 的基础循环是：打开页面 -> 读取结构化状态 -> 执行动作 -> 重新读取状态验证。
+`flocks browser` 的基础循环是：打开页面 -> 读取结构化状态 -> 执行动作 -> 重新读取状态验证。
 
-1. 如果是具体网站任务，先搜索已存在的站点经验。优先看 harness 的 `agent-workspace/domain-skills/`；如果没有，再自己探索。
+1. 如果是具体网站任务，先搜索已存在的站点经验。优先看 `~/.flocks/workspace/domain-skills/`；如果没有，再自己探索。
 2. 创建自己的 tab，等待加载，并读取页面基础状态与候选交互元素：
 
 ```bash
-uv run python -m scripts.run -c '
-tid = new_tab("https://example.com")
+flocks browser -c '
+tid = new_tab("https://example.com", activate=True)
 wait_for_load()
 print(page_info())
 
@@ -93,7 +94,7 @@ print(state)
 3. 执行动作并验证。能稳定定位 DOM 时，优先用 `js(...)`；必须操作可见但 DOM 难以稳定定位的控件时，再使用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
 
 ```bash
-uv run python -m scripts.run -c '
+flocks browser -c '
 js("document.querySelector(\"button[type=submit]\")?.click()")
 wait(0.5)
 print(page_info())
@@ -112,11 +113,14 @@ print(page_info())
 
 ## Tab 与可见性
 
-- `new_tab(url)` 会创建并 attach 到新 tab；这是默认入口，避免污染用户当前 tab。
-- `switch_tab(target_id)` 会 attach 到目标 tab，但用户是否看见取决于 Chrome 可见状态；必要时再用 `cdp("Target.activateTarget", targetId=target_id)`。
+- `new_tab(url, activate=True)` 会创建并 attach 到新 tab，默认同时让 tab 在 Chrome 中可见；这是需要用户登录或观察页面时的默认入口。
+- `new_tab(url, activate=False)` 会创建后台 tab 并 attach，不主动抢当前可见 tab。
+- `attach_tab(target_id)` 只 attach 到目标 tab，不激活 Chrome UI；后续读取页面状态、导出数据、保存认证状态等命令优先使用它。
+- `switch_tab(target_id)` 会 attach 到目标 tab 并执行 `Target.activateTarget`，让目标 tab 在 Chrome 中可见；只在需要用户看到或手动操作时使用。
+- `close_tab(target_id, activate_next=False)` 可关闭自己创建的 tab 且不自动切到其他已打开 tab。
 - `list_tabs()` 默认会包含 `chrome://`、`about:` 等内部页面；要面向用户页面时用 `list_tabs(include_chrome=False)`。
 - 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
-- 当当前 session stale、内部页或不可见时，先 `ensure_real_tab()`。
+- 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户可见页面时，先 `ensure_real_tab()`。
 
 ## 结构化观察与点击
 
@@ -144,7 +148,7 @@ capture_screenshot("/tmp/shot.png", max_dim=1800)
 如果启用点击调试：
 
 ```bash
-uv run python -m scripts.run --debug-clicks -c '
+flocks browser --debug-clicks -c '
 click_at_xy(420, 315)
 '
 ```
@@ -180,7 +184,7 @@ upload_file("input[type=file]", "/absolute/path/to/file")
 
 ## 登录与认证状态
 
-`browser-harness` 复用用户当前 Chrome profile。cookies、localStorage、sessionStorage 会自然保留；用户完成登录后，同一 profile 下的新 tab 通常自动带登录态。
+`flocks browser` 复用用户当前 Chrome profile。cookies、localStorage、sessionStorage 会自然保留；用户完成登录后，同一 profile 下的新 tab 通常自动带登录态。
 
 - 先打开目标页判断是否已登录；需要密码、验证码、TOTP 或授权确认时，让用户在 Chrome 中操作。
 - 用户完成后刷新或重新打开目标 URL，再用 `page_info()` / `js(...)` 验证目标内容是否可见。
@@ -190,8 +194,8 @@ upload_file("input[type=file]", "/absolute/path/to/file")
 检查登录态时只看 cookie 名称和 storage key：
 
 ```bash
-uv run python -m scripts.run -c '
-tid = new_tab("https://example.com")
+flocks browser -c '
+tid = new_tab("https://example.com", activate=True)
 wait_for_load()
 cookies = cdp("Network.getCookies", urls=["https://example.com"]).get("cookies", [])
 print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(localStorage)")})
@@ -202,24 +206,24 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 
 ## 安装与连接排障
 
-如果 `uv run python -m scripts.run` 不可用或连接失败：
+如果 `flocks browser` 不可用或连接失败：
 
-1. 先运行 `uv run python -m scripts.run --doctor` 看版本、安装模式、daemon 和 Chrome 状态。
-2. 首次安装或冷启动优先运行 `uv run python -m scripts.run --setup`。
+1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和 Chrome 状态。
+2. 首次安装或冷启动优先运行 `flocks browser --setup`。
 3. Chrome 未运行时只启动 Chrome，再重试；不要直接让用户改设置。
 4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开 `chrome://inspect/#remote-debugging` 并勾选 Allow remote debugging。
 5. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是 Chrome 正在启动，轮询等待，不要重启。
 6. stale websocket / stale socket 时执行一次：
 
 ```bash
-uv run python -m scripts.run -c 'restart_daemon()'
+flocks browser -c 'restart_daemon()'
 ```
 
-7. 如果看到 `[browser-harness] update available`，可运行 `uv run python -m scripts.run --update -y`。若 editable clone 有未提交改动导致 update 拒绝，告诉用户处理工作区，不要强行覆盖。
+7. 如果需要更新当前实现，可运行 `flocks browser --update -y`。若 editable clone 有未提交改动导致 update 拒绝，告诉用户处理工作区，不要强行覆盖。
 
 ## 沉淀可复用经验
 
-如果在某个网站上学到了可复用信息，优先沉淀到 harness 的 `agent-workspace/domain-skills/<site>/`：
+如果在某个网站上学到了可复用信息，优先沉淀到 `~/.flocks/workspace/domain-skills/<site>/`：
 
 - URL 模式、必要 query 参数、能跳过 loader 的直接路由。
 - 私有 API、请求方法、payload 结构、认证依赖。
@@ -228,14 +232,14 @@ uv run python -m scripts.run -c 'restart_daemon()'
 
 不要写入 secrets、cookies、token、用户个人数据、原始像素坐标或本次任务流水账。
 
-## 相关脚本
+## 相关源码
 
-`browser-use/scripts/` 是当前 CDP 直连模式使用的本地 `browser-harness` 内核实现：
+`flocks/browser/` 是当前 CDP 直连模式使用的内核实现：
 
 - `_ipc.py`：daemon IPC 通信。
 - `daemon.py`：CDP WebSocket 持有与命令转发。
-- `helpers.py`：`uv run python -m scripts.run -c` 中预加载的页面操作 helper。
+- `helpers.py`：`flocks browser -c` 中预加载的页面操作 helper。
 - `admin.py`：doctor、setup、update、daemon 管理与 profile/cloud 相关辅助能力。
 - `run.py`：CLI 入口。
 
-日常浏览器任务只按本文件中的 `uv run python -m scripts.run -c '...'` 使用 helpers；只有排障、升级或维护内核时才需要阅读脚本源码。
+日常浏览器任务只按本文件中的 `flocks browser -c '...'` 使用 helpers；只有排障、升级或维护内核时才需要阅读源码。

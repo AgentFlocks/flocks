@@ -23,11 +23,10 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 C
 先执行：
 
 ```bash
-# 该命令必须在当前 skill 目录（即 `.flocks/plugins/skills/browser-use`）执行
-uv run python -m <skill-dir>/scripts.run --doctor
+flocks browser --doctor
 ```
 
-该命令会检查 `browser-harness` 是否可用、Chrome/Edge 是否运行、daemon 是否存活，以及当前是否有可用的浏览器连接。
+该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Edge 是否运行，以及当前是否有可用的浏览器连接。
 
 ### 第二步：根据检测结果决定模式
 
@@ -54,7 +53,7 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 - 如果重新检测通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
 - 如果仍未通过：继续提示用户检查 remote debugging，或提示切到 `agent-browser`
 
-#### 结果 C：`browser-harness` 不可用，或当前机器没有可用 Chrome/Edge
+#### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Edge
 
 说明当前环境不适合 `CDP 直连`。此时要：
 
@@ -76,5 +75,5 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 
 ## References
 
-- `references/cdp-direct.md`：以 `browser-harness` 作为 CDP 直连内核的启动方式、API、页面探索策略、错误处理
+- `references/cdp-direct.md`：以 `flocks browser` 作为 CDP 直连入口的启动方式、API、页面探索策略、错误处理
 - `references/agent-browser.md`：agent-browser 的 snapshot/ref 工作流、交互命令、等待、截图、排障
