@@ -2,17 +2,14 @@
 
 这是 `agent-browser` 的核心使用参考。适用于通用网页交互、表单填写、点击、截图、提取数据、标签页管理、多会话运行、录屏、网络抓取与排障。
 
-## 前置设定
+## 前置设定（必读）
 
 - 默认使用agent-browser 的 headed 模式，除非用户要求本次任务以 headless 模式执行
-- 对新的域名指定 session，以保持登录态
+- 默认对新的域名指定 session，以保持登录态
 
 ```
-# 开启headed模式
-export AGENT_BROWSER_HEADED=1
-
-# 指定 session（保持登录态）
-export AGENT_BROWSER_SESSION_NAME=my-session
+# 开启headed模式 并 指定 session
+agent-browser --session <name> --headed open https://example.com
 ```
 
 ## 核心循环

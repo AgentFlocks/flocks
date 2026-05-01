@@ -14,9 +14,19 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 C
 - 访问登录后页面、内部系统、动态渲染页面
 - 复用用户当前 Chrome 的登录态
 
-## 先判定模式
+## 浏览器使用模式说明
 
-默认先尝试 `CDP 直连`，不要一开始就把两种模式都读一遍。
+| 模式 | 说明 | 何时使用 |
+| --- | --- | --- |
+| `agent-browser` | 独立浏览器自动化模式 | 用户明确说用 `agent-browser`|
+| `cdp-direct` | 复用本机 Chrome 的 CDP 直连模式 | 用户明确说用 CDP 模式|
+
+ - 用户明确指出模式后，直接阅读执行规则部分
+ - 当用户没有明确指出使用模式时，进入下一步自动判定
+
+## 自动判定模式
+
+当用户没有明确指出使用模式时,开始自动判断
 
 ### 第一步：先跑 CDP 可用性检测
 
@@ -48,9 +58,9 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 不使用 CDP 模式，使用agent-browser
 ```
 
-然后等待用户进一步指示。如果用户确认已开启后，重新运行同一个检测命令。
+然后等待用户进一步指示。如果用户确认已开启后，不要立刻重跑 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 attach，再运行 `flocks browser --doctor` 做只读确认。
 
-- 如果重新检测通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
+- 如果 `--setup` / `-c` 成功，或随后 `--doctor` 通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
 - 如果仍未通过：继续提示用户检查 remote debugging，或提示切到 `agent-browser`
 
 #### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Edge
@@ -68,12 +78,8 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 
 1. 模式一旦确定，立即只读取对应的 reference。
 2. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
-3. 涉及账号风控时，先提示用户存在自动化检测和封禁风险。
-4. 操作结束后清理自己创建的资源：
-   - `CDP 直连`：关闭自己创建的 tab，不关闭用户已有 tab。
-   - `agent-browser`：按需关闭 tab 或 browser session。
 
 ## References
 
 - `references/cdp-direct.md`：以 `flocks browser` 作为 CDP 直连入口的启动方式、API、页面探索策略、错误处理
-- `references/agent-browser.md`：agent-browser 的 snapshot/ref 工作流、交互命令、等待、截图、排障
+- `references/agent-browser.md`：agent-browser 的使用说明、错误处理等

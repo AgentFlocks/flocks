@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 
@@ -60,6 +61,7 @@ def test_generate_python_client_uses_endpoint_path():
     output = module.generate_python_client(_sample_requests(), "https://example.com")
 
     assert 'base_url: str = "https://example.com"' in output
+    assert 'cookie_file: str = "auth-state.json"' in output
     assert 'return self._request("POST", "/api/items/list", data)' in output
     assert 'return self._request("POST", "https://example.com/api/items/list", data)' not in output
 
@@ -111,3 +113,80 @@ def test_python_output_normalizes_explicit_filename(tmp_path, monkeypatch, capsy
     assert expected_output.exists()
     assert f"Written to {expected_output}" in captured.out
     assert f"{requested_output} -> {expected_output}" in captured.err
+
+
+class _FakeCookieJar:
+    def __init__(self) -> None:
+        self.set_calls = []
+
+    def set(self, name, value, **kwargs) -> None:
+        self.set_calls.append({"name": name, "value": value, **kwargs})
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.cookies = _FakeCookieJar()
+        self.headers = {}
+
+    def request(self, method, url, json=None):
+        raise AssertionError("request should not be called in cookie-loading tests")
+
+
+def test_generated_client_loads_storage_state_cookie_object(tmp_path, monkeypatch):
+    module = _load_module()
+    auth_state = tmp_path / "auth-state.json"
+    auth_state.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "sid", "value": "cookie-123", "domain": ".zhihu.com", "path": "/"},
+                    {"name": "api", "value": "cookie-456", "domain": "api.zhihu.com", "path": "/api"},
+                ],
+                "origins": [{"origin": "https://www.zhihu.com", "localStorage": [{"name": "token", "value": "abc"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    fake_session = _FakeSession()
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {}
+    exec(module.generate_python_client(_sample_requests(), "https://example.com"), namespace)
+
+    client = namespace["APIClient"](cookie_file=str(auth_state))
+
+    assert client.session is fake_session
+    assert fake_session.cookies.set_calls == [
+        {"name": "sid", "value": "cookie-123", "domain": ".zhihu.com", "path": "/"},
+        {"name": "api", "value": "cookie-456", "domain": "api.zhihu.com", "path": "/api"},
+    ]
+
+
+def test_generated_client_still_supports_plain_cookie_list(tmp_path, monkeypatch):
+    module = _load_module()
+    cookie_file = tmp_path / "cookies.json"
+    cookie_file.write_text(
+        json.dumps(
+            [
+                {"name": "sid", "value": "cookie-123"},
+                {"name": "api", "value": "cookie-456", "path": "/"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    fake_session = _FakeSession()
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {}
+    exec(module.generate_python_client(_sample_requests(), "https://example.com"), namespace)
+
+    namespace["APIClient"](cookie_file=str(cookie_file))
+
+    assert fake_session.cookies.set_calls == [
+        {"name": "sid", "value": "cookie-123"},
+        {"name": "api", "value": "cookie-456", "path": "/"},
+    ]

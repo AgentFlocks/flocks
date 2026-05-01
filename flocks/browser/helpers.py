@@ -11,6 +11,7 @@ import os
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from . import DEFAULT_AGENT_WORKSPACE
@@ -20,6 +21,23 @@ from . import _ipc as ipc
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
 NAME = os.environ.get("BU_NAME", "default")
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
+_COMMON_SECOND_LEVEL_SUFFIXES = {"ac", "co", "com", "edu", "gov", "mil", "net", "org"}
+_COOKIE_IMPORT_FIELDS = {
+    "name",
+    "value",
+    "url",
+    "domain",
+    "path",
+    "secure",
+    "httpOnly",
+    "sameSite",
+    "expires",
+    "priority",
+    "sameParty",
+    "sourceScheme",
+    "sourcePort",
+    "partitionKey",
+}
 
 
 def _load_env() -> None:
@@ -203,6 +221,241 @@ def page_info():
         "ph:document.documentElement.scrollHeight})"
     )
     return json.loads(_runtime_evaluate(expression))
+
+
+def _origin_from_url(url: str | None) -> str | None:
+    parsed = urlparse(url or "")
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _storage_origin_url(origin: str) -> str:
+    return origin if origin.endswith("/") else f"{origin}/"
+
+
+def _stringify_json(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _site_root_from_hostname(hostname: str) -> str:
+    labels = [label for label in hostname.lower().strip(".").split(".") if label]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    if len(labels[-1]) == 2 and labels[-2] in _COMMON_SECOND_LEVEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _domain_matches_site(domain: str | None, site_root: str) -> bool:
+    normalized = str(domain or "").lower().lstrip(".")
+    return bool(normalized) and (normalized == site_root or normalized.endswith(f".{site_root}"))
+
+
+def _current_page_state() -> tuple[dict[str, Any], str]:
+    info = page_info()
+    if info.get("dialog"):
+        raise RuntimeError("cannot inspect page state while a JavaScript dialog is open")
+    origin = _origin_from_url(info.get("url"))
+    if not origin:
+        raise RuntimeError("current tab does not have a restorable web origin")
+    return info, origin
+
+
+def _storage_entries(storage_name: str) -> list[dict[str, str]]:
+    raw = js(
+        f"""(() => {{
+  const storage = window[{json.dumps(storage_name)}];
+  return JSON.stringify(
+    Object.entries(storage).map(([name, value]) => ({{name, value}}))
+  );
+}})()"""
+    )
+    data = json.loads(raw or "[]")
+    if not isinstance(data, list):
+        raise RuntimeError(f"{storage_name} export did not return a list")
+    return [
+        {"name": str(item.get("name", "")), "value": str(item.get("value", ""))}
+        for item in data
+        if isinstance(item, dict) and "name" in item
+    ]
+
+
+def _collect_site_cookies(target_url: str) -> list[dict[str, Any]]:
+    hostname = urlparse(target_url).hostname
+    if not hostname:
+        raise RuntimeError(f"could not determine hostname for {target_url!r}")
+    site_root = _site_root_from_hostname(hostname)
+    try:
+        cookies = cdp("Storage.getCookies").get("cookies", [])
+    except Exception:
+        cookies = []
+    if not isinstance(cookies, list):
+        cookies = []
+    filtered = [
+        cookie
+        for cookie in cookies
+        if isinstance(cookie, dict) and _domain_matches_site(cookie.get("domain"), site_root)
+    ]
+    if filtered:
+        return filtered
+    fallback = cdp("Network.getCookies", urls=[target_url]).get("cookies", [])
+    if not isinstance(fallback, list):
+        raise RuntimeError("cookie export did not return a list")
+    return fallback
+
+
+def _set_storage_entries(storage_name: str, entries: list[dict[str, Any]]) -> int:
+    payload = _stringify_json(entries)
+    # Merge keys instead of clearing storage: flocks/browser reuses the user's real profile.
+    applied = js(
+        f"""(() => {{
+  const entries = JSON.parse({json.dumps(payload)});
+  const storage = window[{json.dumps(storage_name)}];
+  for (const item of entries) {{
+    if (!item || typeof item.name === "undefined") {{
+      continue;
+    }}
+    storage.setItem(String(item.name), String(item.value ?? ""));
+  }}
+  return entries.length;
+}})()"""
+    )
+    return int(applied or 0)
+
+
+def _sanitize_cookie_for_import(cookie: dict[str, Any]) -> dict[str, Any]:
+    result = {key: value for key, value in cookie.items() if key in _COOKIE_IMPORT_FIELDS}
+    if "expires" in result:
+        try:
+            expires = float(result["expires"])
+        except (TypeError, ValueError):
+            result.pop("expires", None)
+        else:
+            if expires <= 0:
+                result.pop("expires", None)
+            else:
+                result["expires"] = expires
+    return result
+
+
+def _normalize_state_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeError("state file must contain a JSON object")
+
+    cookies = payload.get("cookies", [])
+    origins = payload.get("origins", [])
+    if not isinstance(cookies, list):
+        raise RuntimeError("state file field `cookies` must be a list")
+    if not isinstance(origins, list):
+        raise RuntimeError("state file field `origins` must be a list")
+    return {"cookies": cookies, "origins": origins}
+
+
+def _read_state_file(path: str | Path) -> dict[str, Any]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return _normalize_state_payload(raw)
+
+
+def save_state(path: str | Path, url: str | None = None) -> dict[str, Any]:
+    """Persist site-scoped cookies plus origin-scoped localStorage to a JSON file."""
+    info, origin = _current_page_state()
+    target_url = url or info["url"]
+    target_origin = _origin_from_url(target_url)
+    if target_origin and target_origin != origin:
+        raise RuntimeError(
+            f"current tab origin {origin!r} does not match requested save origin {target_origin!r}; "
+            "attach or navigate to the target origin first"
+        )
+
+    cookies = _collect_site_cookies(target_url)
+    local_storage = _storage_entries("localStorage")
+    state = {
+        "cookies": cookies,
+        "origins": [{"origin": origin, "localStorage": local_storage}],
+    }
+
+    output_path = Path(path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "path": str(output_path),
+        "cookies": len(cookies),
+        "origins": len(state["origins"]),
+        "localStorageItems": len(local_storage),
+    }
+
+
+def load_state(path: str | Path, url: str | None = None, reload: bool = True) -> dict[str, Any]:
+    """Load cookies plus origin-scoped localStorage from a JSON file."""
+    state = _read_state_file(path)
+    cookies = state.get("cookies") or []
+    origins = state.get("origins") or []
+
+    imported_cookies = [_sanitize_cookie_for_import(cookie) for cookie in cookies if isinstance(cookie, dict)]
+    if imported_cookies:
+        cdp("Network.setCookies", cookies=imported_cookies)
+
+    applied_local_storage = 0
+
+    for origin_entry in origins:
+        if not isinstance(origin_entry, dict):
+            continue
+        origin = origin_entry.get("origin")
+        if not isinstance(origin, str) or not origin:
+            continue
+        goto_url(_storage_origin_url(origin))
+        wait_for_load()
+        applied_local_storage += _set_storage_entries(
+            "localStorage",
+            origin_entry.get("localStorage") if isinstance(origin_entry.get("localStorage"), list) else [],
+        )
+
+    final_url = url or current_tab().get("url")
+    if final_url:
+        if current_tab().get("url") == final_url:
+            if reload:
+                cdp("Page.reload")
+                wait_for_load()
+        else:
+            goto_url(final_url)
+            if reload:
+                wait_for_load()
+
+    return {
+        "path": str(Path(path).expanduser()),
+        "cookiesApplied": len(imported_cookies),
+        "originsApplied": len([item for item in origins if isinstance(item, dict) and item.get("origin")]),
+        "localStorageItemsApplied": applied_local_storage,
+        "finalUrl": final_url,
+    }
+
+
+def summarize_state(path: str | Path) -> dict[str, Any]:
+    """Return a redacted summary of a saved state file."""
+    state = _read_state_file(path)
+    cookies = state.get("cookies") or []
+    origins = state.get("origins") or []
+    domains = sorted(
+        {
+            str(cookie.get("domain", "")).lstrip(".")
+            for cookie in cookies
+            if isinstance(cookie, dict) and cookie.get("domain")
+        }
+    )
+    return {
+        "path": str(Path(path).expanduser()),
+        "cookies": len(cookies),
+        "cookieDomains": domains,
+        "origins": [
+            {
+                "origin": item.get("origin"),
+                "localStorageItems": len(item.get("localStorage") or []),
+            }
+            for item in origins
+            if isinstance(item, dict)
+        ],
+    }
 
 
 _debug_click_counter = 0
@@ -463,13 +716,6 @@ def upload_file(selector: str, path: str | list[str]) -> None:
 
 def http_get(url: str, headers: dict | None = None, timeout: float = 20.0) -> str:
     """Fetch a URL directly without using the browser."""
-    if os.environ.get("BROWSER_USE_API_KEY"):
-        try:
-            from fetch_use import fetch_sync
-
-            return fetch_sync(url, headers=headers, timeout_ms=int(timeout * 1000)).text
-        except ImportError:
-            pass
 
     import gzip
 

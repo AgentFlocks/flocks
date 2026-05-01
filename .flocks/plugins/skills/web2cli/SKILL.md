@@ -6,7 +6,7 @@ required: browser-use
 
 # Web2CLI
 
-按固定流程执行，不要跳步，不要引入额外的一键脚本。
+> 正式开始前，先明确需要操作的网站或tab
 
 ## 使用的资源
 
@@ -31,7 +31,12 @@ required: browser-use
 flocks browser --doctor
 ```
 
-如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，按 `browser-use` 的规则提示用户开启 Chrome remote debugging 后重试。
+如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，则提示用户
+```text
+chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://inspect/#remote-debugging 并勾选 Allow remote debugging
+```
+
+用户完成后，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 attach，再用 `--doctor` 做只读确认。
 
 ## 输出目录约定
 
@@ -40,13 +45,18 @@ flocks browser --doctor
 开始前先准备目录：
 
 ```bash
-MODE="${MODE:-agent-browser}"
+MODE="${MODE:-cdp-direct}"
 CAPTURE_NAME="<name>"
 TODAY="$(date +%F)"
 CAPTURE_ROOT="$HOME/.flocks/workspace/outputs/$TODAY/web2cli/$CAPTURE_NAME"
 WEB2CLI_SKILL=".flocks/plugins/skills/web2cli"
 mkdir -p "$CAPTURE_ROOT/captures"
 ```
+
+补充说明：
+
+- `flocks browser -c '...'` 会把代码直接交给 Python `exec()`，表达式不会像 REPL 一样自动回显；需要输出时必须显式 `print(...)`。
+- 多行代码要直接写成真正的多行字符串或 heredoc，不要把 `\n` 当成字面量塞进单引号字符串里。
 
 各类输出位置固定如下：
 
@@ -159,7 +169,7 @@ print(js("window.__apiCapture.config.captureMode"))
 
 ### 4. 明确需要捕获的功能/操作
 
-- 要求用户完成要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
+- 要求用户手动操作要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
 - 或请求用户描述需要 hook 的操作，便于你直接去页面代替用户执行
 
 需要确认捕获是否开始时：
@@ -283,36 +293,19 @@ agent-browser --session-name "$CAPTURE_NAME" state save "$CAPTURE_ROOT/auth-stat
 `cdp-direct` 模式：
 
 ```bash
-AUTH_OUT="$CAPTURE_ROOT/auth-state.json"
-
 (
-  TARGET_ID="$TARGET_ID" AUTH_OUT="$AUTH_OUT" flocks browser -c '
-import json
+  TARGET_ID="$TARGET_ID" flocks browser -c '
 import os
 
 target_id = os.environ.get("TARGET_ID")
 if target_id:
     attach_tab(target_id)
-
-info = page_info()
-cookies = cdp("Network.getCookies", urls=[info["url"]]).get("cookies", [])
-local_storage = json.loads(js("JSON.stringify(Object.entries(localStorage).map(([name, value]) => ({name, value})))") or "[]")
-session_storage = json.loads(js("JSON.stringify(Object.entries(sessionStorage).map(([name, value]) => ({name, value})))") or "[]")
-
-state = {
-    "cookies": cookies,
-    "localStorage": local_storage,
-    "sessionStorage": session_storage,
-}
-out = os.environ["AUTH_OUT"]
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(state, f, ensure_ascii=False, indent=2)
-print(f"Saved {len(cookies)} cookies, {len(local_storage)} localStorage items, {len(session_storage)} sessionStorage items to {out}")
 '
+  && flocks browser state save "$CAPTURE_ROOT/auth-state.json"
 )
 ```
 
-将 cookie、localStorage 和 sessionStorage 保存为后续 CLI 调用的认证输入。认证文件包含敏感值，只能写入 `$CAPTURE_ROOT` 这类工作区输出目录，不要写入代码仓库。
+将 cookie 和 localStorage 保存为后续 CLI 调用的认证输入。`flocks browser state save` 会输出更接近标准 `storageState` 的交换格式：cookies 放在顶层，origin 级 localStorage 放在 `origins[]`。保存时会尽量覆盖当前站点下的多子域 cookie，适合知乎这类依赖跨子域登录态的 CLI。认证文件包含敏感值，只能写入 `$CAPTURE_ROOT` 这类工作区输出目录，不要写入代码仓库。
 
 ### 7. 分析捕获的 web API
 

@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 from unittest.mock import patch
@@ -138,3 +139,120 @@ def test_close_tab_can_skip_activating_next_tab() -> None:
 
     assert ("Target.closeTarget", {"targetId": "target-2"}) in calls
     assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
+
+
+def test_save_state_writes_portable_schema(tmp_path) -> None:
+    out = tmp_path / "auth-state.json"
+    cookies = [
+        {"name": "sid", "value": "secret", "domain": ".zhihu.com", "path": "/"},
+        {"name": "api", "value": "token", "domain": "api.zhihu.com", "path": "/"},
+        {"name": "other", "value": "skip", "domain": ".example.com", "path": "/"},
+    ]
+
+    def fake_cdp(method, **kwargs):
+        if method == "Storage.getCookies":
+            return {"cookies": cookies}
+        raise AssertionError((method, kwargs))
+
+    def fake_js(expression):
+        if 'window["localStorage"]' in expression:
+            return '[{"name":"token","value":"abc"}]'
+        raise AssertionError(expression)
+
+    with (
+        patch("flocks.browser.helpers.page_info", return_value={"url": "https://www.zhihu.com/app", "title": "Example"}),
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers.js", side_effect=fake_js),
+    ):
+        result = helpers.save_state(out)
+
+    saved = json.loads(out.read_text(encoding="utf-8"))
+    assert result["cookies"] == 2
+    assert set(saved) == {"cookies", "origins"}
+    assert {item["domain"] for item in saved["cookies"]} == {".zhihu.com", "api.zhihu.com"}
+    assert saved["origins"] == [{"origin": "https://www.zhihu.com", "localStorage": [{"name": "token", "value": "abc"}]}]
+
+
+def test_load_state_restores_cookies_and_storage(tmp_path) -> None:
+    state_file = tmp_path / "auth-state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {
+                        "name": "sid",
+                        "value": "secret",
+                        "domain": ".example.com",
+                        "path": "/",
+                        "expires": 12345,
+                        "size": 999,
+                    }
+                ],
+                "origins": [{"origin": "https://example.com", "localStorage": [{"name": "token", "value": "abc"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cdp_calls = []
+    goto_calls = []
+    restored = []
+
+    def fake_cdp(method, **kwargs):
+        cdp_calls.append((method, kwargs))
+        return {}
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers.goto_url", side_effect=lambda url: goto_calls.append(url)),
+        patch("flocks.browser.helpers.wait_for_load"),
+        patch("flocks.browser.helpers.current_tab", return_value={"url": ""}),
+        patch(
+            "flocks.browser.helpers._set_storage_entries",
+            side_effect=lambda storage_name, entries: restored.append((storage_name, entries)) or len(entries),
+        ),
+    ):
+        result = helpers.load_state(state_file, url="https://example.com/dashboard")
+
+    assert cdp_calls == [
+        (
+            "Network.setCookies",
+            {
+                "cookies": [
+                    {
+                        "name": "sid",
+                        "value": "secret",
+                        "domain": ".example.com",
+                        "path": "/",
+                        "expires": 12345.0,
+                    }
+                ]
+            },
+        )
+    ]
+    assert goto_calls == [
+        "https://example.com/",
+        "https://example.com/dashboard",
+    ]
+    assert restored == [("localStorage", [{"name": "token", "value": "abc"}])]
+    assert result["cookiesApplied"] == 1
+    assert result["localStorageItemsApplied"] == 1
+
+
+def test_summarize_state_reports_storage_state_shape(tmp_path) -> None:
+    state_file = tmp_path / "auth-state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [{"name": "sid", "value": "secret", "domain": ".example.com", "path": "/"}],
+                "origins": [{"origin": "https://example.com", "localStorage": [{"name": "token", "value": "abc"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = helpers.summarize_state(state_file)
+
+    assert summary["cookies"] == 1
+    assert summary["cookieDomains"] == ["example.com"]
+    assert summary["origins"] == [{"origin": "https://example.com", "localStorageItems": 1}]

@@ -48,6 +48,11 @@ print(page_info())
 
 `flocks browser -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chrome。
 
+注意：
+
+- `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
+- 多行代码请直接写成真正的多行 shell 字符串或 heredoc；不要把 `\n` 当字面量塞进单引号参数里。
+
 常用 helpers：
 
 - `new_tab(url, activate=True)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
@@ -186,9 +191,8 @@ upload_file("input[type=file]", "/absolute/path/to/file")
 
 - 先打开目标页判断是否已登录；需要密码、验证码、TOTP 或授权确认时，让用户在 Chrome 中操作。
 - 用户完成后刷新或重新打开目标 URL，再用 `page_info()` / `js(...)` 验证目标内容是否可见。
-- 可以用 CDP 读写 cookies，用 `js(...)` 读写 localStorage / sessionStorage；默认不要打印 value。
-- 不要记录或沉淀 cookie value、token、Authorization header、密码、验证码等敏感值。
-
+- 可以用 CDP 读写 cookies，用 `js(...)` 读写 localStorage / sessionStorage。
+- 明确需要导出或保存登录状态时，可以用 flocks browser state save auth-state.json
 检查登录态时只看 cookie 名称和 storage key：
 
 ```bash
@@ -210,8 +214,9 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 2. 首次安装或冷启动优先运行 `flocks browser --setup`。
 3. Chrome 未运行时只启动 Chrome，再重试；不要直接让用户改设置。
 4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开 `chrome://inspect/#remote-debugging` 并勾选 Allow remote debugging。
-5. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是 Chrome 正在启动，轮询等待，不要重启。
-6. stale websocket / stale socket 时执行一次：
+5. 用户刚开启 remote debugging 时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
+6. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是 Chrome 正在启动，轮询等待，不要重启。
+7. stale websocket / stale socket 时执行一次：
 
 ```bash
 flocks browser -c 'restart_daemon()'

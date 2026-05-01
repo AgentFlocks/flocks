@@ -49,9 +49,6 @@ PROFILES = [
     Path.home() / "AppData/Local/Microsoft/Edge SxS/User Data",
 ]
 INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
-BU_API = "https://api.browser-use.com/api/v3"
-REMOTE_ID = os.environ.get("BU_BROWSER_ID")
-API_KEY = os.environ.get("BROWSER_USE_API_KEY")
 MARKER = "🟢"
 
 
@@ -136,22 +133,6 @@ def get_ws_url() -> str:
     )
 
 
-def stop_remote() -> None:
-    if not REMOTE_ID or not API_KEY:
-        return
-    try:
-        req = urllib.request.Request(
-            f"{BU_API}/browsers/{REMOTE_ID}",
-            data=json.dumps({"action": "stop"}).encode(),
-            method="PATCH",
-            headers={"X-Browser-Use-API-Key": API_KEY, "Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=15).read()
-        log(f"stopped remote browser {REMOTE_ID}")
-    except Exception as error:
-        log(f"stop_remote failed ({REMOTE_ID}): {error}")
-
-
 def is_real_page(target: dict) -> bool:
     return target["type"] == "page" and not target.get("url", "").startswith(INTERNAL)
 
@@ -198,8 +179,7 @@ class Daemon:
                 raise RuntimeError(
                     f"CDP WS handshake failed: {error} -- remote browser WebSocket connection failed. "
                     "This can happen when network policy blocks the connection, the WS URL is wrong or expired, "
-                    "or the remote endpoint is down. If you use Browser Use cloud, verify "
-                    "BROWSER_USE_API_KEY and get a fresh URL via start_remote_daemon()."
+                    "or the remote endpoint is down. Verify BU_CDP_WS and refresh the remote session if needed."
                 ) from error
             raise RuntimeError(f"CDP WS handshake failed: {error} -- click Allow in Chrome if prompted, then retry")
         await self.attach_first_page()
@@ -306,7 +286,7 @@ async def serve(daemon: Daemon) -> None:
     serve_task = asyncio.create_task(ipc.serve(NAME, handler))
     stop_task = asyncio.create_task(daemon.stop.wait())
     await asyncio.sleep(0.05)
-    log(f"listening on {ipc.sock_addr(NAME)} (name={NAME}, remote={REMOTE_ID or 'local'})")
+    log(f"listening on {ipc.sock_addr(NAME)} (name={NAME})")
     try:
         await asyncio.wait({serve_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
         if serve_task.done():
@@ -350,7 +330,6 @@ if __name__ == "__main__":
         log(f"fatal: {error}")
         sys.exit(1)
     finally:
-        stop_remote()
         try:
             os.unlink(PID)
         except FileNotFoundError:

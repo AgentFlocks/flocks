@@ -102,7 +102,7 @@ def parse_request_body(body_str: str) -> Any:
     try:
         # Handle JSON string
         return json.loads(body_str)
-    except:
+    except json.JSONDecodeError:
         # Return as raw if not JSON
         return {"raw": body_str}
 
@@ -114,20 +114,17 @@ def parse_response_body(resp_str: str) -> Any:
 
     if resp_str.endswith('[truncated]'):
         # Try to parse what's there
-        try:
-            # Find the last complete JSON object
-            for i in range(len(resp_str) - 20, -1, -1):
-                if resp_str[i] == '{' or resp_str[i] == '[':
-                    try:
-                        return json.loads(resp_str[i:])
-                    except:
-                        continue
-        except:
-            pass
+        # Find the last complete JSON object
+        for i in range(len(resp_str) - 20, -1, -1):
+            if resp_str[i] == '{' or resp_str[i] == '[':
+                try:
+                    return json.loads(resp_str[i:])
+                except json.JSONDecodeError:
+                    continue
 
     try:
         return json.loads(resp_str)
-    except:
+    except json.JSONDecodeError:
         return {"raw": resp_str[:500], "note": "not valid JSON"}
 
 
@@ -141,7 +138,7 @@ Auto-generated API Client
 Generated from captured API requests
 
 Usage:
-    client = APIClient(cookie_file="cookies.json")
+    client = APIClient(cookie_file="auth-state.json")
     result = client.get_alarms()
 """
 
@@ -154,18 +151,44 @@ from urllib.parse import urljoin
 class APIClient:
     """Auto-generated API Client"""
 
-    def __init__(self, base_url: str = __BASE_URL__, cookie_file: str = "cookies.json"):
+    @staticmethod
+    def _load_cookie_items(cookie_file: str) -> List[Dict[str, Any]]:
+        """Load cookies from either a raw cookie list or a storageState object."""
+        try:
+            with open(cookie_file, encoding="utf-8") as f:
+                payload = json.load(f)
+        except FileNotFoundError:
+            print(f"Warning: Cookie file {cookie_file} not found")
+            return []
+        except json.JSONDecodeError as error:
+            print(f"Warning: Failed to parse cookie file {cookie_file}: {error}")
+            return []
+
+        if isinstance(payload, list):
+            cookies = payload
+        elif isinstance(payload, dict):
+            cookies = payload.get("cookies", [])
+        else:
+            print(f"Warning: Unsupported cookie file format in {cookie_file}")
+            return []
+
+        return [cookie for cookie in cookies if isinstance(cookie, dict)]
+
+    def __init__(self, base_url: str = __BASE_URL__, cookie_file: str = "auth-state.json"):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
 
         # Load cookies
-        try:
-            with open(cookie_file) as f:
-                cookies = json.load(f)
-            for c in cookies:
-                self.session.cookies.set(c.get("name"), c.get("value"))
-        except FileNotFoundError:
-            print(f"Warning: Cookie file {cookie_file} not found")
+        for c in self._load_cookie_items(cookie_file):
+            name = c.get("name")
+            if not name:
+                continue
+            cookie_kwargs = {}
+            if c.get("domain"):
+                cookie_kwargs["domain"] = c["domain"]
+            if c.get("path"):
+                cookie_kwargs["path"] = c["path"]
+            self.session.cookies.set(name, c.get("value", ""), **cookie_kwargs)
 
         # Common headers
         self.session.headers.update({
@@ -316,7 +339,7 @@ from generated_client import APIClient
 
 client = APIClient(
     base_url="https://your-instance.threatbook.net",
-    cookie_file="cookies.json"
+    cookie_file="auth-state.json"
 )
 
 # 调用 API
