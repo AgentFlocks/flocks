@@ -44,7 +44,7 @@ import {
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useTools } from '@/hooks/useTools';
-import { canDirectlyTestTool, toolAPI, Tool, ToolSource } from '@/api/tool';
+import { canDirectlyTestTool, toolAPI, Tool, ToolFixture, ToolSource } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
@@ -56,7 +56,7 @@ import APITabContent from './components/APITabContent';
 import LocalTabContent from './components/LocalTabContent';
 import { getToolTabCounts } from './tabCounts';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
-import { getLocalizedToolDescription } from './toolDisplay';
+import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
 import LogViewerModal from '@/components/common/LogViewerModal';
 
 // ============================================================================
@@ -1570,6 +1570,16 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
   const [testParams, setTestParams] = useState('{}');
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
+  const [fixturesLoading, setFixturesLoading] = useState(true);
+
+  useEffect(() => {
+    setFixturesLoading(true);
+    toolAPI.listFixtures(tool.name)
+      .then((res) => setFixtures(res.data ?? []))
+      .catch(() => setFixtures([]))
+      .finally(() => setFixturesLoading(false));
+  }, [tool.name]);
 
   const handleTest = async () => {
     try {
@@ -1577,7 +1587,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
       setTestResult(null);
       const params = JSON.parse(testParams);
       const res = await toolAPI.test(tool.name, params);
-      setTestResult({ success: true, data: res.data });
+      setTestResult({ success: res.data.success, data: res.data.output, error: res.data.error });
     } catch (err: any) {
       setTestResult({ success: false, error: err.response?.data?.detail ?? err.message });
     } finally {
@@ -1617,7 +1627,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              {tab === 'info' ? <><Info className="w-3.5 h-3.5" />{t('detail.info')}</> : <><TestTube className="w-3.5 h-3.5" />{t('detail.test')}</>}
+              {tab === 'info' ? <><Info className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}</> : <><TestTube className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}</>}
             </button>
           ))}
         </div>
@@ -1627,22 +1637,22 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         {section === 'info' ? (
           <div className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('detail.tableDesc')}</label>
-              <p className="text-sm text-gray-600 leading-relaxed">{tool.description || t('detail.noDescription')}</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
+              <p className="text-sm text-gray-600 leading-relaxed">{tool.description || t('toolDetail.noDescription')}</p>
             </div>
             {tool.parameters && tool.parameters.length > 0 && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  {t('detail.parameters')} <span className="text-gray-400 font-normal">({tool.parameters.length})</span>
+                  {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
                 <div className="rounded-lg border border-gray-200 overflow-hidden">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.paramName')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.tableType')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.paramRequired')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.tableDesc')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 bg-white">
@@ -1654,8 +1664,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                           <td className="px-4 py-2.5 text-xs text-gray-500">{param.type}</td>
                           <td className="px-4 py-2.5">
                             {param.required
-                              ? <span className="text-xs text-slate-700 font-medium">{t('detail.yes')}</span>
-                              : <span className="text-xs text-gray-400">{t('detail.no')}</span>}
+                              ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
+                              : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                           </td>
                           <td className="px-4 py-2.5 text-xs text-gray-600">{param.description}</td>
                         </tr>
@@ -1669,7 +1679,30 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         ) : (
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">{t('detail.testParamsJson')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
+              <select
+                value=""
+                disabled={fixturesLoading || fixtures.length === 0}
+                onChange={(e) => {
+                  const idx = parseInt(e.target.value, 10);
+                  if (!isNaN(idx) && fixtures[idx]) {
+                    setTestParams(JSON.stringify(fixtures[idx].params, null, 2));
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+              >
+                <option value="">
+                  {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
+                </option>
+                {fixtures.map((f, idx) => (
+                  <option key={idx} value={idx}>
+                    {f.tags.includes('smoke') ? '✦ ' : ''}{getLocalizedFixtureLabel(f, i18n.language)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
               <textarea
                 value={testParams}
                 onChange={(e) => setTestParams(e.target.value)}
@@ -1684,22 +1717,22 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
             >
               {testing
-                ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('detail.executing')}</>
-                : <><Play className="w-4 h-4" />{t('detail.runTest')}</>}
+                ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
             </button>
             {!tool.enabled && (
-              <p className="text-xs text-amber-600 text-center">{t('detail.toolDisabledNoTest')}</p>
+              <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
             )}
             {testResult && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">{t('detail.testResults')}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testResult')}</label>
                 <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                   <div className="flex items-center mb-2">
                     {testResult.success
                       ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
                       : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
                     <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
-                      {testResult.success ? t('detail.testSuccess') : t('detail.testFailed')}
+                      {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                     </span>
                   </div>
                   <pre className="text-xs overflow-auto max-h-48 whitespace-pre-wrap break-all text-gray-700 bg-white/60 rounded p-2">
@@ -3350,6 +3383,8 @@ export function ToolDetailDrawer({
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
+  const [fixturesLoading, setFixturesLoading] = useState(true);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
   const canDirectTest = canDirectlyTestTool(tool);
 
@@ -3358,6 +3393,14 @@ export function ToolDetailDrawer({
     setCustomized(!!tool.enabled_customized);
     setEnabledDefault(tool.enabled_default ?? tool.enabled);
   }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
+
+  useEffect(() => {
+    setFixturesLoading(true);
+    toolAPI.listFixtures(tool.name)
+      .then((res) => setFixtures(res.data ?? []))
+      .catch(() => setFixtures([]))
+      .finally(() => setFixturesLoading(false));
+  }, [tool.name]);
 
   const handleToggleEnabled = async () => {
     if (toggling) return;
@@ -3462,7 +3505,7 @@ export function ToolDetailDrawer({
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
                 <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                  {getLocalizedToolDescription(tool, i18n.language) || t('detail.noDescription')}
+                  {getLocalizedToolDescription(tool, i18n.language) || t('toolDetail.noDescription')}
                 </p>
               </div>
 
@@ -3576,6 +3619,29 @@ export function ToolDetailDrawer({
             </div>
           ) : (
             <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
+                <select
+                  value=""
+                  disabled={fixturesLoading || fixtures.length === 0}
+                  onChange={(e) => {
+                    const idx = parseInt(e.target.value, 10);
+                    if (!isNaN(idx) && fixtures[idx]) {
+                      onTestParamsChange(JSON.stringify(fixtures[idx].params, null, 2));
+                    }
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+                >
+                  <option value="">
+                    {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
+                  </option>
+                  {fixtures.map((f, idx) => (
+                    <option key={idx} value={idx}>
+                      {f.tags.includes('smoke') ? '✦ ' : ''}{getLocalizedFixtureLabel(f, i18n.language)}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
                 <textarea

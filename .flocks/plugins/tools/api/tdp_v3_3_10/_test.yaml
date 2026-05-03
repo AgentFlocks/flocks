@@ -1,0 +1,182 @@
+schema_version: 1
+provider: tdp_api
+
+# Service-level connectivity probe.
+# `system_status` with `action: all` is a lightweight multi-endpoint health
+# check; it verifies HMAC-SHA256 signing and basic platform reachability.
+connectivity:
+  tool: tdp_system_status
+  params:
+    action: all
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  tdp_system_status:
+    - label: "Get all system status"
+      label_cn: "查询所有系统状态"
+      tags: [smoke]
+      params:
+        action: all
+      assert:
+        success: true
+
+  tdp_dashboard_status:
+    - label: "Get dashboard status overview"
+      label_cn: "获取监控大屏状态概览"
+      tags: [smoke, dashboard]
+      params:
+        action: status
+      assert:
+        success: true
+
+  tdp_platform_config:
+    - label: "Get platform configuration"
+      label_cn: "查询平台配置"
+      tags: [smoke]
+      params: {}
+      assert:
+        success: true
+
+  tdp_incident_list:
+    - label: "Search incidents (page 1)"
+      label_cn: "查询威胁事件列表（第 1 页）"
+      tags: [smoke, incidents]
+      params:
+        action: search
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+    - label: "Top attacked entities (last 24 hours)"
+      label_cn: "Top 受攻击实体（最近 24 小时）"
+      tags: [incidents]
+      params:
+        action: top_attacked_entity
+
+  tdp_host_threat_list:
+    - label: "Get threat host summary"
+      label_cn: "查询威胁主机摘要"
+      tags: [smoke, threats]
+      params:
+        action: summary
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_machine_asset_list:
+    - label: "List service assets (page 1)"
+      label_cn: "查询服务器资产列表（第 1 页）"
+      tags: [smoke, assets]
+      params:
+        action: service_list
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_assets_domain_list:
+    - label: "List domain assets (page 1)"
+      label_cn: "查询域名资产列表（第 1 页）"
+      tags: [smoke, assets]
+      params:
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_interface_list:
+    - label: "List network interfaces"
+      label_cn: "查询网络接口列表"
+      tags: [smoke, assets]
+      params:
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_interface_risk_list:
+    - label: "List interface risks (page 1)"
+      label_cn: "查询接口风险列表（第 1 页）"
+      tags: [smoke, risk]
+      params:
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_vulnerability_list:
+    - label: "List vulnerabilities (page 1)"
+      label_cn: "查询脆弱性列表（第 1 页）"
+      tags: [smoke, vuln]
+      params:
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_mdr_alert_list:
+    - label: "List MDR alerts (page 1)"
+      label_cn: "查询 MDR 告警列表（第 1 页）"
+      tags: [smoke, mdr]
+      params:
+        action: list
+        cur_page: 1
+        page_size: 20
+      assert:
+        success: true
+
+  tdp_log_search:
+    - label: "Search attack-level logs (default SQL)"
+      label_cn: "检索攻击级别日志（使用默认 SQL）"
+      tags: [smoke, logs]
+      params:
+        action: search
+        size: 20
+
+  tdp_threat_inbound_attack:
+    - label: "Get inbound attack overview (last 24 hours)"
+      label_cn: "查询外部入侵攻击概览（最近 24 小时）"
+      tags: [smoke, threats]
+      params: {}
+
+  tdp_login_weakpwd_list:
+    - label: "List weak-password login risks (page 1)"
+      label_cn: "查询弱密码登录风险（第 1 页）"
+      tags: [smoke, risk]
+      params:
+        cur_page: 1
+        page_size: 20
+
+  tdp_login_api_list:
+    - label: "List login API records (page 1)"
+      label_cn: "查询登录 API 记录（第 1 页）"
+      tags: [smoke]
+      params:
+        cur_page: 1
+        page_size: 20
+
+  tdp_privacy_diagram:
+    - label: "Get privacy data overview"
+      label_cn: "查询隐私数据拓扑概览"
+      tags: [smoke]
+      params: {}
+
+  tdp_cloud_facilities:
+    - label: "List cloud access sources (page 1)"
+      label_cn: "查询云资产访问来源（第 1 页）"
+      tags: [smoke, assets]
+      params:
+        action: access_source
+        cur_page: 1
+        page_size: 20
+
+  tdp_policy_settings:
+    - label: "List custom intelligence rules"
+      label_cn: "查询自定义情报规则列表"
+      tags: [smoke]
+      params:
+        action: custom_intel_list

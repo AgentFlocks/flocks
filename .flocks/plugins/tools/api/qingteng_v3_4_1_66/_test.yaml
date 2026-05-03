@@ -1,0 +1,160 @@
+schema_version: 1
+provider: qingteng
+
+# Service-level connectivity probe.
+# `system_audit` is a GET with no required params; it verifies both
+# login (session + sign) and read access in one round-trip.
+connectivity:
+  tool: qingteng_system_audit
+  params: {}
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  qingteng_login:
+    - label: "Login and retrieve session token"
+      label_cn: "登录并获取会话 Token"
+      tags: [smoke]
+      params: {}
+      assert:
+        success: true
+
+  qingteng_system_audit:
+    - label: "List audit logs (page 1)"
+      label_cn: "查询系统审计日志（第 1 页）"
+      tags: [smoke]
+      params:
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+  qingteng_host_list:
+    - label: "List Linux hosts (page 1)"
+      label_cn: "查询 Linux 主机列表（第 1 页）"
+      tags: [smoke, assets]
+      params:
+        os_type: linux
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+  qingteng_assets:
+    - label: "List Linux hosts (page 1)"
+      label_cn: "查询 Linux 主机列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: list
+        resource: host
+        os_type: linux
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+    - label: "List Linux processes (page 1)"
+      label_cn: "查询 Linux 进程列表（第 1 页）"
+      tags: [process]
+      params:
+        action: list
+        resource: process
+        os_type: linux
+        page: 0
+        size: 20
+
+  qingteng_risk:
+    - label: "List Linux patches (page 1)"
+      label_cn: "查询 Linux 补丁列表（第 1 页）"
+      tags: [smoke, patch]
+      params:
+        action: patch_list
+        os_type: linux
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+    - label: "List Linux weak passwords (page 1)"
+      label_cn: "查询 Linux 弱口令列表（第 1 页）"
+      tags: [weakpwd]
+      params:
+        action: weakpwd_list
+        os_type: linux
+        page: 0
+        size: 20
+
+  qingteng_detect:
+    - label: "List Linux brute-force attacks (page 1)"
+      label_cn: "查询 Linux 暴力破解事件（第 1 页）"
+      tags: [smoke, detect]
+      params:
+        action: brutecrack_list
+        os_type: linux
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+    - label: "List Linux abnormal logins (page 1)"
+      label_cn: "查询 Linux 异常登录事件（第 1 页）"
+      tags: [detect]
+      params:
+        action: abnormallogin_list
+        os_type: linux
+        page: 0
+        size: 20
+
+  qingteng_baseline:
+    - label: "List Linux baseline jobs (page 1)"
+      label_cn: "查询 Linux 基线检测任务（第 1 页）"
+      tags: [smoke, baseline]
+      params:
+        action: job_list
+        os_type: linux
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+  qingteng_fastjob:
+    - label: "List fast-job task templates (page 1)"
+      label_cn: "查询快速任务模板列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: task_list
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+  qingteng_asset_discovery:
+    - label: "List asset discovery jobs"
+      label_cn: "查询资产发现任务列表"
+      tags: [smoke]
+      params:
+        action: job_list
+      assert:
+        success: true
+
+  qingteng_microseg:
+    - label: "List micro-segmentation rules (page 1)"
+      label_cn: "查询微隔离规则列表（第 1 页）"
+      tags: [smoke, microseg]
+      params:
+        action: seg_list
+        page: 0
+        size: 20
+      assert:
+        success: true
+
+  qingteng_vul_check:
+    # Triggers a system-vulnerability scan for the selected OS (write op).
+    # Provided as a runnable example only; do NOT add `assert: success: true`.
+    - label: "Trigger Linux system vulnerability scan"
+      label_cn: "触发 Linux 系统漏洞扫描（写操作）"
+      tags: [vuln, write]
+      params:
+        os_type: linux
+        risk_type: system

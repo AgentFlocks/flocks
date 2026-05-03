@@ -1,0 +1,71 @@
+schema_version: 1
+provider: onesec_api
+
+# Service-level connectivity probe.
+# `dns_get_public_ip_list` is a lightweight GET with no required params
+# that verifies both base_url reachability and HMAC credential signing.
+connectivity:
+  tool: onesec_dns
+  params:
+    action: dns_get_public_ip_list
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  onesec_dns:
+    - label: "List monitored public IPs"
+      label_cn: "获取受监控公网 IP 列表"
+      tags: [smoke]
+      params:
+        action: dns_get_public_ip_list
+      assert:
+        success: true
+
+    - label: "List all destination lists"
+      label_cn: "查询所有目标列表"
+      tags: [smoke]
+      params:
+        action: dns_get_all_destination_list
+
+  onesec_edr:
+    - label: "List IOC entries (page 1)"
+      label_cn: "查询 IOC 列表（第 1 页）"
+      tags: [smoke, ioc]
+      params:
+        action: edr_get_ioc_list
+      assert:
+        success: true
+
+    - label: "List incidents (page 1)"
+      label_cn: "查询事件列表（第 1 页）"
+      tags: [incidents]
+      params:
+        action: edr_get_incidents
+
+  onesec_ops:
+    - label: "List agents (page 1)"
+      label_cn: "查询终端列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: ops_query_agent_page_list
+      assert:
+        success: true
+
+  onesec_software:
+    - label: "List installed software (page 1)"
+      label_cn: "查询已安装软件列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: software_query_page_list
+      assert:
+        success: true
+
+  onesec_threat:
+    - label: "Query BD engine version"
+      label_cn: "查询病毒库版本"
+      tags: [smoke]
+      params:
+        action: threat_query_bd_version
+      assert:
+        success: true

@@ -1,0 +1,80 @@
+schema_version: 1
+provider: sangfor_sip
+
+# Service-level connectivity probe.
+# `ipgroup` is a lightweight GET (monitored-IP groups) with no required params;
+# it uses a rolling 720-hour window by default, verifying token auth end-to-end.
+connectivity:
+  tool: sangfor_sip_assets
+  params:
+    action: ipgroup
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  sangfor_sip_assets:
+    - label: "List monitored IP groups (last 30 days)"
+      label_cn: "查询受监控 IP 分组（最近 30 天）"
+      tags: [smoke, assets]
+      params:
+        action: ipgroup
+      assert:
+        success: true
+
+    - label: "List monitored servers (last 24 hours)"
+      label_cn: "查询受监控服务器（最近 24 小时）"
+      tags: [smoke, assets]
+      params:
+        action: server
+
+    - label: "List monitored terminals (last 24 hours)"
+      label_cn: "查询受监控终端（最近 24 小时）"
+      tags: [assets]
+      params:
+        action: terminal
+
+  sangfor_sip_events:
+    - label: "List security events (last 24 hours)"
+      label_cn: "查询安全事件（最近 24 小时）"
+      tags: [smoke, events]
+      params:
+        action: sec_event
+      assert:
+        success: true
+
+  sangfor_sip_risk:
+    - label: "List business risks (last 24 hours)"
+      label_cn: "查询业务风险（最近 24 小时）"
+      tags: [smoke, risk]
+      params:
+        action: risk_business
+      assert:
+        success: true
+
+    - label: "List terminal risks (last 24 hours)"
+      label_cn: "查询终端风险（最近 24 小时）"
+      tags: [risk]
+      params:
+        action: risk_terminal
+
+  sangfor_sip_vuln:
+    - label: "List vulnerability info (last 24 hours)"
+      label_cn: "查询漏洞信息（最近 24 小时）"
+      tags: [smoke, vuln]
+      params:
+        action: vuln_info
+      assert:
+        success: true
+
+    - label: "List weak passwords (last 24 hours)"
+      label_cn: "查询弱密码（最近 24 小时）"
+      tags: [vuln]
+      params:
+        action: weak_password
+
+    - label: "List plaintext transmission issues (last 24 hours)"
+      label_cn: "查询明文传输问题（最近 24 小时）"
+      tags: [vuln]
+      params:
+        action: plain_text
