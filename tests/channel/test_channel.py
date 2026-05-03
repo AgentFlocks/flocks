@@ -700,6 +700,83 @@ class TestFeishuNativeCommands:
         assert stored_part.mime == "image/png"
         assert stored_part.url == "file:///tmp/diagram.png"
 
+    @pytest.mark.asyncio
+    async def test_append_user_message_stores_wecom_media_part(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.config.config import ChannelConfig
+        from flocks.session.message import TextPart
+
+        created_message = SimpleNamespace(id="message_user_1")
+        store_part = AsyncMock()
+        published = []
+
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.parts",
+            AsyncMock(
+                return_value=[
+                    TextPart(
+                        id="part_text_1",
+                        sessionID="session_1",
+                        messageID="message_user_1",
+                        text="[文件消息: report.pdf]",
+                    )
+                ]
+            ),
+        )
+        monkeypatch.setattr(
+            "flocks.channel.builtin.wecom.inbound_media.download_inbound_media",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    filename="report.pdf",
+                    mime="application/pdf",
+                    url="file:///tmp/report.pdf",
+                    source={"channel": "wecom"},
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            AsyncMock(side_effect=lambda event, data: published.append((event, data))),
+        )
+
+        await InboundDispatcher._append_user_message(
+            "session_1",
+            "[文件消息: report.pdf]",
+            InboundMessage(
+                channel_id="wecom",
+                account_id="default",
+                message_id="wx_1",
+                sender_id="wx_user",
+                chat_id="wx_user",
+                chat_type=ChatType.DIRECT,
+                media_url="https://example.com/report.pdf",
+            ),
+            ChannelConfig(enabled=True, botId="bot-id", secret="secret"),
+        )
+
+        store_part.assert_awaited()
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "report.pdf"
+        assert stored_part.mime == "application/pdf"
+        assert stored_part.url == "file:///tmp/report.pdf"
+        assert store_part.await_args_list[1].args[2].type == "text"
+        assert store_part.await_args_list[1].args[2].text == "Attached files:\n- /tmp/report.pdf"
+        assert [event for event, _ in published] == [
+            "message.part.updated",
+            "message.part.updated",
+        ]
+        assert published[0][1]["part"]["type"] == "text"
+        assert published[1][1]["part"]["type"] == "file"
+
 
 class TestMultimodalInput:
     @pytest.mark.asyncio
