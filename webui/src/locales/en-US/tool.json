@@ -321,7 +321,11 @@
     "customized": "Customized",
     "customizedTooltip": "Current state comes from a user customization; YAML default is {{def}}",
     "resetSetting": "Reset to default",
-    "resetting": "Resetting…"
+    "resetting": "Resetting…",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "updating": "Updating…",
+    "noDescription": "No description"
   },
 
   "statusBadge": {

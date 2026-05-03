@@ -200,20 +200,23 @@ connectivity:
 
 # ── L2：工具级测试样例（可选） ─────────────────────────────────────
 fixtures:
-  ngtip_query:                  # key = tool name
-    - label: "IP 信誉查询（8.8.8.8）"     # Required，UI 下拉显示
-      tags: [smoke, ip]                  # Optional，语义标签
-      params:                            # Required
+  ngtip_query:                                         # key = tool name
+    - label: "IP reputation lookup (8.8.8.8)"          # Required，默认 (英文)
+      label_cn: "IP 信誉查询（8.8.8.8）"               # Optional，中文覆盖
+      tags: [smoke, ip]                                # Optional，语义标签
+      params:                                          # Required
         action: query_ip
         resource: "8.8.8.8"
-      assert:                            # Optional，回归断言（CI 用）
+      assert:                                          # Optional，回归断言（CI 用）
         success: true
 
-    - label: "域名失陷检测"
+    - label: "Domain compromise check"
+      label_cn: "域名失陷检测"
       params: { action: query_dns, resource: "example.com" }
 
   ngtip_platform:
-    - label: "情报数量统计（最近一年）"
+    - label: "Intel volume statistics (last year)"
+      label_cn: "情报数量统计（最近一年）"
       params: { action: platform_intelligence_count }
 ```
 
@@ -227,7 +230,8 @@ fixtures:
 | `connectivity.params` | 是（若有 connectivity） | dict；可为空 `{}` |
 | `connectivity.success_when` | — | 当前版本不支持，写入会被忽略并 warn；保留键名供未来扩展 |
 | `fixtures` | 否 | dict<tool_name, list<fixture>> |
-| `fixtures[*].label` | 是 | 非空字符串，长度 ≤ 80 |
+| `fixtures[*].label` | 是 | 非空字符串，长度 ≤ 80；默认 UI 显示文案（约定为英文） |
+| `fixtures[*].label_cn` | 否 | 非空字符串，长度 ≤ 80；WebUI 在 zh-* 语言下优先使用 |
 | `fixtures[*].tags` | 否 | 字符串列表 |
 | `fixtures[*].params` | 是 | dict |
 | `fixtures[*].assert` | 否 | dict；首版仅识别 `success: bool` |
@@ -246,10 +250,11 @@ class ConnectivitySpec:
 
 @dataclass(frozen=True)
 class Fixture:
-    label: str
+    label: str                         # default (English) UI string
     params: Dict[str, Any]
     tags: Tuple[str, ...] = ()
     assertion: Dict[str, Any] = field(default_factory=dict)
+    label_cn: Optional[str] = None     # optional zh-* override
 
 @dataclass(frozen=True)
 class TestManifest:
@@ -345,42 +350,71 @@ async def list_tool_fixtures(name: str) -> List[FixtureResponse]:
     ...
 ```
 
-`FixtureResponse` shape：
+`FixtureItemResponse` shape：
 ```python
-class FixtureResponse(BaseModel):
-    label: str
+class FixtureItemResponse(BaseModel):
+    label: str                                  # 默认显示文案 (英文)
+    label_cn: Optional[str] = None              # zh-* 语言下优先使用
     params: Dict[str, Any]
     tags: List[str] = []
-    has_assertion: bool = False  # 是否有 assert（CI 用，前端可隐藏）
+    has_assertion: bool = False                 # 是否有 assert（CI 用，前端可隐藏）
 ```
 
 #### 前端
 
-`flocks/webui/src/api/tool.ts` 增加：
+`flocks/webui/src/api/tool.ts`：
 ```ts
+export interface ToolFixture {
+  label: string;
+  label_cn?: string | null;
+  params: Record<string, any>;
+  tags: string[];
+  has_assertion: boolean;
+}
+
 listFixtures: (name: string) =>
-  client.get<Fixture[]>(`/api/tools/${name}/fixtures`),
+  client.get<ToolFixture[]>(`/api/tools/${name}/fixtures`),
 ```
 
-`flocks/webui/src/pages/Tool/index.tsx` 中的 `ToolDetailDrawer` 在 testParams 输入框上方插入一个下拉：
+`flocks/webui/src/pages/Tool/toolDisplay.ts` 提供 locale-aware 取值（与
+`getLocalizedToolDescription` 同一惯例）：
+
+```ts
+export function getLocalizedFixtureLabel(
+  fixture: Pick<ToolFixture, 'label' | 'label_cn'>,
+  language: string,
+): string {
+  const cn = fixture.label_cn?.trim() || '';
+  const en = fixture.label?.trim() || '';
+  return language.toLowerCase().startsWith('zh') ? (cn || en) : (en || cn);
+}
+```
+
+`flocks/webui/src/pages/Tool/index.tsx` 中两个 detail 组件
+（API 工具用 `ToolDetailDrawer`，MCP 工具用 `MCPToolDetailPanel`）在测试参数
+输入框上方各自渲染一个下拉。下拉**始终渲染**：加载中时禁用并显示
+`toolDetail.updating`，无 fixture 时禁用并显示 `toolDetail.selectFixturePlaceholder`：
 
 ```tsx
-{fixtures.length > 0 && (
-  <div className="mb-2">
-    <label>选择测试样例</label>
-    <select onChange={(e) => {
-      const idx = Number(e.target.value);
-      if (Number.isFinite(idx)) {
-        setTestParams(JSON.stringify(fixtures[idx].params, null, 2));
-      }
-    }}>
-      <option value="">-- 选择样例填入参数 --</option>
-      {fixtures.map((f, i) => (
-        <option key={i} value={i}>{f.label}</option>
-      ))}
-    </select>
-  </div>
-)}
+<select
+  value=""
+  disabled={fixturesLoading || fixtures.length === 0}
+  onChange={(e) => {
+    const idx = parseInt(e.target.value, 10);
+    if (!isNaN(idx) && fixtures[idx]) {
+      onTestParamsChange(JSON.stringify(fixtures[idx].params, null, 2));
+    }
+  }}
+>
+  <option value="">
+    {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
+  </option>
+  {fixtures.map((f, idx) => (
+    <option key={idx} value={idx}>
+      {f.tags.includes('smoke') ? '✦ ' : ''}{getLocalizedFixtureLabel(f, i18n.language)}
+    </option>
+  ))}
+</select>
 ```
 
 > 进阶（同一 PR 或下个迭代）：再加一个「全部样例一键跑」按钮，依次执行所有 fixtures 并展示结果矩阵；这会大幅降低 onesig 这种 6+ 工具厂商的回归测试成本。
