@@ -886,7 +886,8 @@ async def test_tool(name: str, request: ToolTestRequest):
 
 class FixtureItemResponse(BaseModel):
     """One predeclared test sample for a tool."""
-    label: str = Field(..., description="Human-readable sample name for the UI drop-down")
+    label: str = Field(..., description="Default (English) sample name for the UI drop-down")
+    label_cn: Optional[str] = Field(None, description="Optional Chinese override; WebUI picks it when locale is zh-*")
     params: Dict[str, Any] = Field(default_factory=dict, description="Call params, verbatim")
     tags: List[str] = Field(default_factory=list, description="Semantic labels (smoke, ip, …)")
     has_assertion: bool = Field(False, description="Whether the sample declares a pass/fail assertion")
@@ -907,6 +908,7 @@ async def list_tool_fixtures(name: str) -> List[FixtureItemResponse]:
     return [
         FixtureItemResponse(
             label=f.label,
+            label_cn=f.label_cn,
             params=f.params,
             tags=list(f.tags),
             has_assertion=bool(f.assertion),

@@ -321,7 +321,11 @@
     "customized": "已自定义",
     "customizedTooltip": "当前状态来自用户自定义，YAML 默认值为 {{def}}",
     "resetSetting": "恢复默认",
-    "resetting": "重置中…"
+    "resetting": "重置中…",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "updating": "更新中…",
+    "noDescription": "暂无描述"
   },
 
   "statusBadge": {

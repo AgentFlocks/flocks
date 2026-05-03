@@ -45,12 +45,19 @@ class ConnectivitySpec:
 
 @dataclass(frozen=True)
 class Fixture:
-    """One predeclared test sample for a business tool."""
+    """One predeclared test sample for a business tool.
+
+    ``label`` is the default UI string (typically English). ``label_cn``
+    is an optional Chinese override; the WebUI picks one based on the
+    user's locale, mirroring the ``description``/``description_cn``
+    pattern already used by ``ToolInfo``.
+    """
 
     label: str
     params: dict[str, Any]
     tags: tuple[str, ...] = ()
     assertion: dict[str, Any] = field(default_factory=dict)
+    label_cn: Optional[str] = None
 
 
 @dataclass
@@ -123,10 +130,11 @@ def get_tool_fixtures_by_tool_name(tool_name: str) -> list[Fixture]:
     Resolution:
 
     1. Look up the tool in :class:`~flocks.tool.registry.ToolRegistry`. If
-       found, only descriptors whose ``service_id`` matches the tool's
-       declared provider are eligible. This prevents fixture leakage across
-       co-existing versions of the same product (e.g. ``ngtip_api`` v5 vs v6)
-       and across unrelated services that happen to share a tool name.
+       found, only descriptors whose ``service_id`` **or** ``storage_key``
+       matches the tool's ``provider`` field are eligible (the loader stores
+       the versioned ``storage_key`` in ``ToolInfo.provider``). This prevents
+       fixture leakage across co-existing versions of the same product and
+       across unrelated services that happen to share a tool name.
     2. If the tool is not registered (registry not ready, or non-API tool),
        scan every manifest and return the first match.
     """
@@ -134,7 +142,10 @@ def get_tool_fixtures_by_tool_name(tool_name: str) -> list[Fixture]:
 
     target_service_id = _service_id_for_tool(tool_name)
     for descriptor in discover_api_service_descriptors():
-        if target_service_id is not None and descriptor.service_id != target_service_id:
+        if target_service_id is not None and (
+            descriptor.service_id != target_service_id
+            and descriptor.storage_key != target_service_id
+        ):
             continue
         manifest = load_test_manifest(descriptor.storage_key)
         if manifest is None:
@@ -286,9 +297,14 @@ def _parse_fixture(provider_id: str, tool_name: str, idx: int, sample: Any) -> O
     assertion_raw = sample.get("assert")
     assertion = dict(assertion_raw) if isinstance(assertion_raw, dict) else {}
 
+    label_cn_raw = sample.get("label_cn")
+    label_cn_clean = label_cn_raw.strip() if isinstance(label_cn_raw, str) else ""
+    label_cn = label_cn_clean[:80] if label_cn_clean else None
+
     return Fixture(
         label=label.strip()[:80],
         params=dict(params_raw),
         tags=tags,
         assertion=assertion,
+        label_cn=label_cn,
     )

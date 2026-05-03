@@ -16,6 +16,7 @@ export interface ToolStatistics {
 
 export interface ToolFixture {
   label: string;
+  label_cn?: string | null;
   params: Record<string, any>;
   tags: string[];
   has_assertion: boolean;

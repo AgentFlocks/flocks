@@ -267,6 +267,78 @@ class TestFixtureParsing:
 
         assert fixtures == []
 
+    def test_fixture_label_cn_parsed_when_present(self, tmp_path):
+        plugin_dir = _make_plugin_dir(tmp_path, test_yaml_content="""\
+            provider: ngtip_api
+            fixtures:
+              ngtip_query:
+                - label: "IP reputation lookup"
+                  label_cn: "IP 信誉查询"
+                  params: { action: query_ip }
+        """)
+
+        with _patch_plugin_dir(plugin_dir):
+            fixtures = get_tool_fixtures(_PROVIDER_ID, "ngtip_query")
+
+        assert len(fixtures) == 1
+        assert fixtures[0].label == "IP reputation lookup"
+        assert fixtures[0].label_cn == "IP 信誉查询"
+
+    def test_fixture_label_cn_defaults_to_none_when_omitted(self, tmp_path):
+        plugin_dir = _make_plugin_dir(tmp_path, test_yaml_content="""\
+            provider: ngtip_api
+            fixtures:
+              ngtip_query:
+                - label: "English only"
+                  params: { action: query_ip }
+        """)
+
+        with _patch_plugin_dir(plugin_dir):
+            fixtures = get_tool_fixtures(_PROVIDER_ID, "ngtip_query")
+
+        assert len(fixtures) == 1
+        assert fixtures[0].label_cn is None
+
+    def test_fixture_label_cn_ignored_when_not_a_string(self, tmp_path):
+        # Numbers, lists, blank strings are silently coerced to None (consistent
+        # with how the parser handles other malformed optional fields).
+        plugin_dir = _make_plugin_dir(tmp_path, test_yaml_content="""\
+            provider: ngtip_api
+            fixtures:
+              ngtip_query:
+                - label: "Has number"
+                  label_cn: 12345
+                  params: { action: query_ip }
+                - label: "Has blank"
+                  label_cn: "   "
+                  params: { action: query_ip }
+        """)
+
+        with _patch_plugin_dir(plugin_dir):
+            fixtures = get_tool_fixtures(_PROVIDER_ID, "ngtip_query")
+
+        assert len(fixtures) == 2
+        assert fixtures[0].label_cn is None
+        assert fixtures[1].label_cn is None
+
+    def test_fixture_label_cn_truncated_to_80_chars(self, tmp_path):
+        long_cn = "中" * 100
+        plugin_dir = _make_plugin_dir(tmp_path, test_yaml_content=f"""\
+            provider: ngtip_api
+            fixtures:
+              ngtip_query:
+                - label: "ok"
+                  label_cn: "{long_cn}"
+                  params: {{action: query_ip}}
+        """)
+
+        with _patch_plugin_dir(plugin_dir):
+            fixtures = get_tool_fixtures(_PROVIDER_ID, "ngtip_query")
+
+        assert len(fixtures) == 1
+        assert fixtures[0].label_cn is not None
+        assert len(fixtures[0].label_cn) == 80
+
     def test_fixture_for_unknown_tool_returns_empty(self, tmp_path):
         plugin_dir = _make_plugin_dir(tmp_path)
 
