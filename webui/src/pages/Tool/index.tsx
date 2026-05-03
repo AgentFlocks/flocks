@@ -3380,6 +3380,7 @@ export function ToolDetailDrawer({
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
   const canDirectTest = canDirectlyTestTool(tool);
 
@@ -3388,6 +3389,12 @@ export function ToolDetailDrawer({
     setCustomized(!!tool.enabled_customized);
     setEnabledDefault(tool.enabled_default ?? tool.enabled);
   }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
+
+  useEffect(() => {
+    toolAPI.listFixtures(tool.name)
+      .then((res) => setFixtures(res.data ?? []))
+      .catch(() => setFixtures([]));
+  }, [tool.name]);
 
   const handleToggleEnabled = async () => {
     if (toggling) return;
@@ -3606,6 +3613,28 @@ export function ToolDetailDrawer({
             </div>
           ) : (
             <div className="space-y-4">
+              {fixtures.length > 0 && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('detail.selectFixture')}</label>
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const idx = parseInt(e.target.value, 10);
+                      if (!isNaN(idx) && fixtures[idx]) {
+                        onTestParamsChange(JSON.stringify(fixtures[idx].params, null, 2));
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-700"
+                  >
+                    <option value="">{t('detail.selectFixturePlaceholder')}</option>
+                    {fixtures.map((f, idx) => (
+                      <option key={idx} value={idx}>
+                        {f.tags.includes('smoke') ? '✦ ' : ''}{f.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
                 <textarea
