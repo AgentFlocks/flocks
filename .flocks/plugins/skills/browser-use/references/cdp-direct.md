@@ -145,7 +145,7 @@ click_at_xy(x, y)
 截图仅作为可选调试产物：
 
 ```python
-capture_screenshot("/tmp/shot.png", max_dim=1800)
+capture_screenshot("<workspace_dir>/tmp/shot.png", max_dim=1800)
 ```
 
 如果启用点击调试：
