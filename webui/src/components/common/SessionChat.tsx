@@ -275,9 +275,10 @@ const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
-const FILE_INPUT_ACCEPT = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx';
+const FILE_INPUT_ACCEPT = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
+  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx',
 ]);
 
 function getFileExtension(filename: string): string {

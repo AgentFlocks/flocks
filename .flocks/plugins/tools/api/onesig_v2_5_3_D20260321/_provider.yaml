@@ -1,5 +1,6 @@
 name: onesig
 service_id: onesig_api
+version: "2.5.3 D20260321"
 description: >
   OneSIG (Secure Internet Gateway) Web API service. Authentication uses cookie
   session: the handler logs in with username + RSA-OAEP encrypted password and
@@ -57,6 +58,7 @@ defaults:
   oaep_hash: "sha1"
   timeout: 60
   category: custom
+  product_version: "2.5.3 D20260321"
 notes: |
   OneSIG Web API 使用 Cookie 会话鉴权。
 

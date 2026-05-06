@@ -1,5 +1,6 @@
 name: TDP
 service_id: tdp_api
+version: "3.3.10"
 description: >
   TDP monitoring platform API for dashboard, threat investigation, asset risk,
   log search, MDR analysis, and system status queries.
@@ -35,6 +36,7 @@ defaults:
   base_url: "https://{secret:tdp_host}"
   timeout: 30
   category: custom
+  product_version: "3.3.10"
 notes: |
   TDP API 使用 HMAC-SHA256 + Base64 URL Safe 签名。
   当前配置页需要分别配置：

@@ -44,7 +44,7 @@ _HANDLER_PATH = (
     / "plugins"
     / "tools"
     / "api"
-    / "onesig"
+    / "onesig_v2_5_3_D20260321"
     / "onesig.handler.py"
 )
 

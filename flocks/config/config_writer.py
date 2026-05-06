@@ -471,13 +471,20 @@ class ConfigWriter:
 
     @classmethod
     def get_api_service_raw(cls, service_id: str) -> Optional[Dict[str, Any]]:
-        """Read a single api_services entry (raw, secrets unresolved).
+        """Read a single ``api_services`` entry (raw, secrets unresolved).
 
-        Returns:
-            The service config dict, or None if not found.
+        Version-aware: delegates the storage-key/legacy-id resolution to
+        :func:`flocks.config.api_versioning.resolve_api_service`.
+        Falls back to a plain dict lookup if the versioning module is
+        unavailable, so a bug there cannot break credential reads.
         """
-        data = cls._read_raw()
-        return data.get("api_services", {}).get(service_id)
+        raw = cls._read_raw().get("api_services")
+        services = raw if isinstance(raw, dict) else {}
+        try:
+            from flocks.config.api_versioning import resolve_api_service
+            return resolve_api_service(service_id, services)
+        except Exception:
+            return services.get(service_id)
 
     @classmethod
     def list_api_services_raw(cls) -> Dict[str, Any]:
@@ -496,17 +503,25 @@ class ConfigWriter:
                 {"apiKey": "{secret:threatbook_api_key}"},
             )
 
-        Args:
-            service_id: e.g. "threatbook_api", "virustotal"
-            service_config: Config dict; use ``"apiKey": "{secret:<id>}"`` to
-                            reference a secret stored in .secret.json.
+        ``service_id`` is the literal storage key — writes are NOT redirected
+        to a versioned shadow even when one exists. New callers should pass
+        the versioned storage key (e.g. ``tdp_api_v3_3_10``); see
+        :mod:`flocks.config.api_versioning`. Writes that target a
+        shadowed legacy id emit a warning, since
+        :meth:`get_api_service_raw` would prefer the shadow and silently
+        ignore them.
         """
         data = cls._read_raw()
-        if "api_services" not in data:
-            data["api_services"] = {}
-        data["api_services"][service_id] = service_config
+        services = data.setdefault("api_services", {})
+        services[service_id] = service_config
         cls._write_raw(data)
         log.info("config_writer.api_service_set", {"service_id": service_id})
+
+        try:
+            from flocks.config.api_versioning import warn_if_shadowing_legacy
+            warn_if_shadowing_legacy(service_id, services)
+        except Exception:
+            pass
 
     @classmethod
     def remove_api_service(cls, service_id: str) -> bool:

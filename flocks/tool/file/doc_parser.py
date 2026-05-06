@@ -1,13 +1,14 @@
 """
 `doc_parser` built-in file tool.
 
-Converts PDF / Word documents into Markdown files.
+Converts PDF, Office, and HTML documents into Markdown files.
 """
 
 from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import html as html_lib
 import importlib
 import re
 import subprocess
@@ -28,8 +29,17 @@ from flocks.tool.registry import (
 )
 from flocks.workspace.manager import WorkspaceManager
 
-SUPPORTED_SUFFIXES = {".pdf", ".docx", ".doc"}
+SUPPORTED_SUFFIXES = {
+    ".pdf", ".docx", ".doc", ".html", ".htm",
+    ".ppt", ".pptx", ".xls", ".xlsx",
+}
 WORD_NAMESPACE = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+PRESENTATION_NAMESPACE = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+}
+SPREADSHEET_NAMESPACE = {
+    "s": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+}
 DOCX_SOFT_BREAK_TOKEN = "<<FLOCKS_DOCX_SOFT_BREAK>>"
 
 
@@ -91,6 +101,54 @@ def _looks_like_markdown(line: str) -> bool:
 
 def _safe_xml_fromstring(payload: bytes | str) -> ET.Element:
     return DefusedET.fromstring(payload)
+
+
+def _clean_legacy_text(text: str) -> str:
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\x0b", "\n").replace("\x0c", "\n")
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
+def _decode_legacy_office_bytes(data: bytes) -> str:
+    best = ""
+    for encoding in ("utf-16le", "utf-8", "gbk", "latin1"):
+        try:
+            decoded = data.decode(encoding, errors="ignore")
+        except Exception:
+            continue
+        normalized = _normalize_markdown(_clean_legacy_text(decoded))
+        if normalized and _looks_like_readable_text(normalized) and len(normalized) > len(best):
+            best = normalized
+    return best
+
+
+def _strip_html_tags(fragment: str) -> str:
+    fragment = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", fragment)
+    fragment = re.sub(r"(?is)<[^>]+>", " ", fragment)
+    return html_lib.unescape(re.sub(r"\s+", " ", fragment)).strip()
+
+
+def _extract_html_with_stdlib(file_path: Path) -> str:
+    text = file_path.read_text(encoding="utf-8", errors="replace")
+    text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)<li[^>]*>", "\n- ", text)
+    text = re.sub(r"(?is)</(p|div|section|article|header|footer|table|tr|ul|ol|main)>", "\n\n", text)
+
+    def _replace_heading(match: re.Match[str]) -> str:
+        level = int(match.group(1))
+        heading_text = _strip_html_tags(match.group(2))
+        if not heading_text:
+            return "\n\n"
+        return f"\n\n{'#' * level} {heading_text}\n\n"
+
+    text = re.sub(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>", _replace_heading, text)
+    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = html_lib.unescape(text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    return _normalize_markdown(text)
 
 
 def _sanitize_stem(path: Path) -> str:
@@ -278,6 +336,154 @@ def _table_to_markdown(table: ET.Element, styles: dict[str, str]) -> str:
     return "\n".join(rows)
 
 
+def _ppt_tag(name: str) -> str:
+    return f"{{{PRESENTATION_NAMESPACE['a']}}}{name}"
+
+
+def _presentation_paragraph_text(paragraph: ET.Element) -> str:
+    parts: list[str] = []
+    for node in paragraph.iter():
+        if node is paragraph:
+            continue
+        if node.tag == _ppt_tag("t"):
+            parts.append(node.text or "")
+        elif node.tag == _ppt_tag("br"):
+            parts.append("\n")
+    return "".join(parts).strip()
+
+
+def _extract_pptx_with_zipxml(file_path: Path) -> str:
+    with zipfile.ZipFile(file_path) as archive:
+        slide_names = sorted(
+            (
+                name for name in archive.namelist()
+                if re.fullmatch(r"ppt/slides/slide\d+\.xml", name)
+            ),
+            key=lambda name: int(re.search(r"(\d+)\.xml$", name).group(1)),
+        )
+        slide_blocks: list[str] = []
+        for index, slide_name in enumerate(slide_names, start=1):
+            root = _safe_xml_fromstring(archive.read(slide_name))
+            lines = [
+                paragraph_text
+                for paragraph in root.findall(".//a:p", PRESENTATION_NAMESPACE)
+                if (paragraph_text := _presentation_paragraph_text(paragraph))
+            ]
+            if not lines:
+                continue
+            slide_blocks.append(
+                "\n".join([f"## Slide {index}", "", *[f"- {line}" for line in lines]])
+            )
+    return _normalize_markdown("\n\n".join(slide_blocks))
+
+
+def _sheet_tag(name: str) -> str:
+    return f"{{{SPREADSHEET_NAMESPACE['s']}}}{name}"
+
+
+def _sheet_text(node: ET.Element) -> str:
+    return "".join(
+        text or ""
+        for text in (
+            child.text for child in node.iter()
+            if child.tag == _sheet_tag("t")
+        )
+    ).strip()
+
+
+def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        payload = archive.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+
+    root = _safe_xml_fromstring(payload)
+    return [_sheet_text(item) for item in root.findall("s:si", SPREADSHEET_NAMESPACE)]
+
+
+def _xlsx_sheet_names(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        payload = archive.read("xl/workbook.xml")
+    except KeyError:
+        return []
+
+    root = _safe_xml_fromstring(payload)
+    return [
+        sheet.get("name", "").strip()
+        for sheet in root.findall("s:sheets/s:sheet", SPREADSHEET_NAMESPACE)
+    ]
+
+
+def _spreadsheet_cell_value(cell: ET.Element, shared_strings: list[str]) -> str:
+    cell_type = cell.get("t", "")
+    if cell_type == "inlineStr":
+        inline_string = cell.find("s:is", SPREADSHEET_NAMESPACE)
+        return _sheet_text(inline_string) if inline_string is not None else ""
+
+    value_node = cell.find("s:v", SPREADSHEET_NAMESPACE)
+    if value_node is None:
+        return ""
+    raw_value = (value_node.text or "").strip()
+    if not raw_value:
+        return ""
+    if cell_type == "s" and raw_value.isdigit():
+        index = int(raw_value)
+        if 0 <= index < len(shared_strings):
+            return shared_strings[index]
+    return raw_value
+
+
+def _rows_to_markdown(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized_rows = [
+        [cell.replace("|", r"\|") for cell in row] + [""] * (width - len(row))
+        for row in rows
+    ]
+    if len(normalized_rows) == 1:
+        normalized_rows.append([""] * width)
+
+    lines = []
+    for row_index, row in enumerate(normalized_rows):
+        lines.append("| " + " | ".join(row) + " |")
+        if row_index == 0:
+            lines.append("| " + " | ".join(["---"] * width) + " |")
+    return "\n".join(lines)
+
+
+def _extract_xlsx_with_zipxml(file_path: Path) -> str:
+    with zipfile.ZipFile(file_path) as archive:
+        shared_strings = _xlsx_shared_strings(archive)
+        sheet_names = _xlsx_sheet_names(archive)
+        worksheet_files = sorted(
+            (
+                name for name in archive.namelist()
+                if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", name)
+            ),
+            key=lambda name: int(re.search(r"(\d+)\.xml$", name).group(1)),
+        )
+        sheet_blocks: list[str] = []
+        for index, worksheet_name in enumerate(worksheet_files, start=1):
+            root = _safe_xml_fromstring(archive.read(worksheet_name))
+            rows: list[list[str]] = []
+            for row in root.findall(".//s:sheetData/s:row", SPREADSHEET_NAMESPACE):
+                values = [
+                    value
+                    for cell in row.findall("s:c", SPREADSHEET_NAMESPACE)
+                    if (value := _spreadsheet_cell_value(cell, shared_strings))
+                ]
+                if values:
+                    rows.append(values)
+            if not rows:
+                continue
+            title = sheet_names[index - 1] if index - 1 < len(sheet_names) and sheet_names[index - 1] else f"Sheet {index}"
+            table_md = _rows_to_markdown(rows)
+            if table_md:
+                sheet_blocks.append(f"## {title}\n\n{table_md}")
+    return _normalize_markdown("\n\n".join(sheet_blocks))
+
+
 def _extract_docx_with_zipxml(file_path: Path) -> str:
     with zipfile.ZipFile(file_path) as archive:
         document_xml = archive.read("word/document.xml")
@@ -301,35 +507,52 @@ def _extract_docx_with_zipxml(file_path: Path) -> str:
     return _normalize_markdown("\n\n".join(blocks))
 
 
-def _extract_doc_with_olefile(file_path: Path) -> str:
+def _extract_legacy_office_with_olefile(file_path: Path, *preferred_streams: str) -> str:
     olefile = importlib.import_module("olefile")
 
     if not olefile.isOleFile(str(file_path)):
         return ""
 
+    chunks: list[str] = []
     with olefile.OleFileIO(str(file_path)) as ole:
-        if not ole.exists("WordDocument"):
-            return ""
-        stream = ole.openstream("WordDocument")
-        data = stream.read()
+        stream_paths = ole.listdir(streams=True, storages=False)
+        ordered_streams = sorted(
+            stream_paths,
+            key=lambda stream_path: (
+                next(
+                    (
+                        index
+                        for index, preferred in enumerate(preferred_streams)
+                        if preferred.lower() in "/".join(stream_path).lower()
+                    ),
+                    len(preferred_streams),
+                ),
+                "/".join(stream_path).lower(),
+            ),
+        )
+        for stream_path in ordered_streams:
+            stream = ole.openstream(stream_path)
+            data = stream.read()
+            extracted = _decode_legacy_office_bytes(data)
+            if not extracted or extracted in chunks:
+                continue
+            chunks.append(extracted)
+            if sum(len(item) for item in chunks) >= 20_000:
+                break
 
-    for encoding in ("utf-16le", "gbk", "utf-8"):
-        try:
-            text = data.decode(encoding, errors="ignore")
-            break
-        except Exception:
-            continue
-    else:
-        return ""
+    return _normalize_markdown("\n\n".join(chunks))
 
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", text)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace("\x0b", "\n").replace("\x0c", "\n")
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    normalized = _normalize_markdown(text)
-    if not _looks_like_readable_text(normalized):
-        return ""
-    return normalized
+
+def _extract_doc_with_olefile(file_path: Path) -> str:
+    return _extract_legacy_office_with_olefile(file_path, "WordDocument")
+
+
+def _extract_ppt_with_olefile(file_path: Path) -> str:
+    return _extract_legacy_office_with_olefile(file_path, "PowerPoint Document", "Current User")
+
+
+def _extract_xls_with_olefile(file_path: Path) -> str:
+    return _extract_legacy_office_with_olefile(file_path, "Workbook", "Book")
 
 
 def _looks_like_readable_text(text: str) -> bool:
@@ -368,6 +591,36 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
             ("docx-xml", _extract_docx_with_zipxml),
             ("pandoc", _extract_with_pandoc),
         ]
+    elif suffix in {".html", ".htm"}:
+        extractors = [
+            ("markitdown", _extract_with_markitdown),
+            ("html-stdlib", _extract_html_with_stdlib),
+            ("pandoc", _extract_with_pandoc),
+        ]
+    elif suffix == ".pptx":
+        extractors = [
+            ("markitdown", _extract_with_markitdown),
+            ("pptx-xml", _extract_pptx_with_zipxml),
+            ("pandoc", _extract_with_pandoc),
+        ]
+    elif suffix == ".xlsx":
+        extractors = [
+            ("markitdown", _extract_with_markitdown),
+            ("xlsx-xml", _extract_xlsx_with_zipxml),
+            ("pandoc", _extract_with_pandoc),
+        ]
+    elif suffix == ".ppt":
+        extractors = [
+            ("markitdown", _extract_with_markitdown),
+            ("pandoc", _extract_with_pandoc),
+            ("olefile", _extract_ppt_with_olefile),
+        ]
+    elif suffix == ".xls":
+        extractors = [
+            ("markitdown", _extract_with_markitdown),
+            ("pandoc", _extract_with_pandoc),
+            ("olefile", _extract_xls_with_olefile),
+        ]
     else:
         extractors = [
             ("markitdown", _extract_with_markitdown),
@@ -399,16 +652,19 @@ def _run_extractors(file_path: Path) -> tuple[str, str, list[str]]:
 @ToolRegistry.register_function(
     name="doc_parser",
     description=(
-        "Parse a PDF, DOCX, or DOC file into Markdown and write the result "
-        "to an .md file. If output_path is omitted, the markdown file is "
-        "written to the Flocks workspace outputs directory for today."
+        "Parse a PDF, Office, or HTML document into Markdown and write the "
+        "result to an .md file. If output_path is omitted, the markdown file "
+        "is written to the Flocks workspace outputs directory for today."
     ),
     category=ToolCategory.FILE,
     parameters=[
         ToolParameter(
             name="input_path",
             type=ParameterType.STRING,
-            description="Absolute or relative path to the source PDF / DOCX / DOC file.",
+            description=(
+                "Absolute or relative path to the source PDF / DOC / DOCX / "
+                "PPT / PPTX / XLS / XLSX / HTML file."
+            ),
             required=True,
         ),
         ToolParameter(

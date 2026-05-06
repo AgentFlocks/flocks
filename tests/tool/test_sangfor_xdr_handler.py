@@ -1,6 +1,6 @@
 """Targeted tests for the Sangfor XDR plugin handler.
 
-The handler lives under ``.flocks/plugins/tools/api/sangfor_xdr/`` and is
+The handler lives under ``.flocks/plugins/tools/api/sangfor_xdr_v2_2/`` and is
 loaded dynamically at runtime, so we import it via a path-based loader to
 exercise the helpers we just hardened:
 
@@ -31,7 +31,7 @@ _HANDLER_PATH = (
     / "plugins"
     / "tools"
     / "api"
-    / "sangfor_xdr"
+    / "sangfor_xdr_v2_2"
     / "sangfor_xdr.handler.py"
 )
 

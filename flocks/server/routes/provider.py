@@ -20,6 +20,7 @@ from flocks.security.secrets import SecretManager
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
+from flocks.tool.tool_loader import extract_provider_version
 
 
 router = APIRouter()
@@ -870,6 +871,7 @@ class APIServiceSummary(BaseModel):
     """API service summary for the Tool API page."""
     id: str
     name: str
+    version: Optional[str] = None
     enabled: bool = True
     status: str = "unknown"
     message: Optional[str] = None
@@ -1273,9 +1275,12 @@ def _build_api_service_summary(
         verify_ssl = verify_ssl_raw.strip().lower() in {"1", "true", "yes", "on"}
     else:
         verify_ssl = bool(verify_ssl_raw)
+    version = extract_provider_version(meta)
+
     return APIServiceSummary(
         id=provider_id,
         name=meta.get("name", provider_id),
+        version=version,
         enabled=enabled,
         status=status,
         message=cached_status.get("message"),
@@ -1292,6 +1297,7 @@ def _build_api_service_summary(
 async def list_api_services() -> List[APIServiceSummary]:
     try:
         from flocks.tool.registry import ToolRegistry
+        from flocks.config.api_versioning import shadowed_legacy_ids
 
         ToolRegistry.init()
 
@@ -1300,6 +1306,10 @@ async def list_api_services() -> List[APIServiceSummary]:
         raw_statuses = await _read_api_service_status_cache()
 
         service_ids = configured_services | discovered_services
+        # Hide each legacy ``api_services[<service_id>]`` block once its
+        # versioned ``<service_id>_v<version>`` counterpart exists, so
+        # the user does not see duplicate entries after migration.
+        service_ids -= shadowed_legacy_ids(service_ids)
         summaries = [
             _build_api_service_summary(provider_id, raw_statuses)
             for provider_id in service_ids
@@ -1471,77 +1481,53 @@ async def get_api_service_metadata(provider_id: str):
 
 
 def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load metadata from a _provider.yaml file for YAML-based API tools."""
+    """Load ``_provider.yaml`` metadata for an API plugin.
+
+    ``provider_id`` may be either the storage_key (the post-versioning
+    canonical id, e.g. ``tdp_api_v3_3_10``) or the bare unversioned
+    ``service_id`` (legacy callers). Discovery is delegated to
+    :func:`discover_api_service_descriptors`, so plugin directories
+    whose name does not match ``provider_id`` (e.g. ``tdp_v3_3_10``
+    for ``service_id`` ``tdp_api``) still resolve correctly.
+    """
     try:
-        from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+        from flocks.config.api_versioning import discover_api_service_descriptors
         import yaml
 
-        api_roots = [
-            Path.cwd() / ".flocks" / "plugins" / "tools" / "api",
-            DEFAULT_PLUGIN_ROOT / "tools" / "api",
-        ]
-        api_dir: Optional[Path] = None
-        for api_root in api_roots:
-            direct_dir = api_root / provider_id
-            if direct_dir.is_dir():
-                api_dir = direct_dir
-                break
-
-            if not api_root.is_dir():
-                continue
-
-            for candidate in api_root.iterdir():
-                if not candidate.is_dir():
-                    continue
-                provider_file = candidate / "_provider.yaml"
-                if not provider_file.is_file():
-                    continue
-                try:
-                    candidate_provider = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.provider_read_failed", {
-                        "provider_id": provider_id, "dir": str(candidate), "error": str(e),
-                    })
-                    continue
-
-                if (
-                    isinstance(candidate_provider, dict)
-                    and candidate_provider.get("service_id") == provider_id
-                ):
-                    api_dir = candidate
-                    break
-
-            if api_dir is not None:
-                break
-        if api_dir is None:
+        descriptor = next(
+            (d for d in discover_api_service_descriptors()
+             if provider_id in (d.storage_key, d.service_id)),
+            None,
+        )
+        if descriptor is None:
             return None
 
-        provider_file = api_dir / "_provider.yaml"
-        if not provider_file.is_file():
-            return None
-
-        prov = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
+        api_dir = descriptor.provider_yaml.parent
+        prov = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
         if not isinstance(prov, dict):
             return None
 
-        tool_apis = []
+        tool_apis: List[Dict[str, Any]] = []
         for item in sorted(api_dir.iterdir()):
-            if item.suffix in (".yaml", ".yml") and not item.name.startswith("_"):
-                try:
-                    tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
-                    if isinstance(tool_data, dict) and tool_data.get("name"):
-                        tool_apis.append({
-                            "name": tool_data["name"],
-                            "description": tool_data.get("description", ""),
-                        })
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.tool_read_failed", {
-                        "provider_id": provider_id, "file": item.name, "error": str(e),
-                    })
+            if item.suffix not in (".yaml", ".yml") or item.name.startswith("_"):
+                continue
+            try:
+                tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.debug("provider.yaml_metadata.tool_read_failed", {
+                    "provider_id": provider_id, "file": item.name, "error": str(e),
+                })
+                continue
+            if isinstance(tool_data, dict) and tool_data.get("name"):
+                tool_apis.append({
+                    "name": tool_data["name"],
+                    "description": tool_data.get("description", ""),
+                })
 
         return {
             "name": prov.get("name", provider_id),
             "service_id": prov.get("service_id", provider_id),
+            "version": extract_provider_version(prov),
             "description": prov.get("description"),
             "description_cn": prov.get("description_cn"),
             "auth": prov.get("auth"),
@@ -2256,11 +2242,47 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             # Try to test connectivity by calling a simple tool
             from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
-            
+
             ToolRegistry.init()
 
             _set_api_service_tools_enabled(provider_id, True)
-            
+
+            # If the plugin ships a `_test.yaml` with a `connectivity` block,
+            # honour the declared (tool, params) probe. Tool failures (e.g.
+            # wrong apikey) are surfaced as-is — that's the answer the test
+            # is looking for. Exceptions (broken manifest, missing tool, …)
+            # log a warning and fall through to the heuristic below so a
+            # malformed `_test.yaml` cannot take down connectivity testing.
+            from flocks.tool.probe_loader import get_connectivity_spec
+            spec = get_connectivity_spec(provider_id)
+            if spec is not None:
+                log.info("test_credentials.using_declared_probe", {
+                    "service": provider_id, "tool": spec.tool, "params": spec.params,
+                })
+                try:
+                    probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
+                    latency = int((time.time() - start) * 1000)
+                    response = {
+                        "success": probe.success,
+                        "message": (
+                            f"✅ 连通性测试成功（声明式探针：{spec.tool}）"
+                            if probe.success
+                            else f"❌ 连通性测试失败（声明式探针：{spec.tool}）：{probe.error or 'Unknown'}"
+                        ),
+                        "latency_ms": latency,
+                        "tool_tested": spec.tool,
+                        "params_used": spec.params,
+                        "probe_source": "manifest",
+                    }
+                    await _save_api_service_status_if_configured(provider_id, response)
+                    return response
+                except Exception as exc:
+                    log.warning("test_credentials.declared_probe_exception", {
+                        "service": provider_id, "tool": spec.tool, "error": str(exc),
+                    })
+                    # fall through to heuristic
+
+
             # Find tools from this service using the shared source detection
             all_tools = ToolRegistry.list_tools()
             service_tools = []

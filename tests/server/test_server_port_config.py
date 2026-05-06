@@ -12,6 +12,8 @@ Tests various scenarios:
 import os
 import re
 import socket
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -237,6 +239,113 @@ class TestCommandLinePortConfiguration:
         assert captured["config"].backend_port == 9100
         assert captured["config"].frontend_host == "127.0.0.1"
         assert captured["config"].frontend_port == 5273
+
+    def test_restart_reuses_runtime_recorded_host_and_port(self, monkeypatch, tmp_path: Path):
+        """Test restart reuses last runtime host/port when CLI and env omit them."""
+        captured = {}
+        paths = SimpleNamespace(
+            backend_pid=tmp_path / "backend.pid",
+            frontend_pid=tmp_path / "webui.pid",
+        )
+        records = {
+            paths.backend_pid: SimpleNamespace(host="0.0.0.0", port=9000),
+            paths.frontend_pid: SimpleNamespace(host="0.0.0.0", port=5174),
+        }
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(cli_main, "read_runtime_record", lambda path: records.get(path))
+        Config._global_config = None
+
+        result = CliRunner().invoke(cli_main.app, ["restart"])
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "0.0.0.0"
+        assert captured["config"].backend_port == 9000
+        assert captured["config"].frontend_host == "0.0.0.0"
+        assert captured["config"].frontend_port == 5174
+
+    def test_restart_cli_options_override_runtime_record(self, monkeypatch, tmp_path: Path):
+        """Test explicit restart CLI options override runtime-recorded host/port."""
+        captured = {}
+        paths = SimpleNamespace(
+            backend_pid=tmp_path / "backend.pid",
+            frontend_pid=tmp_path / "webui.pid",
+        )
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(
+            cli_main,
+            "read_runtime_record",
+            lambda path: SimpleNamespace(
+                host="0.0.0.0",
+                port=9000 if Path(path) == paths.backend_pid else 5174,
+            ),
+        )
+        Config._global_config = None
+
+        result = CliRunner().invoke(
+            cli_main.app,
+            [
+                "restart",
+                "--server-host",
+                "127.0.0.1",
+                "--server-port",
+                "9100",
+                "--webui-host",
+                "127.0.0.1",
+                "--webui-port",
+                "5273",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "127.0.0.1"
+        assert captured["config"].backend_port == 9100
+        assert captured["config"].frontend_host == "127.0.0.1"
+        assert captured["config"].frontend_port == 5273
+
+    def test_restart_environment_overrides_runtime_record(self, monkeypatch, tmp_path: Path):
+        """Test restart environment variables still override runtime-recorded host/port."""
+        captured = {}
+        paths = SimpleNamespace(
+            backend_pid=tmp_path / "backend.pid",
+            frontend_pid=tmp_path / "webui.pid",
+        )
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(
+            cli_main,
+            "read_runtime_record",
+            lambda path: SimpleNamespace(
+                host="0.0.0.0",
+                port=9000 if Path(path) == paths.backend_pid else 5174,
+            ),
+        )
+        monkeypatch.setenv("FLOCKS_SERVER_HOST", "127.0.0.1")
+        monkeypatch.setenv("FLOCKS_SERVER_PORT", "9101")
+        monkeypatch.setenv("FLOCKS_WEBUI_HOST", "127.0.0.1")
+        monkeypatch.setenv("FLOCKS_WEBUI_PORT", "5275")
+        Config._global_config = None
+
+        result = CliRunner().invoke(cli_main.app, ["restart"])
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "127.0.0.1"
+        assert captured["config"].backend_port == 9101
+        assert captured["config"].frontend_host == "127.0.0.1"
+        assert captured["config"].frontend_port == 5275
 
     def test_service_config_prefers_cli_values(self, monkeypatch):
         """Test CLI values override environment and default values."""

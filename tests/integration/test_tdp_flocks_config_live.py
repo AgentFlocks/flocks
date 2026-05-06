@@ -26,7 +26,7 @@ from flocks.tool.tool_loader import yaml_to_tool
 
 
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
-_TDP_PLUGIN_DIR = _WORKSPACE_ROOT / ".flocks" / "plugins" / "tools" / "api" / "tdp_api"
+_TDP_PLUGIN_DIR = _WORKSPACE_ROOT / ".flocks" / "plugins" / "tools" / "api" / "tdp_v3_3_10"
 
 
 def _live_tdp_enabled() -> bool:
