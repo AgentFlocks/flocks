@@ -48,11 +48,12 @@ def _log_tail(name: str | None):
 
 
 def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
-    """Return True when Chrome needs the inspect-page permission flow."""
+    """Return True when a local browser needs the inspect-page permission flow."""
     lower = (msg or "").lower()
     return (
         "devtoolsactiveport not found" in lower
-        or "enable chrome://inspect" in lower
+        or "remote-debugging page" in lower
+        or "inspect/#remote-debugging" in lower
         or "not live yet" in lower
         or (
             "ws handshake failed" in lower
@@ -143,7 +144,9 @@ def _doctor_short_text(value, limit: int | None = None) -> str:
     return value if len(value) <= limit else value[: limit - 3] + "..."
 
 
-def ensure_daemon(wait: float = 60.0, name: str | None = None, env: dict | None = None, _open_inspect: bool = True) -> None:
+def ensure_daemon(
+    wait: float = 60.0, name: str | None = None, env: dict | None = None, _open_inspect: bool = True
+) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
     if daemon_alive(name):
         try:
@@ -184,8 +187,12 @@ def ensure_daemon(wait: float = 60.0, name: str | None = None, env: dict | None 
         msg = _log_tail(name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
             if _open_inspect:
-                _open_chrome_inspect()
-            print(f"{BROWSER_LABEL}: click Allow on chrome://inspect (and tick the checkbox if shown)", file=sys.stderr)
+                _open_browser_inspect()
+            print(
+                f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
+                "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
+                file=sys.stderr,
+            )
             restart_daemon(name)
             continue
         raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
@@ -298,6 +305,14 @@ def print_update_banner(out=None) -> None:
     _cache_write({**cache, "banner_shown_on": today})
 
 
+def _output_contains_process_names(output: str | bytes, names: tuple[str, ...]) -> bool:
+    if isinstance(output, bytes):
+        lowered = output.lower()
+        return any(name.encode("ascii") in lowered for name in names)
+    lowered = output.lower()
+    return any(name.lower() in lowered for name in names)
+
+
 def _chrome_running() -> bool:
     import platform
     import subprocess
@@ -305,42 +320,48 @@ def _chrome_running() -> bool:
     system = platform.system()
     try:
         if system == "Windows":
-            output = subprocess.check_output(["tasklist"], text=True, timeout=5)
-            names = ("chrome.exe", "msedge.exe")
+            output = subprocess.check_output(["tasklist"], timeout=5)
+            names = ("chrome.exe", "chromium.exe", "msedge.exe")
         else:
             output = subprocess.check_output(["ps", "-A", "-o", "comm="], text=True, timeout=5)
             names = ("Google Chrome", "chrome", "chromium", "Microsoft Edge", "msedge")
-        return any(name.lower() in output.lower() for name in names)
+        return _output_contains_process_names(output, names)
     except Exception:
         return False
 
 
-def _open_chrome_inspect() -> None:
+def _open_browser_inspect() -> None:
     import platform
     import subprocess
     import webbrowser
 
-    url = "chrome://inspect/#remote-debugging"
+    inspect_targets = [
+        ("Google Chrome", "chrome://inspect/#remote-debugging"),
+        ("Microsoft Edge", "edge://inspect/#remote-debugging"),
+    ]
     if platform.system() == "Darwin":
+        for app_name, url in inspect_targets:
+            try:
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'tell application "{app_name}" to activate',
+                        "-e",
+                        f'tell application "{app_name}" to open location "{url}"',
+                    ],
+                    timeout=5,
+                    check=False,
+                )
+                return
+            except Exception:
+                continue
+    for _app_name, url in inspect_targets:
         try:
-            subprocess.run(
-                [
-                    "osascript",
-                    "-e",
-                    'tell application "Google Chrome" to activate',
-                    "-e",
-                    f'tell application "Google Chrome" to open location "{url}"',
-                ],
-                timeout=5,
-                check=False,
-            )
-            return
+            if webbrowser.open(url, new=2):
+                return
         except Exception:
-            pass
-    try:
-        webbrowser.open(url, new=2)
-    except Exception:
-        pass
+            continue
 
 
 def run_setup() -> int:
@@ -352,7 +373,7 @@ def run_setup() -> int:
         print("daemon already running; nothing to do.")
         return 0
     if not _chrome_running():
-        print(f"no Chrome/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
+        print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1
     try:
         ensure_daemon(wait=20.0)
@@ -363,14 +384,14 @@ def run_setup() -> int:
 
     needs_inspect = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
     if needs_inspect:
-        print("chrome remote-debugging is not enabled on the current profile.")
-        print("opening chrome://inspect/#remote-debugging -- in the tab that opens:")
-        print("  1. if chrome shows the profile picker, pick your normal profile;")
+        print("browser remote debugging is not enabled on the current profile.")
+        print("opening your browser's inspect page -- in the tab that opens:")
+        print("  1. if the browser shows the profile picker, pick your normal profile;")
         print("  2. tick 'Discover network targets' and click Allow if prompted.")
-        _open_chrome_inspect()
+        _open_browser_inspect()
     else:
         print(f"attach failed: {first_err}")
-        print("retrying for up to 60s (chrome may still be starting up)...")
+        print("retrying for up to 60s (the browser may still be starting up)...")
 
     deadline = time.time() + 60
     last = first_err
@@ -395,7 +416,7 @@ def run_doctor() -> int:
 
     current = _version()
     mode = _install_mode()
-    chrome = _chrome_running()
+    browser_running = _chrome_running()
     daemon = daemon_alive()
     connections = browser_connections()
     latest = _latest_release_tag()
@@ -414,7 +435,11 @@ def run_doctor() -> int:
         print(f"  latest release    {latest}" + (" (update available)" if newer else ""))
     else:
         print("  latest release    (not configured)")
-    row("chrome running", chrome, "" if chrome else "start chrome/edge and rerun `flocks browser --setup`")
+    row(
+        "browser running",
+        browser_running,
+        "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
+    )
     row("daemon alive", daemon, "" if daemon else "run `flocks browser --setup` to attach")
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
@@ -425,6 +450,4 @@ def run_doctor() -> int:
             print(f"        {conn['name']} — active page: {title} — {url}")
         else:
             print(f"        {conn['name']} — active page: (no real page)")
-    return 0 if (chrome and daemon) else 1
-
-
+    return 0 if (browser_running and daemon) else 1

@@ -42,6 +42,11 @@ def test_stale_websocket_does_not_open_chrome_inspect() -> None:
     assert not admin._needs_chrome_remote_debugging_prompt(msg)
 
 
+def test_generic_remote_debugging_message_triggers_prompt() -> None:
+    msg = "The browser's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:9222"
+    assert admin._needs_chrome_remote_debugging_prompt(msg)
+
+
 def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
     monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", None)
@@ -166,3 +171,76 @@ def test_doctor_page_output_truncates_long_text(monkeypatch, capsys) -> None:
     assert "profile-use installed" not in out
     assert "BROWSER_USE_API_KEY set" not in out
 
+
+def test_run_setup_uses_generic_missing_browser_wording(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+
+    assert admin.run_setup() == 1
+
+    out = capsys.readouterr().out
+    assert "no Chrome/Chromium/Edge process detected" in out
+
+
+def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: None)
+
+    calls = {"count": 0}
+
+    def fake_ensure_daemon(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError(
+                "The browser's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:9222"
+            )
+        return None
+
+    monkeypatch.setattr(admin, "ensure_daemon", fake_ensure_daemon)
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "browser remote debugging is not enabled on the current profile." in out
+    assert "opening your browser's inspect page" in out
+    assert "if the browser shows the profile picker" in out
+
+
+def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 1
+
+    out = capsys.readouterr().out
+    assert "[FAIL] browser running" in out
+    assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
+
+
+def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "subprocess.check_output", lambda *args, **kwargs: b"\xcf\xd6\xce\xf1\xbc\xfe\r\nmsedge.exe\r\n"
+    )
+
+    assert admin._chrome_running()
+
+
+def test_chrome_running_on_windows_detects_chromium_process(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: b"chromium.exe\r\n")
+
+    assert admin._chrome_running()
+
+
+def test_chrome_running_on_non_windows_matches_text_output(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "Google Chrome\n")
+
+    assert admin._chrome_running()

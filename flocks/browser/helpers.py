@@ -14,13 +14,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from . import DEFAULT_AGENT_WORKSPACE
+from . import DEFAULT_AGENT_WORKSPACE, INTERNAL_URL_PREFIXES
 from . import _ipc as ipc
 
 
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
 NAME = os.environ.get("BU_NAME", "default")
-INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
+INTERNAL = INTERNAL_URL_PREFIXES
 _COMMON_SECOND_LEVEL_SUFFIXES = {"ac", "co", "com", "edu", "gov", "mil", "net", "org"}
 _COOKIE_IMPORT_FIELDS = {
     "name",
@@ -588,7 +588,7 @@ def _unmark_tab() -> None:
 
 
 def attach_tab(target) -> str:
-    """Attach to a tab without making it the visible Chrome tab."""
+    """Attach to a tab without making it the visible browser tab."""
     target_id = target.get("targetId") if isinstance(target, dict) else target
     _unmark_tab()
     session_id = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
@@ -598,7 +598,7 @@ def attach_tab(target) -> str:
 
 
 def switch_tab(target) -> str:
-    """Attach to a tab and make it the visible Chrome tab."""
+    """Attach to a tab and make it the visible browser tab."""
     target_id = target.get("targetId") if isinstance(target, dict) else target
     cdp("Target.activateTarget", targetId=target_id)
     return attach_tab(target_id)

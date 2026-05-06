@@ -141,6 +141,27 @@ def test_close_tab_can_skip_activating_next_tab() -> None:
     assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
 
 
+def test_list_tabs_excludes_edge_internal_pages_when_requested() -> None:
+    def fake_cdp(method, **kwargs):
+        assert method == "Target.getTargets"
+        return {
+            "targetInfos": [
+                {
+                    "type": "page",
+                    "targetId": "edge-internal",
+                    "url": "edge://inspect/#remote-debugging",
+                    "title": "Inspect",
+                },
+                {"type": "page", "targetId": "real-page", "url": "https://example.com", "title": "Example"},
+            ]
+        }
+
+    with patch("flocks.browser.helpers.cdp", side_effect=fake_cdp):
+        tabs = helpers.list_tabs(include_chrome=False)
+
+    assert tabs == [{"targetId": "real-page", "title": "Example", "url": "https://example.com"}]
+
+
 def test_save_state_writes_portable_schema(tmp_path) -> None:
     out = tmp_path / "auth-state.json"
     cookies = [
@@ -160,7 +181,9 @@ def test_save_state_writes_portable_schema(tmp_path) -> None:
         raise AssertionError(expression)
 
     with (
-        patch("flocks.browser.helpers.page_info", return_value={"url": "https://www.zhihu.com/app", "title": "Example"}),
+        patch(
+            "flocks.browser.helpers.page_info", return_value={"url": "https://www.zhihu.com/app", "title": "Example"}
+        ),
         patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
         patch("flocks.browser.helpers.js", side_effect=fake_js),
     ):
@@ -170,7 +193,9 @@ def test_save_state_writes_portable_schema(tmp_path) -> None:
     assert result["cookies"] == 2
     assert set(saved) == {"cookies", "origins"}
     assert {item["domain"] for item in saved["cookies"]} == {".zhihu.com", "api.zhihu.com"}
-    assert saved["origins"] == [{"origin": "https://www.zhihu.com", "localStorage": [{"name": "token", "value": "abc"}]}]
+    assert saved["origins"] == [
+        {"origin": "https://www.zhihu.com", "localStorage": [{"name": "token", "value": "abc"}]}
+    ]
 
 
 def test_load_state_restores_cookies_and_storage(tmp_path) -> None:

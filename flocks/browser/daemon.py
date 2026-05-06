@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cdp_use.client import CDPClient
 
-from . import DEFAULT_AGENT_WORKSPACE
+from . import DEFAULT_AGENT_WORKSPACE, INTERNAL_URL_PREFIXES
 from . import _ipc as ipc
 
 
@@ -48,7 +48,7 @@ PROFILES = [
     Path.home() / "AppData/Local/Microsoft/Edge Dev/User Data",
     Path.home() / "AppData/Local/Microsoft/Edge SxS/User Data",
 ]
-INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://", "about:")
+INTERNAL = INTERNAL_URL_PREFIXES
 MARKER = "🟢"
 
 
@@ -90,12 +90,14 @@ def get_ws_url() -> str:
         last_err = None
         while time.time() < deadline:
             try:
-                return json.loads(urllib.request.urlopen(f"{url}/json/version", timeout=5).read())["webSocketDebuggerUrl"]
+                return json.loads(urllib.request.urlopen(f"{url}/json/version", timeout=5).read())[
+                    "webSocketDebuggerUrl"
+                ]
             except Exception as error:
                 last_err = error
                 time.sleep(1)
         raise RuntimeError(
-            f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- is the dedicated automation Chrome running?"
+            f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- is the dedicated automation browser running?"
         )
     for base in PROFILES:
         try:
@@ -112,8 +114,8 @@ def get_ws_url() -> str:
             except OSError:
                 if time.time() >= deadline:
                     raise RuntimeError(
-                        "Chrome's remote-debugging page is open, but DevTools is not live yet on "
-                        f"127.0.0.1:{port.strip()} — if Chrome opened a profile picker, choose your normal "
+                        "The browser's remote-debugging page is open, but DevTools is not live yet on "
+                        f"127.0.0.1:{port.strip()} — if the browser opened a profile picker, choose your normal "
                         "profile first, then tick the checkbox and click Allow if shown"
                     )
                 time.sleep(1)
@@ -128,7 +130,8 @@ def get_ws_url() -> str:
             continue
     raise RuntimeError(
         "DevToolsActivePort not found in "
-        f"{[str(path) for path in PROFILES]} — enable chrome://inspect/#remote-debugging, "
+        f"{[str(path) for path in PROFILES]} — enable your browser's remote-debugging page "
+        "(for example chrome://inspect/#remote-debugging or edge://inspect/#remote-debugging), "
         "or set BU_CDP_WS for a remote browser"
     )
 
@@ -181,7 +184,9 @@ class Daemon:
                     "This can happen when network policy blocks the connection, the WS URL is wrong or expired, "
                     "or the remote endpoint is down. Verify BU_CDP_WS and refresh the remote session if needed."
                 ) from error
-            raise RuntimeError(f"CDP WS handshake failed: {error} -- click Allow in Chrome if prompted, then retry")
+            raise RuntimeError(
+                f"CDP WS handshake failed: {error} -- click Allow in your browser if prompted, then retry"
+            )
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
         mark_js = f"if(!document.title.startsWith('{MARKER}'))document.title='{MARKER} '+document.title"
@@ -236,7 +241,9 @@ class Daemon:
                 await asyncio.wait_for(
                     self.cdp.send_raw(
                         "Runtime.evaluate",
-                        {"expression": f"if(!document.title.startsWith('{MARKER}'))document.title='{MARKER} '+document.title"},
+                        {
+                            "expression": f"if(!document.title.startsWith('{MARKER}'))document.title='{MARKER} '+document.title"
+                        },
                         session_id=self.session,
                     ),
                     timeout=2,
