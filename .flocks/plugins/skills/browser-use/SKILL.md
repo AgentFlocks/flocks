@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 Chrome 与 agent-browser CLI 两种模式。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome login session, access internal/login-only pages, or automate browser actions.
+description: 统一处理浏览器使用任务，支持 CDP 直连用户本机 Chromium 系浏览器与 agent-browser CLI 两种模式。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, access internal/login-only pages, or automate browser actions.
 ---
 
 # Browser Use
@@ -12,14 +12,14 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 C
 - 打开网页、浏览页面、点击按钮、填写表单
 - 截图、抓取页面内容、提取链接或媒体资源
 - 访问登录后页面、内部系统、动态渲染页面
-- 复用用户当前 Chrome 的登录态
+- 复用用户当前浏览器的登录态
 
 ## 浏览器使用模式说明
 
 | 模式 | 说明 | 何时使用 |
 | --- | --- | --- |
 | `agent-browser` | 独立浏览器自动化模式 | 用户明确说用 `agent-browser`|
-| `cdp-direct` | 复用本机 Chrome 的 CDP 直连模式 | 用户明确说用 CDP 模式|
+| `cdp-direct` | 复用本机 Chromium 系浏览器的 CDP 直连模式 | 用户明确说用 CDP 模式|
 
  - 用户明确指出模式后，直接阅读执行规则部分
  - 当用户没有明确指出使用模式时，进入下一步自动判定
@@ -36,7 +36,7 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户日常 C
 flocks browser --doctor
 ```
 
-该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Edge 是否运行，以及当前是否有可用的浏览器连接。
+该命令会检查 `flocks browser` 的 daemon 是否可用、Chrome/Chromium/Edge 是否运行，以及当前是否有可用的浏览器连接。
 
 ### 第二步：根据检测结果决定模式
 
@@ -48,12 +48,12 @@ flocks browser --doctor
 
 之后只按 CDP 流程执行，不再切到 `agent-browser`。
 
-#### 结果 B：Chrome 已运行，但 daemon 或 active browser connection 不可用
+#### 结果 B：浏览器已运行，但 daemon 或 active browser connection 不可用
 
 必须直接提示用户：
 
 ```text
-chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://inspect/#remote-debugging 并勾选 Allow remote debugging
+browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后访问对应浏览器的 inspect 页面（例如 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging）并勾选 Allow remote debugging
 或
 不使用 CDP 模式，使用agent-browser
 ```
@@ -63,7 +63,7 @@ chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://ins
 - 如果 `--setup` / `-c` 成功，或随后 `--doctor` 通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
 - 如果仍未通过：继续提示用户检查 remote debugging，或提示切到 `agent-browser`
 
-#### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Edge
+#### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Chromium/Edge
 
 说明当前环境不适合 `CDP 直连`。此时要：
 

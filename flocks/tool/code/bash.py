@@ -14,15 +14,14 @@ import sys
 import asyncio
 import subprocess
 import shlex
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from flocks.sandbox.types import BashSandboxConfig
 
-from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
-)
+from flocks.tool.registry import ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 from flocks.project.instance import Instance
 from flocks.utils.log import Log
 
@@ -119,6 +118,7 @@ def get_shell() -> str:
 def shutil_which(cmd: str) -> Optional[str]:
     """Cross-platform which command"""
     import shutil
+
     return shutil.which(cmd)
 
 
@@ -130,31 +130,57 @@ def _get_windows_shell_command(command: str) -> tuple[str, list[str]]:
     return "cmd", ["cmd", "/d", "/s", "/c", command]
 
 
+def _get_windows_default_workdir_fallback() -> Optional[str]:
+    """Return a safe existing directory for Windows host commands."""
+    for candidate in (
+        os.environ.get("USERPROFILE"),
+        os.path.expanduser("~"),
+        tempfile.gettempdir(),
+        "C:\\",
+    ):
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _resolve_workdir(base_dir: str, workdir: Optional[str]) -> str:
+    """Resolve command working directory, with Windows-only default cwd fallback."""
+    cwd = workdir or base_dir
+
+    if not os.path.isabs(cwd):
+        cwd = os.path.join(base_dir, cwd)
+
+    if sys.platform == "win32" and workdir is None and not os.path.isdir(cwd):
+        if fallback := _get_windows_default_workdir_fallback():
+            log.warn("bash.invalid_default_cwd_fallback", {"invalid_cwd": cwd, "fallback": fallback})
+            return fallback
+
+    return cwd
+
+
 async def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
     """
     Kill a process and all its children
-    
+
     Args:
         proc: Process to kill
     """
     try:
         if sys.platform == "win32":
             # Windows: use taskkill
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True
-            )
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
         else:
             # Unix: send SIGTERM to process group
             import signal
+
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except (ProcessLookupError, OSError):
                 pass
-            
+
             # Wait briefly for graceful shutdown
             await asyncio.sleep(0.1)
-            
+
             # Force kill if still running
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -216,11 +242,7 @@ async def _resolve_sandbox_workdir(
 
         # 将相对路径映射为容器路径
         relative = result.relative.replace(os.sep, "/") if result.relative else ""
-        container_workdir = (
-            f"{sandbox.container_workdir}/{relative}"
-            if relative
-            else sandbox.container_workdir
-        )
+        container_workdir = f"{sandbox.container_workdir}/{relative}" if relative else sandbox.container_workdir
         return result.resolved, container_workdir
     except (ValueError, OSError):
         return fallback, sandbox.container_workdir
@@ -231,30 +253,25 @@ async def _resolve_sandbox_workdir(
     description=get_description(os.getcwd()),
     category=ToolCategory.TERMINAL,
     parameters=[
-        ToolParameter(
-            name="command",
-            type=ParameterType.STRING,
-            description="The command to execute",
-            required=True
-        ),
+        ToolParameter(name="command", type=ParameterType.STRING, description="The command to execute", required=True),
         ToolParameter(
             name="timeout",
             type=ParameterType.INTEGER,
             description="Optional timeout in milliseconds",
             required=False,
-            default=DEFAULT_TIMEOUT_MS
+            default=DEFAULT_TIMEOUT_MS,
         ),
         ToolParameter(
             name="workdir",
             type=ParameterType.STRING,
             description="The working directory to run the command in. Defaults to project directory.",
-            required=False
+            required=False,
         ),
         ToolParameter(
             name="description",
             type=ParameterType.STRING,
             description="Clear, concise description of what this command does in 5-10 words",
-            required=False
+            required=False,
         ),
         ToolParameter(
             name="host",
@@ -263,7 +280,7 @@ async def _resolve_sandbox_workdir(
             required=False,
             enum=["sandbox", "host"],
         ),
-    ]
+    ],
 )
 async def bash_tool(
     ctx: ToolContext,
@@ -282,19 +299,15 @@ async def bash_tool(
     """
     # Resolve working directory
     base_dir = Instance.get_directory() or os.getcwd()
-    cwd = workdir or base_dir
-    
-    if not os.path.isabs(cwd):
-        cwd = os.path.join(base_dir, cwd)
-    
+    cwd = _resolve_workdir(base_dir, workdir)
+
     # Validate timeout
     timeout_ms = timeout or DEFAULT_TIMEOUT_MS
     if timeout_ms < 0:
         return ToolResult(
-            success=False,
-            error=f"Invalid timeout value: {timeout_ms}. Timeout must be a positive number."
+            success=False, error=f"Invalid timeout value: {timeout_ms}. Timeout must be a positive number."
         )
-    
+
     timeout_sec = timeout_ms / 1000
 
     # Check for sandbox configuration
@@ -354,33 +367,25 @@ async def _execute_host(
     """在宿主机上执行命令（原有逻辑）."""
     # Check if working directory is outside project
     if not Instance.contains_path(cwd):
-        await ctx.ask(
-            permission="external_directory",
-            patterns=[cwd],
-            always=[os.path.dirname(cwd) + "*"],
-            metadata={}
-        )
-    
+        await ctx.ask(permission="external_directory", patterns=[cwd], always=[os.path.dirname(cwd) + "*"], metadata={})
+
     # Request bash permission
-    await ctx.ask(
-        permission="bash",
-        patterns=[command],
-        always=["*"],
-        metadata={}
-    )
-    
+    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={})
+
     # Get shell
     shell = get_shell()
-    
+
     # Initialize metadata
-    ctx.metadata({
-        "metadata": {
-            "output": "",
-            "description": description or command,
-            **(extra_metadata or {}),
+    ctx.metadata(
+        {
+            "metadata": {
+                "output": "",
+                "description": description or command,
+                **(extra_metadata or {}),
+            }
         }
-    })
-    
+    )
+
     # Build environment with UTF-8 encoding for Windows
     env = None
     if sys.platform == "win32":
@@ -413,12 +418,8 @@ async def _execute_host(
                 start_new_session=True,  # Create new process group
             )
     except Exception as e:
-        return ToolResult(
-            success=False,
-            error=f"Failed to start command: {str(e)}",
-            title=description or command
-        )
-    
+        return ToolResult(success=False, error=f"Failed to start command: {str(e)}", title=description or command)
+
     return await _stream_output(
         ctx=ctx,
         proc=proc,
@@ -449,28 +450,28 @@ async def _execute_sandboxed(
     """
     from flocks.sandbox.docker import build_docker_exec_args, build_sandbox_env
 
-    log.info("bash.execute.sandbox", {
-        "command": command,
-        "container": sandbox.container_name,
-    })
-
-    # Request bash permission (沙箱内也需要权限)
-    await ctx.ask(
-        permission="bash",
-        patterns=[command],
-        always=["*"],
-        metadata={"sandbox": True}
+    log.info(
+        "bash.execute.sandbox",
+        {
+            "command": command,
+            "container": sandbox.container_name,
+        },
     )
 
+    # Request bash permission (沙箱内也需要权限)
+    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={"sandbox": True})
+
     # Initialize metadata
-    ctx.metadata({
-        "metadata": {
-            "output": "",
-            "description": description or command,
-            "sandbox": True,
-            "container": sandbox.container_name,
+    ctx.metadata(
+        {
+            "metadata": {
+                "output": "",
+                "description": description or command,
+                "sandbox": True,
+                "container": sandbox.container_name,
+            }
         }
-    })
+    )
 
     # 解析工作目录 (host → container 路径映射)
     host_workdir, container_workdir = await _resolve_sandbox_workdir(cwd, sandbox)
@@ -540,89 +541,88 @@ async def _stream_output(
             # Read from both stdout and stderr
             stdout_task = asyncio.create_task(proc.stdout.read(4096))
             stderr_task = asyncio.create_task(proc.stderr.read(4096))
-            
-            done, pending = await asyncio.wait(
-                [stdout_task, stderr_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
+
+            done, pending = await asyncio.wait([stdout_task, stderr_task], return_when=asyncio.FIRST_COMPLETED)
+
             for task in pending:
                 task.cancel()
-            
+
             for task in done:
                 try:
                     chunk = task.result()
                     if chunk:
-                        output += chunk.decode('utf-8', errors='replace')
-                        
+                        output += chunk.decode("utf-8", errors="replace")
+
                         # Update metadata with truncated output
                         truncated_output = output
                         if len(truncated_output) > MAX_METADATA_LENGTH:
                             truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
-                        
-                        ctx.metadata({
-                            "metadata": {
-                                "output": truncated_output,
-                                "description": description or command,
-                                **(extra_metadata or {}),
+
+                        ctx.metadata(
+                            {
+                                "metadata": {
+                                    "output": truncated_output,
+                                    "description": description or command,
+                                    **(extra_metadata or {}),
+                                }
                             }
-                        })
+                        )
                 except asyncio.CancelledError:
                     pass
-            
+
             # Check if process has exited
             if proc.returncode is not None:
                 # Read any remaining output
                 remaining_stdout = await proc.stdout.read()
                 remaining_stderr = await proc.stderr.read()
                 if remaining_stdout:
-                    output += remaining_stdout.decode('utf-8', errors='replace')
+                    output += remaining_stdout.decode("utf-8", errors="replace")
                 if remaining_stderr:
-                    output += remaining_stderr.decode('utf-8', errors='replace')
+                    output += remaining_stderr.decode("utf-8", errors="replace")
                 break
-            
+
             # Check for abort
             if ctx.aborted:
                 break
 
     # Create tasks
     read_task = asyncio.create_task(read_output())
-    
+
     try:
         await asyncio.wait_for(read_task, timeout=timeout_sec)
     except asyncio.TimeoutError:
         timed_out = True
         read_task.cancel()
         await kill_process_tree(proc)
-    
+
     # Check for abort
     if ctx.aborted:
         aborted = True
         await kill_process_tree(proc)
-    
+
     # Wait for process to finish
     try:
         await asyncio.wait_for(proc.wait(), timeout=1.0)
     except asyncio.TimeoutError:
         pass
-    
+
     exit_code = proc.returncode
-    
+
     # Build result metadata
     result_metadata = []
     if timed_out:
         result_metadata.append(f"bash tool terminated command after exceeding timeout {timeout_ms} ms")
     if aborted:
         result_metadata.append("User aborted the command")
-    
+
     if result_metadata:
         output += "\n\n<bash_metadata>\n" + "\n".join(result_metadata) + "\n</bash_metadata>"
-    
+
     # Truncate output for metadata
     truncated_output = output
     if len(truncated_output) > MAX_METADATA_LENGTH:
         truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
-    
+
     # Determine success based on exit code
     success = exit_code == 0 if exit_code is not None else not timed_out and not aborted
     error_message = None
@@ -634,7 +634,7 @@ async def _stream_output(
             timed_out=timed_out,
             aborted=aborted,
         )
-    
+
     return ToolResult(
         success=success,
         output=output,
@@ -647,5 +647,5 @@ async def _stream_output(
             "timed_out": timed_out,
             "aborted": aborted,
             **(extra_metadata or {}),
-        }
+        },
     )

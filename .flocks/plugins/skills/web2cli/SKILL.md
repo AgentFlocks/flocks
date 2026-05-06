@@ -1,6 +1,6 @@
 ---
 name: web2cli
-description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chrome 登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
+description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chromium 系浏览器登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
 required: browser-use
 ---
 
@@ -24,16 +24,16 @@ required: browser-use
 
 ### `cdp-direct`（默认模式）
 
-适用于需要复用用户 Chrome 登录态、通过 `browser-use` 的 `flocks browser` 内核直连 CDP 的场景。
+适用于需要复用用户 Chromium 系浏览器登录态、通过 `browser-use` 的 `flocks browser` 内核直连 CDP 的场景。
 
 使用此模式前必须检查可用性：
 ```bash
 flocks browser --doctor
 ```
 
-如果 doctor 提示 Chrome 已运行但 remote debugging 未连接，则提示用户
+如果 doctor 提示浏览器已运行但 remote debugging 未连接，则提示用户
 ```text
-chrome: not connected — 请确保 Chrome 已打开，然后访问 chrome://inspect/#remote-debugging 并勾选 Allow remote debugging
+browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后访问对应浏览器的 inspect 页面（例如 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging）并勾选 Allow remote debugging
 ```
 
 用户完成后，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 attach，再用 `--doctor` 做只读确认。
@@ -96,7 +96,7 @@ echo "Created tab: $TARGET_ID"
 要求用户在可见浏览器中完成登录、验证码、二次确认等人工步骤。
 
 - `agent-browser`：在当前会话窗口中完成登录。
-- `cdp-direct`：在刚创建的 Chrome tab 中完成登录，必要时让用户手动处理验证码、TOTP 或授权弹窗。
+- `cdp-direct`：在刚创建的浏览器 tab 中完成登录，必要时让用户手动处理验证码、TOTP 或授权弹窗。
 
 登录完成后告知 agent 继续。
 

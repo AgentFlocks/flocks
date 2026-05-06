@@ -11,7 +11,7 @@
 使用 CDP 直连处理这些任务：
 
 - 打开网页、点击、填写表单、上传文件、打印/下载、抓取动态页面内容。
-- 需要复用用户当前 Chrome 登录态、访问内网页面、登录后页面或复杂 SPA。
+- 需要复用用户当前浏览器登录态、访问内网页面、登录后页面或复杂 SPA。
 - 需要比普通浏览器自动化更底层的 CDP 能力，例如 raw CDP、iframe/shadow DOM/cross-origin 点击、网络状态判断。
 
 如果任务涉及账号、资金、生产环境配置、删除/发布/提交等高风险动作，先向用户确认再执行。遇到登录页、验证码、TOTP、授权弹窗或需要输入密码时，可以停下来提示用户操作。
@@ -21,8 +21,8 @@
 - 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
 - 后续命令恢复同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(target_id)` 抢用户当前浏览器焦点。只有需要让用户看到页面、登录、授权或手动操作时才使用 `switch_tab(target_id)`。
 - 只关闭自己创建的 tab，不关闭用户原有 tab。
-- 不要主动停止或重启 Chrome。daemon stale 时可以 `restart_daemon()` 一次；杀 Chrome 只能作为最后排障手段并先说明影响。
-- 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权 Chrome 调试连接。
+- 不要主动停止或重启浏览器。daemon stale 时可以 `restart_daemon()` 一次；杀浏览器只能作为最后排障手段并先说明影响。
+- 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权浏览器调试连接。
 - 每个可见动作后立即用 `page_info()` 或 `js(...)` 重新观察并验证，不要凭假设继续。
 - 优先读取 DOM、文本、可交互元素、URL、网络状态等结构化信息。
 - 只有用户明确需要视觉证据、调试像素坐标或外部流程可查看图片文件时，才用 `capture_screenshot(...)` 生成截图文件。
@@ -46,7 +46,7 @@ print(page_info())
 '
 ```
 
-`flocks browser -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chrome。
+`flocks browser -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chromium 系浏览器。
 
 注意：
 
@@ -116,10 +116,10 @@ print(page_info())
 
 ## Tab 与可见性
 
-- `new_tab(url, activate=True)` 会创建并 attach 到新 tab，默认同时让 tab 在 Chrome 中可见；这是需要用户登录或观察页面时的默认入口。
+- `new_tab(url, activate=True)` 会创建并 attach 到新 tab，默认同时让 tab 在浏览器中可见；这是需要用户登录或观察页面时的默认入口。
 - `new_tab(url, activate=False)` 会创建后台 tab 并 attach，不主动抢当前可见 tab。
-- `attach_tab(target_id)` 只 attach 到目标 tab，不激活 Chrome UI；后续读取页面状态、导出数据、保存认证状态等命令优先使用它。
-- `switch_tab(target_id)` 会 attach 到目标 tab 并执行 `Target.activateTarget`，让目标 tab 在 Chrome 中可见；只在需要用户看到或手动操作时使用。
+- `attach_tab(target_id)` 只 attach 到目标 tab，不激活浏览器 UI；后续读取页面状态、导出数据、保存认证状态等命令优先使用它。
+- `switch_tab(target_id)` 会 attach 到目标 tab 并执行 `Target.activateTarget`，让目标 tab 在浏览器中可见；只在需要用户看到或手动操作时使用。
 - `close_tab(target_id, activate_next=False)` 可关闭自己创建的 tab 且不自动切到其他已打开 tab。
 - `list_tabs()` 默认会包含 `chrome://`、`about:` 等内部页面；要面向用户页面时用 `list_tabs(include_chrome=False)`。
 - 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
@@ -187,9 +187,9 @@ upload_file("input[type=file]", "/absolute/path/to/file")
 
 ## 登录与认证状态
 
-`flocks browser` 复用用户当前 Chrome profile。cookies、localStorage、sessionStorage 会自然保留；用户完成登录后，同一 profile 下的新 tab 通常自动带登录态。
+`flocks browser` 复用用户当前浏览器 profile。cookies、localStorage、sessionStorage 会自然保留；用户完成登录后，同一 profile 下的新 tab 通常自动带登录态。
 
-- 先打开目标页判断是否已登录；需要密码、验证码、TOTP 或授权确认时，让用户在 Chrome 中操作。
+- 先打开目标页判断是否已登录；需要密码、验证码、TOTP 或授权确认时，让用户在浏览器中操作。
 - 用户完成后刷新或重新打开目标 URL，再用 `page_info()` / `js(...)` 验证目标内容是否可见。
 - 可以用 CDP 读写 cookies，用 `js(...)` 读写 localStorage / sessionStorage。
 - 明确需要导出或保存登录状态时，可以用 flocks browser state save auth-state.json
@@ -210,12 +210,12 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 
 如果 `flocks browser` 不可用或连接失败：
 
-1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和 Chrome 状态。
+1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和浏览器状态。
 2. 首次安装或冷启动优先运行 `flocks browser --setup`。
-3. Chrome 未运行时只启动 Chrome，再重试；不要直接让用户改设置。
-4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开 `chrome://inspect/#remote-debugging` 并勾选 Allow remote debugging。
+3. Chrome / Chromium / Edge 未运行时只启动浏览器，再重试；不要直接让用户改设置。
+4. 只有在明确提示 remote debugging 未启用或 `DevToolsActivePort` 缺失时，才让用户打开对应浏览器的 inspect 页面（例如 `chrome://inspect/#remote-debugging` 或 `edge://inspect/#remote-debugging`）并勾选 Allow remote debugging。
 5. 用户刚开启 remote debugging 时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
-6. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是 Chrome 正在启动，轮询等待，不要重启。
+6. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
 7. stale websocket / stale socket 时执行一次：
 
 ```bash
