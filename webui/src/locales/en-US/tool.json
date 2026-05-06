@@ -307,6 +307,8 @@
     "mcpToolTitle": "MCP Tool",
     "mcpToolDesc": "This tool is from MCP Server \"{{server}}\", follows Model Context Protocol and can be called by Agents and Workflows.",
     "testParams": "Test Parameters (JSON)",
+    "selectFixture": "Select Test Sample",
+    "selectFixturePlaceholder": "— Select a sample to fill in params —",
     "executing": "Executing...",
     "runTest": "Run Test",
     "disabledNote": "This tool is disabled, cannot run test",
@@ -319,7 +321,11 @@
     "customized": "Customized",
     "customizedTooltip": "Current state comes from a user customization; YAML default is {{def}}",
     "resetSetting": "Reset to default",
-    "resetting": "Resetting…"
+    "resetting": "Resetting…",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "updating": "Updating…",
+    "noDescription": "No description"
   },
 
   "statusBadge": {

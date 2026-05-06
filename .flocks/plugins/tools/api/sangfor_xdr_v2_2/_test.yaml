@@ -1,0 +1,92 @@
+schema_version: 1
+provider: sangfor_xdr
+
+# Service-level connectivity probe.
+# `run_assets` with `action: list` is a read-only paginated call with no
+# required params; it verifies HMAC-SHA256 auth_code signing end-to-end.
+connectivity:
+  tool: sangfor_xdr_assets
+  params:
+    action: list
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  sangfor_xdr_alerts:
+    - label: "List alerts (last 24 hours)"
+      label_cn: "查询安全告警（最近 24 小时）"
+      tags: [smoke, alerts]
+      params:
+        action: list
+      assert:
+        success: true
+
+    - label: "List alert status options"
+      label_cn: "查询告警状态枚举"
+      tags: [smoke]
+      params:
+        action: status_list
+
+  sangfor_xdr_incidents:
+    - label: "List incidents (last 24 hours)"
+      label_cn: "查询安全事件（最近 24 小时）"
+      tags: [smoke, incidents]
+      params:
+        action: list
+      assert:
+        success: true
+
+    - label: "List incident status options"
+      label_cn: "查询事件状态枚举"
+      tags: [smoke]
+      params:
+        action: status_list
+
+  sangfor_xdr_responses:
+    - label: "List isolated hosts"
+      label_cn: "查询已隔离主机列表"
+      tags: [smoke, response]
+      params:
+        action: isolate_list
+      assert:
+        success: true
+
+  sangfor_xdr_whitelists:
+    - label: "List whitelist entries (page 1)"
+      label_cn: "查询白名单列表（第 1 页）"
+      tags: [smoke, whitelist]
+      params:
+        action: list
+      assert:
+        success: true
+
+  sangfor_xdr_assets:
+    - label: "List assets (page 1)"
+      label_cn: "查询资产列表（第 1 页）"
+      tags: [smoke, assets]
+      params:
+        action: list
+      assert:
+        success: true
+
+    - label: "Get asset classification"
+      label_cn: "查询资产分类"
+      tags: [smoke, assets]
+      params:
+        action: asset_class
+
+    - label: "Get department tree"
+      label_cn: "查询部门树"
+      tags: [assets]
+      params:
+        action: department_tree
+
+  sangfor_xdr_vulns:
+    - label: "List baseline vulnerabilities"
+      label_cn: "查询基线漏洞"
+      tags: [smoke, vuln]
+      params:
+        action: baseline
+      assert:
+        success: true

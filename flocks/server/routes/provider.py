@@ -2242,11 +2242,47 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             # Try to test connectivity by calling a simple tool
             from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
-            
+
             ToolRegistry.init()
 
             _set_api_service_tools_enabled(provider_id, True)
-            
+
+            # If the plugin ships a `_test.yaml` with a `connectivity` block,
+            # honour the declared (tool, params) probe. Tool failures (e.g.
+            # wrong apikey) are surfaced as-is — that's the answer the test
+            # is looking for. Exceptions (broken manifest, missing tool, …)
+            # log a warning and fall through to the heuristic below so a
+            # malformed `_test.yaml` cannot take down connectivity testing.
+            from flocks.tool.probe_loader import get_connectivity_spec
+            spec = get_connectivity_spec(provider_id)
+            if spec is not None:
+                log.info("test_credentials.using_declared_probe", {
+                    "service": provider_id, "tool": spec.tool, "params": spec.params,
+                })
+                try:
+                    probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
+                    latency = int((time.time() - start) * 1000)
+                    response = {
+                        "success": probe.success,
+                        "message": (
+                            f"✅ 连通性测试成功（声明式探针：{spec.tool}）"
+                            if probe.success
+                            else f"❌ 连通性测试失败（声明式探针：{spec.tool}）：{probe.error or 'Unknown'}"
+                        ),
+                        "latency_ms": latency,
+                        "tool_tested": spec.tool,
+                        "params_used": spec.params,
+                        "probe_source": "manifest",
+                    }
+                    await _save_api_service_status_if_configured(provider_id, response)
+                    return response
+                except Exception as exc:
+                    log.warning("test_credentials.declared_probe_exception", {
+                        "service": provider_id, "tool": spec.tool, "error": str(exc),
+                    })
+                    # fall through to heuristic
+
+
             # Find tools from this service using the shared source detection
             all_tools = ToolRegistry.list_tools()
             service_tools = []

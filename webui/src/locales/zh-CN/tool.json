@@ -307,6 +307,8 @@
     "mcpToolTitle": "MCP 工具",
     "mcpToolDesc": "此工具来自 MCP Server「{{server}}」，遵循 Model Context Protocol 标准，可被 Agent 和 Workflow 直接调用。",
     "testParams": "测试参数 (JSON)",
+    "selectFixture": "选择测试样例",
+    "selectFixturePlaceholder": "— 选择样例自动填入参数 —",
     "executing": "执行中...",
     "runTest": "执行测试",
     "disabledNote": "该工具已禁用，无法执行测试",
@@ -319,7 +321,11 @@
     "customized": "已自定义",
     "customizedTooltip": "当前状态来自用户自定义，YAML 默认值为 {{def}}",
     "resetSetting": "恢复默认",
-    "resetting": "重置中…"
+    "resetting": "重置中…",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "updating": "更新中…",
+    "noDescription": "暂无描述"
   },
 
   "statusBadge": {
