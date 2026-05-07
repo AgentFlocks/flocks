@@ -67,7 +67,7 @@ def test_project_builtin_plugins_are_listed_as_installed():
     assert by_key[("skill", "tdp-use")].native is True
     assert by_key[("agent", "ndr-analyst")].state == "installed"
     assert by_key[("workflow", "tdp_alert_triage")].state == "installed"
-    assert by_key[("tool", "tdp_api")].state == "installed"
+    assert by_key[("tool", "tdp_v3_3_10")].state == "installed"
 
     manifest = load_manifest("skill", "tdp-use")
     assert manifest.id == "tdp-use"
