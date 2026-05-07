@@ -18,6 +18,7 @@ INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-en}"
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
 UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.sh/uv/install.sh}"
 UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-}"
+UV_INSTALL_SH_SECONDARY_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL:-https://astral.sh/uv/install.sh}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
@@ -69,6 +70,9 @@ select_install_sources() {
     info "使用 nvm 安装脚本: $NVM_INSTALL_SCRIPT_URL"
     if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
       info "使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL"
+    fi
+    if [[ -n "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" ]]; then
+      info "使用 uv 官方回退安装脚本: $UV_INSTALL_SH_SECONDARY_FALLBACK_URL"
     fi
   else
     info "Using PyPI index: $UV_DEFAULT_INDEX"
@@ -629,6 +633,7 @@ ensure_npm_global_prefix_writable() {
 
 install_uv() {
   local primary_install_failed=0
+  local fallback_install_failed=0
   if has_cmd uv; then
     return
   fi
@@ -658,7 +663,31 @@ install_uv() {
     fi
 
     if ! curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh; then
-      fail "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。"
+      fallback_install_failed=1
+    fi
+    refresh_path
+    ensure_path_persisted "$HOME/.local/bin"
+  fi
+
+  if has_cmd uv; then
+    return
+  fi
+
+  if is_zh_install && [[ -n "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" ]]; then
+    if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
+      if [[ "$fallback_install_failed" -eq 1 ]]; then
+        info "中国大陆备用源失败，正在尝试官方 uv 安装脚本..."
+      else
+        info "中国大陆备用源执行后仍未检测到 uv，正在尝试官方 uv 安装脚本..."
+      fi
+    elif [[ "$primary_install_failed" -eq 1 ]]; then
+      info "默认 uv 安装脚本失败，正在尝试官方 uv 安装脚本..."
+    else
+      info "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试官方 uv 安装脚本..."
+    fi
+
+    if ! curl -LsSf "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" | sh; then
+      fail "默认 uv 安装脚本、中国大陆备用源和官方 uv 安装脚本都执行失败。请检查网络连通性或 PATH 后重试。"
     fi
     refresh_path
     ensure_path_persisted "$HOME/.local/bin"
@@ -831,36 +860,6 @@ install_bun() {
   refresh_path
   ensure_path_persisted "$HOME/.bun/bin"
   has_cmd bun || fail "bun finished installing, but it is still not available. Check PATH and retry."
-}
-
-install_dingtalk_channel_deps() {
-  local connector_dir="$ROOT_DIR/.flocks/plugins/channels/dingtalk/dingtalk-openclaw-connector"
-  [[ -f "$connector_dir/package.json" ]] || return 0
-
-  local node_modules_dir="$connector_dir/node_modules"
-  if [[ -d "$node_modules_dir" ]]; then
-    if is_zh_install; then
-      info "钉钉频道依赖已存在，跳过安装。"
-    else
-      info "DingTalk channel dependencies already exist. Skipping installation."
-    fi
-    return 0
-  fi
-
-  if is_zh_install; then
-    info "检测到钉钉频道插件，正在安装 npm 依赖..."
-  else
-    info "Detected DingTalk channel plugin. Installing npm dependencies..."
-  fi
-  (
-    cd "$connector_dir"
-    npm_config_registry="$NPM_REGISTRY" npm install
-  )
-  if is_zh_install; then
-    info "钉钉频道依赖安装完成。"
-  else
-    info "DingTalk channel dependencies installed."
-  fi
 }
 
 ensure_env_var_persisted() {
@@ -1069,8 +1068,6 @@ main() {
     cd "$ROOT_DIR/webui"
     npm_config_registry="$NPM_REGISTRY" npm install
   )
-
-  install_dingtalk_channel_deps
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun
