@@ -394,10 +394,14 @@ def _build_script_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     user_plugins_root = DEFAULT_PLUGIN_ROOT.resolve()
     project_plugins_root = (Path.cwd() / ".flocks" / "plugins").resolve()
     script_str = str(script_path)
-    if not script_str.startswith(str(user_plugins_root)) and not script_str.startswith(str(project_plugins_root)):
+    allowed_prefixes = (
+        str(user_plugins_root),
+        str(project_plugins_root),
+    )
+    if not any(script_str.startswith(prefix) for prefix in allowed_prefixes):
         raise ValueError(
             f"Script path {script_path} is outside the allowed plugins directories. "
-            f"For security, scripts must be under {user_plugins_root} or {project_plugins_root}."
+            f"For security, scripts must be under one of: {', '.join(allowed_prefixes)}."
         )
 
     if not script_path.is_file():
@@ -643,8 +647,18 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
 # ---------------------------------------------------------------------------
 
 def _yaml_tool_search_roots() -> List[Path]:
-    """Return YAML tool roots for both user-level and project-level plugins."""
-    roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    """Return YAML tool roots: user-level then project-level.
+
+    Bundled flockshub directories are intentionally NOT included — bundled
+    tool plugins must be installed via the Hub flow (which copies them
+    into ``<plugins>/tools/<type>/<id>/``) before this CRUD-oriented
+    helper is expected to find them. This keeps "installed" the single
+    source of truth for editing/listing.
+    """
+    roots = [
+        _TOOLS_SUBDIR,
+        Path.cwd() / ".flocks" / "plugins" / "tools",
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -847,8 +861,16 @@ def delete_yaml_tool(name: str) -> bool:
 
 
 def _python_tool_dirs() -> List[Path]:
-    """Return all plugin python tool directories to search."""
-    dirs = [_TOOLS_SUBDIR / TOOL_TYPE_PYTHON, Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON]
+    """Return user- and project-level python tool directories.
+
+    Bundled flockshub directories are intentionally excluded; python
+    tools must be installed via the Hub flow before being picked up
+    by the discovery layer.
+    """
+    dirs = [
+        _TOOLS_SUBDIR / TOOL_TYPE_PYTHON,
+        Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON,
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for directory in dirs:
@@ -991,7 +1013,7 @@ def list_yaml_tools() -> List[Dict[str, Any]]:
             ):
                 _collect(item, depth + 1, max_depth)
 
-    search_roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    search_roots = _yaml_tool_search_roots()
     for root in search_roots:
         _collect(root)
 

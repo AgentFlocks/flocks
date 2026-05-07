@@ -308,13 +308,22 @@ _descriptor_cache: Optional[List[ApiServiceDescriptor]] = None
 
 
 def _api_plugin_roots() -> List[Path]:
-    """Return plugin api roots in priority order (project, user)."""
-    from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+    """Return ``<plugins>/tools/api/`` roots to scan for descriptors.
 
-    candidates = [
-        Path.cwd() / ".flocks" / "plugins" / "tools" / "api",
-        DEFAULT_PLUGIN_ROOT / "tools" / "api",
-    ]
+    Multi-version API plugins (different ``service_id``+``version`` combos
+    living side-by-side under the same ``api/`` parent) are supported by
+    :func:`discover_api_service_descriptors` walking each root's
+    immediate subdirectories — no extra root is needed for that case.
+
+    Both project- and user-level roots are computed at call time
+    (``Path.cwd()`` / ``Path.home()``) so test fixtures that
+    monkey-patch ``HOME`` or ``chdir`` see the new locations without
+    needing to reimport :mod:`flocks.plugin.loader`.
+    """
+    project_tools_api = Path.cwd() / ".flocks" / "plugins" / "tools" / "api"
+    user_tools_api = Path.home() / ".flocks" / "plugins" / "tools" / "api"
+
+    candidates = [project_tools_api, user_tools_api]
     seen: Set[str] = set()
     unique: List[Path] = []
     for root in candidates:

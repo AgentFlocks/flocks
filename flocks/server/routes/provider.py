@@ -1294,6 +1294,75 @@ def _build_api_service_summary(
     )
 
 
+def _disambiguate_summary_names(summaries: List[APIServiceSummary]) -> None:
+    """Append ``" (v<version>)"`` to multi-version entries so users can
+    tell sibling installs apart in the Tools UI.
+
+    Two scenarios drive this:
+
+    * **Same ``name`` field** — e.g. two ``onesig`` plugins where each
+      ``_provider.yaml`` carries ``name: onesig`` for different
+      versions. Without a suffix the UI shows two identical rows.
+    * **Multiple versions of the same ``service_id``** — sibling
+      installs may already have distinct names (one author baked
+      the version into ``name``, the other did not). We still append
+      the suffix to the *short* name(s) so users see consistent
+      version labelling across all rows of a service family.
+
+    The suffix is skipped when the existing ``name`` already
+    contains the version string verbatim (avoids ``onesig_v2_5_3
+    (v2.5.3)`` noise when authors embed the version in ``name``).
+    Single-version entries are left untouched.
+    """
+    from collections import defaultdict
+
+    by_name: Dict[str, List[APIServiceSummary]] = defaultdict(list)
+    for item in summaries:
+        by_name[item.name].append(item)
+
+    versioned_storage_keys = {
+        item.id for item in summaries
+        if item.version and item.id != _strip_version_suffix(item.id, item.version)
+    }
+    family_counts: Dict[str, int] = defaultdict(int)
+    for item in summaries:
+        if item.id in versioned_storage_keys and item.version:
+            family_counts[_strip_version_suffix(item.id, item.version)] += 1
+
+    for item in summaries:
+        if not item.version:
+            continue
+        same_name_siblings = len(by_name[item.name]) > 1
+        family_root = _strip_version_suffix(item.id, item.version) if item.id in versioned_storage_keys else None
+        family_siblings = family_root is not None and family_counts[family_root] > 1
+        if not (same_name_siblings or family_siblings):
+            continue
+        if item.version in item.name:
+            continue
+        item.name = f"{item.name} (v{item.version})"
+
+
+def _strip_version_suffix(storage_key: str, version: str) -> str:
+    """Reverse :func:`derive_storage_key` to recover the bare ``service_id``.
+
+    ``derive_storage_key("onesig_api", "2.5.3 D20260321")`` returns
+    ``onesig_api_v2_5_3_D20260321``; this helper rebuilds the
+    ``_v<sanitised>`` tail using the same sanitiser and chops it off
+    so callers can group sibling installs by family. Falls back to
+    *storage_key* when the suffix isn't present (e.g. legacy
+    unversioned entries).
+    """
+    import re
+
+    sanitised = re.sub(r"[^A-Za-z0-9]+", "_", str(version)).strip("_")
+    if not sanitised:
+        return storage_key
+    suffix = f"_v{sanitised}"
+    if storage_key.endswith(suffix):
+        return storage_key[: -len(suffix)]
+    return storage_key
+
+
 async def list_api_services() -> List[APIServiceSummary]:
     try:
         from flocks.tool.registry import ToolRegistry
@@ -1314,6 +1383,7 @@ async def list_api_services() -> List[APIServiceSummary]:
             _build_api_service_summary(provider_id, raw_statuses)
             for provider_id in service_ids
         ]
+        _disambiguate_summary_names(summaries)
         summaries.sort(key=lambda item: (
             0 if item.enabled else 1,
             0 if item.status == "connected" else 1,
@@ -1364,8 +1434,51 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[str]:
+    """Return the ``installed.json`` plugin id that backs *storage_key*.
+
+    Walks the discovered ``ApiServiceDescriptor`` set, finds the
+    ``_provider.yaml`` matching *storage_key*, and resolves it to the
+    enclosing user-installed plugin directory id. Returns ``None`` if
+    no descriptor matches OR the descriptor lives outside
+    ``~/.flocks/plugins/`` (project-level / built-in installs are kept
+    intact — only user-level installs cascade).
+    """
+    from flocks.config.api_versioning import discover_api_service_descriptors
+    from flocks.hub import local as hub_local
+
+    user_root = (Path.home() / ".flocks" / "plugins" / "tools").resolve()
+    for descriptor in discover_api_service_descriptors(refresh=True):
+        if descriptor.storage_key != storage_key:
+            continue
+        plugin_dir = descriptor.provider_yaml.parent.resolve()
+        try:
+            plugin_dir.relative_to(user_root)
+        except ValueError:
+            return None  # Not under the user-level install root.
+        plugin_id = plugin_dir.name
+        # Confirm the catalog tracks this as an installed plugin so
+        # we never try to "uninstall" a stray on-disk dir.
+        record = hub_local.get_record("tool", plugin_id)
+        if record is not None:
+            return plugin_id
+        if hub_local.infer_local_install("tool", plugin_id) is not None:
+            return plugin_id
+    return None
+
+
 async def delete_api_service(provider_id: str) -> Dict[str, Any]:
-    """Delete an API service configuration and its stored credential."""
+    """Delete an API service configuration and its stored credential.
+
+    When the service is backed by a user-installed plugin (i.e. lives
+    under ``~/.flocks/plugins/tools/``), the plugin itself is also
+    uninstalled so the FlocksHub catalog flips back to ``available`` —
+    otherwise the catalog would still show the plugin as ``installed``
+    despite the user explicitly deleting "the API". Project-level /
+    built-in plugins are left untouched (they're guarded by
+    :func:`_is_api_service_builtin` above).
+    """
+    from flocks.hub.installer import uninstall_plugin
     from flocks.security import get_secret_manager
 
     try:
@@ -1385,6 +1498,12 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
                 if candidate not in secret_ids
             )
 
+        # Resolve backing plugin BEFORE we mutate config — once
+        # ``remove_api_service`` runs, ``discover_api_service_descriptors``
+        # still works (it scans ``_provider.yaml`` on disk, not config),
+        # but doing this first keeps the order easy to reason about.
+        backing_plugin_id = _find_user_installed_tool_plugin_for(provider_id)
+
         removed_config = ConfigWriter.remove_api_service(provider_id)
 
         secrets = get_secret_manager()
@@ -1399,7 +1518,22 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
 
         matched_count = _set_api_service_tools_enabled(provider_id, False)
 
-        if not removed_config and not deleted_secret:
+        uninstalled_plugin = False
+        if backing_plugin_id:
+            try:
+                # ``uninstall_plugin`` itself calls
+                # ``_cleanup_orphan_api_services`` for the plugin's
+                # storage_keys, but ``provider_id`` is already gone from
+                # config at this point so that pass is a no-op for it.
+                uninstalled_plugin = await uninstall_plugin("tool", backing_plugin_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("api_service.delete.plugin_uninstall_failed", {
+                    "provider_id": provider_id,
+                    "plugin_id": backing_plugin_id,
+                    "error": str(exc),
+                })
+
+        if not removed_config and not deleted_secret and not uninstalled_plugin:
             raise HTTPException(status_code=404, detail="API service not found")
 
         log.info("api_service.deleted", {
@@ -1407,6 +1541,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
             "removed_config": removed_config,
             "deleted_secret": deleted_secret,
             "matched_tools": matched_count,
+            "uninstalled_plugin": backing_plugin_id if uninstalled_plugin else None,
         })
         return {"success": True}
     except HTTPException:

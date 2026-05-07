@@ -387,8 +387,66 @@ def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     return roots
 
 
+def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
+    """Tool plugin directories shipped pre-bundled inside flockshub.
+
+    Returns ``(plugin_type, plugin_id) -> Path`` for every directory
+    under ``<flockshub>/plugins/tools/`` that carries an actual tool
+    payload (``_provider.yaml`` or any non-underscore YAML/PY file).
+
+    These bundled tools are surfaced in the FlocksHub UI as ``available``
+    entries so users can install them through the standard Hub flow
+    (``hub.install``); the runtime registry only loads tools that have
+    been installed into ``<plugins>/tools/...``.
+
+    Project- and user-installed copies take precedence in the catalog
+    listing (see :func:`list_catalog`); this helper does not attempt
+    that resolution itself so it stays a pure on-disk discovery.
+    """
+    from flocks.hub.paths import bundled_tool_plugin_roots
+
+    roots: dict[tuple[PluginType, str], Path] = {}
+    for tools_root in bundled_tool_plugin_roots():
+        if not tools_root.is_dir():
+            continue
+        for directory in sorted(
+            (path for path in tools_root.rglob("*") if path.is_dir()),
+            key=lambda item: item.as_posix(),
+        ):
+            # Skip the type-organisation subdirs (api/, python/) and
+            # housekeeping noise. Their direct children are the actual
+            # plugin directories we want to surface.
+            name = directory.name
+            if name.startswith("_") or name == "__pycache__":
+                continue
+            if directory.parent == tools_root and name in {"api", "python", "mcp", "generated"}:
+                continue
+            if not _tool_manifest(name, directory):
+                continue
+            # First-wins: keep the highest-priority bundled root entry
+            # and let later collisions fall through silently — same
+            # contract as ``_system_plugin_roots``.
+            roots.setdefault(("tool", name), directory)
+    return roots
+
+
 def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path]:
-    return _system_plugin_roots().get((plugin_type, plugin_id))
+    """Resolve the on-disk root for a plugin, preferring local installs.
+
+    Lookup order (first hit wins):
+      1. Project-/user-level installed plugins (``_system_plugin_roots``)
+      2. Bundled flockshub tool plugins (``_bundled_tool_roots``)
+
+    The bundled fallback makes ``plugin_root``/``file_tree``/``read_file_content``
+    work for FlocksHub-bundled tools even when no copy has been installed
+    locally yet, so the UI's plugin detail panel can preview them.
+    """
+    installed = _system_plugin_roots().get((plugin_type, plugin_id))
+    if installed is not None:
+        return installed
+    if plugin_type == "tool":
+        return _bundled_tool_roots().get((plugin_type, plugin_id))
+    return None
 
 
 def system_plugin_manifest(plugin_type: PluginType, plugin_id: str) -> Optional[HubPluginManifest]:
@@ -538,6 +596,70 @@ def _entry_from_system_manifest(manifest: HubPluginManifest, root: Path) -> HubC
     )
 
 
+def _entry_from_bundled_tool(
+    manifest: HubPluginManifest,
+    root: Path,
+    records: dict[str, local.InstalledPluginRecord],
+    inferred_installs: dict[tuple[PluginType, str], Path],
+) -> HubCatalogEntry:
+    """Catalog entry for a tool bundled inside flockshub.
+
+    State is computed exactly like :func:`_entry_from_index`:
+      * ``installed``       — the user installed it under
+                              ``~/.flocks/plugins/tools/<group>/<id>/``
+                              (record or on-disk payload found).
+      * ``updateAvailable`` — installed copy is older than the bundled
+                              version.
+      * ``available``       — bundled in flockshub, no local install.
+                              The runtime ``ToolRegistry`` only picks up
+                              installed tools, so an "available" entry
+                              here mirrors the on-disk state truthfully
+                              and matches the user's mental model
+                              ("not installed" until they click install).
+      * ``incompatible``    — manifest declares an incompatible OS.
+    """
+    record = records.get(f"{manifest.type}:{manifest.id}")
+    install_path = _resolve_install_path(manifest.type, manifest.id, record, inferred_installs)
+
+    state = "available"
+    installed_version: Optional[str] = None
+    if install_path:
+        installed_version = record.version if record else manifest.version
+        state = "installed"
+        if _version_tuple(installed_version) < _version_tuple(manifest.version):
+            state = "updateAvailable"
+    if not _os_compatible(manifest):
+        state = "incompatible"
+
+    bundled_root = get_bundled_hub_root().resolve()
+    try:
+        manifest_rel = (root.resolve() / "manifest.json").relative_to(bundled_root).as_posix()
+    except ValueError:
+        manifest_rel = _system_manifest_path(manifest.type, manifest.id)
+
+    return HubCatalogEntry(
+        id=manifest.id,
+        type=manifest.type,
+        name=manifest.name,
+        description=manifest.description,
+        descriptionCn=getattr(manifest, "descriptionCn", None),
+        version=manifest.version,
+        category=manifest.category,
+        tags=manifest.tags,
+        useCases=manifest.useCases,
+        domains=manifest.domains,
+        capabilities=manifest.capabilities,
+        trust=manifest.trust,
+        riskLevel=manifest.risk.level,
+        state=state,
+        installedVersion=installed_version,
+        source="bundled",
+        manifestPath=manifest_rel,
+        installPath=str(install_path) if install_path else None,
+        native=False,
+    )
+
+
 def list_manifests() -> list[HubPluginManifest]:
     root = get_bundled_hub_root()
     index = load_index()
@@ -575,13 +697,29 @@ def list_catalog(
         _entry_from_index(item, records, inferred_installs)
         for item in load_index().plugins
     ]
-    indexed = {(entry.type, entry.id) for entry in entries}
+    seen: set[tuple[PluginType, str]] = {(entry.type, entry.id) for entry in entries}
     for (system_type, system_id), root in _system_plugin_roots().items():
-        if (system_type, system_id) in indexed:
+        if (system_type, system_id) in seen:
             continue
         manifest = _manifest_for_system_root(system_type, system_id, root)
         if manifest:
             entries.append(_entry_from_system_manifest(manifest, root))
+            seen.add((system_type, system_id))
+
+    # FlocksHub-bundled tool plugins. The runtime ``ToolRegistry`` only
+    # discovers tools that have been installed into ``<plugins>/tools``,
+    # so the catalog needs an explicit pass to surface bundled-but-not-
+    # yet-installed plugins like ``onesig_v2_5_3_D20250710``. These show
+    # up as ``state="available"`` until the user installs them, at which
+    # point the standard ``records``/``inferred_installs`` flow upgrades
+    # them to ``state="installed"`` (see :func:`_entry_from_bundled_tool`).
+    for (bundled_type, bundled_id), root in _bundled_tool_roots().items():
+        if (bundled_type, bundled_id) in seen:
+            continue
+        manifest = _manifest_for_system_root(bundled_type, bundled_id, root)
+        if manifest:
+            entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
+            seen.add((bundled_type, bundled_id))
     query = (q or "").strip().lower()
 
     def keep(entry: HubCatalogEntry) -> bool:

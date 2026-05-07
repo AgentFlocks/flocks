@@ -8,7 +8,11 @@ from pathlib import Path
 from flocks.hub.models import HubPluginManifest
 
 
-_DENY_NAMES = {"__pycache__", ".git", ".svn"}
+# Names we silently strip when copying a bundled package — generated
+# bytecode caches and VCS metadata are noise rather than security risks
+# and have historically caused install failures when present in the
+# bundled tree (e.g. ``__pycache__`` left over from earlier dev runs).
+SKIP_NAMES = {"__pycache__", ".git", ".svn", ".DS_Store"}
 
 
 def _sha256(path: Path) -> str:
@@ -26,8 +30,8 @@ def validate_package(package_dir: Path, manifest: HubPluginManifest) -> None:
 
     for path in base.rglob("*"):
         rel = path.relative_to(base)
-        if any(part in _DENY_NAMES for part in rel.parts):
-            raise ValueError(f"Disallowed path in package: {rel.as_posix()}")
+        if any(part in SKIP_NAMES for part in rel.parts):
+            continue
         resolved = path.resolve()
         if base not in resolved.parents and resolved != base:
             raise ValueError(f"Path escapes package root: {rel.as_posix()}")
