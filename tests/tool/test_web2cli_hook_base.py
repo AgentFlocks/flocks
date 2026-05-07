@@ -187,8 +187,12 @@ def test_hook_base_captures_recent_action_context_for_xhr():
 """
     )
 
-    assert result["version"] == "3.1-base"
+    assert result["version"] == "web2cli-base"
     assert result["request"]["pageContext"]["path"] == "/dashboard"
+    assert result["request"]["normalizedUrl"] == "https://example.com/api/items/list"
+    assert result["request"]["pathname"] == "/api/items/list"
+    assert result["request"]["captureReason"] == "nonGet"
+    assert result["request"]["requestShape"]["$.page"] == "number"
     assert result["request"]["actionContext"]["lastAction"]["action"] == "Load data"
     assert result["recentActions"][0]["type"] == "click"
     assert any("action=Load data" in line for line in result["logs"])
@@ -216,4 +220,6 @@ def test_hook_base_exposes_debug_state_and_truncates_large_responses():
 
     assert result["response"].endswith("...[truncated]")
     assert any(action["type"] == "pushState" for action in result["debugState"]["recentActions"])
+    assert result["debugState"]["lastRequest"]["response"] == result["response"]
+    assert result["debugState"]["lastRequest"]["pathname"] == "/api/debug"
     assert any("window.__apiCapture.getDebugState()" in line for line in result["logs"])

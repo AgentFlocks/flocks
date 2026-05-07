@@ -63,8 +63,10 @@ mkdir -p "$CAPTURE_ROOT/captures"
 - 浏览器内存中的原始捕获数据：`window.__capturedRequests`
 - 导出的接口抓包 JSON：`$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json`
 - 浏览器认证状态：`$CAPTURE_ROOT/auth-state.json`
+- 操作适配规格：`$CAPTURE_ROOT/web2cli-spec.json`
 - 站点自适应 Hook（仅当 base 失败时创建）：`$CAPTURE_ROOT/hook.js`
 - 生成的 CLI 工具：`$CAPTURE_ROOT/<normalized_capture_name>_cli.py`，`generate-cli.py` 会把 `-` 等非 Python 模块名字符替换为 `_`
+- 生成的验证材料：`$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
 - 生成的接口文档：`$CAPTURE_ROOT/${CAPTURE_NAME}_api.md`
 - 生成的 Postman 集合：`$CAPTURE_ROOT/${CAPTURE_NAME}_postman.json`
 
@@ -323,35 +325,73 @@ jq -r '.[].method' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sort | un
 jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 ```
 
-### 8. 生成 CLI 工具
+### 8. 生成 web2cli-spec 规格
 
-基于 `"$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"` 与 `"$CAPTURE_ROOT/auth-state.json"` 生成新的 CLI 工具。
+先基于 `"$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"` 生成中间契约层 `web2cli-spec.json`。
+
+```bash
+uv run python .flocks/plugins/skills/web2cli/scripts/generate-spec.py \
+  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
+  --base-url "https://example.com" \
+  --output "$CAPTURE_ROOT/web2cli-spec.json"
+```
+
+`web2cli-spec.json` 是抓包结果到最终 CLI 之间的可编辑契约，包含：
+
+- 目标站点与命令名
+- 鉴权策略（如 `PUBLIC` / `COOKIE` / `HEADER`）
+- 主请求的 method、endpoint、query/body 模板
+- CLI 参数定义
+- 固定输出列定义
+- 验证材料初稿
+
+生成后必须检查并按需修正：
+
+- `strategy` 是否正确
+- `args` 是否符合实际操作意图
+- `columns` 与字段路径是否对应目标数据
+- `verify` 的最少行数、必填列是否合理
+
+### 9. 基于 spec 生成 CLI 工具
+
+从 `"$CAPTURE_ROOT/web2cli-spec.json"` 生成最终 CLI。
 
 ```bash
 uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
+  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
   --format python \
-  --base-url "https://example.com" \
   --output "$CAPTURE_ROOT/${CAPTURE_NAME}_cli.py"
 ```
 
 如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成器会自动规范化输出文件名，例如 `test-domain_cli.py` 会写为 `test_domain_cli.py`，并在命令输出中打印实际路径。
 
-如需同时产出文档可继续执行：
+生成验证文件：
 
 ```bash
 uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
-  "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" \
+  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
+  --format verify \
+  --output "$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"
+```
+
+生成接口文档：
+
+```bash
+uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
+  --spec "$CAPTURE_ROOT/web2cli-spec.json" \
   --format markdown \
   --title "${CAPTURE_NAME} API Documentation" \
   --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
 ```
 
-### 9. CLI工具验证 和浏览器关闭
+### 10. CLI工具验证 和浏览器关闭
 
 根据生成的 CLI ，任意选择一个接口调用测试可用性
 - CLI 工具可用性
 - 认证状态可用性
+- `verify.json` 的输出约束是否满足
+
+推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
 
 当验证完成，确保 CLI 可用后关闭浏览器或 Tab
 
@@ -382,11 +422,11 @@ else:
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
 
 
-### 10. summary
+### 11. summary
 
 总结当前 生成 的CLI 工具有哪些能力，然后可提示用户下一步操作：
 - 保存为对应的 skill 方便后续操作
-- 精简 CLI
+- 精简或修正CLI
 - 进一步丰富 CLI 工具，重新开始 web2cli标准流程
 
 ## 故障处理
