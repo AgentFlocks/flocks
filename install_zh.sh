@@ -45,6 +45,7 @@ Flocks 中国用户一键安装脚本。
   npm 源: https://registry.npmmirror.com/
   nvm 源: https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh
   uv 备用源: https://uv.agentsmirror.com/install-cn.sh
+  uv 官方回退: https://astral.sh/uv/install.sh
 
 远程使用：
   curl -fsSL $RAW_INSTALL_ZH_SH_URL | bash
@@ -136,7 +137,9 @@ configure_cn_environment() {
   export FLOCKS_NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://gitee.com/mirrors/nvm/raw/v0.40.3/install.sh}"
   export FLOCKS_UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.org.cn/uv/install.sh}"
   export FLOCKS_UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-https://uv.agentsmirror.com/install-cn.sh}"
+  export FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL:-https://astral.sh/uv/install.sh}"
   export FLOCKS_UV_INSTALL_PS1_URL="${FLOCKS_UV_INSTALL_PS1_URL:-https://astral.org.cn/uv/install.ps1}"
+  export FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL="${FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL:-https://astral.sh/uv/install.ps1}"
   export PUPPETEER_CHROME_DOWNLOAD_BASE_URL="${PUPPETEER_CHROME_DOWNLOAD_BASE_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing}"
 }
 

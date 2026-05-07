@@ -14,6 +14,7 @@ $script:InstallLanguage = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_L
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
 $script:UvInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_URL }
 $script:UvInstallPs1FallbackUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) { "https://uv.agentsmirror.com/install-cn.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL }
+$script:UvInstallPs1SecondaryFallbackUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL }
 $script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
 $script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
@@ -96,6 +97,7 @@ function Initialize-InstallSources {
     Write-Info (Get-LocalizedText -English "Using uv install script: $script:UvInstallPs1Url" -Chinese "使用 uv 安装脚本: $script:UvInstallPs1Url")
     if (Test-IsZhInstall) {
         Write-Info (Get-LocalizedText -English "Using uv fallback script: $script:UvInstallPs1FallbackUrl" -Chinese "使用 uv 备用安装脚本: $script:UvInstallPs1FallbackUrl")
+        Write-Info (Get-LocalizedText -English "Using official uv fallback script: $script:UvInstallPs1SecondaryFallbackUrl" -Chinese "使用 uv 官方回退安装脚本: $script:UvInstallPs1SecondaryFallbackUrl")
     }
 }
 
@@ -380,6 +382,9 @@ function Install-Uv {
 
     Write-Info (Get-LocalizedText -English "uv was not found. Installing it automatically..." -Chinese "未检测到 uv，正在自动安装...")
     $primaryInstallError = $null
+    $fallbackInstallError = $null
+    $secondaryFallbackInstallError = $null
+
     try {
         powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1Url' | iex"
     }
@@ -392,7 +397,7 @@ function Install-Uv {
         return
     }
 
-    if (Test-IsZhInstall) {
+    if (Test-IsZhInstall -and -not [string]::IsNullOrWhiteSpace($script:UvInstallPs1FallbackUrl)) {
         if ($null -ne $primaryInstallError) {
             Write-Info (Get-LocalizedText -English "Primary uv install script failed. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本失败，正在尝试中国大陆备用源...")
             Write-Warning $primaryInstallError
@@ -401,7 +406,6 @@ function Install-Uv {
             Write-Info (Get-LocalizedText -English "uv is still unavailable after the primary install script. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试中国大陆备用源...")
         }
 
-        $fallbackInstallError = $null
         try {
             powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1FallbackUrl' | iex"
         }
@@ -413,9 +417,40 @@ function Install-Uv {
         if (Test-Command "uv") {
             return
         }
+    }
 
-        if ($null -ne $fallbackInstallError) {
-            Fail (Get-LocalizedText -English "uv installation failed with both the primary script and the mainland China fallback script. Check network access or PATH and retry." -Chinese "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。")
+    if (Test-IsZhInstall -and -not [string]::IsNullOrWhiteSpace($script:UvInstallPs1SecondaryFallbackUrl)) {
+        if (-not [string]::IsNullOrWhiteSpace($script:UvInstallPs1FallbackUrl)) {
+            if ($null -ne $fallbackInstallError) {
+                Write-Info (Get-LocalizedText -English "The mainland China fallback script failed. Trying the official uv install script..." -Chinese "中国大陆备用源失败，正在尝试官方 uv 安装脚本...")
+                Write-Warning $fallbackInstallError
+            }
+            else {
+                Write-Info (Get-LocalizedText -English "uv is still unavailable after the mainland China fallback script. Trying the official uv install script..." -Chinese "中国大陆备用源执行后仍未检测到 uv，正在尝试官方 uv 安装脚本...")
+            }
+        }
+        elseif ($null -ne $primaryInstallError) {
+            Write-Info (Get-LocalizedText -English "Primary uv install script failed. Trying the official uv install script..." -Chinese "默认 uv 安装脚本失败，正在尝试官方 uv 安装脚本...")
+            Write-Warning $primaryInstallError
+        }
+        else {
+            Write-Info (Get-LocalizedText -English "uv is still unavailable after the primary install script. Trying the official uv install script..." -Chinese "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试官方 uv 安装脚本...")
+        }
+
+        try {
+            powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1SecondaryFallbackUrl' | iex"
+        }
+        catch {
+            $secondaryFallbackInstallError = $_.Exception.Message
+        }
+        Refresh-Path
+
+        if (Test-Command "uv") {
+            return
+        }
+
+        if ($null -ne $secondaryFallbackInstallError) {
+            Fail (Get-LocalizedText -English "uv installation failed with the primary script, the mainland China fallback script, and the official fallback script. Check network access or PATH and retry." -Chinese "默认 uv 安装脚本、中国大陆备用源和官方 uv 安装脚本都执行失败。请检查网络连通性或 PATH 后重试。")
         }
     }
 
@@ -1016,9 +1051,10 @@ function Resolve-ExplicitBrowserPath {
         return $browserOverride
     }
 
-    Write-Warning (Get-LocalizedText `
+    $warningMessage = Get-LocalizedText `
         -English "The explicit browser override path does not exist and will be ignored: $browserOverride" `
-        -Chinese "显式指定的浏览器路径不存在，已忽略：$browserOverride")
+        -Chinese "显式指定的浏览器路径不存在，已忽略：$browserOverride"
+    Write-Warning $warningMessage
     return $null
 }
 
@@ -1178,39 +1214,6 @@ function Install-AgentBrowser {
     Configure-AgentBrowserBrowser
 }
 
-function Install-DingtalkChannelDeps {
-    $connectorDir = Join-Path $RootDir ".flocks\plugins\channels\dingtalk\dingtalk-openclaw-connector"
-    $packageJson  = Join-Path $connectorDir "package.json"
-
-    if (-not (Test-Path $packageJson)) {
-        return
-    }
-
-    $nodeModulesDir = Join-Path $connectorDir "node_modules"
-    if (Test-Path $nodeModulesDir) {
-        Write-Info (Get-LocalizedText -English "DingTalk channel dependencies already exist. Skipping installation." -Chinese "钉钉频道依赖已存在，跳过安装。")
-        return
-    }
-
-    Write-Info (Get-LocalizedText -English "Detected DingTalk channel plugin. Installing npm dependencies..." -Chinese "检测到钉钉频道插件，正在安装 npm 依赖...")
-
-    Push-Location $connectorDir
-    try {
-        $null = Invoke-NativeCommandOrFail `
-            -Description "DingTalk channel npm dependency installation" `
-            -FilePath "npm.cmd" `
-            -ArgumentList @("install") `
-            -WorkingDirectory $connectorDir `
-            -Environment @{ npm_config_registry = $script:NpmRegistry } `
-            -StreamOutput
-    }
-    finally {
-        Pop-Location
-    }
-
-    Write-Info (Get-LocalizedText -English "DingTalk channel dependencies installed." -Chinese "钉钉频道依赖安装完成。")
-}
-
 function Main {
     if ($Help) {
         Show-Usage
@@ -1260,8 +1263,6 @@ function Main {
     finally {
         Pop-Location
     }
-
-    Install-DingtalkChannelDeps
 
     if ($InstallTui) {
         Install-Bun
