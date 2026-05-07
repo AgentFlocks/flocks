@@ -468,10 +468,57 @@ RISK_LIST_ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
 
 
 DETECT_LIST_ALLOWED_FIELDS: dict[str, tuple[str, ...]] = {
-    "brutecrack_list": ("hostId", "status", "ip", "account", "begin_time", "end_time"),
-    "abnormallogin_list": ("keyword", "hostId", "ip", "account", "begin_time", "end_time"),
-    "webshell_list": ("severity", "status", "hostId", "groups", "file_path"),
-    "backdoor_list": ("severity", "status", "hostId", "groups"),
+    "__legacy__": (
+        "keyword",
+        "hostId",
+        "hostIds",
+        "begin_time",
+        "end_time",
+        "severity",
+        "file_path",
+        "account",
+        "duration",
+        "reason",
+        "rule_name",
+        "source_ips",
+        "target_ips",
+        "users",
+        "enabled",
+        "protocol",
+        "rule",
+        "rules",
+        "ids",
+        "taskName",
+    ),
+    "shelllog_list": ("groups", "logTime", "auditStatus", "status", "cmd", "loginIp", "loginUser", "hostname", "ip"),
+    "brutecrack_list": ("groups", "loginTime", "serviceType", "block", "clientIp", "ip", "hostname"),
+    "brutecrack_log": ("crackId",),
+    "brutecrack_block": ("id", "block"),
+    "abnormallogin_list": ("groups", "loginTime", "flag", "ip", "uname", "clientIp", "hostname"),
+    "abnormallogin_rule_set": ("realmType", "groups", "agentIds", "loginIpInfo", "loginTimeInfo", "loginLocationInfo", "hostname"),
+    "abnormallogin_rule_list": ("loginIp", "loginLocation"),
+    "webshell_list": ("agentId", "hostname", "groups", "types", "ip", "serverName", "filePath"),
+    "webshell_scan": ("realmType", "agentIds", "groups"),
+    "bounceshell_list": ("groups", "createTime", "processName", "ip", "targetIpLike", "targetPort", "hostname"),
+    "localrights_list": ("groups", "time", "ip", "procName", "procUserName"),
+    "backdoor_list": (
+        "groups",
+        "ip",
+        "hostname",
+        "backDoorTypes",
+        "backDoorCheckNames",
+        "backDoorName",
+        "backDoorTypeIds",
+        "name",
+    ),
+    "backdoor_scan": ("realmType", "agentIds", "groups"),
+    "honeypot_list": ("groups", "time", "clientIp", "ip", "port"),
+    "honeypot_rule_create": ("agentId", "ports"),
+    "honeypot_rules_create": ("realmType", "groups", "agentIds", "excludeGroups", "excludeAgentIds", "ports"),
+    "honeypot_rules_delete": ("realmType", "groups", "agentIds", "ports"),
+    "honeypot_rule_list": ("groups", "ip"),
+    "honeypot_rule_update": ("agentId", "ports"),
+    "honeypot_rule_enable": ("agentId", "status"),
 }
 
 
@@ -517,20 +564,68 @@ def _poc_list_query(params: dict[str, Any]) -> dict[str, Any]:
     return _paged_query(params, "severity", "status", "hostId", "groups", "cve", "ruleIds")
 
 
+def _shelllog_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "groups", "logTime", "auditStatus", "status", "cmd", "loginIp", "loginUser", "hostname", "ip")
+
+
 def _brutecrack_list_query(params: dict[str, Any]) -> dict[str, Any]:
-    return _paged_query(params, "hostId", "status", "ip", "account", "begin_time", "end_time")
+    return _paged_query(params, "groups", "loginTime", "serviceType", "block", "clientIp", "ip", "hostname")
+
+
+def _brutecrack_log_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "crackId")
 
 
 def _abnormallogin_list_query(params: dict[str, Any]) -> dict[str, Any]:
-    return _paged_query(params, "keyword", "hostId", "ip", "account", "begin_time", "end_time")
+    return _paged_query(params, "groups", "loginTime", "flag", "ip", "uname", "clientIp", "hostname")
+
+
+def _abnormallogin_rule_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "loginIp", "loginLocation")
 
 
 def _webshell_list_query(params: dict[str, Any]) -> dict[str, Any]:
-    return _paged_query(params, "severity", "status", "hostId", "groups", "file_path")
+    return _paged_query(params, "agentId", "hostname", "groups", "types", "ip", "serverName", "filePath")
+
+
+def _bounceshell_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "groups", "createTime", "processName", "ip", "targetIpLike", "targetPort", "hostname")
+
+
+def _localrights_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "groups", "time", "ip", "procName", "procUserName")
 
 
 def _backdoor_list_query(params: dict[str, Any]) -> dict[str, Any]:
-    return _paged_query(params, "severity", "status", "hostId", "groups")
+    base_fields = ("groups", "ip", "hostname")
+    os_type = str(params.get("os_type", "")).lower()
+    if os_type == "linux":
+        return _paged_query(params, *(base_fields + ("backDoorTypes", "backDoorCheckNames", "backDoorName")))
+    return _paged_query(params, *(base_fields + ("backDoorTypeIds", "name")))
+
+
+def _honeypot_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "groups", "time", "clientIp", "ip", "port")
+
+
+def _honeypot_rule_list_query(params: dict[str, Any]) -> dict[str, Any]:
+    return _paged_query(params, "groups", "ip")
+
+
+def _invalid_backdoor_list_fields(params: dict[str, Any]) -> list[str]:
+    os_type = str(params.get("os_type", "")).lower()
+    linux_only = {"backDoorTypes", "backDoorCheckNames", "backDoorName"}
+    win_only = {"backDoorTypeIds", "name"}
+    invalid: list[str] = []
+    if os_type == "linux":
+        for field in sorted(win_only):
+            if _has_value(params.get(field)):
+                invalid.append(field)
+    elif os_type == "win":
+        for field in sorted(linux_only):
+            if _has_value(params.get(field)):
+                invalid.append(field)
+    return invalid
 
 
 def _baseline_job_list_query(params: dict[str, Any]) -> dict[str, Any]:
@@ -787,7 +882,7 @@ RISK_ACTIONS: dict[str, ActionSpec] = {
 
 
 DETECT_ACTIONS: dict[str, ActionSpec] = {
-    "shelllog_list": ActionSpec("GET", "/external/api/detect/shelllog/linux", query_builder=_common_query),
+    "shelllog_list": ActionSpec("GET", "/external/api/detect/shelllog/linux", query_builder=_shelllog_list_query),
     "brutecrack_list": ActionSpec(
         "GET",
         lambda p: f"/external/api/detect/brutecrack/{p['os_type']}",
@@ -796,23 +891,27 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "brutecrack_log": ActionSpec(
         "GET",
         lambda p: f"/external/api/detect/brutecrack/{p['os_type']}/log",
-        query_builder=lambda p: _query_with_fields(p, "hostId", "ip", "account"),
+        query_builder=_brutecrack_log_query,
     ),
     "brutecrack_block": ActionSpec(
         "POST",
         lambda p: f"/external/api/detect/brutecrack/{p['os_type']}/block",
-        body_builder=lambda p: _body_with_fields(p, "ip", "account", "block", "duration", "reason"),
+        body_builder=lambda p: _body_with_fields(p, "id", "block"),
     ),
     "abnormallogin_list": ActionSpec(
         "GET", lambda p: f"/external/api/detect/abnormallogin/{p['os_type']}", query_builder=_abnormallogin_list_query
     ),
-    "bounceshell_list": ActionSpec("GET", lambda p: f"/external/api/detect/bounceshell/{p.get('os_type', 'linux')}", query_builder=_common_query),
-    "localrights_list": ActionSpec("GET", "/external/api/detect/localrights/linux", query_builder=_common_query),
+    "bounceshell_list": ActionSpec(
+        "GET",
+        lambda p: f"/external/api/detect/bounceshell/{p.get('os_type', 'linux')}",
+        query_builder=_bounceshell_list_query,
+    ),
+    "localrights_list": ActionSpec("GET", "/external/api/detect/localrights/linux", query_builder=_localrights_list_query),
     "abnormallogin_rule_set": ActionSpec(
         "POST",
         lambda p: f"/external/api/detect/abnormallogin/{p['os_type']}/rule",
         body_builder=lambda p: _body_with_fields(
-            p, "id", "rule_name", "source_ips", "target_ips", "users", "ports", "enabled"
+            p, "realmType", "groups", "agentIds", "loginIpInfo", "loginTimeInfo", "loginLocationInfo", "hostname"
         ),
     ),
     "abnormallogin_rule_get": ActionSpec(
@@ -821,7 +920,9 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
         query_builder=_common_query,
     ),
     "abnormallogin_rule_list": ActionSpec(
-        "GET", lambda p: f"/external/api/detect/abnormallogin/{p['os_type']}/rule", query_builder=_common_query
+        "GET",
+        lambda p: f"/external/api/detect/abnormallogin/{p['os_type']}/rule",
+        query_builder=_abnormallogin_rule_list_query,
     ),
     "abnormallogin_rule_delete": ActionSpec(
         "DELETE",
@@ -836,7 +937,7 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "webshell_scan": ActionSpec(
         "POST",
         lambda p: f"/external/api/websecurity/webshell/{p['os_type']}/check",
-        body_builder=lambda p: _body_with_fields(p, "groups", "hostIds", "taskName"),
+        body_builder=lambda p: _body_with_fields(p, "realmType", "agentIds", "groups"),
     ),
     "webshell_scan_status": ActionSpec(
         "GET", lambda p: f"/external/api/websecurity/webshell/{p['os_type']}/check/status", query_builder=_common_query
@@ -854,23 +955,25 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "backdoor_scan": ActionSpec(
         "POST",
         lambda p: f"/external/api/detect/backdoor/{p['os_type']}/check",
-        body_builder=lambda p: _body_with_fields(p, "groups", "hostIds", "taskName"),
+        body_builder=lambda p: _body_with_fields(p, "realmType", "agentIds", "groups"),
     ),
     "backdoor_scan_status": ActionSpec(
         "GET", lambda p: f"/external/api/detect/backdoor/{p['os_type']}/check/status", query_builder=_common_query
     ),
     "honeypot_list": ActionSpec(
-        "GET", lambda p: f"/external/api/detect/honeypot/{p['os_type']}", query_builder=_common_query
+        "GET",
+        lambda p: f"/external/api/detect/honeypot/{p['os_type']}",
+        query_builder=_honeypot_list_query,
     ),
     "honeypot_rule_create": ActionSpec(
         "POST",
         lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rule",
-        body_builder=lambda p: _body_with_fields(p, "name", "port", "protocol", "enabled", "rule"),
+        body_builder=lambda p: _body_with_fields(p, "agentId", "ports"),
     ),
     "honeypot_rules_create": ActionSpec(
         "POST",
         lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rules",
-        body_builder=lambda p: _body_with_fields(p, "rules"),
+        body_builder=lambda p: _body_with_fields(p, "realmType", "groups", "agentIds", "excludeGroups", "excludeAgentIds", "ports"),
     ),
     "honeypot_rule_delete": ActionSpec(
         "DELETE",
@@ -880,10 +983,12 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "honeypot_rules_delete": ActionSpec(
         "DELETE",
         lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rules",
-        body_builder=lambda p: _body_with_fields(p, "ids"),
+        body_builder=lambda p: _body_with_fields(p, "realmType", "groups", "agentIds", "ports"),
     ),
     "honeypot_rule_list": ActionSpec(
-        "GET", lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rule", query_builder=_common_query
+        "GET",
+        lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rule",
+        query_builder=_honeypot_rule_list_query,
     ),
     "honeypot_rule_get": ActionSpec(
         "GET",
@@ -893,12 +998,12 @@ DETECT_ACTIONS: dict[str, ActionSpec] = {
     "honeypot_rule_update": ActionSpec(
         "PUT",
         lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rule",
-        body_builder=lambda p: _body_with_fields(p, "id", "name", "port", "protocol", "enabled", "rule"),
+        body_builder=lambda p: _body_with_fields(p, "agentId", "ports"),
     ),
     "honeypot_rule_enable": ActionSpec(
         "PUT",
         lambda p: f"/external/api/detect/honeypot/{p['os_type']}/rule/enable",
-        body_builder=lambda p: _body_with_fields(p, "id", "enabled"),
+        body_builder=lambda p: _body_with_fields(p, "agentId", "status"),
     ),
 }
 
@@ -1299,6 +1404,8 @@ def _validate_risk(action: str, params: dict[str, Any]) -> Optional[str]:
 
 def _validate_detect(action: str, params: dict[str, Any]) -> Optional[str]:
     missing: list[str] = []
+    body = _dict_param(params, "body")
+    query = _dict_param(params, "query")
     if action in {
         "brutecrack_list",
         "brutecrack_log",
@@ -1328,15 +1435,32 @@ def _validate_detect(action: str, params: dict[str, Any]) -> Optional[str]:
         missing.extend(_require_fields(params, "os_type"))
     if action in {"abnormallogin_rule_get", "abnormallogin_rule_delete", "honeypot_rule_delete", "honeypot_rule_get"}:
         missing.extend(_require_fields(params, "id"))
+    if action == "brutecrack_log":
+        if not _has_value(params.get("crackId")) and not _has_value(query.get("crackId")):
+            missing.append("crackId/query")
+    if action == "brutecrack_block":
+        if not _has_value(params.get("id")) and not _has_value(body.get("id")):
+            missing.append("id/body")
+        if not _has_value(params.get("block")) and not _has_value(body.get("block")):
+            missing.append("block/body")
     if action == "webshell_download":
         missing.extend(_require_fields(params, "download_id"))
-    if action == "brutecrack_block":
-        if not _has_value(params.get("ip")) and not _has_value(_dict_param(params, "body")):
-            missing.append("ip/body")
-    if action in {"honeypot_rule_update", "honeypot_rule_enable"}:
-        if not _has_value(params.get("id")) and not _has_value(_dict_param(params, "body")):
-            missing.append("id/body")
+    if action in {"abnormallogin_rule_set", "webshell_scan", "backdoor_scan", "honeypot_rules_create", "honeypot_rules_delete"}:
+        if not _has_value(params.get("realmType")) and not _has_value(body.get("realmType")):
+            missing.append("realmType/body")
+    if action in {"honeypot_rule_create", "honeypot_rule_update", "honeypot_rule_enable"}:
+        if not _has_value(params.get("agentId")) and not _has_value(body.get("agentId")):
+            missing.append("agentId/body")
+    if action in {"honeypot_rule_create", "honeypot_rule_update", "honeypot_rules_create", "honeypot_rules_delete"}:
+        if not _has_value(params.get("ports")) and not _has_value(body.get("ports")):
+            missing.append("ports/body")
+    if action == "honeypot_rule_enable":
+        if not _has_value(params.get("status")) and not _has_value(body.get("status")):
+            missing.append("status/body")
     invalid_fields = _invalid_action_fields(action, params, DETECT_LIST_ALLOWED_FIELDS)
+    if action == "backdoor_list":
+        invalid_fields.extend(_invalid_backdoor_list_fields(params))
+        invalid_fields = sorted(dict.fromkeys(invalid_fields))
     if invalid_fields:
         return f"Unsupported filters for detect.{action}: {', '.join(invalid_fields)}"
     if missing:

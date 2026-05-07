@@ -1,9 +1,9 @@
 name: qingteng_detect
 description: >
-  青藤入侵检测分组工具。通过 `action` 参数访问可疑操作、暴力破解、异常登录规则、
-  Web 后门、后门检测和网络蜜罐相关接口。
+  青藤入侵检测分组工具。通过 `action` 参数访问可疑操作、暴力破解、异常登录、
+  WebShell、反弹 Shell、本地提权、后门检测和网络蜜罐相关接口。
 description_cn: >
-  青藤入侵检测分组工具。覆盖检测查询、封停控制、规则管理和蜜罐配置。
+  青藤入侵检测分组工具。覆盖检测结果查询、规则管理、封停/解封、扫描状态和蜜罐规则操作。
 category: custom
 enabled: true
 requires_confirmation: true
@@ -18,54 +18,56 @@ inputSchema:
         - shelllog_list
           用途: 查询 Linux 可疑操作结果
           必填: 无
-          常用: `page`、`size`、`sorts`、`keyword`
-          风险提示: 建议带分页
+          常用: `page`、`size`、`groups`、`logTime`、`auditStatus`、`status`、`cmd`
+          风险提示: 仅 Linux；时间字段需按 DateRange 传值
           是否任务型: 否
         - brutecrack_list / brutecrack_log / brutecrack_block
-          用途: 暴力破解结果、记录与封停控制
-          必填: `os_type`
-          常用: `hostId`、`ip`、`account`、`status`、`begin_time`、`end_time`、`block`、`duration`
+          用途: 查询暴力破解结果、攻击记录，以及执行封停/解封
+          必填: `os_type`；`brutecrack_log` 还需要 `crackId`；`brutecrack_block` 还需要 `id`、`block`
+          常用: `groups`、`loginTime`、`serviceType`、`clientIp`、`ip`、`hostname`
           风险提示: `brutecrack_block` 为高风险写操作
           是否任务型: 否
         - abnormallogin_list
           用途: 查询异常登录结果
           必填: `os_type`
-          常用: `page`、`size`、`keyword`、`hostId`、`ip`、`account`、`begin_time`、`end_time`
-          风险提示: 无
+          常用: `groups`、`loginTime`、`flag`、`ip`、`uname`、`clientIp`、`hostname`
+          风险提示: 时间字段需按 DateRange 传值
           是否任务型: 否
         - abnormallogin_rule_set / abnormallogin_rule_get / abnormallogin_rule_list / abnormallogin_rule_delete
-          用途: 异常登录规则增删改查
-          必填: `os_type`；单条查询/删除还需要 `id`
-          常用: `rule_name`、`source_ips`、`target_ips`、`users`、`ports`、`enabled`
-          风险提示: 写操作会直接影响告警策略
+          用途: 异常登录规则设置、单条查询、多条查询和删除
+          必填: `os_type`；`abnormallogin_rule_set` 还需要 `realmType`；单条查询/删除还需要 `id`
+          常用: `realmType`、`groups`、`agentIds`、`loginIpInfo`、`loginTimeInfo`、`loginLocationInfo`
+          风险提示: 写操作会直接影响告警判断逻辑
           是否任务型: 否
         - webshell_list / webshell_scan / webshell_scan_status / webshell_download
-          用途: Web 后门结果、扫描、状态和文件下载
-          必填: `os_type`；下载需要 `download_id`
-          常用: `page`、`size`、`severity`、`status`、`hostId`、`groups`、`file_path`、`hostIds`
-          风险提示: 下载动作通常依赖已有下载任务 ID；列表类专属字段误传会被拦截
-          是否任务型: `scan` 为是
+          用途: 查询 WebShell 结果、发起扫描、查看扫描状态、下载文件
+          必填: `os_type`；`webshell_scan` 还需要 `realmType`；下载需要 `download_id`
+          常用: `agentId`、`hostname`、`groups`、`types`、`ip`、`serverName`、`filePath`
+          风险提示: `webshell_scan` 为任务型写操作；下载通常依赖既有下载 ID
+          是否任务型: 仅 `webshell_scan` 为是
         - bounceshell_list
           用途: 查询反弹 Shell 检测结果
           必填: 无（`os_type` 可选，不传默认 `linux`；传 `win` 查询 Windows）
-          常用: `page`、`size`、`sorts`、`groups`
+          常用: `page`、`size`、`groups`、`createTime`、`processName`、`ip`、`targetIpLike`、`targetPort`
+          风险提示: 时间字段需按 DateRange 传值
           是否任务型: 否
         - localrights_list
-          用途: 查询本地提权检测结果（仅 Linux）
+          用途: 查询 Linux 本地提权检测结果
           必填: 无
-          常用: `page`、`size`、`sorts`、`groups`
+          常用: `page`、`size`、`groups`、`time`、`ip`、`procName`、`procUserName`
+          风险提示: 仅 Linux；时间字段需按 DateRange 传值
           是否任务型: 否
         - backdoor_list / backdoor_scan / backdoor_scan_status
-          用途: Linux/Windows 后门检测查询与扫描
-          必填: `os_type`
-          常用: `page`、`size`、`severity`、`status`、`hostId`、`groups`
-          风险提示: 扫描类接口建议缩小主机范围
-          是否任务型: `scan` 为是
+          用途: 查询 Linux/Windows 后门检测结果、发起扫描和查看扫描状态
+          必填: `os_type`；`backdoor_scan` 还需要 `realmType`
+          常用: Linux 用 `backDoorTypes`、`backDoorCheckNames`、`backDoorName`；Windows 用 `backDoorTypeIds`、`name`
+          风险提示: `backdoor_scan` 为任务型写操作；Linux/Windows 筛选字段不同
+          是否任务型: 仅 `backdoor_scan` 为是
         - honeypot_list / honeypot_rule_create / honeypot_rules_create / honeypot_rule_delete / honeypot_rules_delete / honeypot_rule_list / honeypot_rule_get / honeypot_rule_update / honeypot_rule_enable
-          用途: 网络蜜罐结果查询与规则管理
-          必填: `os_type`；单条查询/删除通常需要 `id`
-          常用: `name`、`port`、`protocol`、`enabled`、`rule`、`rules`
-          风险提示: 写操作会直接改变拦截和诱捕策略
+          用途: 查询网络蜜罐结果与规则，支持单条/批量创建、删除、更新和开关
+          必填: `os_type`；单条查询/删除需要 `id`；`honeypot_rule_create/update` 需要 `agentId`、`ports`；批量增删需要 `realmType`、`ports`；开关需要 `agentId`、`status`
+          常用: `groups`、`time`、`clientIp`、`ip`、`ports`、`agentIds`
+          风险提示: 写操作会直接改变诱捕和拦截行为
           是否任务型: 否
       enum:
         - shelllog_list
@@ -97,128 +99,197 @@ inputSchema:
         - honeypot_rule_enable
     os_type:
       type: string
-      description: 操作系统类型，常用 `linux` 或 `win`
+      description: 操作系统类型，支持 `linux` 或 `win`
       enum:
         - linux
         - win
     id:
       type: string
-      description: 规则 ID，适用于单条规则查询和删除
+      description: 记录 ID 或规则主机 ID，适用于封停、单条查询和删除
+    crackId:
+      type: string
+      description: 暴力破解攻击 ID，适用于 `brutecrack_log`
     download_id:
       type: string
-      description: Web 后门下载任务 ID
+      description: WebShell 下载任务 ID
     page:
       type: integer
       description: GET 分页页码，从 0 开始
       default: 0
     size:
       type: integer
-      description: GET 每页数量
-      default: 20
+      description: GET 每页数量；手册默认值为 50
+      default: 50
     sorts:
       type: string
-      description: GET 排序字段
-    keyword:
-      type: string
-      description: 通用关键词筛选
+      description: GET 排序字段，多个字段用逗号分隔；升序省略前缀，降序用 `-`
     groups:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表；GET 请求会按逗号分隔传递
+    realmType:
+      type: integer
+      description: 扫描或批量规则操作范围，0=全部主机，1=自定义主机，2=自定义业务组
+    agentId:
       type: string
-      description: 多值分组条件，逗号分隔
-    severity:
-      type: string
-      description: 严重级别筛选
-    status:
-      type: string
-      description: 状态筛选
-    begin_time:
-      type: string
-      description: 开始时间筛选
-    end_time:
-      type: string
-      description: 结束时间筛选
-    hostId:
-      type: string
-      description: 主机 ID 筛选
-    hostIds:
+      description: 单个主机 ID，适用于 WebShell 查询或蜜罐单条规则操作
+    agentIds:
       type: array
       items:
         type: string
-      description: 主机 ID 列表
-    file_path:
+      description: 主机 ID 列表，适用于扫描范围和批量规则操作
+    excludeGroups:
+      type: array
+      items:
+        type: integer
+      description: 批量创建蜜罐规则时的排除业务组列表
+    excludeAgentIds:
+      type: array
+      items:
+        type: string
+      description: 批量创建蜜罐规则时的排除主机列表
+    logTime:
       type: string
-      description: 文件路径筛选，适合 `webshell_list`
+      description: 可疑操作上报时间，DateRange 格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    loginTime:
+      type: string
+      description: 暴力破解或异常登录时间，DateRange 格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    createTime:
+      type: string
+      description: 反弹 Shell 发现时间，DateRange 格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    time:
+      type: string
+      description: 本地提权或蜜罐发现时间，DateRange 格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    auditStatus:
+      type: array
+      items:
+        type: integer
+      description: 可疑操作审核状态列表，1=未审核，2=审核通过，3=审核未通过
+    status:
+      oneOf:
+        - type: integer
+        - type: array
+          items:
+            type: integer
+      description: 可疑操作类型列表，或蜜罐规则开关状态（0=开启，1=关闭）
+    cmd:
+      type: string
+      description: 可疑操作命令内容
+    loginIp:
+      type: string
+      description: 登录 IP，适用于可疑操作筛选或异常登录规则列表
+    loginUser:
+      type: string
+      description: 登录用户，适用于可疑操作筛选
     ip:
       type: string
-      description: IP 地址
-    account:
+      description: 主机 IP 或被攻击 IP，具体含义取决于 action
+    hostname:
       type: string
-      description: 账号名
+      description: 主机名筛选
+    serviceType:
+      type: array
+      items:
+        type: integer
+      description: 暴力破解服务类型列表；Linux 常见 1=SSHD，2=VSFTPD；Windows 常见 100=RDP，101=WINRM，102=SSH
     block:
-      type: boolean
-      description: 是否封停
-    duration:
+      oneOf:
+        - type: integer
+        - type: array
+          items:
+            type: integer
+      description: 暴力破解封停状态列表，或封停/解封操作类型（0=解封，1=封停）
+    clientIp:
+      type: string
+      description: 攻击来源 IP 或异常登录来源 IP 或蜜罐源 IP
+    flag:
+      type: array
+      items:
+        type: integer
+      description: 异常登录类型列表，2=异常 IP，3=异常区域，4=异常时间
+    uname:
+      type: string
+      description: 异常登录用户名
+    loginLocation:
+      type: string
+      description: 异常登录规则列表中的登录区域筛选
+    loginIpInfo:
+      type: array
+      items:
+        type: object
+      description: 异常登录规则的登录 IP 条件列表
+    loginTimeInfo:
+      type: array
+      items:
+        type: object
+      description: 异常登录规则的登录时间条件列表
+    loginLocationInfo:
+      type: array
+      items:
+        type: object
+      description: 异常登录规则的登录区域条件列表
+    types:
+      type: array
+      items:
+        type: integer
+      description: WebShell 类型列表
+    serverName:
+      type: string
+      description: WebShell 域名筛选
+    filePath:
+      type: string
+      description: WebShell 文件路径筛选
+    processName:
+      type: string
+      description: 反弹 Shell 连接进程名
+    targetIpLike:
+      type: string
+      description: 反弹 Shell 目标主机模糊查询
+    targetPort:
       type: integer
-      description: 封停时长
-    reason:
+      description: 反弹 Shell 目标端口
+    procName:
       type: string
-      description: 封停原因
-    rule_name:
+      description: 本地提权进程名
+    procUserName:
       type: string
-      description: 规则名称
-    source_ips:
+      description: 本地提权用户名
+    backDoorTypes:
       type: array
       items:
         type: string
-      description: 源 IP 列表
-    target_ips:
+      description: Linux 后门类型列表，例如 `应用后门`、`Bootkit`、`Rootkit`
+    backDoorCheckNames:
       type: array
       items:
         type: string
-      description: 目标 IP 列表
-    users:
+      description: Linux 后门检查功能列表
+    backDoorName:
+      type: string
+      description: Linux 后门检查项
+    backDoorTypeIds:
       type: array
       items:
-        type: string
-      description: 用户列表
+        type: integer
+      description: Windows 后门类型 ID 列表
+    name:
+      type: string
+      description: Windows 后门问题摘要筛选
+    port:
+      type: integer
+      description: 蜜罐主机端口筛选
     ports:
       type: array
       items:
         type: integer
-      description: 端口列表
-    enabled:
-      type: boolean
-      description: 规则是否启用
-    name:
-      type: string
-      description: 蜜罐规则名称
-    port:
-      type: integer
-      description: 蜜罐监听端口
-    protocol:
-      type: string
-      description: 协议类型
-    rule:
-      type: object
-      description: 单条蜜罐规则对象
-    rules:
-      type: array
-      items:
-        type: object
-      description: 批量蜜罐规则对象列表
-    ids:
-      type: array
-      items:
-        type: string
-      description: 批量删除时使用的规则 ID 列表
-    taskName:
-      type: string
-      description: 扫描任务名称
+      description: 蜜罐规则端口列表；单条/批量规则操作均使用该字段
     query:
       type: object
-      description: 额外 GET 查询参数对象
+      description: 额外 GET 查询参数对象；会与已建模字段合并
     body:
       type: object
-      description: POST/PUT/DELETE 请求体对象
+      description: POST/PUT/DELETE 请求体对象；适用于范围型扫描和规则写操作
   required:
     - action
 handler:
