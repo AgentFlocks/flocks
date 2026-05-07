@@ -3,7 +3,7 @@
 
 ### 浏览器最小操作模板
 ```bash
-agent-browser open "https://<skyeye-domain>/<path>"
+agent-browser open "https://<domain>/<path>"
 agent-browser wait --load networkidle
 agent-browser snapshot -i
 ```
