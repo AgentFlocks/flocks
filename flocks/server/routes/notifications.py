@@ -9,6 +9,7 @@ from fastapi import APIRouter, Path, Request
 
 from flocks.notifications.service import (
     NotificationAck,
+    NotificationAckStatus,
     NotificationResponse,
     NotificationService,
 )
@@ -32,6 +33,22 @@ async def list_active_notifications(
         user_id=user.id,
         locale=locale,
         current_version=current_version,
+    )
+
+
+@router.get(
+    "/{notification_id}/ack",
+    response_model=NotificationAckStatus,
+    summary="Get notification acknowledgement status",
+)
+async def get_notification_acknowledgement(
+    request: Request,
+    notification_id: str = Path(..., pattern=r"^[a-zA-Z0-9._:-]{1,128}$"),
+) -> NotificationAckStatus:
+    user = require_user(request)
+    return await NotificationService.acknowledgement_status(
+        user_id=user.id,
+        notification_id=notification_id,
     )
 
 

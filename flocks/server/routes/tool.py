@@ -880,6 +880,44 @@ async def test_tool(name: str, request: ToolTestRequest):
 
 
 # =============================================================================
+# Test Fixtures Route
+# =============================================================================
+
+
+class FixtureItemResponse(BaseModel):
+    """One predeclared test sample for a tool."""
+    label: str = Field(..., description="Default (English) sample name for the UI drop-down")
+    label_cn: Optional[str] = Field(None, description="Optional Chinese override; WebUI picks it when locale is zh-*")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Call params, verbatim")
+    tags: List[str] = Field(default_factory=list, description="Semantic labels (smoke, ip, …)")
+    has_assertion: bool = Field(False, description="Whether the sample declares a pass/fail assertion")
+
+
+@router.get(
+    "/{name}/fixtures",
+    response_model=List[FixtureItemResponse],
+    summary="List declared test fixtures for a tool",
+)
+async def list_tool_fixtures(name: str) -> List[FixtureItemResponse]:
+    """Return predeclared test samples sourced from the tool's provider ``_test.yaml``.
+
+    Returns an empty list when no manifest exists or no fixtures are declared.
+    """
+    from flocks.tool.probe_loader import get_tool_fixtures_by_tool_name
+
+    return [
+        FixtureItemResponse(
+            label=f.label,
+            label_cn=f.label_cn,
+            params=f.params,
+            tags=list(f.tags),
+            has_assertion=bool(f.assertion),
+        )
+        for f in get_tool_fixtures_by_tool_name(name)
+    ]
+
+
+# =============================================================================
 # Plugin Tool CRUD Routes
 # =============================================================================
 

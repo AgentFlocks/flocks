@@ -92,6 +92,14 @@ class ToolInfo(BaseModel):
     enabled: bool = Field(True, description="Is tool enabled")
     requires_confirmation: bool = Field(False, description="Requires user confirmation")
     provider: Optional[str] = Field(None, description="Tool provider name (for grouped plugin tools)")
+    provider_version: Optional[str] = Field(
+        None,
+        description=(
+            "Provider/service version string (e.g. '9.2'). Sourced from the "
+            "`version` field in `_provider.yaml`. Surfaced to the LLM via the "
+            "tool description so the model can pick version-appropriate behavior."
+        ),
+    )
     source: Optional[str] = Field(None, description="Tool source: builtin, dynamic, plugin_py, plugin_yaml, mcp")
     native: bool = Field(False, description=(
         "True for built-in tools (registered via @register_function) and project-level "

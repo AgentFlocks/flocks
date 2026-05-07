@@ -1431,6 +1431,7 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
     staged_webui = staged_root / "webui"
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
@@ -1486,7 +1487,7 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
     assert captured["sources"] == ["gitee", "github"]
     assert run_calls == [
         (
-            ["/usr/bin/npm", "install"],
+            ["/usr/bin/npm", "ci"],
             {"npm_config_registry": "https://registry.npmmirror.com/"},
         ),
         (
@@ -1497,6 +1498,63 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
             ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
             None,
         ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_retries_cn_uv_sync_with_default_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.tar.gz"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+
+    run_calls: list[list[str]] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="tar.gz",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append(list(cmd))
+        if cmd == ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"]:
+            return 1, "", "403 Forbidden"
+        return 0, "", ""
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_sleep(_seconds) -> None:
+        pass
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
+
+    assert progresses[-1].stage == "done"
+    assert run_calls == [
+        ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
+        ["/usr/bin/uv", "sync"],
     ]
 
 
@@ -1980,6 +2038,62 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
         "rollback",
     ]
     assert "restore" not in events
+
+
+@pytest.mark.asyncio
+async def test_perform_update_reports_frontend_dependency_install_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        events.append(" ".join(cmd))
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: events.append("replace"))
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm ci."
+    assert events == ["/usr/bin/npm ci"]
 
 
 @pytest.mark.asyncio

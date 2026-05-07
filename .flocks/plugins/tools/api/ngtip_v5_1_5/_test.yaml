@@ -1,0 +1,76 @@
+schema_version: 1
+provider: ngtip_api
+
+# Service-level connectivity probe.
+# `query_ip` is chosen because:
+#   - lightweight (GET; only `apikey` + `resource`),
+#   - exercises both `query_base_url` (port 8090) and the apikey,
+#   - deterministic against 8.8.8.8 (Google DNS).
+connectivity:
+  tool: ngtip_query
+  params:
+    action: query_ip
+    resource: "8.8.8.8"
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  ngtip_query:
+    - label: "IP reputation lookup (8.8.8.8)"
+      label_cn: "IP 信誉查询（8.8.8.8）"
+      tags: [smoke, ip]
+      params:
+        action: query_ip
+        resource: "8.8.8.8"
+      assert:
+        success: true
+
+    - label: "Domain compromise check (example.com)"
+      label_cn: "域名失陷检测（example.com）"
+      tags: [smoke, domain]
+      params:
+        action: query_dns
+        resource: "example.com"
+
+    - label: "File hash reputation (benign SHA256)"
+      label_cn: "Hash 文件信誉（已知良性 SHA256）"
+      tags: [hash]
+      params:
+        action: query_hash
+        resource: "657483b5bf67ef0cc2e2d21c68394d1f7fd35f9c0b6998f7b944dc4e5aa881f8"
+
+    - label: "Vulnerability intel (CVE-2024-3400)"
+      label_cn: "漏洞情报（CVE-2024-3400）"
+      tags: [vuln]
+      params:
+        action: query_vuln
+        vuln_id: "CVE-2024-3400"
+
+    - label: "IP geolocation (8.8.8.8)"
+      label_cn: "IP 地理位置（8.8.8.8）"
+      tags: [location]
+      params:
+        action: query_location
+        resource: "8.8.8.8"
+
+  ngtip_platform:
+    - label: "Intel volume statistics (last year)"
+      label_cn: "情报数量统计（最近一年）"
+      tags: [smoke, count]
+      params:
+        action: platform_intelligence_count
+
+    - label: "Situational intel subscription (last 7 days)"
+      label_cn: "态势情报订阅（最近 7 天）"
+      tags: [subscription]
+      params:
+        action: platform_subscription
+        report_time: "7d"
+
+    - label: "Industry attack intel (last 7 days)"
+      label_cn: "行业攻击情报（最近 7 天）"
+      tags: [industry]
+      params:
+        action: platform_industry_attack
+        update_time: "7d"

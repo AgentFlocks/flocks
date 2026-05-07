@@ -1,0 +1,36 @@
+name: ngsoc_users
+description: >
+  NGSOC user management grouped tool. Use the `action` parameter to fetch
+  the username (nickname) directory used elsewhere as audit / dispatch
+  responsibility lookups (`/users/accounts/*`, manual §5.5).
+description_cn: >
+  NGSOC 用户管理分组工具，对应手册「5.5 用户管理」1 个接口。
+  通过 `action=user_nicknames` 获取系统内可用用户名列表，常用于
+  工单分派、审计、值班等下游模块的下拉数据源。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Users 分组动作名（手册 §5.5）：
+        - user_nicknames   GET /users/accounts/nicknames   获取用户名列表
+      enum:
+        - user_nicknames
+    orgId:
+      type: integer
+      description: 组织 id，可选；不传时为 1（当前用户所在组织）。
+    hiddenList:
+      type: string
+      description: 是否需要隐藏字段，默认 false。
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: users

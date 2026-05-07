@@ -1,0 +1,133 @@
+name: ngsoc_workorders
+description: >
+  NGSOC work-order grouped tool. Use the `action` parameter to update
+  work-order status, list work-orders with rich filters / pagination,
+  and fetch a single work-order's detail under `/workorders/*`
+  (manual §5.6).
+description_cn: >
+  NGSOC 工单管理分组工具，对应手册「5.6 工单管理」3 个接口。
+  通过 `action` 调用工单状态修改、工单列表（多维过滤 + 分页）、
+  单工单详情。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Work-orders 分组动作名（手册 §5.6）：
+        - work_order_status_update  PUT /workorders/list/status            修改工单状态
+        - work_order_list           GET /workorders/work-orders            获取工单列表
+        - work_order_get            GET /workorders/work-order/{workOrderId} 获取工单详情
+      enum:
+        - work_order_status_update
+        - work_order_list
+        - work_order_get
+    workOrderIds:
+      description: |
+        - work_order_status_update：必填，需要变更状态的工单 id 数组
+          （元素为纯数字，例 `[9, 10]`）。
+        - work_order_list：可选字符串，工单 id 列表，多个逗号分隔
+          （例 `"1,2"`，与手册 §5.6.2 query 参数 `workOrderIds` 一致）。
+    status:
+      type: string
+      description: |
+        工单状态（work_order_status_update 必填，纯英文枚举字符串；
+        手册 §5.6.1 BODY 表）：
+        PENDING-待下发；UNDISPOSED-待处置；DISPOSING-处置中；
+        REVOKED-已撤销；DISPOSED-已处置；FINISHED-已完成。
+        在 work_order_list 中作为筛选条件时同样使用枚举字符串。
+      enum:
+        - PENDING
+        - UNDISPOSED
+        - DISPOSING
+        - REVOKED
+        - DISPOSED
+        - FINISHED
+    workOrderId:
+      type: integer
+      description: 工单 id（work_order_get 必填，REST 参数）。
+    page:
+      type: integer
+    size:
+      type: integer
+    tabType:
+      type: string
+      description: |
+        标签页（work_order_list 可选）：SEND-发出的工单；
+        RECEIVE-收到工单；RELATED-相关工单；ADMIN-所有工单。
+      enum:
+        - SEND
+        - RECEIVE
+        - RELATED
+        - ADMIN
+    startTime:
+      type: integer
+      description: 创建时间起，毫秒时间戳（work_order_list 可选）。
+    endTime:
+      type: integer
+      description: 创建时间止，毫秒时间戳（work_order_list 可选）。
+    name:
+      type: string
+      description: 工单名称（work_order_list 可选）。
+    priority:
+      type: string
+      description: |
+        工单优先级（work_order_list 可选，多个逗号分隔）：
+        LOW-低；MIDDLE-中；HIGH-高；EXTRA-极高。
+    creatorIds:
+      description: 创建人 id 列表（work_order_list 可选，长整型）。
+    type:
+      type: string
+      description: |
+        工单类型（work_order_list 可选，多个逗号分隔）：
+        TEXT-通用；ALARM-告警；WEEK_PASSWORD-弱口令；
+        CONFIG_VERIFY-配置核查；VULN-漏洞；WEB_RAW-WEB 漏洞；
+        INCIDENT-事件。
+    orderBy:
+      type: string
+      description: 排序字段（work_order_list 可选，例 `-updateTime`）。
+    SLASwitch:
+      type: boolean
+      description: SLA 开关筛选（work_order_list 可选）。
+    noticeSwitch:
+      type: boolean
+      description: 超时通知开关筛选（work_order_list 可选）。
+    deliveryTimeStart:
+      type: integer
+      description: 下发开始时间，毫秒时间戳（work_order_list 可选）。
+    deliveryTimeEnd:
+      type: integer
+      description: 下发结束时间，毫秒时间戳（work_order_list 可选）。
+    updateTimeStart:
+      type: integer
+      description: 更新开始时间，毫秒时间戳（work_order_list 可选）。
+    updateTimeEnd:
+      type: integer
+      description: 更新结束时间，毫秒时间戳（work_order_list 可选）。
+    sendOrgId:
+      type: integer
+      description: 发送组织 id（work_order_list 可选，纯数字）。
+    receiveOrgId:
+      type: integer
+      description: 接收组织 id（work_order_list 可选，纯数字）。
+    coordinate:
+      type: boolean
+      description: 是否协同工单（work_order_list 可选）。
+    ownerIds:
+      description: 责任人 id 列表（work_order_list 可选，纯数字）。
+    relatedIds:
+      description: 相关人 id 列表（work_order_list 可选，纯数字）。
+    updated:
+      type: boolean
+      description: 是否只看有更新的工单（work_order_list 可选）。
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: workorders
