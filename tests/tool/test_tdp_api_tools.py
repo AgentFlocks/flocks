@@ -7,7 +7,7 @@ import yaml
 from flocks.tool.registry import ToolContext
 from flocks.tool.tool_loader import yaml_to_tool
 
-BASE = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "tdp_api"
+BASE = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "tdp_v3_3_10"
 
 
 def _load_tool(yaml_name: str):
@@ -429,7 +429,7 @@ async def test_tdp_interface_risk_list_invokes_handler_via_yaml_tool_loader():
     tool = _load_tool("tdp_interface_risk_list.yaml")
 
     assert tool.info.name == "tdp_interface_risk_list"
-    assert tool.info.provider == "tdp_api"
+    assert tool.info.provider == "tdp_api_v3_3_10"
 
     fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": {"items": []}})])
 

@@ -1,0 +1,75 @@
+name: ngsoc_bigscreens
+description: >
+  NGSOC situational-dashboard grouped tool. Use the `action` parameter to
+  fetch the dashboard widgets the executive screens consume: TOP-N
+  exploited vulnerabilities, victim assets, threat-type and attack-source
+  distributions, drill-down attack lists, and the victim-IP survey under
+  `/bigscreens/*` (manual §5.7).
+description_cn: >
+  NGSOC 态势大屏分组工具，对应手册「5.7 态势大屏」6 个接口。
+  通过 `action` 调用被利用漏洞 TOP5、受害 IP TOP5、外部威胁类型
+  TOP5、外部攻击 IP TOP5、攻击列表（下钻）、受害者 IP 数等大屏指标。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngsoc_api
+version: "4.15.1"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Big-screens 分组动作名（手册 §5.7）：
+        - vulnerability_leakused_top  GET /bigscreens/vulnerability/getleakusedtop          被利用漏洞 TOP5
+        - attack_asset_top            GET /bigscreens/bigscreen/getattackassettopX          受害 IP TOP5
+        - threat_type_top             GET /bigscreens/bigscreen/getthreattype               外部威胁类型 TOP5
+        - attack_source_ip_top        GET /bigscreens/bigscreen/getattacksourceiptopX       外部攻击 IP TOP5
+        - attack_list                 GET /bigscreens/bigscreen/getattacklist               攻击列表（外部威胁类型 TOP5 下钻）
+        - victim_survey               GET /bigscreens/attacker-situation/victim-survey      受害者 IP 数
+      enum:
+        - vulnerability_leakused_top
+        - attack_asset_top
+        - threat_type_top
+        - attack_source_ip_top
+        - attack_list
+        - victim_survey
+    parentId:
+      type: string
+      description: |
+        资产或网段分组 id（vulnerability_leakused_top 必填，纯数字字符串，
+        `0` 表示根分组；手册 §5.7.1 query 参数表）。
+    severity:
+      type: integer
+      description: |
+        脆弱性等级（vulnerability_leakused_top 必填，整数；
+        手册 §5.7.1）：0-全部；1-低危；2-中危；3-高危；4-危急。
+      enum: [0, 1, 2, 3, 4]
+    type:
+      type: integer
+      description: |
+        时间范围（attack_asset_top / threat_type_top /
+        attack_source_ip_top / attack_list 可选，整数；手册 §5.7.2~§5.7.5）：
+        1-最近 24 小时；2-最近 7 天；3-最近 14 天；4-最近 30 天。
+      enum: [1, 2, 3, 4]
+    page:
+      type: integer
+      description: 第几页（attack_list 必填）。
+    size:
+      type: integer
+      description: 每页数据量（attack_list 必填）。
+    assetId:
+      type: string
+      description: 受害者 IP（attack_list 可选，IP 字符串，例 `1.1.1.1`）。
+    dateType:
+      type: integer
+      description: |
+        统计周期（victim_survey 可选；手册 §5.7.6 dateType 取值）：
+        1-最近 24 小时；7-最近 7 天；14-最近 14 天；30-最近 30 天。
+      enum: [1, 7, 14, 30]
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngsoc.handler.py
+  function: bigscreens

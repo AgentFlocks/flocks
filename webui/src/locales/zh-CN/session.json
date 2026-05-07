@@ -93,7 +93,7 @@
       "retry": "重试上传",
       "dropHint": "松开以上传文档文件",
       "waiting": "文件上传中，请等待完成后发送",
-      "invalidType": "仅支持 txt、md、json、yaml、yml、xml、csv、pdf、doc、docx",
+      "invalidType": "仅支持 txt、md、json、yaml、yml、xml、csv、pdf、doc、docx、html、htm、ppt、pptx、xls、xlsx",
       "errorGeneric": "上传失败，请重试"
     },
     "tool": {

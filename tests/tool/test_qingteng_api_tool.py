@@ -10,6 +10,9 @@ from flocks.tool.registry import ToolContext
 from flocks.tool.tool_loader import yaml_to_tool
 
 
+_QINGTENG_PLUGIN_DIR = "qingteng_v3_4_1_66"
+
+
 def _load_tool(yaml_name: str):
     yaml_path = (
         Path.cwd()
@@ -17,7 +20,7 @@ def _load_tool(yaml_name: str):
         / "plugins"
         / "tools"
         / "api"
-        / "qingteng"
+        / _QINGTENG_PLUGIN_DIR
         / yaml_name
     )
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
@@ -31,7 +34,7 @@ def _load_handler_module(script_name: str, module_name: str):
         / "plugins"
         / "tools"
         / "api"
-        / "qingteng"
+        / _QINGTENG_PLUGIN_DIR
         / script_name
     )
     spec = importlib.util.spec_from_file_location(module_name, str(script_path))
@@ -119,7 +122,9 @@ async def test_qingteng_assets_tool_and_handler_use_signed_sorted_query_params()
             businessGroupId="bg-1",
         )
 
-        assert tool.info.provider == "qingteng"
+        # ``info.provider`` is the storage key (service_id + version).
+        assert tool.info.provider == "qingteng_v3_4_1_66"
+        assert getattr(tool, "_service_id", None) == "qingteng"
         assert result.success is True
         assert result.metadata["api"] == "assets.list"
         assert result.output["total"] == 1
@@ -655,7 +660,7 @@ async def test_qingteng_system_audit_uses_shared_handler_logic():
         sorts="-eventTime",
     )
 
-    assert tool.info.provider == "qingteng"
+    assert tool.info.provider == "qingteng_v3_4_1_66"
     assert result.success is True
     assert result.metadata["api"] == "system.audit"
     assert result.output["total"] == 1

@@ -1,0 +1,116 @@
+schema_version: 1
+provider: onesig_api
+
+# Service-level connectivity probe.
+# `basic_version` is a lightweight GET that verifies the device is reachable
+# and the session cookie / credentials are valid, without side-effects.
+connectivity:
+  tool: onesig_device
+  params:
+    action: basic_version
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  onesig_login:
+    - label: "Get current account info"
+      label_cn: "获取当前登录账户信息"
+      tags: [smoke]
+      params:
+        action: get_account
+      assert:
+        success: true
+
+    - label: "Get product news"
+      label_cn: "获取产品公告"
+      tags: [smoke]
+      params:
+        action: get_product_news
+
+  onesig_monitoring:
+    - label: "List threat type options"
+      label_cn: "获取威胁类型枚举"
+      tags: [smoke]
+      params:
+        action: common_threat_type_list
+      assert:
+        success: true
+
+    - label: "Get dashboard status"
+      label_cn: "获取仪表板状态"
+      tags: [smoke]
+      params:
+        action: dashboard_status
+
+    - label: "Get device platform status"
+      label_cn: "获取设备平台状态"
+      tags: [smoke]
+      params:
+        action: device_platform_status
+
+  onesig_strategy:
+    - label: "Get blacklist location options"
+      label_cn: "获取黑名单地理位置枚举"
+      tags: [smoke]
+      params:
+        action: blacklist_location_options
+      assert:
+        success: true
+
+    - label: "List whitelist entries (page 1)"
+      label_cn: "查询全局白名单列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: whitelist_list
+
+  onesig_assets:
+    - label: "Get asset group tree"
+      label_cn: "获取资产分组树"
+      tags: [smoke]
+      params:
+        action: common_asset_group_tree
+      assert:
+        success: true
+
+    - label: "List assets (page 1)"
+      label_cn: "查询资产列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: asset_list
+
+  onesig_device:
+    - label: "Get device version"
+      label_cn: "获取设备版本信息"
+      tags: [smoke]
+      params:
+        action: basic_version
+      assert:
+        success: true
+
+    - label: "Get license info"
+      label_cn: "获取许可证信息"
+      tags: [smoke]
+      params:
+        action: basic_license_get
+
+    - label: "Get device network status"
+      label_cn: "获取设备网络状态"
+      tags: [smoke]
+      params:
+        action: device_network_status
+
+  onesig_helper:
+    - label: "Get product version"
+      label_cn: "获取产品版本"
+      tags: [smoke]
+      params:
+        action: product_version
+      assert:
+        success: true
+
+    - label: "List documents (page 1)"
+      label_cn: "获取文档列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: document_list

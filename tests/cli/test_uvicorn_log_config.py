@@ -9,3 +9,5 @@ def test_uvicorn_log_config_adds_asctime_to_formatters() -> None:
     assert "%(asctime)s |" in cfg["formatters"]["access"]["fmt"]
     assert cfg["formatters"]["default"]["datefmt"] == "%Y-%m-%d %H:%M:%S"
     assert cfg["formatters"]["access"]["datefmt"] == "%Y-%m-%d %H:%M:%S"
+    assert cfg["loggers"]["uvicorn.access"]["handlers"] == []
+    assert cfg["loggers"]["uvicorn.access"]["propagate"] is False
