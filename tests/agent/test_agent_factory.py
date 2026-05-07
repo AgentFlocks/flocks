@@ -683,6 +683,23 @@ class TestProjectLevelAgentScan:
         assert "proj-native" in result
         assert result["proj-native"].native is True
 
+    def test_project_agent_pack_nested_agents_are_discovered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agent packs can expose one-level nested Flocks agent directories."""
+        pack_dir = tmp_path / ".flocks" / "plugins" / "agents" / "pentest-ai-agents"
+        self._write_agent(pack_dir.parent, "pentest-ai-agents")
+        self._write_agent(pack_dir, "web-hunter")
+        self._write_agent(pack_dir, "cloud-security")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        assert "pentest-ai-agents" in result
+        assert "web-hunter" in result
+        assert "cloud-security" in result
+        assert result["web-hunter"].native is True
+
     def test_user_plugin_agent_is_not_native(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):

@@ -6,12 +6,16 @@ function isChineseLocale(language?: string): boolean {
 }
 
 export function getCatalogDescription(
-  entry: Pick<MCPCatalogEntry, 'description' | 'description_cn'> | null | undefined,
+  entry: ({
+    description?: string;
+    description_cn?: string;
+    descriptionCn?: string;
+  }) | null | undefined,
   language?: string,
 ): string {
   if (!entry) return '';
   const englishDescription = entry.description?.trim() || '';
-  const chineseDescription = entry.description_cn?.trim() || '';
+  const chineseDescription = entry.description_cn?.trim() || entry.descriptionCn?.trim() || '';
   return isChineseLocale(language)
     ? (chineseDescription || englishDescription)
     : (englishDescription || chineseDescription);

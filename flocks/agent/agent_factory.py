@@ -12,6 +12,7 @@ Extension point:
   Built-in agents:         flocks/agent/agents/<name>/          native=True
   Project plugin agents:   <cwd>/.flocks/plugins/agents/<name>/ native=True
   User plugin agents:      ~/.flocks/plugins/agents/<name>/     native=False
+  Agent packs may include nested <pack>/<name>/agent.yaml entries.
 
 The ``native`` field is derived from the loading directory and must NOT be
 declared in agent.yaml.
@@ -169,6 +170,22 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
 # Directory scanning
 # ---------------------------------------------------------------------------
 
+def _iter_agent_dirs(scan_dir: Path) -> List[Path]:
+    """Return immediate agents and one-level nested agents inside collection packs."""
+    agent_dirs: List[Path] = []
+    for child in sorted(scan_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith("_"):
+            continue
+        if (child / "agent.yaml").is_file():
+            agent_dirs.append(child)
+        for nested in sorted(child.iterdir()):
+            if not nested.is_dir() or nested.name.startswith("_"):
+                continue
+            if (nested / "agent.yaml").is_file():
+                agent_dirs.append(nested)
+    return agent_dirs
+
+
 def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     """
     Scan agent directories and load all valid agents.
@@ -204,9 +221,7 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     for scan_dir, is_native in search_dirs:
         if not scan_dir.is_dir():
             continue
-        for agent_dir in sorted(scan_dir.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
-                continue
+        for agent_dir in _iter_agent_dirs(scan_dir):
             agent = load_agent(agent_dir, native=is_native)
             if agent is None:
                 continue

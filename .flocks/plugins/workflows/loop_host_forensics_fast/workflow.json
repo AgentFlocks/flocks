@@ -1,7 +1,8 @@
 {
   "id": "loop_host_forensics_fast",
   "name": "loop_host_forensics_fast",
-  "description": "从文件或 inputs 读取主机列表；可选 ssh_user。每台巡检结束立即写入 host_triage/ 下独立 md；循环态仅保留包含 success/verdict/per_host_md 的轻量结果索引。每台巡检前先做 SSH 预检，超时仅重试一次；末步同时生成 JSON/CSV 索引，避免最后节点 summary 因全量结果过大而超时。",
+  "description": "Batch host quick-triage workflow: loads hosts from inputs/file, performs per-host SSH preflight and fast checks, writes per-host reports, and outputs compact JSON/CSV indexes.",
+  "description_cn": "从文件或 inputs 读取主机列表；可选 ssh_user。每台巡检结束立即写入 host_triage/ 下独立 md；循环态仅保留包含 success/verdict/per_host_md 的轻量结果索引。每台巡检前先做 SSH 预检，超时仅重试一次；末步同时生成 JSON/CSV 索引，避免最后节点 summary 因全量结果过大而超时。",
   "start": "init_hosts",
   "nodes": [
     {
