@@ -55,6 +55,12 @@ function providerAllowsEmptyApiKey(providerId: string): boolean {
   );
 }
 
+const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
+
+function isAzureProviderId(providerId: string): boolean {
+  return AZURE_PROVIDER_IDS.has(providerId);
+}
+
 // ==================== Connection Cache ====================
 
 const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
@@ -1088,6 +1094,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [baseUrl, setBaseUrl] = useState('');
   const [description, setDescription] = useState('');
   const [providerName, setProviderName] = useState('');
+  const [azureDeploymentName, setAzureDeploymentName] = useState('');
+  const [azureDeploymentDisplayName, setAzureDeploymentDisplayName] = useState('');
 
   // Model selection (for catalog providers)
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
@@ -1172,6 +1180,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setDescription(provider.description || '');
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
       setProviderName('');
+      setAzureDeploymentName('');
+      setAzureDeploymentDisplayName('');
     }
   };
 
@@ -1212,7 +1222,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         base_url: baseUrl.trim() || undefined,
         provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
       });
-      const res = await providerAPI.testCredentials(selectedCatalogId);
+      const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
+      const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId || undefined);
       setTestResult({
         success: res.data.success,
         message: res.data.message || (res.data.success ? t('status.connected') : t('form.testFailed')),
@@ -1233,6 +1244,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
       toast.warning('Please enter API Key');
+      return;
+    }
+    const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
+    if (isAzureProviderId(selectedCatalogId) && selectedModelIds.size === 0 && !azureModelId) {
+      toast.warning(t('form.azureDeploymentRequired'));
       return;
     }
     try {
@@ -1258,6 +1274,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       if (selectedCatalog) {
         const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
         await Promise.all(unselected.map(id => modelV2API.deleteDefinition(selectedCatalogId, id).catch(() => {})));
+      }
+      if (azureModelId) {
+        await modelV2API.createDefinition(selectedCatalogId, {
+          model_id: azureModelId,
+          name: azureDeploymentDisplayName.trim() || azureModelId,
+        });
+        try {
+          const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId);
+          if (!res.data.success) {
+            toast.warning(t('form.testFailed'), res.data.error || res.data.message);
+          }
+        } catch (testErr: any) {
+          toast.warning(t('form.testFailed'), testErr.response?.data?.detail || testErr.message);
+        }
       }
       toast.success(t('providerAdded'), displayName);
       setSavedProviderId(selectedCatalogId);
@@ -1600,6 +1630,36 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
+                      {isAzureProviderId(selectedCatalogId) && (
+                        <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.azureDeploymentName')}
+                            </label>
+                            <input
+                              type="text"
+                              value={azureDeploymentName}
+                              onChange={e => setAzureDeploymentName(e.target.value)}
+                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              placeholder={t('form.azureDeploymentPlaceholder')}
+                            />
+                            <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.azureDeploymentDisplayName')}
+                            </label>
+                            <input
+                              type="text"
+                              value={azureDeploymentDisplayName}
+                              onChange={e => setAzureDeploymentDisplayName(e.target.value)}
+                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              placeholder={azureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
+                            />
+                          </div>
+                        </div>
+                      )}
+
                       {selectedCatalog.models.length > 0 && (
                         <div>
                           <div className="flex items-center justify-between mb-2">
@@ -1712,7 +1772,13 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
             </div>
           )}
-          <ModelFormFields form={modelForm} testResult={modelTestResult} testing={modelTesting} />
+          <ModelFormFields
+            form={modelForm}
+            testResult={modelTestResult}
+            testing={modelTesting}
+            modelIdPlaceholder={savedProviderId && isAzureProviderId(savedProviderId) ? t('form.azureDeploymentPlaceholder') : undefined}
+            modelIdHint={savedProviderId && isAzureProviderId(savedProviderId) ? t('form.azureModelIdHint') : undefined}
+          />
         </div>
       )}
     </EntitySheet>
@@ -1791,10 +1857,12 @@ function useModelForm() {
   };
 }
 
-function ModelFormFields({ form, testResult, testing }: {
+function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelIdHint }: {
   form: ReturnType<typeof useModelForm>;
   testResult: { success: boolean; message: string; latency?: number } | null;
   testing: boolean;
+  modelIdPlaceholder?: string;
+  modelIdHint?: string;
 }) {
   const { t } = useTranslation('model');
   return (
@@ -1809,8 +1877,9 @@ function ModelFormFields({ form, testResult, testing }: {
             value={form.modelId}
             onChange={e => form.setModelId(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            placeholder="gpt-4o-custom"
+            placeholder={modelIdPlaceholder || 'gpt-4o-custom'}
           />
+          {modelIdHint && <p className="mt-1 text-xs text-gray-500">{modelIdHint}</p>}
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -2013,7 +2082,13 @@ Provider: ${provider.name} (${provider.id})
             className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
           />
         </div>
-        <ModelFormFields form={form} testResult={testResult} testing={testing} />
+        <ModelFormFields
+          form={form}
+          testResult={testResult}
+          testing={testing}
+          modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
+          modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
+        />
       </div>
     </EntitySheet>
   );
@@ -2085,7 +2160,20 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
 
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
+  const [catalogModelsLoaded, setCatalogModelsLoaded] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
+  const [newAzureDeploymentName, setNewAzureDeploymentName] = useState('');
+  const [newAzureDeploymentDisplayName, setNewAzureDeploymentDisplayName] = useState('');
+  const isAzureProvider = isAzureProviderId(provider.id);
+  const catalogModelIds = useMemo(() => new Set(catalogModels.map(m => m.id)), [catalogModels]);
+  const selectedCatalogModelCount = useMemo(
+    () => catalogModels.filter(m => selectedModelIds.has(m.id)).length,
+    [catalogModels, selectedModelIds]
+  );
+  const azureCustomModels = useMemo(
+    () => isAzureProvider && catalogModelsLoaded ? models.filter(m => !catalogModelIds.has(m.id)) : [],
+    [catalogModelIds, catalogModelsLoaded, isAzureProvider, models]
+  );
 
   useEffect(() => {
     setApiKey(existingKey);
@@ -2103,10 +2191,19 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   }, [provider.id, models]);
 
   useEffect(() => {
+    setCatalogModelsLoaded(false);
     catalogAPI.list().then(res => {
       const found = res.data.providers.find(p => p.id === provider.id);
-      if (found) setCatalogModels(found.models);
-    }).catch(() => {});
+      if (found) {
+        setCatalogModels(found.models);
+        setCatalogModelsLoaded(true);
+      } else {
+        setCatalogModels([]);
+      }
+    }).catch(() => {
+      setCatalogModels([]);
+      setCatalogModelsLoaded(false);
+    });
   }, [provider.id]);
 
   const handleToggleCatalogModel = (modelId: string) => {
@@ -2147,6 +2244,13 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
           ...toDelete.map(m => modelV2API.deleteDefinition(provider.id, m.id).catch(() => {})),
           ...toAdd.map(m => modelV2API.createDefinition(provider.id, { model_id: m.id, name: m.name }).catch(() => {})),
         ]);
+      }
+      const azureModelId = newAzureDeploymentName.trim();
+      if (isAzureProvider && azureModelId) {
+        await modelV2API.createDefinition(provider.id, {
+          model_id: azureModelId,
+          name: newAzureDeploymentDisplayName.trim() || azureModelId,
+        });
       }
 
       toast.success(t('credentialsSaved'));
@@ -2343,7 +2447,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               <label className="text-sm font-medium text-gray-700">
                 {t('form.availableModels')}
                 <span className="text-gray-400 font-normal ml-1">
-                  ({selectedModelIds.size}/{catalogModels.length} {t('form.selected')})
+                  ({selectedCatalogModelCount}/{catalogModels.length} {t('form.selected')})
                 </span>
               </label>
               <button type="button" onClick={handleToggleAllCatalogModels} className="text-xs text-slate-600 hover:text-slate-800">
@@ -2377,6 +2481,55 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
                   </div>
                 </label>
               ))}
+            </div>
+          </div>
+        )}
+
+        {isAzureProvider && catalogModelsLoaded && (
+          <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div>
+              <h4 className="text-sm font-medium text-gray-900">{t('form.azureCustomDeployments')}</h4>
+              <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+            </div>
+
+            {azureCustomModels.length > 0 ? (
+              <div className="space-y-2">
+                {azureCustomModels.map(model => (
+                  <div key={model.id} className="px-3 py-2 bg-white border border-blue-100 rounded-lg">
+                    <div className="text-sm font-medium text-gray-900">{model.name || model.id}</div>
+                    <div className="text-xs text-gray-500 font-mono mt-0.5">{model.id}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">{t('form.azureNoCustomDeployments')}</p>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {t('form.azureDeploymentName')}
+                </label>
+                <input
+                  type="text"
+                  value={newAzureDeploymentName}
+                  onChange={e => setNewAzureDeploymentName(e.target.value)}
+                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  placeholder={t('form.azureDeploymentPlaceholder')}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {t('form.azureDeploymentDisplayName')}
+                </label>
+                <input
+                  type="text"
+                  value={newAzureDeploymentDisplayName}
+                  onChange={e => setNewAzureDeploymentDisplayName(e.target.value)}
+                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  placeholder={newAzureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
+                />
+              </div>
             </div>
           </div>
         )}
