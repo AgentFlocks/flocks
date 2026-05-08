@@ -51,6 +51,8 @@ _CN_PIP_INDEX_URL = _CN_UV_DEFAULT_INDEX
 _CURL_USER_AGENT = "curl/8.7.1"
 _FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 _FRONTEND_BUILD_TIMEOUT_SECONDS = 300
+_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 180
+_WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
@@ -362,6 +364,13 @@ def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[s
             env["PATH"] = node_bin if not current_path else node_bin + os.pathsep + current_path
 
     return env or None
+
+
+def _dependency_sync_timeout_seconds() -> int:
+    """Return the timeout budget for ``uv sync`` during self-update."""
+    if sys.platform == "win32":
+        return _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS
+    return _DEPENDENCY_SYNC_TIMEOUT_SECONDS
 
 
 # ------------------------------------------------------------------ #
@@ -2150,10 +2159,29 @@ async def perform_update(
         uv_cmd.extend(["--default-index", profile.uv_default_index])
 
     sync_env = _build_uv_sync_env()
+    sync_timeout = _dependency_sync_timeout_seconds()
     retried_after_managed_python_repair = False
-    code, _, err = await _run_async(
-        uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-    )
+
+    async def _run_uv_sync(cmd: list[str]) -> tuple[int, str, str]:
+        return await _run_async(
+            cmd,
+            cwd=install_root,
+            timeout=sync_timeout,
+            env=sync_env,
+        )
+
+    def _dependency_sync_timeout_message() -> str:
+        return f"Dependency sync timed out after {sync_timeout}s while running uv sync."
+
+    try:
+        code, _, err = await _run_uv_sync(uv_cmd)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        await _restore_after_apply_failure()
+        timeout_message = _dependency_sync_timeout_message()
+        _record_update_journal(f"ERROR {timeout_message}")
+        yield UpdateProgress(stage="error", message=timeout_message, success=False)
+        return
     if (
         code != 0
         and sys.platform == "win32"
@@ -2173,9 +2201,15 @@ async def perform_update(
                 {"error": err},
             )
         await asyncio.sleep(2)
-        code, _, err = await _run_async(
-            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-        )
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
     if code != 0 and profile.uv_default_index:
         log.warning(
             "updater.dependencies.sync_retry_default_index",
@@ -2186,15 +2220,27 @@ async def perform_update(
         )
         await asyncio.sleep(3)
         uv_cmd = [uv_path, "sync"]
-        code, _, err = await _run_async(
-            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-        )
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
     if code != 0:
         log.warning("updater.dependencies.sync_retry", {"first_error": err})
         await asyncio.sleep(3)
-        code, _, err = await _run_async(
-            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-        )
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
 
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
