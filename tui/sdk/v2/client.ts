@@ -37,8 +37,8 @@ function getStoredApiToken(): string | undefined {
   }
 }
 
-function withAuthHeaders(config?: Config & { directory?: string }) {
-  const headers = new Headers(config?.headers as HeadersInit | undefined)
+export function getFlocksAuthHeaders(headersInit?: HeadersInit) {
+  const headers = new Headers(headersInit)
   const apiToken = getStoredApiToken()
   const hasAuth = headers.has("authorization") || headers.has("x-flocks-api-token")
   if (apiToken && !hasAuth) {
@@ -60,7 +60,7 @@ export function createFlocksClient(config?: Config & { directory?: string }) {
     }
   }
 
-  const headers = withAuthHeaders(config)
+  const headers = getFlocksAuthHeaders(config?.headers as HeadersInit | undefined)
 
   if (config?.directory) {
     const isNonASCII = /[^\x00-\x7F]/.test(config.directory)

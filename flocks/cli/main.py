@@ -6,6 +6,7 @@ Provides command-line interface for Flocks
 
 import asyncio
 import os
+import secrets as secrets_lib
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -72,6 +73,19 @@ app.command(
 )(browser_command)
 
 console = Console()
+
+
+def _ensure_server_api_token() -> bool:
+    """Ensure local non-browser clients such as `flocks tui` can authenticate."""
+    from flocks.security import get_secret_manager
+    from flocks.server.auth import API_TOKEN_SECRET_ID
+
+    secrets = get_secret_manager()
+    if secrets.get(API_TOKEN_SECRET_ID):
+        return False
+
+    secrets.set(API_TOKEN_SECRET_ID, secrets_lib.token_urlsafe(32))
+    return True
 
 
 def version_callback(value: bool):
@@ -451,6 +465,8 @@ def tui(
 
         # Start server process
         env = os.environ.copy()
+        if _ensure_server_api_token():
+            console.print("[dim]Initialized local API token for TUI access[/dim]")
 
         # Set auto-approve environment variable for TUI mode
         if auto_approve:

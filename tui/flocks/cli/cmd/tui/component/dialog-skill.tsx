@@ -26,7 +26,7 @@ export function DialogSkill() {
     setError(null)
     // Use status endpoint to get eligibility info
     try {
-      const res = await fetch(`${sdk.url}/skill/status`)
+      const res = await sdk.fetch(`${sdk.url}/skill/status`)
       if (res.ok) {
         const data = await res.json()
         setSkills(Array.isArray(data) ? data : [])

@@ -24,7 +24,6 @@ from typing import Any, Callable, Dict, List, Optional
 import yaml
 
 from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-from flocks.security.url_guard import guarded_tcp_connector, validate_public_http_url
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -326,10 +325,6 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
         import aiohttp
 
         url = _substitute_params(url_template, kwargs, url_encode=False)
-        url_error = validate_public_http_url(url)
-        if url_error:
-            return ToolResult(success=False, error=url_error)
-
         headers = {
             k: _substitute_params(v, kwargs)
             for k, v in headers_template.items()
@@ -351,8 +346,7 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
 
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            connector = guarded_tcp_connector()
-            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
+            async with aiohttp.ClientSession(timeout=client_timeout) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params

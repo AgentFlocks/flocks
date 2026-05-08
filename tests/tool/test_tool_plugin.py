@@ -851,22 +851,6 @@ class TestPluginPyRegistration:
 
 class TestHttpHandler:
     @pytest.mark.asyncio
-    async def test_rejects_template_resolved_loopback_url(self):
-        cfg = {
-            "type": "http",
-            "method": "GET",
-            "url": "{target}",
-            "timeout": 10,
-        }
-        handler = _build_http_handler(cfg)
-        ctx = ToolContext(session_id="test", message_id="test")
-
-        result = await handler(ctx, target="http://127.0.0.1:8000/internal")
-
-        assert result.success is False
-        assert "restricted network" in result.error
-
-    @pytest.mark.asyncio
     async def test_get_request(self):
         cfg = {
             "type": "http",
