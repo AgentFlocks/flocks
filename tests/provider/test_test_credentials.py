@@ -754,3 +754,43 @@ class TestTestCredentialsInlineConfigFallback:
             assert configured.api_key == "gateway-api-key"
             assert configured.base_url == "https://gateway.internal/v1"
             assert configured.custom_settings["verify_ssl"] is False
+
+    @pytest.mark.asyncio
+    async def test_requested_azure_deployment_model_is_used_for_provider_test(self):
+        from flocks.server.routes.provider import TestCredentialRequest, test_provider_credentials
+
+        provider = MagicMock()
+        provider._config = MagicMock(
+            custom_settings={},
+            base_url="https://example-resource.openai.azure.com/",
+        )
+        provider.chat = AsyncMock(return_value=MagicMock(content="Paris"))
+
+        model = MagicMock()
+        model.id = "customer-prod-deployment"
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "azure-api-key"
+
+        mock_config = MagicMock()
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=mock_config),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls._load_dynamic_providers = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials(
+                "azure-openai",
+                TestCredentialRequest(model_id="customer-prod-deployment"),
+            )
+
+            assert result["success"] is True, result
+            assert result["model_id"] == "customer-prod-deployment"
+            provider.chat.assert_awaited_once()
+            assert provider.chat.await_args.args[0] == "customer-prod-deployment"

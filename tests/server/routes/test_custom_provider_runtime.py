@@ -48,3 +48,36 @@ def test_add_model_to_runtime_preserves_reasoning_and_currency(monkeypatch):
         assert provider._config_models[0].capabilities.supports_reasoning is True
     finally:
         Provider._models = original_models
+
+
+def test_add_azure_deployment_to_runtime_config_models(monkeypatch):
+    class DynamicAzureProvider:
+        _config_models = []
+
+    provider = DynamicAzureProvider()
+    body = CreateModelReq(
+        model_id="customer-prod-deployment",
+        name="Customer Production Deployment",
+        context_window=128000,
+        max_output_tokens=4096,
+        supports_vision=False,
+        supports_tools=True,
+        supports_streaming=True,
+        supports_reasoning=False,
+        input_price=0.0,
+        output_price=0.0,
+        currency="USD",
+    )
+
+    original_models = Provider._models
+    Provider._models = {}
+    monkeypatch.setattr(Provider, "get", classmethod(lambda cls, provider_id: provider))
+
+    try:
+        _add_model_to_runtime("azure-openai", body)
+
+        assert Provider._models[body.model_id].provider_id == "azure-openai"
+        assert provider._config_models[0].id == "customer-prod-deployment"
+        assert provider._config_models[0].name == "Customer Production Deployment"
+    finally:
+        Provider._models = original_models

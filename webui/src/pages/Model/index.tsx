@@ -1088,6 +1088,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   const [baseUrl, setBaseUrl] = useState('');
   const [description, setDescription] = useState('');
   const [providerName, setProviderName] = useState('');
+  const [azureDeploymentName, setAzureDeploymentName] = useState('');
+  const [azureDeploymentDisplayName, setAzureDeploymentDisplayName] = useState('');
 
   // Model selection (for catalog providers)
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set());
@@ -1172,6 +1174,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setDescription(provider.description || '');
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
       setProviderName('');
+      setAzureDeploymentName('');
+      setAzureDeploymentDisplayName('');
     }
   };
 
@@ -1212,7 +1216,14 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         base_url: baseUrl.trim() || undefined,
         provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
       });
-      const res = await providerAPI.testCredentials(selectedCatalogId);
+      const azureModelId = selectedCatalogId === 'azure-openai' ? azureDeploymentName.trim() : '';
+      if (azureModelId) {
+        await modelV2API.createDefinition(selectedCatalogId, {
+          model_id: azureModelId,
+          name: azureDeploymentDisplayName.trim() || azureModelId,
+        });
+      }
+      const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId || undefined);
       setTestResult({
         success: res.data.success,
         message: res.data.message || (res.data.success ? t('status.connected') : t('form.testFailed')),
@@ -1233,6 +1244,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
       toast.warning('Please enter API Key');
+      return;
+    }
+    const azureModelId = selectedCatalogId === 'azure-openai' ? azureDeploymentName.trim() : '';
+    if (selectedCatalogId === 'azure-openai' && selectedModelIds.size === 0 && !azureModelId) {
+      toast.warning(t('form.azureDeploymentRequired'));
       return;
     }
     try {
@@ -1258,6 +1274,20 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       if (selectedCatalog) {
         const unselected = selectedCatalog.models.filter(m => !selectedModelIds.has(m.id)).map(m => m.id);
         await Promise.all(unselected.map(id => modelV2API.deleteDefinition(selectedCatalogId, id).catch(() => {})));
+      }
+      if (azureModelId) {
+        await modelV2API.createDefinition(selectedCatalogId, {
+          model_id: azureModelId,
+          name: azureDeploymentDisplayName.trim() || azureModelId,
+        });
+        try {
+          const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId);
+          if (!res.data.success) {
+            toast.error(t('form.testFailed'), res.data.error || res.data.message);
+          }
+        } catch (testErr: any) {
+          toast.error(t('form.testFailed'), testErr.response?.data?.detail || testErr.message);
+        }
       }
       toast.success(t('providerAdded'), displayName);
       setSavedProviderId(selectedCatalogId);
@@ -1600,6 +1630,36 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
+                      {selectedCatalogId === 'azure-openai' && (
+                        <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.azureDeploymentName')}
+                            </label>
+                            <input
+                              type="text"
+                              value={azureDeploymentName}
+                              onChange={e => setAzureDeploymentName(e.target.value)}
+                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              placeholder={t('form.azureDeploymentPlaceholder')}
+                            />
+                            <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+                          </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                              {t('form.azureDeploymentDisplayName')}
+                            </label>
+                            <input
+                              type="text"
+                              value={azureDeploymentDisplayName}
+                              onChange={e => setAzureDeploymentDisplayName(e.target.value)}
+                              className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                              placeholder={azureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
+                            />
+                          </div>
+                        </div>
+                      )}
+
                       {selectedCatalog.models.length > 0 && (
                         <div>
                           <div className="flex items-center justify-between mb-2">
@@ -1712,7 +1772,13 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
               <p className="text-xs text-green-800">{t('wizard.modelsAdded', { count: addedModelCount })}</p>
             </div>
           )}
-          <ModelFormFields form={modelForm} testResult={modelTestResult} testing={modelTesting} />
+          <ModelFormFields
+            form={modelForm}
+            testResult={modelTestResult}
+            testing={modelTesting}
+            modelIdPlaceholder={savedProviderId === 'azure-openai' ? t('form.azureDeploymentPlaceholder') : undefined}
+            modelIdHint={savedProviderId === 'azure-openai' ? t('form.azureModelIdHint') : undefined}
+          />
         </div>
       )}
     </EntitySheet>
@@ -1791,10 +1857,12 @@ function useModelForm() {
   };
 }
 
-function ModelFormFields({ form, testResult, testing }: {
+function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelIdHint }: {
   form: ReturnType<typeof useModelForm>;
   testResult: { success: boolean; message: string; latency?: number } | null;
   testing: boolean;
+  modelIdPlaceholder?: string;
+  modelIdHint?: string;
 }) {
   const { t } = useTranslation('model');
   return (
@@ -1809,8 +1877,9 @@ function ModelFormFields({ form, testResult, testing }: {
             value={form.modelId}
             onChange={e => form.setModelId(e.target.value)}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
-            placeholder="gpt-4o-custom"
+            placeholder={modelIdPlaceholder || 'gpt-4o-custom'}
           />
+          {modelIdHint && <p className="mt-1 text-xs text-gray-500">{modelIdHint}</p>}
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -2013,7 +2082,13 @@ Provider: ${provider.name} (${provider.id})
             className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-sm text-gray-900 cursor-default"
           />
         </div>
-        <ModelFormFields form={form} testResult={testResult} testing={testing} />
+        <ModelFormFields
+          form={form}
+          testResult={testResult}
+          testing={testing}
+          modelIdPlaceholder={(provider.id === 'azure-openai' || provider.id === 'azure') ? t('form.azureDeploymentPlaceholder') : undefined}
+          modelIdHint={(provider.id === 'azure-openai' || provider.id === 'azure') ? t('form.azureModelIdHint') : undefined}
+        />
       </div>
     </EntitySheet>
   );
