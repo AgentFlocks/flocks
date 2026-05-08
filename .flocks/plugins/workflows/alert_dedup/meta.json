@@ -1,6 +1,6 @@
 {
   "name": "alert_dedup",
-  "description": "告警去重工作流：通过 URI 归一化、5-gram Shingling 与 Jaccard 相似度对批量安全告警进行聚类去重，降低告警噪声",
+  "description": "告警处理四阶段主流程：归一化（TDP/Skyeye字段映射）→ 过滤（扫描/出站剔除）→ 去重（URI归一化+Jaccard相似度）→ LLM研判（仅对唯一dedup_key调用），完整对齐 aisoc_mini LogProcessPipeline",
   "category": "security",
   "status": "active",
   "createdBy": null,
