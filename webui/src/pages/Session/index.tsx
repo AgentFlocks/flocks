@@ -16,6 +16,7 @@ import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
+import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 
@@ -46,6 +47,7 @@ export default function SessionPage() {
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
+  const [supportsVision, setSupportsVision] = useState<boolean | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
@@ -57,6 +59,35 @@ export default function SessionPage() {
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+
+  // Fetch the default LLM model capabilities to determine vision support
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const resolvedResp = await defaultModelAPI.getResolved();
+        if (cancelled) return;
+        const { provider_id, model_id } = resolvedResp.data;
+        const defResp = await modelV2API.getDefinition(provider_id, model_id);
+        if (cancelled) return;
+        const caps = defResp.data?.capabilities;
+        if (caps) {
+          // Only set false when explicitly not supported; otherwise keep null (unknown = allow)
+          if (caps.supports_vision === true ||
+              caps.modalities?.input?.includes('image') ||
+              (caps.features ?? []).includes('vision')) {
+            setSupportsVision(true);
+          } else if (caps.supports_vision === false) {
+            setSupportsVision(false);
+          }
+          // else: leave as null — user can try, backend will handle unsupported modality
+        }
+      } catch {
+        // If we can't determine vision support, remain null (allow by default)
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
@@ -620,6 +651,7 @@ export default function SessionPage() {
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
           onStreamingDone={() => setPendingInitialMessage(null)}
+          supportsVision={supportsVision}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}

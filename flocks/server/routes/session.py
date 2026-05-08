@@ -442,6 +442,34 @@ async def delete_session(sessionID: str, request: Request) -> bool:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
 
     await Session.delete(session.project_id, sessionID)
+
+    # Best-effort cleanup of any image/file uploads materialised for this
+    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
+    # The session DB row is gone, so the on-disk bytes are now orphaned —
+    # remove them to keep the workspace tidy. We deliberately swallow any
+    # filesystem errors: deletion of the session record is the contract,
+    # the upload cleanup is incidental.
+    try:
+        from flocks.workspace.manager import WorkspaceManager
+        import shutil
+
+        uploads_root = (
+            WorkspaceManager.get_instance().get_workspace_dir()
+            / "uploads"
+            / sessionID
+        )
+        if uploads_root.exists() and uploads_root.is_dir():
+            shutil.rmtree(uploads_root, ignore_errors=True)
+            log.info("session.uploads.cleaned", {
+                "session_id": sessionID,
+                "path": str(uploads_root),
+            })
+    except Exception as exc:
+        log.warn("session.uploads.cleanup_failed", {
+            "session_id": sessionID,
+            "error": str(exc),
+        })
+
     log.info("session.deleted", {"session_id": sessionID})
     return True
 
@@ -933,6 +961,10 @@ class MessagePartInfo(BaseModel):
     state: Optional[Dict[str, Any]] = None
     callID: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # File / image attachment fields (populated when ``type == "file"``).
+    url: Optional[str] = None
+    mime: Optional[str] = None
+    filename: Optional[str] = None
 
 
 class MessageWithParts(BaseModel):
@@ -1054,7 +1086,7 @@ async def get_session_messages(
                             state_value = raw_state.model_dump()
                         elif isinstance(raw_state, dict):
                             state_value = raw_state
-                
+
                 part_info = MessagePartInfo(
                     id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
                     messageID=msg.id,
@@ -1066,6 +1098,9 @@ async def get_session_messages(
                     state=state_value,
                     callID=getattr(part, 'callID', None) if part.type == "tool" else None,
                     metadata=getattr(part, 'metadata', None),
+                    url=getattr(part, 'url', None) if part.type == "file" else None,
+                    mime=getattr(part, 'mime', None) if part.type == "file" else None,
+                    filename=getattr(part, 'filename', None) if part.type == "file" else None,
                 )
                 parts.append(part_info)
             result.append(MessageWithParts(info=info, parts=parts))
@@ -1157,6 +1192,9 @@ async def get_message(sessionID: str, messageID: str) -> MessageWithParts:
                 state=getattr(part, 'state', None) if part.type == "tool" else None,
                 callID=getattr(part, 'callID', None) if part.type == "tool" else None,
                 metadata=getattr(part, 'metadata', None),
+                url=getattr(part, 'url', None) if part.type == "file" else None,
+                mime=getattr(part, 'mime', None) if part.type == "file" else None,
+                filename=getattr(part, 'filename', None) if part.type == "file" else None,
             )
             parts.append(part_info)
         return MessageWithParts(info=info, parts=parts)
@@ -2006,19 +2044,25 @@ async def _process_session_message(
     # 1. Extract text content
     # ------------------------------------------------------------------
     text_content = ""
+    has_non_text_parts = False
     for part in request.parts:
-        if part.get("type") == "text":
+        part_type = part.get("type")
+        if part_type == "text":
             text_content += part.get("text", "")
-    
-    if not text_content:
+        elif part_type:
+            has_non_text_parts = True
+
+    # Allow messages that only contain attachments (e.g. an image with no caption)
+    if not text_content and not has_non_text_parts:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No text content in message"
+            detail="Message must contain text or at least one attachment"
         )
-    
+
     log.info("session.message.received", {
         "sessionID": sessionID,
         "content_length": len(text_content),
+        "has_non_text_parts": has_non_text_parts,
     })
     
     # ------------------------------------------------------------------
@@ -2113,6 +2157,102 @@ async def _process_session_message(
     if _is_no_reply:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})
+
+    # ------------------------------------------------------------------
+    # 3a. Persist any non-text parts (file/image attachments) so the
+    #     SessionLoop sees them when building the LLM request. Without
+    #     this, file parts sent from clients would be silently dropped.
+    #
+    #     For ``data:`` URLs we materialize the bytes to disk and store
+    #     a ``file://`` reference instead. Keeping the raw base64 string
+    #     in the message database is dangerous: any code path that later
+    #     stringifies the part (legacy LLM adapters, logging, compaction)
+    #     would tokenize hundreds of KB of base64 and blow past the
+    #     model's context window.
+    # ------------------------------------------------------------------
+    from flocks.session.message import FilePart
+
+    def _materialize_data_url_to_disk(
+        data_url: str, mime_hint: str, filename_hint: Optional[str]
+    ) -> str:
+        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
+
+        Returns a ``file://`` URL pointing at the persisted file. On failure
+        the original ``data:`` URL is returned unchanged (older code paths
+        still cope with that, just with the now-known token-cost penalty).
+        """
+        try:
+            import base64
+            from flocks.workspace.manager import WorkspaceManager
+
+            header, _, encoded = data_url.partition(",")
+            if not encoded:
+                return data_url
+            raw_bytes = base64.b64decode(encoded)
+
+            ws = WorkspaceManager.get_instance()
+            uploads_root = ws.get_workspace_dir() / "uploads" / sessionID
+            uploads_root.mkdir(parents=True, exist_ok=True)
+
+            ext_map = {
+                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
+                "application/pdf": ".pdf",
+            }
+            ext = ext_map.get(mime_hint, "")
+            if not ext and filename_hint:
+                _, _, tail = filename_hint.rpartition(".")
+                if tail and len(tail) <= 5:
+                    ext = "." + tail
+            unique_name = f"{Identifier.create('upload')}{ext}"
+            target = uploads_root / unique_name
+            target.write_bytes(raw_bytes)
+            return f"file://{target.resolve()}"
+        except Exception as exc:
+            log.warn("session.message.file_part.materialize_failed", {
+                "sessionID": sessionID,
+                "error": str(exc),
+            })
+            return data_url
+
+    for raw_part in request.parts or []:
+        part_type = raw_part.get("type")
+        if part_type == "text":
+            continue  # Already stored as the message's TextPart above
+        if part_type == "file":
+            url = raw_part.get("url") or ""
+            mime = raw_part.get("mime") or ""
+            if not url or not mime:
+                log.warn("session.message.file_part.skipped", {
+                    "sessionID": sessionID,
+                    "reason": "missing url or mime",
+                })
+                continue
+            # Materialize ``data:`` URLs to disk before persisting the part.
+            if url.startswith("data:"):
+                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+            file_part_id = raw_part.get("id") or Identifier.create("part")
+            file_part = FilePart(
+                id=file_part_id,
+                sessionID=sessionID,
+                messageID=user_message_id,
+                mime=mime,
+                filename=raw_part.get("filename"),
+                url=url,
+            )
+            await Message.add_part(sessionID, user_message_id, file_part)
+            await publish_event("message.part.updated", {
+                "part": {
+                    "id": file_part_id,
+                    "messageID": user_message_id,
+                    "sessionID": sessionID,
+                    "type": "file",
+                    "mime": mime,
+                    "filename": raw_part.get("filename"),
+                    "url": url,
+                    "time": {"start": now_ms},
+                }
+            })
 
     # ------------------------------------------------------------------
     # noReply: store message only, skip AI loop
