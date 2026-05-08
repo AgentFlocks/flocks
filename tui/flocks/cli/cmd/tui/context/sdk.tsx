@@ -1,4 +1,4 @@
-import { createFlocksClient, type Event } from "@flocks-ai/sdk/v2"
+import { createFlocksClient, getFlocksAuthHeaders, type Event } from "@flocks-ai/sdk/v2"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup, onMount } from "solid-js"
@@ -17,6 +17,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       directory: props.directory,
       fetch: props.fetch,
     })
+
+    const authenticatedFetch: typeof fetch = (input, init = {}) => {
+      const headers = getFlocksAuthHeaders(init.headers)
+      return (props.fetch ?? fetch)(input, { ...init, headers })
+    }
 
     const emitter = createGlobalEmitter<{
       [key in Event["type"]]: Extract<Event, { type: key }>
@@ -91,6 +96,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       if (timer) clearTimeout(timer)
     })
 
-    return { client: sdk, event: emitter, url: props.url }
+    return { client: sdk, event: emitter, url: props.url, fetch: authenticatedFetch }
   },
 })

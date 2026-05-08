@@ -8,6 +8,7 @@ import httpx
 from typer.testing import CliRunner
 
 import flocks.cli.main as cli_main
+import flocks.security as security_module
 
 runner = CliRunner()
 
@@ -121,6 +122,14 @@ def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
 
     popen_calls = {}
     run_calls = []
+    saved_secrets = {}
+
+    class FakeSecrets:
+        def get(self, secret_id: str):
+            return saved_secrets.get(secret_id)
+
+        def set(self, secret_id: str, value: str) -> None:
+            saved_secrets[secret_id] = value
 
     class DummyProcess:
         pid = 4321
@@ -149,6 +158,7 @@ def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli_main.Path, "cwd", staticmethod(lambda: tmp_path))
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(security_module, "get_secret_manager", lambda: FakeSecrets())
     monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: SimpleNamespace(status_code=200))
     monkeypatch.setattr(time, "sleep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(Path, "exists", fake_exists)
@@ -158,3 +168,4 @@ def test_tui_starts_hidden_serve_command(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert popen_calls["args"][:4] == [cli_main.sys.executable, "-m", "flocks.cli.main", "serve"]
     assert ["bun", "--version"] == run_calls[0][0]
+    assert saved_secrets["server_api_token"]

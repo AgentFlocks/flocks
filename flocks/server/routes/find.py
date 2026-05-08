@@ -8,9 +8,11 @@ import os
 import subprocess
 from typing import Optional, List
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from flocks.config.config import Config
+from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
 from flocks.utils.log import Log
 
 
@@ -26,6 +28,25 @@ class FindResult(BaseModel):
     content: Optional[str] = None
 
 
+async def _resolve_search_directory(directory: Optional[str]) -> str:
+    """Resolve a requested search root to an allowed readable directory."""
+    cfg = await Config.get()
+    requested = directory or os.getcwd()
+    try:
+        cwd = await resolve_path_for_http_file_access(requested, cfg)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Access denied") from exc
+
+    if not os.path.isdir(cwd):
+        raise HTTPException(status_code=400, detail="Search directory must be a directory")
+    return cwd
+
+
+def _validate_search_input(value: str, *, label: str, max_length: int = 500) -> None:
+    if not value or len(value) > max_length or "\x00" in value:
+        raise HTTPException(status_code=400, detail=f"Invalid {label}")
+
+
 @router.get(
     "",
     summary="Find text",
@@ -36,15 +57,17 @@ async def find_text(
     directory: Optional[str] = Query(None, description="Project directory"),
 ) -> List[FindResult]:
     """Search for text in files"""
-    cwd = directory or os.getcwd()
+    _validate_search_input(pattern, label="search pattern")
+    cwd = await _resolve_search_directory(directory)
     
     try:
         # Use ripgrep if available
         result = subprocess.run(
-            ["rg", "--json", "--max-count", "100", pattern],
+            ["rg", "--json", "--max-count", "100", "--", pattern],
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=10,
         )
         
         results = []
@@ -72,10 +95,11 @@ async def find_text(
         # ripgrep not available, use grep
         try:
             result = subprocess.run(
-                ["grep", "-rn", pattern, "."],
+                ["grep", "-rn", "--", pattern, "."],
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                timeout=10,
             )
             
             results = []
@@ -106,10 +130,11 @@ async def find_files(
     directory: Optional[str] = Query(None, description="Project directory"),
     dirs: Optional[str] = Query(None, description="Include directories"),
     type: Optional[str] = Query(None, description="Filter type: file or directory"),
-    limit: Optional[int] = Query(50, description="Max results"),
+    limit: Optional[int] = Query(50, ge=1, le=200, description="Max results"),
 ) -> List[str]:
     """Search for files by name"""
-    cwd = directory or os.getcwd()
+    _validate_search_input(query, label="file query", max_length=200)
+    cwd = await _resolve_search_directory(directory)
     
     try:
         # Use fd if available
@@ -118,20 +143,21 @@ async def find_files(
             cmd.extend(["--type", "d"])
         elif type == "file":
             cmd.extend(["--type", "f"])
-        cmd.append(query)
+        cmd.extend(["--", query])
         
         result = subprocess.run(
             cmd,
             cwd=cwd,
             capture_output=True,
             text=True,
+            timeout=10,
         )
         
         return result.stdout.strip().splitlines() if result.stdout else []
     except FileNotFoundError:
         # fd not available, use find
         try:
-            cmd = ["find", ".", "-name", f"*{query}*", "-maxdepth", "10"]
+            cmd = ["find", ".", "-maxdepth", "10", "-name", f"*{query}*"]
             if type == "directory":
                 cmd.extend(["-type", "d"])
             elif type == "file":
@@ -142,6 +168,7 @@ async def find_files(
                 cwd=cwd,
                 capture_output=True,
                 text=True,
+                timeout=10,
             )
             
             files = result.stdout.strip().splitlines() if result.stdout else []

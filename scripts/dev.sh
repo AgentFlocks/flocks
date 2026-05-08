@@ -204,6 +204,8 @@ cleanup() {
 start_backend() {
     echo -e "${GREEN}🔧 启动后端服务: http://${BACKEND_HOST}:${BACKEND_PORT}${NC}"
     cd "${PROJECT_ROOT}"
+    _FLOCKS_WEBUI_HOST="${FRONTEND_HOST}" \
+    _FLOCKS_WEBUI_PORT="${FRONTEND_PORT}" \
     uv run uvicorn flocks.server.app:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \
@@ -222,6 +224,8 @@ start_frontend() {
 start_all() {
     echo -e "${BLUE}🚀 同时启动前后端开发环境...${NC}"
     cd "${PROJECT_ROOT}"
+    _FLOCKS_WEBUI_HOST="${FRONTEND_HOST}" \
+    _FLOCKS_WEBUI_PORT="${FRONTEND_PORT}" \
     uv run uvicorn flocks.server.app:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \

@@ -25,7 +25,7 @@ export function DialogSkillInstall() {
     setIsError(false)
 
     try {
-      const res = await fetch(`${sdk.url}/skill/install`, {
+      const res = await sdk.fetch(`${sdk.url}/skill/install`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source: src, scope: scope() }),

@@ -10,6 +10,7 @@ import re
 from typing import Optional
 
 from fastapi import HTTPException, Request, Response, status
+from starlette.requests import HTTPConnection
 
 from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.auth.service import AuthService
@@ -149,12 +150,12 @@ def password_reset_exempt(path: str) -> bool:
     return path in _PASSWORD_RESET_ALLOWED
 
 
-def _has_session_cookie(request: Request) -> bool:
+def _has_session_cookie(request: HTTPConnection) -> bool:
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     return bool(session_id and session_id.strip())
 
 
-def _is_browser_like_request(request: Request) -> bool:
+def _is_browser_like_request(request: HTTPConnection) -> bool:
     """
     Identify browser-originated traffic (must keep strict login checks).
 
@@ -186,25 +187,7 @@ def _is_browser_like_request(request: Request) -> bool:
     return False
 
 
-def _loopback_hosts() -> frozenset[str]:
-    hosts = {"127.0.0.1", "::1", "localhost"}
-    # FastAPI TestClient reports client host as "testclient"; only trust it in tests.
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        hosts.add("testclient")
-    return frozenset(hosts)
-
-
-def _is_loopback_direct_request(request: Request) -> bool:
-    """
-    Trust only local direct requests (no proxy forwarding headers).
-    """
-    if request.headers.get("x-forwarded-for"):
-        return False
-    client_host = request.client.host if request.client else None
-    return client_host in _loopback_hosts()
-
-
-def _read_api_token_from_request(request: Request) -> Optional[str]:
+def _read_api_token_from_request(request: HTTPConnection) -> Optional[str]:
     """
     Read API token from Authorization Bearer or x-flocks-api-token header.
     """
@@ -248,18 +231,7 @@ def _build_api_token_user() -> AuthUser:
     )
 
 
-def _build_local_service_user() -> AuthUser:
-    """Synthetic local service identity for loopback non-browser clients."""
-    return AuthUser(
-        id="local-service",
-        username="local-service",
-        role="admin",
-        status="active",
-        must_reset_password=False,
-    )
-
-
-async def apply_auth_for_request(request: Request):
+async def apply_auth_for_request(request: HTTPConnection):
     """
     Resolve user from cookie and bind context var.
     Returns (response_if_blocked, token, user).
@@ -297,7 +269,8 @@ async def apply_auth_for_request(request: Request):
             )
         return None, token, auth_user
 
-    # Non-browser clients: local loopback can run without token; remote requires API token.
+    # Non-browser clients must authenticate with an API token because
+    # localhost is not a reliable auth boundary.
     if not _is_browser_like_request(request):
         provided = _read_api_token_from_request(request)
         if provided:
@@ -311,21 +284,15 @@ async def apply_auth_for_request(request: Request):
             token = set_current_auth_user(token_user)
             return None, token, token_user
 
-        if _is_loopback_direct_request(request):
-            local_user = _build_local_service_user()
-            request.state.auth_user = local_user
-            token = set_current_auth_user(local_user)
-            return None, token, local_user
-
         expected = _get_expected_api_token()
         if not expected:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"远程非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
+                detail=f"非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
             )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="远程非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
+            detail="非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
         )
 
     bootstrapped = await AuthService.has_users()
