@@ -11,8 +11,8 @@ import asyncio
 import re
 from typing import Optional
 from html.parser import HTMLParser
-from urllib.parse import urlparse
 
+from flocks.security.url_guard import guarded_tcp_connector, validate_public_http_url
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
@@ -205,11 +205,13 @@ async def webfetch_tool(
     Returns:
         ToolResult with fetched content
     """
-    # Validate URL
-    if not url.startswith("http://") and not url.startswith("https://"):
+    # Validate URL before asking for permission so SSRF-only URLs cannot be
+    # persisted as approved patterns.
+    url_error = validate_public_http_url(url)
+    if url_error:
         return ToolResult(
             success=False,
-            error="URL must start with http:// or https://"
+            error=url_error
         )
     
     # Request permission
@@ -246,7 +248,8 @@ async def webfetch_tool(
         else:
             headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         
-        async with aiohttp.ClientSession() as session:
+        connector = guarded_tcp_connector()
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_sec)) as response:
                 if response.status != 200:
                     return ToolResult(
@@ -296,56 +299,10 @@ async def webfetch_tool(
         )
         
     except ImportError:
-        # Fallback to urllib if aiohttp not available
-        import urllib.request
-        import urllib.error
-        
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            
-            with urllib.request.urlopen(req, timeout=timeout_sec) as response:
-                content = response.read().decode('utf-8', errors='replace')
-                content_type = response.headers.get("Content-Type", "")
-            
-            title = f"{url} ({content_type})"
-            
-            if format == "markdown":
-                if "text/html" in content_type:
-                    output = html_to_markdown(content)
-                else:
-                    output = content
-            elif format == "text":
-                if "text/html" in content_type:
-                    output = extract_text_from_html(content)
-                else:
-                    output = content
-            else:
-                output = content
-            
-            return ToolResult(
-                success=True,
-                output=output,
-                title=title,
-                metadata={}
-            )
-            
-        except urllib.error.HTTPError as e:
-            return ToolResult(
-                success=False,
-                error=f"Request failed with status code: {e.code}"
-            )
-        except urllib.error.URLError as e:
-            return ToolResult(
-                success=False,
-                error=f"Request failed: {str(e.reason)}"
-            )
-        except Exception as e:
-            return ToolResult(
-                success=False,
-                error=f"Request failed: {str(e)}"
-            )
+        return ToolResult(
+            success=False,
+            error="aiohttp is required for secure webfetch requests"
+        )
             
     except asyncio.TimeoutError:
         return ToolResult(

@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
+from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.utils.log import Log
 from flocks.pty.pty import Pty, PtyInfo, CreateInput, UpdateInput, PtyStatus
 
@@ -134,14 +135,23 @@ async def connect_session(websocket: WebSocket, pty_id: str):
     
     Establish a WebSocket connection to interact with a PTY session in real-time.
     """
-    # Check if session exists first
-    if not Pty.get(pty_id):
-        await websocket.close(code=4004, reason="Session not found")
-        return
-    
-    await websocket.accept()
-    
+    token = None
     try:
+        _blocked, token, _user = await apply_auth_for_request(websocket)
+    except HTTPException as exc:
+        close_code = 4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401
+        await websocket.close(code=close_code, reason=str(exc.detail))
+        return
+
+    try:
+        # Check only after authentication so unauthenticated callers cannot
+        # probe for active PTY identifiers.
+        if not Pty.get(pty_id):
+            await websocket.close(code=4004, reason="Session not found")
+            return
+
+        await websocket.accept()
+
         # Connect to PTY
         handlers = await Pty.connect(pty_id, websocket)
         if not handlers:
@@ -164,3 +174,6 @@ async def connect_session(websocket: WebSocket, pty_id: str):
         
     except Exception as e:
         log.error("pty.ws.connect.error", {"id": pty_id, "error": str(e)})
+    finally:
+        if token is not None:
+            clear_auth_context(token)

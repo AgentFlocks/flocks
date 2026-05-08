@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from flocks.tool.tool_loader import (
+    _build_execution_handler,
     _build_http_handler,
     _extract_response,
     _json_schema_to_params,
@@ -850,6 +851,22 @@ class TestPluginPyRegistration:
 
 class TestHttpHandler:
     @pytest.mark.asyncio
+    async def test_rejects_template_resolved_loopback_url(self):
+        cfg = {
+            "type": "http",
+            "method": "GET",
+            "url": "{target}",
+            "timeout": 10,
+        }
+        handler = _build_http_handler(cfg)
+        ctx = ToolContext(session_id="test", message_id="test")
+
+        result = await handler(ctx, target="http://127.0.0.1:8000/internal")
+
+        assert result.success is False
+        assert "restricted network" in result.error
+
+    @pytest.mark.asyncio
     async def test_get_request(self):
         cfg = {
             "type": "http",
@@ -939,3 +956,22 @@ class TestHttpHandler:
 
         assert result.success is True
         assert result.output == [1, 2]
+
+
+class TestExecutionHandler:
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_loads_but_refuses_to_run_by_default(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        monkeypatch.delenv("FLOCKS_ALLOW_YAML_EXECUTION", raising=False)
+
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True}"},
+            tmp_path / "tool.yaml",
+        )
+        result = await handler(ToolContext(session_id="test", message_id="test"))
+
+        assert result.success is False
+        assert "Inline YAML execution is disabled" in result.error

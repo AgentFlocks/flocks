@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 import yaml
 
 from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
+from flocks.security.url_guard import guarded_tcp_connector, validate_public_http_url
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -42,6 +43,13 @@ _TOOLS_SUBDIR = DEFAULT_PLUGIN_ROOT / "tools"
 _PROVIDER_FILENAME = "_provider.yaml"
 _SECRET_PATTERN = re.compile(r"\{secret:([^}]+)\}")
 _PARAM_PATTERN = re.compile(r"\{([^}]+)\}")
+_ALLOW_YAML_EXECUTION_ENV = "FLOCKS_ALLOW_YAML_EXECUTION"
+
+
+def _truthy_env(name: str) -> bool:
+    import os
+
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Tool type constants — each type maps to a subdirectory under _TOOLS_SUBDIR
@@ -318,6 +326,10 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
         import aiohttp
 
         url = _substitute_params(url_template, kwargs, url_encode=False)
+        url_error = validate_public_http_url(url)
+        if url_error:
+            return ToolResult(success=False, error=url_error)
+
         headers = {
             k: _substitute_params(v, kwargs)
             for k, v in headers_template.items()
@@ -339,7 +351,8 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
 
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            connector = guarded_tcp_connector()
+            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params
@@ -503,6 +516,18 @@ def _build_execution_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     code = cfg.get("code", "")
     if not code or not code.strip():
         raise ValueError(f"Empty execution code in {yaml_path}")
+
+    if not _truthy_env(_ALLOW_YAML_EXECUTION_ENV):
+        async def disabled_handler(ctx: ToolContext, **kwargs: Any) -> ToolResult:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Inline YAML execution is disabled for safety. "
+                    f"Set {_ALLOW_YAML_EXECUTION_ENV}=1 to run this trusted legacy tool."
+                ),
+            )
+
+        return disabled_handler
 
     code_body = code.rstrip()
     wrapper_lines = ["async def _tool_exec(**_kw_):", "    import asyncio"]

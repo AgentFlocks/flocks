@@ -24,6 +24,19 @@ log = Log.create(service="pty")
 # Buffer configuration matching Flocks
 BUFFER_LIMIT = 1024 * 1024 * 2  # 2MB
 BUFFER_CHUNK = 64 * 1024  # 64KB
+_ALLOWED_SHELL_NAMES = {
+    "bash",
+    "cmd",
+    "cmd.exe",
+    "fish",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "sh",
+    "zsh",
+}
+_ALLOWED_SHELL_ARGS = {"-i", "-l", "--login"}
 
 
 class PtyStatus(str, Enum):
@@ -99,6 +112,20 @@ class Pty:
                 return shell_path
         
         return "sh"
+
+    @classmethod
+    def _validate_interactive_shell(cls, command: str, args: List[str]) -> None:
+        """Allow PTY creation only for interactive shell sessions."""
+        if not command or "\x00" in command:
+            raise ValueError("Invalid PTY command")
+
+        shell_name = os.path.basename(command).lower()
+        if shell_name not in _ALLOWED_SHELL_NAMES:
+            raise ValueError("PTY command must be an approved interactive shell")
+
+        for arg in args:
+            if not isinstance(arg, str) or "\x00" in arg or arg not in _ALLOWED_SHELL_ARGS:
+                raise ValueError("PTY command arguments are restricted to interactive shell flags")
     
     @classmethod
     def list(cls) -> List[PtyInfo]:
@@ -125,6 +152,7 @@ class Pty:
         pty_id = Identifier.create("pty")
         command = input_data.command or cls._get_shell()
         args = list(input_data.args) if input_data.args else []
+        cls._validate_interactive_shell(command, args)
         
         # Add login flag for shells
         if command.endswith("sh") and "-l" not in args:

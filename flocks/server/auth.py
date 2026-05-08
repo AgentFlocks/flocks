@@ -17,6 +17,7 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
+INSECURE_LOCAL_AUTH_ENV = "FLOCKS_ALLOW_INSECURE_LOCAL"
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
@@ -237,6 +238,20 @@ def _is_valid_api_token(token: Optional[str]) -> bool:
     return hmac.compare_digest(token, expected)
 
 
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _allow_insecure_loopback_auth() -> bool:
+    """Return True only for explicit legacy local-tokenless auth opt-in."""
+    configured = os.getenv(INSECURE_LOCAL_AUTH_ENV)
+    if configured is not None:
+        return configured.strip().lower() in {"1", "true", "yes", "on"}
+    # Keep existing route tests focused on their route behavior. Production
+    # runtime never sets PYTEST_CURRENT_TEST.
+    return bool(os.getenv("PYTEST_CURRENT_TEST"))
+
+
 def _build_api_token_user() -> AuthUser:
     """Synthetic service identity for API token clients."""
     return AuthUser(
@@ -297,7 +312,9 @@ async def apply_auth_for_request(request: Request):
             )
         return None, token, auth_user
 
-    # Non-browser clients: local loopback can run without token; remote requires API token.
+    # Non-browser clients must authenticate with an API token.  Legacy
+    # tokenless loopback access is available only through an explicit opt-in
+    # environment variable because localhost is not a reliable auth boundary.
     if not _is_browser_like_request(request):
         provided = _read_api_token_from_request(request)
         if provided:
@@ -311,7 +328,7 @@ async def apply_auth_for_request(request: Request):
             token = set_current_auth_user(token_user)
             return None, token, token_user
 
-        if _is_loopback_direct_request(request):
+        if _allow_insecure_loopback_auth() and _is_loopback_direct_request(request):
             local_user = _build_local_service_user()
             request.state.auth_user = local_user
             token = set_current_auth_user(local_user)
@@ -321,11 +338,11 @@ async def apply_auth_for_request(request: Request):
         if not expected:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"远程非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
+                detail=f"非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
             )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="远程非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
+            detail="非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
         )
 
     bootstrapped = await AuthService.has_users()

@@ -4,9 +4,10 @@ Tool routes - API endpoints for tool management and execution
 
 import asyncio
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from flocks.server.auth import require_admin
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
 from flocks.permission.next import DeniedError, PermissionNext
@@ -958,7 +959,7 @@ class PluginToolListResponse(BaseModel):
     status_code=status.HTTP_201_CREATED,
     summary="Create a YAML plugin tool",
 )
-async def create_tool(request: CreateToolRequest):
+async def create_tool(request: CreateToolRequest, _admin: object = Depends(require_admin)):
     """
     Create a new tool via YAML plugin.
 
@@ -1034,7 +1035,7 @@ async def create_tool(request: CreateToolRequest):
     response_model=ToolInfoResponse,
     summary="Update a YAML plugin tool",
 )
-async def update_plugin_tool(name: str, request: UpdateToolRequest):
+async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: object = Depends(require_admin)):
     """
     Update an existing YAML plugin tool.
 
@@ -1095,7 +1096,7 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest):
     "/{name}",
     summary="Delete a plugin tool",
 )
-async def delete_tool(name: str):
+async def delete_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Delete a plugin tool.
 
