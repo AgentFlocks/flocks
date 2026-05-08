@@ -353,22 +353,43 @@ async def run_workflow_tool(
         if isinstance(parsed, dict):
             # Valid workflow JSON object.
             workflow_source = parsed
-        else:
-            # Either not JSON, or JSON that decoded to a non-dict (e.g. a JSON-encoded
-            # string like '"/path/to/workflow.json"'). Treat the raw value (or the
-            # decoded string) as a file path.
-            file_path_str = parsed if isinstance(parsed, str) else raw
-            p = Path(file_path_str).expanduser()
+        elif isinstance(parsed, str):
+            # json.loads decoded a JSON-encoded string, e.g. the AI double-encoded the
+            # path: workflow='"/path/to/workflow.json"' → parsed='/path/to/workflow.json'.
+            # Use the decoded string (no surrounding quotes) as the file path.
+            p = Path(parsed).expanduser()
             if p.exists() and p.is_file():
                 workflow_source = p
             else:
                 return ToolResult(
                     success=False,
                     error=(
-                        "Unsupported workflow string. Provide a workflow JSON string, "
+                        f"Workflow file not found: {parsed!r}. "
+                        "Provide a valid workflow JSON file path or a workflow dict."
+                    )
+                )
+        elif parsed is None:
+            # json.loads raised JSONDecodeError — raw is not JSON; treat as a plain file path.
+            p = Path(raw).expanduser()
+            if p.exists() and p.is_file():
+                workflow_source = p
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "Unsupported workflow string. Provide a workflow JSON string "
                         "or a valid workflow JSON file path."
                     )
                 )
+        else:
+            # json.loads returned list / int / bool — not a valid workflow parameter.
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Invalid workflow parameter: expected a workflow dict or a file path string, "
+                    f"got JSON-decoded {type(parsed).__name__} ({parsed!r})."
+                )
+            )
     elif isinstance(workflow, dict):
         workflow_source = workflow
     else:
