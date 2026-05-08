@@ -190,3 +190,143 @@ def test_generated_client_still_supports_plain_cookie_list(tmp_path, monkeypatch
         {"name": "sid", "value": "cookie-123"},
         {"name": "api", "value": "cookie-456", "path": "/"},
     ]
+
+
+def _sample_spec():
+    return {
+        "schemaVersion": "1.0",
+        "site": "example",
+        "command": "list_items",
+        "description": "List items from example API",
+        "baseUrl": "https://example.com",
+        "strategy": "COOKIE",
+        "auth": {"stateFile": "auth-state.json", "requiredCookies": [], "requiredHeaders": []},
+        "operation": {
+            "method": "POST",
+            "endpoint": "/api/items/list",
+            "queryTemplate": {},
+            "bodyTemplate": {"page": "${page}", "size": "${limit}"},
+            "headers": {"Content-Type": "application/json"},
+        },
+        "rowSource": {"path": "$.data.items[]", "collectionPath": "$.data.items[]"},
+        "args": [
+            {"name": "page", "type": "int", "default": 1, "help": "Page number"},
+            {"name": "limit", "type": "int", "default": 20, "help": "Page size"},
+        ],
+        "columns": [
+            {"name": "id", "path": "$.data.items[].id", "relativePath": "id", "type": "string"},
+            {"name": "title", "path": "$.data.items[].title", "relativePath": "title", "type": "string"},
+        ],
+        "verify": {
+            "args": {"page": 1, "limit": 20},
+            "rowCount": {"min": 1, "max": 2},
+            "columns": ["id", "title"],
+            "types": {"id": "string", "title": "string"},
+            "notEmpty": ["id", "title"],
+            "patterns": {},
+        },
+    }
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRequestSession(_FakeSession):
+    def __init__(self, payload) -> None:
+        super().__init__()
+        self._payload = payload
+        self.request_calls = []
+
+    def request(self, method, url, json=None, params=None):
+        self.request_calls.append({"method": method, "url": url, "json": json, "params": params})
+        return _FakeResponse(self._payload)
+
+
+def test_generate_verify_materials_from_spec_uses_spec_contract():
+    module = _load_module()
+
+    verify = module.generate_verify_materials_from_spec(_sample_spec())
+
+    assert verify["site"] == "example"
+    assert verify["command"] == "list_items"
+    assert verify["expect"]["columns"] == ["id", "title"]
+    assert verify["expect"]["rowCount"]["max"] == 2
+
+
+def test_generate_python_cli_from_spec_supports_argparse_and_verify():
+    module = _load_module()
+
+    output = module.generate_python_cli_from_spec(_sample_spec())
+
+    assert 'parser.add_argument("--format", choices=["json", "csv", "table"]' in output
+    assert 'parser.add_argument("--verify", action="store_true"' in output
+    assert 'SPEC = {' in output
+    assert 'def verify_rows(rows: List[Dict[str, Any]], verify_spec: Dict[str, Any])' in output
+
+
+def test_generated_spec_cli_executes_request_and_projects_rows(tmp_path, monkeypatch):
+    module = _load_module()
+    auth_state = tmp_path / "auth-state.json"
+    auth_state.write_text(
+        json.dumps({"cookies": [{"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"}]}),
+        encoding="utf-8",
+    )
+
+    fake_session = _FakeRequestSession(
+        {"data": {"items": [{"id": "1", "title": "Alpha"}, {"id": "2", "title": "Beta"}]}}
+    )
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_spec_cli"}
+    exec(module.generate_python_cli_from_spec(_sample_spec()), namespace)
+
+    client = namespace["APIClient"](auth_state=str(auth_state))
+    rows = client.run({"page": 3, "limit": 5})
+    errors = namespace["verify_rows"](rows, {"expect": _sample_spec()["verify"]})
+
+    assert rows == [{"id": "1", "title": "Alpha"}, {"id": "2", "title": "Beta"}]
+    assert errors == []
+    assert fake_session.request_calls == [
+        {
+            "method": "POST",
+            "url": "https://example.com/api/items/list",
+            "json": {"page": 3, "size": 5},
+            "params": None,
+        }
+    ]
+    assert fake_session.cookies.set_calls == [
+        {"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"}
+    ]
+
+
+def test_main_supports_spec_verify_output(tmp_path, monkeypatch, capsys):
+    module = _load_module()
+    spec_path = tmp_path / "web2cli-spec.json"
+    spec_path.write_text(json.dumps(_sample_spec()), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate-cli.py",
+            "--spec",
+            str(spec_path),
+            "--format",
+            "verify",
+        ],
+    )
+
+    module.main()
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert payload["site"] == "example"
+    assert payload["expect"]["types"]["id"] == "string"
