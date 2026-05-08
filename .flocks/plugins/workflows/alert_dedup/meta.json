@@ -1,0 +1,10 @@
+{
+  "name": "alert_dedup",
+  "description": "告警去重工作流：通过 URI 归一化、5-gram Shingling 与 Jaccard 相似度对批量安全告警进行聚类去重，降低告警噪声",
+  "category": "security",
+  "status": "active",
+  "createdBy": null,
+  "createdAt": 1746691200000,
+  "updatedAt": 1746691200000,
+  "id": "alert_dedup"
+}
