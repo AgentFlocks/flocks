@@ -366,9 +366,6 @@ def _should_log_request(path: str, status_code: int) -> bool:
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
-#   3. Optional legacy fallback via ``FLOCKS_ALLOW_ANY_LOCALHOST_CORS=1`` →
-#      localhost on any port.
-#
 # We deliberately do NOT auto-whitelist wildcard binds such as ``0.0.0.0``:
 # matching ``[^/]+:<port>`` would accept every host on that port, effectively
 # disabling CORS.  Remote deployments that bind to wildcard hosts must keep
@@ -380,9 +377,6 @@ def _should_log_request(path: str, status_code: int) -> bool:
 # running event loop, and so that ``Config.get_global()`` is not invoked at
 # import time — which would otherwise cache ``HOME`` before test harnesses
 # can monkey-patch it.
-
-_LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
-_ALLOW_ANY_LOCALHOST_CORS_ENV = "FLOCKS_ALLOW_ANY_LOCALHOST_CORS"
 
 _LOOPBACK_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::"}
@@ -435,8 +429,7 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
     except Exception:
         pass
 
-    allow_any_localhost = os.getenv(_ALLOW_ANY_LOCALHOST_CORS_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
-    return origins, _LOCALHOST_ORIGIN_RE if allow_any_localhost else None
+    return origins, None
 
 
 class _DeferredCORSMiddleware:

@@ -59,12 +59,11 @@ def test_read_cors_config_brackets_ipv6_webui_origin(monkeypatch, tmp_path) -> N
     assert allow_origin_regex is None
 
 
-def test_read_cors_config_allows_any_localhost_only_with_explicit_opt_in(monkeypatch, tmp_path) -> None:
+def test_read_cors_config_does_not_allow_any_localhost(monkeypatch, tmp_path) -> None:
     config_file = tmp_path / "missing.json"
     monkeypatch.setattr(app_module.Config, "get_config_file", lambda: config_file)
-    monkeypatch.setenv(app_module._ALLOW_ANY_LOCALHOST_CORS_ENV, "1")
 
     allow_origins, allow_origin_regex = app_module._read_cors_config()
 
     assert allow_origins == []
-    assert allow_origin_regex == app_module._LOCALHOST_ORIGIN_RE
+    assert allow_origin_regex is None

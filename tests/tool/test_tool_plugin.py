@@ -946,11 +946,8 @@ class TestExecutionHandler:
     @pytest.mark.asyncio
     async def test_inline_yaml_execution_loads_but_refuses_to_run_by_default(
         self,
-        monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ):
-        monkeypatch.delenv("FLOCKS_ALLOW_YAML_EXECUTION", raising=False)
-
         handler = _build_execution_handler(
             {"type": "python", "code": "return {'success': True}"},
             tmp_path / "tool.yaml",
@@ -959,3 +956,18 @@ class TestExecutionHandler:
 
         assert result.success is False
         assert "Inline YAML execution is disabled" in result.error
+
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_stays_disabled(
+        self,
+        tmp_path: Path,
+    ):
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True, 'value': _kw_['name']}"},
+            tmp_path / "tool.yaml",
+        )
+
+        result = await handler(ToolContext(session_id="test", message_id="test"), name="after")
+
+        assert result.success is False
+        assert "handler.type=script" in result.error

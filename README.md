@@ -230,11 +230,9 @@ Initial setup:
 
 Non-browser clients (TUI, SDKs, scripts):
 
-- **Local loopback** (`127.0.0.1` / `::1` / `localhost`, no
-  `x-forwarded-for` header) is auto-trusted as `local-service` admin. This
-  covers TUI, plugin sub-processes, and CLI calls running on the same host.
-- **Remote** clients must present an API token. The token lives in
-  `~/.flocks/config/.secret.json` under the secret id `server_api_token`.
+- All non-browser clients, including local loopback clients, must present an
+  API token. The token lives in `~/.flocks/config/.secret.json` under the
+  secret id `server_api_token`.
 
   On the **server**, generate (or rotate) the token — it is persisted on
   the server's local secret store:

@@ -85,7 +85,6 @@ async def test_apply_auth_for_request_non_browser_accepts_valid_token(monkeypatc
 @pytest.mark.asyncio
 async def test_apply_auth_for_request_non_browser_loopback_rejects_without_token_by_default(monkeypatch):
     monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}))
-    monkeypatch.delenv(auth_module.INSECURE_LOCAL_AUTH_ENV, raising=False)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     request = _make_request(headers={"user-agent": "curl/8.0"})
     with pytest.raises(HTTPException) as exc_info:
@@ -95,16 +94,16 @@ async def test_apply_auth_for_request_non_browser_loopback_rejects_without_token
 
 
 @pytest.mark.asyncio
-async def test_apply_auth_for_request_non_browser_loopback_allows_with_explicit_opt_in(monkeypatch):
+async def test_apply_auth_for_request_ignores_pytest_current_test_for_loopback(monkeypatch):
     monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}))
-    monkeypatch.setenv(auth_module.INSECURE_LOCAL_AUTH_ENV, "1")
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/example.py::test_name (call)")
     request = _make_request(headers={"user-agent": "curl/8.0"})
-    _, token, user = await auth_module.apply_auth_for_request(request)
-    try:
-        assert user is not None
-        assert user.username == "local-service"
-    finally:
-        auth_module.clear_auth_context(token)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+
+    assert exc_info.value.status_code == 401
+    assert "Bearer API Token" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio

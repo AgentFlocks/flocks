@@ -494,7 +494,7 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
-async def update_tool(tool_name: str, request: ToolUpdateRequest):
+async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object = Depends(require_admin)):
     """
     Update tool settings (e.g., enable or disable).
 
@@ -560,7 +560,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
     response_model=ToolInfoResponse,
     summary="Reset a tool to its YAML/registration default",
 )
-async def reset_tool_setting(tool_name: str):
+async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_admin)):
     """Remove the user setting for ``tool_name`` and restore the default.
 
     Restores the registration-time ``enabled`` value from the registry's
@@ -757,7 +757,7 @@ class RefreshResponse(BaseModel):
     response_model=RefreshResponse,
     summary="Refresh all plugin and dynamic tools",
 )
-async def refresh_tools():
+async def refresh_tools(_admin: object = Depends(require_admin)):
     """
     Reload all plugin tools (YAML + Python) and dynamically generated tools
     from disk without restarting the service.
@@ -1142,7 +1142,7 @@ async def delete_tool(name: str, _admin: object = Depends(require_admin)):
     response_model=ToolInfoResponse,
     summary="Reload a YAML plugin tool",
 )
-async def reload_tool(name: str):
+async def reload_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Hot-reload a single YAML plugin tool.
 
