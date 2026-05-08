@@ -267,6 +267,17 @@ export function getMessageBubbleClassName({
   }`;
 }
 
+export function getRegenerateTruncateTarget(
+  messages: Message[],
+  messageId: string,
+): { messageId: string; includeTarget?: boolean } {
+  const targetMessage = messages.find((message) => message.id === messageId);
+  if (targetMessage?.role === 'assistant' && targetMessage.parentID) {
+    return { messageId: targetMessage.parentID };
+  }
+  return { messageId, includeTarget: true };
+}
+
 // ============================================================================
 // Main component
 // ============================================================================
@@ -1216,7 +1227,11 @@ export default function SessionChat({
     setActionMessageId(messageId);
     try {
       await sessionApi.regenerateMessage(sessionId, messageId);
-      truncateAfterMessage(messageId, { includeTarget: true });
+      const truncateTarget = getRegenerateTruncateTarget(messagesRef.current, messageId);
+      truncateAfterMessage(
+        truncateTarget.messageId,
+        truncateTarget.includeTarget ? { includeTarget: true } : undefined,
+      );
       setIsStreaming(true);
       if (editingMessageId === messageId) {
         resetEditingState();
