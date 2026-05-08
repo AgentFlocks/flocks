@@ -15,9 +15,7 @@ branch_log_type
                     │
                filter_logs
                     │
-          branch_has_alerts
-            ├─ true  ─→ dedup_logs   ◀── 终点，输出 dict
-            └─ false ─→ dedup_empty  ◀── 终点，输出空 dict
+               dedup_logs  ◀── 终点，输出 dict
 ```
 
 ## 输入参数
@@ -88,7 +86,7 @@ branch_log_type
 | `threat_result` | `attack_result` |
 
 ### filter_logs
-基于 `process_type` 的 9 类分类过滤，输出 `_has_alerts` 布尔值供后续分支路由：
+基于 `process_type` 的 9 类分类过滤：
 
 | process_type | 保留/过滤 |
 |-------------|----------|
@@ -99,13 +97,7 @@ branch_log_type
 | `alert_not_scan_not_http_*` | ❌ 过滤（非 HTTP） |
 | `alert_not_process` | ❌ 过滤（其他） |
 
-### branch_has_alerts
-按 `_has_alerts` 路由：`true` → `dedup_logs`；`false` → `dedup_empty`。
-
-### dedup_empty（终点 — 无告警路径）
-过滤后无告警时直接返回空结果 dict，格式与 `dedup_logs` 输出一致（`deduped_alerts=[]`，`unique_alerts=[]`，stats 补零）。
-
-### dedup_logs（终点 — 有告警路径）
+### dedup_logs（终点）
 
 **URI 归一化**（减少 LSH 字段噪音）：
 
