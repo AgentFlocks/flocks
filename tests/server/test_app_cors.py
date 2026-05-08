@@ -39,7 +39,11 @@ def test_read_cors_config_ignores_localhost_and_wildcard_runtime_hosts(monkeypat
 
     allow_origins, allow_origin_regex = app_module._read_cors_config()
 
-    assert allow_origins == ["http://127.0.0.1:5173"]
+    assert allow_origins == [
+        "http://127.0.0.1:5173",
+        "http://[::1]:5173",
+        "http://localhost:5173",
+    ]
     assert allow_origin_regex is None
 
 

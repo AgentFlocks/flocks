@@ -384,6 +384,7 @@ def _should_log_request(path: str, status_code: int) -> bool:
 _LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
 _ALLOW_ANY_LOCALHOST_CORS_ENV = "FLOCKS_ALLOW_ANY_LOCALHOST_CORS"
 
+_LOOPBACK_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::"}
 
 
@@ -397,9 +398,11 @@ def _format_host_for_url(host: str) -> str:
 def _append_origin(origins: list[str], host: str, port: str) -> None:
     if not host or not port or host in _WILDCARD_HOSTS:
         return
-    origin = f"http://{_format_host_for_url(host)}:{port}"
-    if origin not in origins:
-        origins.append(origin)
+    hosts = sorted(_LOOPBACK_ORIGIN_HOSTS) if host in _LOOPBACK_ORIGIN_HOSTS else [host]
+    for candidate_host in hosts:
+        origin = f"http://{_format_host_for_url(candidate_host)}:{port}"
+        if origin not in origins:
+            origins.append(origin)
 
 
 def _read_cors_config() -> tuple[list[str], Optional[str]]:
