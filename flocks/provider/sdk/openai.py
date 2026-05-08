@@ -19,6 +19,7 @@ from flocks.provider.provider import (
 from flocks.provider.sdk.openai_base import (
     _coerce_bool,
     extract_reasoning_content,
+    format_openai_content,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -77,10 +78,15 @@ class OpenAIProvider(BaseProvider):
                 if isinstance(cfg_settings, dict) and "trust_env" in cfg_settings:
                     trust_env = _coerce_bool(cfg_settings.get("trust_env"), trust_env)
                 verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
+                # Match ``OpenAIBaseProvider._get_client`` so all OpenAI-style
+                # providers share the same generous write/read headroom for
+                # multimodal (image) payloads. A flat 120s timeout tends to
+                # abort mid-upload over slow links.
+                timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
                 http_client = httpx.AsyncClient(
                     trust_env=trust_env,
                     verify=verify_ssl,
-                    timeout=120.0,
+                    timeout=timeout,
                 )
 
                 if base_url:
@@ -116,26 +122,8 @@ class OpenAIProvider(BaseProvider):
         """
         return list(getattr(self, "_config_models", []))
     
-    @staticmethod
-    def _format_content(content: Any) -> Any:
-        if not isinstance(content, list):
-            return content
-
-        formatted: list[dict[str, Any]] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if block_type == "text" and isinstance(block.get("text"), str):
-                formatted.append({"type": "text", "text": block["text"]})
-            elif block_type == "image" and block.get("data") and block.get("mimeType"):
-                formatted.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{block['mimeType']};base64,{block['data']}",
-                    },
-                })
-        return formatted
+    # Delegated to the shared canonical implementation in ``openai_base``.
+    _format_content = staticmethod(format_openai_content)
 
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:

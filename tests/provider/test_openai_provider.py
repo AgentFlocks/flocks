@@ -24,11 +24,17 @@ class TestOpenAIProviderConfiguration:
 
         provider._get_client()
 
-        mock_http_client.assert_called_once_with(
-            trust_env=True,
-            verify=False,
-            timeout=120.0,
-        )
+        # Granular timeout supports multimodal payloads; verify fields
+        # semantically so minor adjustments to non-critical values don't break.
+        assert mock_http_client.call_count == 1
+        kwargs = mock_http_client.call_args.kwargs
+        assert kwargs["trust_env"] is True
+        assert kwargs["verify"] is False
+        timeout_arg = kwargs["timeout"]
+        assert getattr(timeout_arg, "connect", None) == 30.0
+        assert getattr(timeout_arg, "read", None) == 600.0
+        assert getattr(timeout_arg, "write", None) == 600.0
+
         mock_async_openai.assert_called_once_with(
             api_key="test-api-key",
             base_url="https://gateway.internal/v1",

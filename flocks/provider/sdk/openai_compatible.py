@@ -23,9 +23,11 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     ThinkTagExtractor,
+    _coerce_bool,
     _normalize_stream_usage,
     _supports_include_usage_fallback,
     extract_reasoning_content,
+    format_openai_content,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -92,7 +94,21 @@ class OpenAICompatibleProvider(BaseProvider):
 
                 custom_settings = getattr(self._config, "custom_settings", None) or {}
                 verify_ssl = resolve_verify_ssl(custom_settings, default=True)
-                http_client = httpx.AsyncClient(verify=verify_ssl, timeout=120.0)
+                # Honour the same env-var / per-provider trust_env contract as
+                # OpenAIProvider and OpenAIBaseProvider, and use a granular
+                # timeout so multimodal (image) payloads can be fully uploaded
+                # over slow links without hitting the old 120 s flat ceiling.
+                trust_env = _coerce_bool(
+                    os.getenv("FLOCKS_HTTP_TRUST_ENV"), True
+                )
+                if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
+                    trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
+                timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
+                http_client = httpx.AsyncClient(
+                    trust_env=trust_env,
+                    verify=verify_ssl,
+                    timeout=timeout,
+                )
 
                 # Create client
                 self._client = AsyncOpenAI(
@@ -102,7 +118,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 )
                 self.log.info(
                     "openai_compatible.client.created",
-                    {"base_url": base_url, "verify_ssl": verify_ssl},
+                    {"base_url": base_url, "trust_env": trust_env, "verify_ssl": verify_ssl},
                 )
                     
             except ImportError:
@@ -143,26 +159,8 @@ class OpenAICompatibleProvider(BaseProvider):
         })
         await asyncio.sleep(delay_seconds)
     
-    @staticmethod
-    def _format_content(content: Any) -> Any:
-        if not isinstance(content, list):
-            return content
-
-        formatted: list[dict] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if block_type == "text" and isinstance(block.get("text"), str):
-                formatted.append({"type": "text", "text": block["text"]})
-            elif block_type == "image" and block.get("data") and block.get("mimeType"):
-                formatted.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{block['mimeType']};base64,{block['data']}",
-                    },
-                })
-        return formatted
+    # Delegated to the shared canonical implementation in ``openai_base``.
+    _format_content = staticmethod(format_openai_content)
 
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:
