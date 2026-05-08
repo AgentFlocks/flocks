@@ -86,7 +86,7 @@ branch_log_type
 | `threat_result` | `attack_result` |
 
 ### filter_logs
-基于 `process_type` 的 9 类分类过滤（对齐 `aisoc_mini.LogFilter`）：
+基于 `process_type` 的 9 类分类过滤：
 
 | process_type | 保留/过滤 |
 |-------------|----------|
@@ -116,11 +116,3 @@ branch_log_type
 3. 与已注册簇计算 **Jaccard 相似度**，≥ `threshold` 则归入该簇
 4. 新簇生成 **MD5 dedup_key**；重复告警标记 `dedup_key_already_exists=True`
 
-## 对应 aisoc_mini 关系
-
-| workflow 节点 | aisoc_mini 类/方法 |
-|--------------|------------------|
-| `normalize_tdp` | `LogNorm.normalize_ndr_log(type='tdp')` |
-| `normalize_skyeye` | `LogNorm.normalize_ndr_log(type='skyeye')` |
-| `filter_logs` | `LogFilter.filter()` |
-| `dedup_logs` | `LogDedup.dedup()` |
