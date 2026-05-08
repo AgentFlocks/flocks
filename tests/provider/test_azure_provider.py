@@ -22,3 +22,12 @@ def test_azure_provider_returns_configured_deployment_models():
 
     assert [m.id for m in models] == ["customer-prod-deployment"]
     assert models[0].name == "Customer Production Deployment"
+
+
+def test_azure_provider_returns_fallback_models_without_config():
+    provider = AzureProvider()
+
+    models = provider.get_models()
+
+    assert {m.id for m in models} == {"gpt-5.4", "gpt-5-mini"}
+    assert all(m.provider_id == "azure" for m in models)

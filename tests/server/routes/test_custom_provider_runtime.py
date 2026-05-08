@@ -1,4 +1,5 @@
 from flocks.provider.provider import ModelCapabilities, ModelInfo, Provider
+from flocks.provider.sdk.azure import AzureProvider
 from flocks.server.routes.custom_provider import CreateModelReq, _add_model_to_runtime
 
 
@@ -51,10 +52,9 @@ def test_add_model_to_runtime_preserves_reasoning_and_currency(monkeypatch):
 
 
 def test_add_azure_deployment_to_runtime_config_models(monkeypatch):
-    class DynamicAzureProvider:
-        _config_models = []
-
-    provider = DynamicAzureProvider()
+    provider = AzureProvider()
+    provider.id = "azure-openai"
+    provider._config_models = []
     body = CreateModelReq(
         model_id="customer-prod-deployment",
         name="Customer Production Deployment",

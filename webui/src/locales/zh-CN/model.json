@@ -120,7 +120,7 @@
     "noModelsToTest": "没有已启用的模型可测试",
     "batchTestDone": "批量测试完成",
     "batchTestSummary": "{{success}} 成功, {{failed}} 失败",
-    "azureDeploymentName": "Azure Deployment Name",
+    "azureDeploymentName": "Azure 部署名称",
     "azureDeploymentPlaceholder": "例如 my-gpt-4o-prod",
     "azureDeploymentHint": "Azure OpenAI 请求使用 deployment name，而不是固定模型名。预设模型只是常用示例，你可以在这里填写自己的部署名称。",
     "azureDeploymentDisplayName": "显示名称（可选）",

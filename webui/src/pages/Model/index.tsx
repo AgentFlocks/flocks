@@ -55,6 +55,12 @@ function providerAllowsEmptyApiKey(providerId: string): boolean {
   );
 }
 
+const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
+
+function isAzureProviderId(providerId: string): boolean {
+  return AZURE_PROVIDER_IDS.has(providerId);
+}
+
 // ==================== Connection Cache ====================
 
 const CONNECTION_CACHE_KEY = 'flocks_provider_connection_cache';
@@ -1216,13 +1222,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         base_url: baseUrl.trim() || undefined,
         provider_name: selectedCatalogId === 'openai-compatible' && providerName.trim() ? providerName.trim() : undefined,
       });
-      const azureModelId = selectedCatalogId === 'azure-openai' ? azureDeploymentName.trim() : '';
-      if (azureModelId) {
-        await modelV2API.createDefinition(selectedCatalogId, {
-          model_id: azureModelId,
-          name: azureDeploymentDisplayName.trim() || azureModelId,
-        });
-      }
+      const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
       const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId || undefined);
       setTestResult({
         success: res.data.success,
@@ -1246,8 +1246,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       toast.warning('Please enter API Key');
       return;
     }
-    const azureModelId = selectedCatalogId === 'azure-openai' ? azureDeploymentName.trim() : '';
-    if (selectedCatalogId === 'azure-openai' && selectedModelIds.size === 0 && !azureModelId) {
+    const azureModelId = isAzureProviderId(selectedCatalogId) ? azureDeploymentName.trim() : '';
+    if (isAzureProviderId(selectedCatalogId) && selectedModelIds.size === 0 && !azureModelId) {
       toast.warning(t('form.azureDeploymentRequired'));
       return;
     }
@@ -1283,10 +1283,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
         try {
           const res = await providerAPI.testCredentials(selectedCatalogId, azureModelId);
           if (!res.data.success) {
-            toast.error(t('form.testFailed'), res.data.error || res.data.message);
+            toast.warning(t('form.testFailed'), res.data.error || res.data.message);
           }
         } catch (testErr: any) {
-          toast.error(t('form.testFailed'), testErr.response?.data?.detail || testErr.message);
+          toast.warning(t('form.testFailed'), testErr.response?.data?.detail || testErr.message);
         }
       }
       toast.success(t('providerAdded'), displayName);
@@ -1630,7 +1630,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                         </div>
                       )}
 
-                      {selectedCatalogId === 'azure-openai' && (
+                      {isAzureProviderId(selectedCatalogId) && (
                         <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                           <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -1776,8 +1776,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
             form={modelForm}
             testResult={modelTestResult}
             testing={modelTesting}
-            modelIdPlaceholder={savedProviderId === 'azure-openai' ? t('form.azureDeploymentPlaceholder') : undefined}
-            modelIdHint={savedProviderId === 'azure-openai' ? t('form.azureModelIdHint') : undefined}
+            modelIdPlaceholder={savedProviderId && isAzureProviderId(savedProviderId) ? t('form.azureDeploymentPlaceholder') : undefined}
+            modelIdHint={savedProviderId && isAzureProviderId(savedProviderId) ? t('form.azureModelIdHint') : undefined}
           />
         </div>
       )}
@@ -2086,8 +2086,8 @@ Provider: ${provider.name} (${provider.id})
           form={form}
           testResult={testResult}
           testing={testing}
-          modelIdPlaceholder={(provider.id === 'azure-openai' || provider.id === 'azure') ? t('form.azureDeploymentPlaceholder') : undefined}
-          modelIdHint={(provider.id === 'azure-openai' || provider.id === 'azure') ? t('form.azureModelIdHint') : undefined}
+          modelIdPlaceholder={isAzureProviderId(provider.id) ? t('form.azureDeploymentPlaceholder') : undefined}
+          modelIdHint={isAzureProviderId(provider.id) ? t('form.azureModelIdHint') : undefined}
         />
       </div>
     </EntitySheet>
@@ -2160,18 +2160,19 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
 
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
+  const [catalogModelsLoaded, setCatalogModelsLoaded] = useState(false);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
   const [newAzureDeploymentName, setNewAzureDeploymentName] = useState('');
   const [newAzureDeploymentDisplayName, setNewAzureDeploymentDisplayName] = useState('');
-  const isAzureProvider = provider.id === 'azure-openai' || provider.id === 'azure';
+  const isAzureProvider = isAzureProviderId(provider.id);
   const catalogModelIds = useMemo(() => new Set(catalogModels.map(m => m.id)), [catalogModels]);
   const selectedCatalogModelCount = useMemo(
     () => catalogModels.filter(m => selectedModelIds.has(m.id)).length,
     [catalogModels, selectedModelIds]
   );
   const azureCustomModels = useMemo(
-    () => isAzureProvider ? models.filter(m => !catalogModelIds.has(m.id)) : [],
-    [catalogModelIds, isAzureProvider, models]
+    () => isAzureProvider && catalogModelsLoaded ? models.filter(m => !catalogModelIds.has(m.id)) : [],
+    [catalogModelIds, catalogModelsLoaded, isAzureProvider, models]
   );
 
   useEffect(() => {
@@ -2190,10 +2191,19 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   }, [provider.id, models]);
 
   useEffect(() => {
+    setCatalogModelsLoaded(false);
     catalogAPI.list().then(res => {
       const found = res.data.providers.find(p => p.id === provider.id);
-      if (found) setCatalogModels(found.models);
-    }).catch(() => {});
+      if (found) {
+        setCatalogModels(found.models);
+        setCatalogModelsLoaded(true);
+      } else {
+        setCatalogModels([]);
+      }
+    }).catch(() => {
+      setCatalogModels([]);
+      setCatalogModelsLoaded(false);
+    });
   }, [provider.id]);
 
   const handleToggleCatalogModel = (modelId: string) => {
@@ -2475,7 +2485,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
           </div>
         )}
 
-        {isAzureProvider && (
+        {isAzureProvider && catalogModelsLoaded && (
           <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
             <div>
               <h4 className="text-sm font-medium text-gray-900">{t('form.azureCustomDeployments')}</h4>
