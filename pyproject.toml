@@ -83,6 +83,7 @@ dependencies = [
     # browser
     "cdp-use>=1.4.5",
     "pillow>=12.2.0",
+    "datasketch>=1.10.0",
 ]
 
 [dependency-groups]
