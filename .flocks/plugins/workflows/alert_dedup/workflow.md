@@ -1,53 +1,14 @@
-# alert_dedup — 告警去重工作流
+# alert_dedup — 告警处理四阶段 Pipeline 工作流
 
 ## 简介
 
-`alert_dedup` 是一个安全告警去重工作流，基于 **aisoc_mini** 项目的去重算法移植而来。
-它通过 URI 归一化 + 5-gram Shingling + Jaccard 相似度，将相似告警归入同一去重簇，
-有效降低告警噪声，让安全分析师聚焦于真正唯一的威胁事件。
+`alert_dedup` 完整实现了 `aisoc_mini` 项目中 `LogProcessPipeline` 的四阶段主流程：
 
-## 使用场景
-
-- 批量告警分析前的预处理（降噪）
-- SIEM/NDR 告警规律性分析
-- 告警风暴抑制（同一攻击模式产生大量重复告警）
-- 与 LLM 研判结合：去重后只对唯一告警调用大模型，节省成本
-
-## 输入参数
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `alerts` | `list[dict]` | 必填 | 待去重告警列表，每条为 JSON 对象 |
-| `strict_fields` | `list[str]` | `["sip", "dip"]` | 严格匹配字段（如源IP/目的IP），这些字段不同则一定不归为同组 |
-| `lsh_fields` | `list[str]` | `["req_http_url", "req_body", "rsp_body"]` | 近似匹配字段（URL、请求体、响应体），用于 Jaccard 相似度计算 |
-| `threshold` | `float` | `0.7` | Jaccard 相似度阈值，超过此值认为是同类告警 |
-| `max_field_len` | `int` | `500` | 字段截断长度，避免超长内容影响性能 |
-
-### 中文字段名支持
-
-如果告警使用中文列名（如来自 CSV），可将字段名配置为中文：
-
-```json
-{
-  "strict_fields": ["源IP", "目的IP"],
-  "lsh_fields": ["请求内容", "响应内容", "载荷_decoded"]
-}
+```
+原始告警 → 归一化 → 过滤 → 去重 → 研判分析
 ```
 
-## 输出
-
-| 字段 | 说明 |
-|------|------|
-| `unique_alerts` | 去重后的唯一告警列表，每条含 `dedup_key`、`dedup_group_size`、`dedup_key_already_exists=false` |
-| `duplicate_alerts` | 被归为重复的告警列表，含 `dedup_key_already_exists=true` |
-| `dedup_stats` | 统计信息：总数、唯一数、重复数、去重率、分组数 |
-| `report_path` | Markdown 报告路径 |
-| `summary` | 单行执行摘要 |
-
-**告警新增字段说明：**
-- `dedup_key`：MD5 去重键，同一去重簇的告警共享相同的值
-- `dedup_key_already_exists`：`true` 表示该告警是重复的
-- `dedup_group_size`：该告警所属分组的总数量
+每阶段均可通过配置独立开关，支持 TDP 和 Skyeye 两种日志格式。
 
 ## 工作流节点
 
@@ -55,110 +16,134 @@
 receive_alerts
      │
      ▼
-normalize_alerts       ← URI 归一化（日期/UUID/长数字/路径穿越/编码字符）
+normalize_logs     ← Step 1: TDP/Skyeye 字段映射，扁平化嵌套结构
      │
      ▼
-compute_dedup_keys     ← 严格字段精确匹配 + 5-gram Jaccard 近似相似度
+filter_logs        ← Step 2: 过滤扫描类/出站/非 HTTP 告警
      │
      ▼
-group_by_dedup_key     ← 按去重键分组，标记唯一/重复
+dedup_logs         ← Step 3: URI 归一化 + 5-gram Jaccard 去重，生成 dedup_key
      │
      ▼
-generate_dedup_report  ← 生成报告 + 写出 JSONL/JSON 数据文件
+analyze_unique     ← Step 4: LLM 研判（仅对唯一 dedup_key 调用，结果回填重复告警）
+     │
+     ▼
+generate_report    ← 汇总统计，写出 Markdown 报告与 JSONL 数据文件
 ```
 
-### 节点说明
+## 输入参数
 
-| 节点 ID | 类型 | 职责 |
-|---------|------|------|
-| `receive_alerts` | python | 解析告警输入（支持 JSON 字符串、列表、`{data:[...]}` 嵌套），提取配置 |
-| `normalize_alerts` | python | 对 LSH 字段值进行 URI 风格归一化，去除日期/UUID/数字等噪声 |
-| `compute_dedup_keys` | python | 5-gram Shingling + Jaccard 相似度计算，生成 MD5 去重键 |
-| `group_by_dedup_key` | python | 按去重键分组，首条为代表（unique），其余标记为 duplicate |
-| `generate_dedup_report` | python | 生成 Markdown 报告及 JSONL/JSON 数据文件 |
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `alerts` | `list[dict]` | 必填 | 原始告警列表 |
+| `source_log_type` | `str` | `"tdp"` | 日志来源类型，`"tdp"` 或 `"skyeye"` |
+| `normalize_enabled` | `bool` | `true` | 是否执行字段归一化 |
+| `filter_enabled` | `bool` | `true` | 是否执行规则过滤 |
+| `dedup_enabled` | `bool` | `true` | 是否执行去重 |
+| `analyze_enabled` | `bool` | `true` | 是否执行 LLM 研判 |
+| `threshold` | `float` | `0.7` | Jaccard 相似度阈值（去重步骤） |
+| `strict_fields` | `list[str]` | `["sip","dip"]` | 严格匹配字段 |
+| `lsh_fields` | `list[str]` | `["req_http_url","req_body","rsp_body"]` | 近似匹配字段 |
+| `max_field_len` | `int` | `500` | 字段截断长度 |
 
-## 算法说明
+## 四阶段详解
 
-### 1. URI 归一化（`normalize_alerts`）
+### Step 1 — 归一化（`normalize_logs`）
 
-对 URL、请求体等 LSH 字段应用以下替换规则，使内容相同但细节不同的告警在相似度计算上趋近：
+将 TDP 或 Skyeye 原始字段映射为统一标准字段：
 
-| 模式 | 替换为 |
-|------|--------|
-| `2024-01-15`、`2024/01/15 14:30` | `DATETIME` |
-| `550e8400-e29b-41d4-a716-...` (UUID) | `UUID` |
-| 6 位及以上纯数字 | `NUM` |
-| `../`、`..\` 路径穿越 | `../` |
-| URL 编码的 NULL 字节 `%00` | `NULL` |
-| 连续 3 个以上 URL 编码字符 | `ENCODED` |
+| 标准字段 | TDP 原始字段 | Skyeye 原始字段 |
+|----------|-------------|----------------|
+| `sip` | `net_real_src_ip` | `sip` |
+| `dip` | `net_dest_ip` | `dip` |
+| `req_http_url` | `net_http_url` | `uri` |
+| `req_body` | `net_http_reqs_body` | `req_body` |
+| `rsp_body` | `net_http_resp_body` | `rsp_body` |
+| `threat_name` | `threat_name` | `vuln_name` |
+| `direction` | `direction` | *(none)* |
+| `net_type` | `net_type` | *(none，自动探测 method)* |
 
-### 2. 去重键计算（`compute_dedup_keys`）
+支持嵌套结构（自动扁平化），缺失 `id` 时自动生成 UUID。
 
-```
-strict_text = join(strict_fields values)
-lsh_text    = join(normalized lsh_fields values)
+### Step 2 — 过滤（`filter_logs`）
 
-→ 在已有簇中找 strict_text 相同、Jaccard(lsh_text) ≥ threshold 的簇
-→ 若找到：复用该簇的 dedup_key
-→ 若未找到：dedup_key = MD5(strict_text + ". " + lsh_text)
-```
+应用两条 jsonLogic 规则：
 
-Jaccard 相似度基于 **5-gram** 分词（Character-level shingles）。
+| 规则 | 逻辑 | 结果 |
+|------|------|------|
+| 扫描过滤 | `threat_name/threat_type 含"扫描"` 且 **不含** `"webshell"` | 剔除 |
+| 方向+协议 | `direction in ["in","none"]` 且 `net_type in ["http","none"]` | 保留 |
+
+仅保留**不是扫描类**且**满足入站 HTTP 条件**的告警，添加 `_need_analysis_is_attack`、`_is_scan`、`_is_inbound_http` 字段。
+
+### Step 3 — 去重（`dedup_logs`）
+
+1. **URI 归一化**：对 lsh_fields 字段值做正则替换（日期→`DATETIME`、UUID→`UUID`、6位+数字→`NUM`、路径穿越、URL 编码）
+2. **相似度计算**：5-gram Character Shingles + Jaccard 相似度
+3. **聚类规则**：严格字段完全相同 + lsh_fields Jaccard ≥ threshold → 归为同一簇，复用同一 `dedup_key`
+4. **去重键**：新簇时用 MD5(`strict_text + ". " + normalized_lsh_text`) 生成
+
+每条告警新增字段：
+- `dedup_key`：MD5 哈希串
+- `dedup_key_already_exists`：`true` 表示该告警是重复告警
+
+### Step 4 — 研判分析（`analyze_unique`）
+
+- **LLM 调用策略**：仅对每个 `dedup_key` 的第一条告警（代表）调用 LLM，重复告警直接复用结果 → 节省大量 LLM 调用开销
+- **Prompt**：专业安全研判 Prompt，明确区分"成功攻击"与"扫描/误报/正常流量"
+- **输出字段**：每条告警新增 `is_attack: bool`
+
+## 输出
+
+| 字段 | 说明 |
+|------|------|
+| `analyzed_alerts` | 全量含 `is_attack` 字段的告警列表 |
+| `attack_alerts` | 判定为真实攻击的告警子集 |
+| `stats` | 各阶段统计：raw/normalized/filtered/dedup/analyzed 计数 |
+| `report_path` | 最终 Markdown 报告路径 |
+| `summary` | 单行执行摘要 |
 
 ## 输出文件
 
-所有文件写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`：
-
 ```
-outputs/
-└── <YYYY-MM-DD>/
-    ├── alert_dedup_report.md            # 主报告（Markdown）
-    └── artifacts/
-        ├── dedup_all_alerts.jsonl       # 全量带去重键告警
-        ├── dedup_unique_alerts.jsonl    # 唯一告警（去重代表）
-        ├── dedup_duplicate_alerts.jsonl # 重复告警
-        └── dedup_groups.json           # 分组统计（key + count）
+outputs/<YYYY-MM-DD>/
+├── alert_pipeline_report.md               # 主报告
+└── artifacts/
+    ├── pipeline_all_analyzed.jsonl        # 全量含 is_attack 告警
+    ├── pipeline_attack_alerts.jsonl       # 真实攻击告警
+    └── pipeline_non_attack_alerts.jsonl   # 非攻击/误报告警
 ```
-
-## 示例
-
-```json
-{
-  "alerts": [
-    {
-      "sip": "1.2.3.4",
-      "dip": "10.0.0.1",
-      "req_http_url": "/admin/login.php?id=1 OR 1=1",
-      "req_body": "username=admin&password=123456",
-      "rsp_body": "HTTP/1.1 200 OK"
-    },
-    {
-      "sip": "1.2.3.4",
-      "dip": "10.0.0.1",
-      "req_http_url": "/admin/login.php?id=2 OR 2=2",
-      "req_body": "username=admin&password=654321",
-      "rsp_body": "HTTP/1.1 200 OK"
-    }
-  ],
-  "strict_fields": ["sip", "dip"],
-  "lsh_fields": ["req_http_url", "req_body", "rsp_body"],
-  "threshold": 0.7
-}
-```
-
-上述两条告警的严格字段相同（同源同目），LSH 字段经归一化后相似度高（SQL 注入 payload 结构一致），
-因此会被归为同一去重簇，只保留第一条为代表。
 
 ## 与 aisoc_mini 的对应关系
 
-| aisoc_mini 组件 | 本工作流对应节点 |
-|-----------------|----------------|
-| `LogDecoder.process()` | `normalize_alerts`（子集：URI 归一化） |
-| `LogDedup._generate_dedup_key_text()` | `compute_dedup_keys` |
-| `LSHProcessor.query_most_similar()` | `compute_dedup_keys`（5-gram Jaccard 简化版） |
-| `LogDedup.process()` | `group_by_dedup_key` |
-| 报告输出 | `generate_dedup_report` |
+| aisoc_mini 类/函数 | 本工作流节点 |
+|-------------------|------------|
+| `LogNormalization.process()` / `normalize_ndr_log()` | `normalize_logs` |
+| `LogFilter.filter()` + `jsonLogic(rule_1, rule_2)` | `filter_logs` |
+| `LogDedup.process()` + `LSHProcessor` + `normalize_uri()` | `dedup_logs` |
+| `LogAnalysis.process_parallel()` | `analyze_unique` |
+| `PipelineResult.stats` | `generate_report` |
 
-> **注意**：本工作流使用标准库实现相似度计算（无需 `datasketch`），
-> 采用精确 Jaccard 而非 MinHash 近似。对于超大批量（>10 万条）告警，
-> 建议改用 `datasketch` 的 MinHash LSH 以获得更好性能。
+## 示例输入
+
+```json
+{
+  "source_log_type": "tdp",
+  "threshold": 0.7,
+  "alerts": [
+    {
+      "net_real_src_ip": "1.2.3.4",
+      "net_dest_ip": "10.0.0.1",
+      "direction": "in",
+      "net_type": "http",
+      "net_http_url": "/admin/login.php?id=1 OR 1=1",
+      "net_http_reqs_body": "username=admin&password=123456",
+      "net_http_resp_body": "root@localhost, MySQL 5.7",
+      "threat_name": "SQL注入攻击",
+      "threat_type": "web攻击"
+    }
+  ]
+}
+```
+
+> **提示**：`analyze_enabled: false` 可跳过 LLM 调用，仅做去重统计，适合纯降噪场景。
