@@ -119,7 +119,16 @@
     "loadFailed": "加载 Provider 目录失败",
     "noModelsToTest": "没有已启用的模型可测试",
     "batchTestDone": "批量测试完成",
-    "batchTestSummary": "{{success}} 成功, {{failed}} 失败"
+    "batchTestSummary": "{{success}} 成功, {{failed}} 失败",
+    "azureDeploymentName": "Azure 部署名称",
+    "azureDeploymentPlaceholder": "例如 my-gpt-4o-prod",
+    "azureDeploymentHint": "Azure OpenAI 请求使用 deployment name，而不是固定模型名。预设模型只是常用示例，你可以在这里填写自己的部署名称。",
+    "azureDeploymentDisplayName": "显示名称（可选）",
+    "azureDeploymentDisplayPlaceholder": "例如 GPT-4o Production",
+    "azureDeploymentRequired": "请至少选择一个预设模型，或填写 Azure deployment name",
+    "azureModelIdHint": "对于 Azure OpenAI，模型 ID 请填写 Azure Portal 中的 deployment name。",
+    "azureCustomDeployments": "自定义 Azure Deployments",
+    "azureNoCustomDeployments": "尚未添加自定义 Azure deployment。"
   },
   "wizard": {
     "providerSaved": "Provider 已保存",
