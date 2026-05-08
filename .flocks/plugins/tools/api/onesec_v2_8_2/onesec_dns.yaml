@@ -20,14 +20,15 @@ inputSchema:
         - dns_search_blocked_queries
           用途: 分页查询 DNS 拦截记录
           必填: `time_from`、`time_to`、`domain`、`keyword`
-          常用: `public_ip`、`private_ip`、`block_reason`、`threat_level`、`threat_type`、`cur_page`
-          风险提示: 查询窗口通常不超过 24 小时；缺少 `domain` 或 `keyword` 会被工具层拦截
+          常用: `public_ip`、`private_ip`、`block_reason`、`show_unblocked_threat`、`threat_level`、`threat_type`、`cur_page`
+          风险提示: 推荐使用 Unix 秒级时间戳；工具会兼容常见 `YYYY-MM-DD HH:MM:SS` 日期字符串。若只传 `domain`，工具会默认将 `keyword` 补成相同值；若仅按 `public_ip` + 时间范围查询最近 24 小时数据，请优先改用 `dns_get_recent_blocked_queries`
           是否任务型: 否
         - dns_get_recent_blocked_queries
           用途: 获取近期 DNS 拦截记录（仅适用于增量同步，有严格时间限制）
           必填: `time_from`、`time_to`
-          常用: `public_ip`、`block_reason`、`threat_level`
+          常用: `public_ip`、`block_reason`、`show_unblocked_threat`、`threat_level`
           ⚠️ 限制: 仅支持最近 24 小时的数据；time_from 超出 24 小时将被服务器拒绝
+          ⚠️ 限制: 不支持 `domain`、`keyword`、`private_ip`、`threat_type` 和分页参数；如需按域名/关键字查询，请改用 `dns_search_blocked_queries`
           ⚠️ 推荐: 通用查询请优先使用 `dns_search_blocked_queries`
           是否任务型: 否
         - dns_search_queries
@@ -86,15 +87,18 @@ inputSchema:
       type: integer
       description: >
         开始时间戳，Unix 秒级时间戳。必须小于 time_to。可以使用python datetime动态计算。
+        工具会兼容常见日期时间字符串，如 `YYYY-MM-DD HH:MM:SS`。
         对于 recent 系列接口，time_from 距当前时间不能超过 24 小时。
     time_to:
       type: integer
-      description: 结束时间戳，Unix 秒级时间戳。必须大于 time_from。可以使用python datetime动态计算。
+      description: >
+        结束时间戳，Unix 秒级时间戳。必须大于 time_from。可以使用python datetime动态计算。
+        工具会兼容常见日期时间字符串，如 `YYYY-MM-DD HH:MM:SS`。
     public_ip:
       type: array
       items:
         type: string
-      description: 公网 IP 列表
+      description: 公网 IP 列表；当前工具会兼容单个字符串并自动包装为单元素数组
     private_ip:
       type: string
       description: 私网 IP
@@ -107,6 +111,9 @@ inputSchema:
     block_reason:
       type: string
       description: 拦截原因
+    show_unblocked_threat:
+      type: integer
+      description: 是否返回未拦截的威胁记录，常见取值 `1`
     threat_level:
       type: array
       items:

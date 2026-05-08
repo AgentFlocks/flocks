@@ -34,6 +34,11 @@ description: 用于处理 OneSEC 终端安全平台相关任务，适合通过AP
 - 用户说“威胁事件”“最近有什么事件”“事件详情”“有哪些事件”时，优先走 `onesec_edr` 的事件类 action
 - 用户说“终端告警”“告警日志”“查某终端的告警”“查某进程行为”“行为记录”“时间线”“IOC”“恶意文件”时，优先走 `onesec_edr` 的告警/日志类 action
 - 用户说“DNS 拦截”“DNS 告警”“解析日志”“受威胁终端”“域名放行/阻断”时，优先走 `onesec_dns`
+- 涉及任何时间查询时，必须动态计算 `time_from` / `time_to` / `begin_time` / `end_time`，禁止手动估算时间戳
+- 查询单个域名是否被 DNS 拦截时，优先构造 `dns_search_blocked_queries + domain + time_from + time_to`；未显式给 `keyword` 时，工具会默认复用 `domain`
+- DNS 查询优先使用 Unix 秒级时间戳；如果用户给的是常见日期字符串（如 `2026-05-08 00:00:00`），工具会自动换算
+- 查询指定域名或关键字的 DNS 拦截明细时，优先使用 `dns_search_blocked_queries`
+- `dns_get_recent_blocked_queries` 只用于最近 24 小时增量拉取，不支持 `domain` / `keyword` / `private_ip` / `threat_type` / 分页参数
 - 用户说“安装了什么软件”“哪些终端装了某软件”时，优先走 `onesec_software`
 - 用户说“终端管理”“任务列表”“任务执行进度”“审计日志”“策略范围”时，优先走 `onesec_ops`
 - 用户说“病毒库版本”“病毒扫描”“停止扫描”“升级病毒库”时，优先走 `onesec_threat`

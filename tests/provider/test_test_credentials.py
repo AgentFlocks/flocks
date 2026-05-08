@@ -228,10 +228,28 @@ class TestTestCredentialsToolExecution:
             )
 
     @pytest.mark.asyncio
-    async def test_service_uses_enum_action_instead_of_placeholder_string(self):
-        """Connectivity checks should use enum-backed action values, not the generic 'test' placeholder."""
+    async def test_onesec_service_prefers_threat_probe_and_uses_enum_action(self):
+        """OneSEC should prefer the read-only threat probe over the older DNS probe."""
         from flocks.server.routes.provider import test_provider_credentials
 
+        onesec_threat_tool = ToolInfo(
+            name="onesec_threat",
+            description="OneSEC threat grouped tool",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Threat action",
+                    required=True,
+                    enum=[
+                        "threat_query_bd_version",
+                        "threat_virus_scan",
+                        "threat_update_bd_version",
+                    ],
+                )
+            ],
+        )
         onesec_dns_tool = ToolInfo(
             name="onesec_dns",
             description="OneSEC DNS grouped tool",
@@ -265,9 +283,9 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
-            mock_tr.list_tools.return_value = [onesec_dns_tool]
+            mock_tr.list_tools.return_value = [onesec_dns_tool, onesec_threat_tool]
             mock_tr._dynamic_tools_by_module = {
-                "flocks.tool.generated.onesec": ["onesec_dns"],
+                "flocks.tool.generated.onesec": ["onesec_dns", "onesec_threat"],
             }
             mock_tr.execute = AsyncMock(return_value=ToolResult(
                 success=True,
@@ -277,10 +295,10 @@ class TestTestCredentialsToolExecution:
             result = await test_provider_credentials("onesec_api")
 
             assert result["success"] is True, result
-            assert result["tool_tested"] == "onesec_dns"
+            assert result["tool_tested"] == "onesec_threat"
             mock_tr.execute.assert_awaited_once_with(
-                tool_name="onesec_dns",
-                action="dns_get_public_ip_list",
+                tool_name="onesec_threat",
+                action="threat_query_bd_version",
             )
 
     @pytest.mark.asyncio

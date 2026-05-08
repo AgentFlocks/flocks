@@ -27,7 +27,7 @@ inputSchema:
           用途: 下发病毒扫描任务
           必填: `agent_list`、`task_type`/`scan_type`、`scanmode`；当 `task_type=10130` 时还需 `scan_paths`
           常用: `scan_paths`、`scanmode`、`task_type`
-          风险提示: 高风险任务；扫描范围较大时可能影响终端性能
+          风险提示: 高风险任务；`task_type` 仅支持 `10110/10120/10130`，`scanmode` 仅支持 `1/2/3`
           是否任务型: 是
         - threat_stop_virus_scan
           用途: 下发终止病毒扫描任务
@@ -39,13 +39,13 @@ inputSchema:
           用途: 下发病毒库升级任务
           必填: `agent_list`、`bd_upgrade_type`
           常用: `bd_upgrade_type`
-          风险提示: 写操作；会触发终端更新病毒库
+          风险提示: 写操作；会触发终端更新病毒库，`bd_upgrade_type` 仅支持 `1/2`
           是否任务型: 是
         - threat_update_bd_version
           用途: 修改病毒库应用版本
           必填: `os_platform`；当 `os_platform=macos` 时还需 `os_arch`
           常用: `os_arch`
-          风险提示: 写操作；平台参数不匹配会被工具层拦截
+          风险提示: 写操作；`os_platform` 仅支持 `windows/macos`，macOS 架构仅支持 `Apple Silicon/Intel Chip`
           是否任务型: 否
       enum:
         - threat_query_bd_version
@@ -60,7 +60,7 @@ inputSchema:
       description: 终端 UMID 列表
     task_type:
       type: integer
-      description: 病毒扫描任务类型
+      description: 病毒扫描任务类型，支持 `10110` 快速扫描、`10120` 全盘扫描、`10130` 自定义扫描
     scan_paths:
       type: array
       items:
@@ -68,22 +68,22 @@ inputSchema:
       description: 自定义扫描路径
     scanmode:
       type: integer
-      description: 扫描模式
+      description: 扫描模式，支持 `1` 极速、`2` 均衡、`3` 低耗
     scan_type:
       type: integer
       description: 兼容旧调用的病毒扫描任务类型别名
     bd_upgrade_type:
       type: integer
-      description: 病毒库升级类型
+      description: 病毒库升级类型，支持 `1` 应用版本、`2` 云端最新版本
     issue_time:
       type: integer
       description: 下发时间
     os_platform:
       type: string
-      description: 操作系统平台
+      description: 操作系统平台，仅支持 `windows`、`macos`
     os_arch:
       type: string
-      description: 系统架构
+      description: 系统架构；当 `os_platform=macos` 时仅支持 `Apple Silicon`、`Intel Chip`
   required:
     - action
 handler:
