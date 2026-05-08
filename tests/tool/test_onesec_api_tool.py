@@ -1,4 +1,5 @@
 import base64
+import datetime as dt
 import hmac
 from hashlib import sha1
 from pathlib import Path
@@ -192,6 +193,303 @@ async def test_onesec_dns_get_public_ip_list_honors_verify_ssl_true():
 
 
 @pytest.mark.asyncio
+async def test_onesec_dns_search_blocked_queries_normalizes_block_status():
+    tool = _load_tool("onesec_dns.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "data": {
+                        "total_num": 1,
+                        "items": [
+                            {
+                                "domain": "blocked.example",
+                                "block_reason": "threat",
+                            }
+                        ],
+                    }
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_search_blocked_queries",
+            time_from=1699990000,
+            time_to=1700000000,
+            domain="blocked.example",
+            keyword="blocked.example",
+            show_unblocked_threat=1,
+            cur_page=2,
+        )
+
+    assert result.success is True
+    assert result.output["items"] == [
+        {
+            "domain": "blocked.example",
+            "block_reason": "threat",
+            "result": "block",
+            "is_blocked": True,
+        }
+    ]
+
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert url == "https://console.onesec.net/open/api/client/searchBlockedQueries"
+    assert kwargs["json"] == {
+        "time_from": 1699990000,
+        "time_to": 1700000000,
+        "domain": "blocked.example",
+        "keyword": "blocked.example",
+        "show_unblocked_threat": 1,
+        "cur_page": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_search_blocked_queries_defaults_keyword_and_parses_datetime_strings():
+    tool = _load_tool("onesec_dns.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "data": {
+                        "total_num": 1,
+                        "items": [{"domain": "bilibili.com", "result": "block"}],
+                    }
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+    local_tz = dt.datetime.now().astimezone().tzinfo
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_search_blocked_queries",
+            domain="bilibili.com",
+            time_from="2026-05-08 00:00:00",
+            time_to="2026-05-08 23:59:59",
+        )
+
+    assert result.success is True
+
+    expected_time_from = int(dt.datetime(2026, 5, 8, 0, 0, 0, tzinfo=local_tz).timestamp())
+    expected_time_to = int(dt.datetime(2026, 5, 8, 23, 59, 59, tzinfo=local_tz).timestamp())
+
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert url == "https://console.onesec.net/open/api/client/searchBlockedQueries"
+    assert kwargs["json"] == {
+        "time_from": expected_time_from,
+        "time_to": expected_time_to,
+        "domain": "bilibili.com",
+        "keyword": "bilibili.com",
+    }
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_search_blocked_queries_rejects_invalid_datetime_string():
+    tool = _load_tool("onesec_dns.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="dns_search_blocked_queries",
+        domain="bilibili.com",
+        keyword="bilibili.com",
+        time_from="tomorrow morning",
+        time_to=1700000000,
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "time_from (tomorrow morning) 必须是 Unix 秒级时间戳。"
+        " 当前工具支持自动转换常见日期时间格式，如 `YYYY-MM-DD HH:MM:SS`。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_search_queries_rejects_time_from_older_than_24_hours():
+    tool = _load_tool("onesec_dns.yaml")
+
+    with patch("time.time", return_value=1700000000):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_search_queries",
+            time_from=1699900000,
+            time_to=1699950000,
+            domain="example.com",
+        )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "按 OneSEC API 文档，`dns_search_queries` 仅支持最近 24 小时内的数据。请将 time_from 设置在最近 24 小时内。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_search_blocked_queries_suggests_recent_for_public_ip_only():
+    tool = _load_tool("onesec_dns.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="dns_search_blocked_queries",
+        public_ip="203.0.113.10",
+        time_from="2026-05-07 17:30:00",
+        time_to="2026-05-08 17:30:00",
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "`dns_search_blocked_queries` 按 OneSEC API 文档要求必须传 `domain` 和 `keyword`。"
+        " 如果你当前只有 `public_ip` + 时间范围，且要查询最近 24 小时拦截记录，"
+        " 请改用 `dns_get_recent_blocked_queries`。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_get_recent_blocked_queries_rejects_doc_unsupported_filters():
+    tool = _load_tool("onesec_dns.yaml")
+
+    with patch("time.time", return_value=1700000000):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_get_recent_blocked_queries",
+            time_from=1699990000,
+            time_to=1700000000,
+            domain="blocked.example",
+            keyword="blocked",
+        )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "dns_get_recent_blocked_queries 按 OneSEC API 文档不支持以下参数: domain, keyword。"
+        " 若需要按域名或关键字筛选 DNS 拦截记录，请改用 `dns_search_blocked_queries`。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_get_recent_blocked_queries_passes_doc_example_fields():
+    tool = _load_tool("onesec_dns.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "data": {
+                        "total_num": 1,
+                        "items": [{"result": "block"}],
+                    }
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_get_recent_blocked_queries",
+            time_from=1699990000,
+            time_to=1700000000,
+            public_ip=["1.1.1.1"],
+            block_reason="threat",
+            show_unblocked_threat=1,
+            threat_level=[2, 3],
+        )
+
+    assert result.success is True
+
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert url == "https://console.onesec.net/open/api/client/getRecentBlockedQueries"
+    assert kwargs["json"] == {
+        "time_from": 1699990000,
+        "time_to": 1700000000,
+        "public_ip": ["1.1.1.1"],
+        "block_reason": "threat",
+        "show_unblocked_threat": 1,
+        "threat_level": [2, 3],
+    }
+
+
+@pytest.mark.asyncio
+async def test_onesec_dns_get_recent_blocked_queries_wraps_single_public_ip_string():
+    tool = _load_tool("onesec_dns.yaml")
+    fake_session = _FakeSession(
+        [
+            _FakeResponse(
+                json_payload={
+                    "data": {
+                        "total_num": 1,
+                        "items": [{"result": "block"}],
+                    }
+                }
+            )
+        ]
+    )
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.return_value = "api-key-1|secret-1"
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"apiKey": "{secret:onesec_credentials}"},
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+        patch("time.time", return_value=1700000000),
+    ):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="dns_get_recent_blocked_queries",
+            public_ip="203.0.113.10",
+            time_from="2026-05-07 17:30:00",
+            time_to="2026-05-08 17:30:00",
+        )
+
+    assert result.success is True
+
+    method, url, kwargs = fake_session.calls[0]
+    assert method == "POST"
+    assert url == "https://console.onesec.net/open/api/client/getRecentBlockedQueries"
+    assert kwargs["json"]["public_ip"] == ["203.0.113.10"]
+
+
+@pytest.mark.asyncio
 async def test_onesec_edr_get_threat_files_uses_doc_page_structure():
     tool = _load_tool("onesec_edr.yaml")
     fake_session = _FakeSession(
@@ -289,6 +587,43 @@ async def test_onesec_threat_virus_scan_returns_integer_task_id():
         "task_type": 10110,
         "task_content": {"scanmode": 2},
     }
+
+
+@pytest.mark.asyncio
+async def test_onesec_threat_virus_scan_rejects_invalid_task_type():
+    tool = _load_tool("onesec_threat.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="threat_virus_scan",
+        agent_list=["umid-1"],
+        task_type=99999,
+        scanmode=1,
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "`task_type`/`scan_type` 取值无效：99999。按 OneSEC API 文档仅支持：10110, 10120, 10130。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_threat_update_bd_version_rejects_invalid_os_arch():
+    tool = _load_tool("onesec_threat.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="threat_update_bd_version",
+        os_platform="macos",
+        os_arch="ARM64",
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "`os_arch` 取值无效：ARM64。当 `os_platform=macos` 时仅支持：Apple Silicon, Intel Chip。"
+    )
 
 
 @pytest.mark.asyncio
@@ -437,6 +772,45 @@ async def test_onesec_ops_query_task_page_list_uses_sort_object_payload():
 
 
 @pytest.mark.asyncio
+async def test_onesec_ops_query_task_page_list_rejects_invalid_time_type():
+    tool = _load_tool("onesec_ops.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="ops_query_task_page_list",
+        time_type="last_seen",
+        begin_time=1699990000,
+        end_time=1700000000,
+        auto=0,
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "`time_type` 取值无效：last_seen。按 OneSEC API 文档仅支持：create_time, update_time。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_onesec_ops_query_audit_log_rejects_begin_time_older_than_30_days():
+    tool = _load_tool("onesec_ops.yaml")
+
+    with patch("time.time", return_value=1700000000):
+        result = await tool.handler(
+            ToolContext(session_id="test", message_id="test"),
+            action="ops_query_audit_log",
+            begin_time=1690000000,
+            end_time=1690100000,
+        )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "按 OneSEC API 文档，`ops_query_audit_log` 仅支持最近 30 天内的审计日志。请调整 begin_time。"
+    )
+
+
+@pytest.mark.asyncio
 async def test_onesec_edr_get_ioc_list_uses_doc_payload():
     tool = _load_tool("onesec_edr.yaml")
     fake_session = _FakeSession(
@@ -550,6 +924,24 @@ async def test_onesec_edr_get_threat_disposals_uses_incident_and_sort_payload():
         "umid": "umid-1",
         "sort": [{"sort_by": "update_time", "sort_order": "desc"}],
     }
+
+
+@pytest.mark.asyncio
+async def test_onesec_edr_get_threat_files_rejects_span_over_three_months():
+    tool = _load_tool("onesec_edr.yaml")
+
+    result = await tool.handler(
+        ToolContext(session_id="test", message_id="test"),
+        action="edr_get_threat_files",
+        time_from=1690000000,
+        time_to=1700000000,
+    )
+
+    assert result.success is False
+    assert (
+        result.error
+        == "按 OneSEC API 文档，`edr_get_threat_files` 的时间窗口最长三个月。请缩小 time_from/time_to 范围。"
+    )
 
 
 @pytest.mark.asyncio

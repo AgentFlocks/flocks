@@ -33,13 +33,13 @@ inputSchema:
           用途: 分页查询审计日志
           必填: `begin_time`、`end_time`
           常用: `cur_page`、`page_size`、`operate_list`、`role_list`、`group_list`、`api_access_type_list`
-          风险提示: 建议限定时间范围，避免返回量过大
+          风险提示: 建议限定时间范围，避免返回量过大；按 OneSEC API 文档仅支持最近 30 天内日志
           是否任务型: 否
         - ops_query_task_page_list
           用途: 分页查询任务列表
           必填: `time_type`、`begin_time`、`end_time`、`auto`
           常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`task_status_list`、`task_type_list`、`group_id`
-          风险提示: 分页接口通常要求排序对象；缺少关键时间条件会被工具层拦截
+          风险提示: 分页接口通常要求排序对象；`time_type` 仅支持 `create_time/update_time`，`auto` 仅支持 `0/1`
           是否任务型: 否
         - ops_query_task_execute_list
           用途: 分页查询任务执行进度明细
@@ -88,7 +88,7 @@ inputSchema:
       description: 结构化条件列表
     time_type:
       type: string
-      description: 时间字段类型
+      description: 时间字段类型，仅支持 `create_time`、`update_time`
     cur_page:
       type: integer
       default: 1
@@ -158,7 +158,7 @@ inputSchema:
       description: API 访问来源列表
     auto:
       type: integer
-      description: 任务来源
+      description: 任务来源，仅支持 `0` 人工响应、`1` 自动响应
     task_type_list:
       type: array
       items:

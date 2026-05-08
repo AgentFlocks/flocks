@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hmac
 import os
 import time
@@ -488,6 +489,42 @@ def _action_task_content(
     return [content]
 
 
+def _normalize_dns_search_blocked_queries(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return payload
+
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+
+    normalized_items: list[Any] = []
+    changed = False
+    for item in items:
+        if not isinstance(item, dict):
+            normalized_items.append(item)
+            continue
+
+        normalized_item = dict(item)
+        if "result" not in normalized_item:
+            normalized_item["result"] = "block"
+            changed = True
+        if "is_blocked" not in normalized_item:
+            normalized_item["is_blocked"] = True
+            changed = True
+        normalized_items.append(normalized_item)
+
+    if not changed:
+        return payload
+
+    return {**payload, "items": normalized_items}
+
+
+def _normalize_output(action: str, payload: Any) -> Any:
+    if action in {"searchBlockedQueries", "dns_search_blocked_queries"}:
+        return _normalize_dns_search_blocked_queries(payload)
+    return payload
+
+
 def _json_result(action: str, payload: Any) -> ToolResult:
     metadata = {"source": "OneSEC", "api": action}
     if isinstance(payload, dict):
@@ -495,7 +532,11 @@ def _json_result(action: str, payload: Any) -> ToolResult:
         if response_code not in (None, 0, 200):
             error_msg = payload.get("verbose_msg") or payload.get("msg") or "Unknown error"
             return ToolResult(success=False, error=f"OneSEC API error: {error_msg}", metadata=metadata)
-        return ToolResult(success=True, output=payload.get("data", payload), metadata=metadata)
+        return ToolResult(
+            success=True,
+            output=_normalize_output(action, payload.get("data", payload)),
+            metadata=metadata,
+        )
     return ToolResult(success=True, output=payload, metadata=metadata)
 
 
@@ -511,6 +552,101 @@ def _has_value(value: Any) -> bool:
 
 def _require_fields(params: dict[str, Any], *fields: str) -> list[str]:
     return [field for field in fields if not _has_value(params.get(field))]
+
+
+def _normalize_unix_seconds(value: Any, field_name: str) -> tuple[Optional[int], Optional[str]]:
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, f"{field_name} ({value}) 必须是 Unix 秒级时间戳。"
+    if isinstance(value, int):
+        return value, None
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value), None
+        return None, f"{field_name} ({value}) 必须是 Unix 秒级时间戳。"
+    if not isinstance(value, str):
+        return None, f"{field_name} ({value}) 必须是 Unix 秒级时间戳。"
+
+    stripped = value.strip()
+    if not stripped:
+        return None, None
+    if stripped.lstrip("-").isdigit():
+        return int(stripped), None
+
+    try:
+        parsed = dt.datetime.fromisoformat(stripped)
+    except ValueError:
+        return (
+            None,
+            f"{field_name} ({value}) 必须是 Unix 秒级时间戳。"
+            " 当前工具支持自动转换常见日期时间格式，如 `YYYY-MM-DD HH:MM:SS`。",
+        )
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.datetime.now().astimezone().tzinfo)
+    return int(parsed.timestamp()), None
+
+
+def _normalize_action_params(action: str, params: dict[str, Any]) -> tuple[dict[str, Any], Optional[str]]:
+    normalized = dict(params)
+
+    for field_name in ("time_from", "time_to", "begin_time", "end_time"):
+        if not _has_value(normalized.get(field_name)):
+            continue
+        normalized_value, error = _normalize_unix_seconds(normalized.get(field_name), field_name)
+        if error:
+            return params, error
+        normalized[field_name] = normalized_value
+
+    if action in {"dns_search_blocked_queries", "dns_get_recent_blocked_queries"}:
+        public_ip = normalized.get("public_ip")
+        if isinstance(public_ip, str) and public_ip.strip():
+            normalized["public_ip"] = [public_ip.strip()]
+    if action == "dns_search_blocked_queries":
+        if not _has_value(normalized.get("keyword")) and _has_value(normalized.get("domain")):
+            normalized["keyword"] = normalized["domain"]
+    elif action == "dns_search_queries":
+        if isinstance(normalized.get("qType"), str):
+            normalized["qType"] = normalized["qType"].strip().upper()
+        if isinstance(normalized.get("rcode"), str):
+            normalized["rcode"] = normalized["rcode"].strip().upper()
+    elif action in {"dns_search_blocked_queries", "dns_get_recent_blocked_queries"}:
+        if isinstance(normalized.get("block_reason"), str):
+            normalized["block_reason"] = normalized["block_reason"].strip().lower()
+    elif action == "dns_get_all_destination_list":
+        if isinstance(normalized.get("policy_type"), str):
+            normalized["policy_type"] = normalized["policy_type"].strip().lower()
+    elif action == "threat_virus_scan":
+        for field_name in ("task_type", "scan_type", "scanmode"):
+            value = normalized.get(field_name)
+            if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+                normalized[field_name] = int(value.strip())
+    elif action == "threat_upgrade_bd_version_task":
+        value = normalized.get("bd_upgrade_type")
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            normalized["bd_upgrade_type"] = int(value.strip())
+    elif action == "threat_update_bd_version":
+        if isinstance(normalized.get("os_platform"), str):
+            normalized["os_platform"] = normalized["os_platform"].strip().lower()
+        if isinstance(normalized.get("os_arch"), str):
+            arch_map = {
+                "apple silicon": "Apple Silicon",
+                "intel chip": "Intel Chip",
+            }
+            normalized["os_arch"] = arch_map.get(normalized["os_arch"].strip().lower(), normalized["os_arch"])
+    elif action == "ops_query_task_page_list":
+        if isinstance(normalized.get("time_type"), str):
+            normalized["time_type"] = normalized["time_type"].strip()
+        auto_value = normalized.get("auto")
+        if isinstance(auto_value, str) and auto_value.strip().lstrip("-").isdigit():
+            normalized["auto"] = int(auto_value.strip())
+
+    return normalized, None
+
+
+def _reject_present_fields(params: dict[str, Any], *fields: str) -> list[str]:
+    return [field for field in fields if _has_value(params.get(field))]
 
 
 def _validate_non_empty_aliases(params: dict[str, Any], aliases: tuple[str, ...], label: str) -> list[str]:
@@ -539,23 +675,104 @@ _PAGINATED_ALTERNATIVES: dict[str, str] = {
 }
 
 _ONE_DAY_SECS = 86400
+_THIRTY_DAY_SECS = 30 * _ONE_DAY_SECS
+_THREE_MONTH_SECS = 90 * _ONE_DAY_SECS
+
+_SPAN_LIMIT_RULES: dict[str, tuple[str, str, int, str]] = {
+    "dns_search_blocked_queries": (
+        "time_from",
+        "time_to",
+        _ONE_DAY_SECS,
+        "按 OneSEC API 文档，`dns_search_blocked_queries` 的时间窗口最多 24 小时。请缩小 time_from/time_to 范围。",
+    ),
+    "dns_search_queries": (
+        "time_from",
+        "time_to",
+        _ONE_DAY_SECS,
+        "按 OneSEC API 文档，`dns_search_queries` 的时间窗口最多 24 小时。",
+    ),
+    "edr_get_threat_files": (
+        "time_from",
+        "time_to",
+        _THREE_MONTH_SECS,
+        "按 OneSEC API 文档，`edr_get_threat_files` 的时间窗口最长三个月。请缩小 time_from/time_to 范围。",
+    ),
+    "edr_get_threat_activities": (
+        "time_from",
+        "time_to",
+        _THREE_MONTH_SECS,
+        "按 OneSEC API 文档，`edr_get_threat_activities` 的时间窗口最长三个月。请缩小 time_from/time_to 范围。",
+    ),
+    "edr_get_incidents": (
+        "time_from",
+        "time_to",
+        _THREE_MONTH_SECS,
+        "按 OneSEC API 文档，`edr_get_incidents` 的时间窗口最长三个月。请缩小 time_from/time_to 范围。",
+    ),
+    "edr_get_endpoint_alerts": (
+        "time_from",
+        "time_to",
+        _THREE_MONTH_SECS,
+        "按 OneSEC API 文档，`edr_get_endpoint_alerts` 的时间窗口最长三个月。请缩小 time_from/time_to 范围。",
+    ),
+    "ops_query_audit_log": (
+        "begin_time",
+        "end_time",
+        _THIRTY_DAY_SECS,
+        "按 OneSEC API 文档，`ops_query_audit_log` 的查询窗口最多 30 天。",
+    ),
+}
+
+_AGE_LIMIT_RULES: dict[str, tuple[str, int, str]] = {
+    "dns_search_queries": (
+        "time_from",
+        _ONE_DAY_SECS,
+        "按 OneSEC API 文档，`dns_search_queries` 仅支持最近 24 小时内的数据。请将 time_from 设置在最近 24 小时内。",
+    ),
+    "ops_query_audit_log": (
+        "begin_time",
+        _THIRTY_DAY_SECS,
+        "按 OneSEC API 文档，`ops_query_audit_log` 仅支持最近 30 天内的审计日志。请调整 begin_time。",
+    ),
+}
+
+_DNS_QTYPE_VALUES = {"A", "AAAA", "CNAME", "MX", "TXT", "PTR", "NS", "CERT", "SRV", "SOA", "DS"}
+_DNS_RCODE_VALUES = {"NOERROR", "NXDOMAIN", "FORMERR", "SERVFAIL", "YXDOMAIN"}
+_DNS_BLOCK_REASON_VALUES = {"threat", "custom"}
+_DNS_POLICY_TYPE_VALUES = {"block", "pass"}
+_THREAT_SCAN_TASK_TYPES = {10110, 10120, 10130}
+_THREAT_SCANMODES = {1, 2, 3}
+_THREAT_BD_UPGRADE_TYPES = {1, 2}
+_THREAT_OS_PLATFORMS = {"windows", "macos"}
+_THREAT_MAC_ARCHES = {"Apple Silicon", "Intel Chip"}
+_OPS_TASK_TIME_TYPES = {"create_time", "update_time"}
+_OPS_TASK_AUTO_VALUES = {0, 1}
 
 
 def _validate_time_params(action: str, params: dict[str, Any]) -> Optional[str]:
-    """Check time_from/time_to consistency and recent-API 24-hour window."""
+    """Check time order and documented time-window limits."""
+    for start_field, end_field in (("time_from", "time_to"), ("begin_time", "end_time")):
+        start_value = params.get(start_field)
+        end_value = params.get(end_field)
+        if start_value is None or end_value is None:
+            continue
+        try:
+            start_int, end_int = int(start_value), int(end_value)
+        except (TypeError, ValueError):
+            continue
+        if start_int >= end_int:
+            return (
+                f"{start_field} ({start_int}) 必须小于 {end_field} ({end_int})。"
+                f" 请确认时间范围：`{start_field}` 为开始时间，`{end_field}` 为结束时间。"
+            )
+
     tf = params.get("time_from")
     tt = params.get("time_to")
-
     if tf is not None and tt is not None:
         try:
             tf_int, tt_int = int(tf), int(tt)
         except (TypeError, ValueError):
             return None
-        if tf_int >= tt_int:
-            return (
-                f"time_from ({tf_int}) 必须小于 time_to ({tt_int})。"
-                " 请确认时间范围：time_from 为开始时间，time_to 为结束时间。"
-            )
         if action in _RECENT_ACTIONS:
             span = tt_int - tf_int
             if span > _ONE_DAY_SECS:
@@ -580,6 +797,114 @@ def _validate_time_params(action: str, params: dict[str, Any]) -> Optional[str]:
                 f"{action} 属于 recent 接口，仅支持最近 24 小时的数据。"
                 f" 传入的 time_from ({tf_int}) 距当前时间已超过 {age // 3600} 小时。{alt_hint}"
             )
+
+    span_rule = _SPAN_LIMIT_RULES.get(action)
+    if span_rule is not None:
+        start_field, end_field, max_span, message = span_rule
+        start_value = params.get(start_field)
+        end_value = params.get(end_field)
+        if start_value is not None and end_value is not None:
+            try:
+                start_int, end_int = int(start_value), int(end_value)
+            except (TypeError, ValueError):
+                return None
+            if end_int - start_int > max_span:
+                return message
+
+    age_rule = _AGE_LIMIT_RULES.get(action)
+    if age_rule is not None:
+        field_name, max_age, message = age_rule
+        field_value = params.get(field_name)
+        if field_value is not None:
+            try:
+                field_int = int(field_value)
+            except (TypeError, ValueError):
+                return None
+            if int(time.time()) - field_int > max_age + 3600:
+                return message
+    return None
+
+
+def _validate_enum_params(action: str, params: dict[str, Any]) -> Optional[str]:
+    if action == "dns_search_queries":
+        qtype = params.get("qType")
+        if _has_value(qtype) and str(qtype) not in _DNS_QTYPE_VALUES:
+            allowed = ", ".join(sorted(_DNS_QTYPE_VALUES))
+            return f"`qType` 取值无效：{qtype}。按 OneSEC API 文档仅支持：{allowed}。"
+        rcode = params.get("rcode")
+        if _has_value(rcode) and str(rcode) not in _DNS_RCODE_VALUES:
+            allowed = ", ".join(sorted(_DNS_RCODE_VALUES))
+            return f"`rcode` 取值无效：{rcode}。按 OneSEC API 文档仅支持：{allowed}。"
+
+    if action in {"dns_search_blocked_queries", "dns_get_recent_blocked_queries"}:
+        block_reason = params.get("block_reason")
+        if _has_value(block_reason) and str(block_reason) not in _DNS_BLOCK_REASON_VALUES:
+            allowed = ", ".join(sorted(_DNS_BLOCK_REASON_VALUES))
+            return f"`block_reason` 取值无效：{block_reason}。按 OneSEC API 文档仅支持：{allowed}。"
+
+    if action == "dns_get_all_destination_list":
+        policy_type = params.get("policy_type")
+        if _has_value(policy_type) and str(policy_type) not in _DNS_POLICY_TYPE_VALUES:
+            allowed = ", ".join(sorted(_DNS_POLICY_TYPE_VALUES))
+            return f"`policy_type` 取值无效：{policy_type}。按 OneSEC API 文档仅支持：{allowed}。"
+
+    if action == "threat_virus_scan":
+        task_type = params.get("task_type", params.get("scan_type"))
+        if _has_value(task_type):
+            try:
+                task_type_int = int(task_type)
+            except (TypeError, ValueError):
+                return f"`task_type`/`scan_type` 取值无效：{task_type}。按 OneSEC API 文档应为整数枚举值。"
+            if task_type_int not in _THREAT_SCAN_TASK_TYPES:
+                allowed = ", ".join(str(item) for item in sorted(_THREAT_SCAN_TASK_TYPES))
+                return f"`task_type`/`scan_type` 取值无效：{task_type_int}。按 OneSEC API 文档仅支持：{allowed}。"
+        scanmode = params.get("scanmode")
+        if _has_value(scanmode):
+            try:
+                scanmode_int = int(scanmode)
+            except (TypeError, ValueError):
+                return f"`scanmode` 取值无效：{scanmode}。按 OneSEC API 文档应为整数枚举值。"
+            if scanmode_int not in _THREAT_SCANMODES:
+                allowed = ", ".join(str(item) for item in sorted(_THREAT_SCANMODES))
+                return f"`scanmode` 取值无效：{scanmode_int}。按 OneSEC API 文档仅支持：{allowed}。"
+
+    if action == "threat_upgrade_bd_version_task":
+        bd_upgrade_type = params.get("bd_upgrade_type")
+        if _has_value(bd_upgrade_type):
+            try:
+                upgrade_int = int(bd_upgrade_type)
+            except (TypeError, ValueError):
+                return f"`bd_upgrade_type` 取值无效：{bd_upgrade_type}。按 OneSEC API 文档应为整数枚举值。"
+            if upgrade_int not in _THREAT_BD_UPGRADE_TYPES:
+                allowed = ", ".join(str(item) for item in sorted(_THREAT_BD_UPGRADE_TYPES))
+                return f"`bd_upgrade_type` 取值无效：{upgrade_int}。按 OneSEC API 文档仅支持：{allowed}。"
+
+    if action == "threat_update_bd_version":
+        os_platform = params.get("os_platform")
+        if _has_value(os_platform) and str(os_platform) not in _THREAT_OS_PLATFORMS:
+            allowed = ", ".join(sorted(_THREAT_OS_PLATFORMS))
+            return f"`os_platform` 取值无效：{os_platform}。按 OneSEC API 文档仅支持：{allowed}。"
+        if str(os_platform) == "macos":
+            os_arch = params.get("os_arch")
+            if _has_value(os_arch) and str(os_arch) not in _THREAT_MAC_ARCHES:
+                allowed = ", ".join(sorted(_THREAT_MAC_ARCHES))
+                return f"`os_arch` 取值无效：{os_arch}。当 `os_platform=macos` 时仅支持：{allowed}。"
+
+    if action == "ops_query_task_page_list":
+        time_type = params.get("time_type")
+        if _has_value(time_type) and str(time_type) not in _OPS_TASK_TIME_TYPES:
+            allowed = ", ".join(sorted(_OPS_TASK_TIME_TYPES))
+            return f"`time_type` 取值无效：{time_type}。按 OneSEC API 文档仅支持：{allowed}。"
+        auto = params.get("auto")
+        if _has_value(auto):
+            try:
+                auto_int = int(auto)
+            except (TypeError, ValueError):
+                return f"`auto` 取值无效：{auto}。按 OneSEC API 文档应为整数枚举值。"
+            if auto_int not in _OPS_TASK_AUTO_VALUES:
+                allowed = ", ".join(str(item) for item in sorted(_OPS_TASK_AUTO_VALUES))
+                return f"`auto` 取值无效：{auto_int}。按 OneSEC API 文档仅支持：{allowed}。"
+
     return None
 
 
@@ -587,13 +912,38 @@ def _validate_action_params(action: str, params: dict[str, Any]) -> Optional[str
     time_err = _validate_time_params(action, params)
     if time_err:
         return time_err
+    enum_err = _validate_enum_params(action, params)
+    if enum_err:
+        return enum_err
 
     missing: list[str] = []
+    unsupported: list[str] = []
 
     if action == "dns_search_blocked_queries":
         missing.extend(_require_fields(params, "time_from", "time_to", "domain", "keyword"))
+        if {
+            "domain",
+            "keyword",
+        }.issubset(set(missing)) and _has_value(params.get("public_ip")):
+            return (
+                "`dns_search_blocked_queries` 按 OneSEC API 文档要求必须传 `domain` 和 `keyword`。"
+                " 如果你当前只有 `public_ip` + 时间范围，且要查询最近 24 小时拦截记录，"
+                " 请改用 `dns_get_recent_blocked_queries`。"
+            )
     elif action == "dns_get_recent_blocked_queries":
         missing.extend(_require_fields(params, "time_from", "time_to"))
+        unsupported.extend(
+            _reject_present_fields(
+                params,
+                "domain",
+                "keyword",
+                "private_ip",
+                "threat_type",
+                "cur_page",
+                "pageitemsnum",
+                "page_items_num",
+            )
+        )
     elif action == "dns_search_queries":
         missing.extend(_require_fields(params, "time_from", "time_to"))
     elif action == "dns_search_threatened_endpoint":
@@ -668,13 +1018,24 @@ def _validate_action_params(action: str, params: dict[str, Any]) -> Optional[str
     elif action == "software_query_agent_list":
         missing.extend(_require_fields(params, "name", "publisher"))
 
-    if not missing:
-        return None
     deduped: list[str] = []
     for item in missing:
         if item not in deduped:
             deduped.append(item)
-    return f"Missing required parameters for {action}: {', '.join(deduped)}"
+    if deduped:
+        return f"Missing required parameters for {action}: {', '.join(deduped)}"
+
+    deduped_unsupported: list[str] = []
+    for item in unsupported:
+        if item not in deduped_unsupported:
+            deduped_unsupported.append(item)
+    if deduped_unsupported:
+        fields = ", ".join(deduped_unsupported)
+        return (
+            f"{action} 按 OneSEC API 文档不支持以下参数: {fields}。"
+            " 若需要按域名或关键字筛选 DNS 拦截记录，请改用 `dns_search_blocked_queries`。"
+        )
+    return None
 
 
 class ActionSpec:
@@ -702,6 +1063,7 @@ ACTION_SPECS: dict[str, ActionSpec] = {
             "domain",
             "keyword",
             "block_reason",
+            "show_unblocked_threat",
             "threat_level",
             "threat_type",
             "cur_page",
@@ -710,7 +1072,15 @@ ACTION_SPECS: dict[str, ActionSpec] = {
     "dns_get_recent_blocked_queries": ActionSpec(
         "POST",
         "/open/api/client/getRecentBlockedQueries",
-        lambda p: _pick(p, "time_from", "time_to", "public_ip", "block_reason", "threat_level"),
+        lambda p: _pick(
+            p,
+            "time_from",
+            "time_to",
+            "public_ip",
+            "block_reason",
+            "show_unblocked_threat",
+            "threat_level",
+        ),
     ),
     "dns_search_queries": ActionSpec("POST", "/open/api/client/searchQueries", _dns_search_queries_payload),
     "dns_search_threatened_endpoint": ActionSpec(
@@ -1053,10 +1423,13 @@ async def unified_ops(ctx: ToolContext, action: str, **params: Any) -> ToolResul
             success=False,
             error=f"Unknown action: {action}. Available actions: {available}",
         )
-    validation_error = _validate_action_params(action, params)
+    normalized_params, normalize_error = _normalize_action_params(action, params)
+    if normalize_error:
+        return ToolResult(success=False, error=normalize_error)
+    validation_error = _validate_action_params(action, normalized_params)
     if validation_error:
         return ToolResult(success=False, error=validation_error)
-    result = await _call_onesec_api(spec.method, spec.path, spec.payload_builder(params))
+    result = await _call_onesec_api(spec.method, spec.path, spec.payload_builder(normalized_params))
     if result.success:
         metadata = dict(result.metadata or {})
         metadata["api"] = action

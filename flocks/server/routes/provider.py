@@ -2525,6 +2525,11 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 # actions (which would each trigger a fresh login attempt).
                 if _is_login_probe(t) or _is_action_dispatch_login_probe(t):
                     priority = -1
+                # OneSEC grouped tools all look equally generic to the default
+                # heuristic, but the threat probe maps to a safer read-only
+                # version query than the legacy DNS probe.
+                elif provider_id == "onesec_api" and name_lower == "onesec_threat":
+                    priority = 0
                 # Prefer query/scan style tools first, and push upload/file tools last.
                 elif "ip" in name_lower:
                     priority = 0
