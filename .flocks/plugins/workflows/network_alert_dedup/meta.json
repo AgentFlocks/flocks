@@ -1,0 +1,10 @@
+{
+  "name": "network_alert_dedup",
+  "description": "网络告警去重 Pipeline：归一化（TDP/Skyeye 字段映射）→ 过滤（剔除扫描/非 HTTP 告警）→ 去重（URI 归一化 + 5-gram Jaccard 相似度聚类）。输入 dict，输出 dict（deduped_alerts / unique_alerts / stats）。",
+  "category": "security",
+  "status": "active",
+  "createdBy": null,
+  "createdAt": 1746691200000,
+  "updatedAt": 1746777600000,
+  "id": "network_alert_dedup"
+}
