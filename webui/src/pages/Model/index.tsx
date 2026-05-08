@@ -2161,6 +2161,18 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   // Catalog model management
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>([]);
   const [selectedModelIds, setSelectedModelIds] = useState<Set<string>>(new Set(models.map(m => m.id)));
+  const [newAzureDeploymentName, setNewAzureDeploymentName] = useState('');
+  const [newAzureDeploymentDisplayName, setNewAzureDeploymentDisplayName] = useState('');
+  const isAzureProvider = provider.id === 'azure-openai' || provider.id === 'azure';
+  const catalogModelIds = useMemo(() => new Set(catalogModels.map(m => m.id)), [catalogModels]);
+  const selectedCatalogModelCount = useMemo(
+    () => catalogModels.filter(m => selectedModelIds.has(m.id)).length,
+    [catalogModels, selectedModelIds]
+  );
+  const azureCustomModels = useMemo(
+    () => isAzureProvider ? models.filter(m => !catalogModelIds.has(m.id)) : [],
+    [catalogModelIds, isAzureProvider, models]
+  );
 
   useEffect(() => {
     setApiKey(existingKey);
@@ -2222,6 +2234,13 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
           ...toDelete.map(m => modelV2API.deleteDefinition(provider.id, m.id).catch(() => {})),
           ...toAdd.map(m => modelV2API.createDefinition(provider.id, { model_id: m.id, name: m.name }).catch(() => {})),
         ]);
+      }
+      const azureModelId = newAzureDeploymentName.trim();
+      if (isAzureProvider && azureModelId) {
+        await modelV2API.createDefinition(provider.id, {
+          model_id: azureModelId,
+          name: newAzureDeploymentDisplayName.trim() || azureModelId,
+        });
       }
 
       toast.success(t('credentialsSaved'));
@@ -2418,7 +2437,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               <label className="text-sm font-medium text-gray-700">
                 {t('form.availableModels')}
                 <span className="text-gray-400 font-normal ml-1">
-                  ({selectedModelIds.size}/{catalogModels.length} {t('form.selected')})
+                  ({selectedCatalogModelCount}/{catalogModels.length} {t('form.selected')})
                 </span>
               </label>
               <button type="button" onClick={handleToggleAllCatalogModels} className="text-xs text-slate-600 hover:text-slate-800">
@@ -2452,6 +2471,55 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
                   </div>
                 </label>
               ))}
+            </div>
+          </div>
+        )}
+
+        {isAzureProvider && (
+          <div className="space-y-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div>
+              <h4 className="text-sm font-medium text-gray-900">{t('form.azureCustomDeployments')}</h4>
+              <p className="mt-1 text-xs text-blue-800">{t('form.azureDeploymentHint')}</p>
+            </div>
+
+            {azureCustomModels.length > 0 ? (
+              <div className="space-y-2">
+                {azureCustomModels.map(model => (
+                  <div key={model.id} className="px-3 py-2 bg-white border border-blue-100 rounded-lg">
+                    <div className="text-sm font-medium text-gray-900">{model.name || model.id}</div>
+                    <div className="text-xs text-gray-500 font-mono mt-0.5">{model.id}</div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">{t('form.azureNoCustomDeployments')}</p>
+            )}
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {t('form.azureDeploymentName')}
+                </label>
+                <input
+                  type="text"
+                  value={newAzureDeploymentName}
+                  onChange={e => setNewAzureDeploymentName(e.target.value)}
+                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  placeholder={t('form.azureDeploymentPlaceholder')}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  {t('form.azureDeploymentDisplayName')}
+                </label>
+                <input
+                  type="text"
+                  value={newAzureDeploymentDisplayName}
+                  onChange={e => setNewAzureDeploymentDisplayName(e.target.value)}
+                  className="w-full px-3 py-2 border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 text-sm bg-white"
+                  placeholder={newAzureDeploymentName.trim() || t('form.azureDeploymentDisplayPlaceholder')}
+                />
+              </div>
             </div>
           </div>
         )}
