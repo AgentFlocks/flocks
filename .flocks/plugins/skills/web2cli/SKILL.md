@@ -1,6 +1,6 @@
 ---
 name: web2cli
-description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档和 Postman 集合。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chromium 系浏览器登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
+description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chromium 系浏览器登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
 required: browser-use
 ---
 
@@ -425,9 +425,9 @@ else:
 ### 11. summary
 
 总结当前 生成 的CLI 工具有哪些能力，然后可提示用户下一步操作：
-- 保存为对应的 skill 方便后续操作
 - 精简或修正CLI
 - 进一步丰富 CLI 工具，重新开始 web2cli标准流程
+- 保存为对应的 skill 方便后续操作（进入此操作后，需要阅读references）
 
 ## 故障处理
 
@@ -459,3 +459,6 @@ else:
 
 - `agent-browser`：重新登录后再次执行保存状态命令。
 - `cdp-direct`：重新登录后再次执行保存认证状态。
+
+## Reference
+- references/cli-in-skill.md 将生成的 CLI 集成到 skill 中使用
