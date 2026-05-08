@@ -1,4 +1,4 @@
-# network_alert_dedup
+# http_alert_dedup
 
 网络告警去重 Pipeline，三阶段处理：**归一化 → 过滤 → 去重**。
 
