@@ -349,6 +349,20 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     return list(by_id.values())
 
 
+async def sync_workflows_from_filesystem() -> int:
+    """Scan all workflow directories on the filesystem and return the count of discovered workflows.
+
+    Called at server startup (app.py) to surface any filesystem-only workflows early.
+    The filesystem is already the sole source of truth for workflow definitions, so this
+    function only needs to scan and count—no data needs to be written anywhere.
+    It also triggers the one-time storage → filesystem migration as a side-effect.
+    """
+    await _migrate_storage_to_filesystem()
+    all_data = _list_workflows_from_fs()
+    log.info("workflow.sync.filesystem", {"count": len(all_data)})
+    return len(all_data)
+
+
 async def _migrate_storage_to_filesystem() -> None:
     """One-time migration: move Storage-only workflow definitions to the filesystem.
 
