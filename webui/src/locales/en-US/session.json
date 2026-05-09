@@ -89,12 +89,15 @@
     },
     "upload": {
       "select": "Upload documents",
+      "selectWithImage": "Upload files or images",
       "remove": "Remove file",
       "retry": "Retry upload",
       "dropHint": "Drop document files to upload",
       "waiting": "Files are still uploading. Please wait before sending.",
       "invalidType": "Only txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, and xlsx files are supported",
-      "errorGeneric": "Upload failed. Please try again."
+      "errorGeneric": "Upload failed. Please try again.",
+      "imageNotSupported": "The current model does not support image analysis. Please select a vision-capable model in the model settings.",
+      "imageNotSupportedBanner": "Image analysis is not supported by the current model"
     },
     "tool": {
       "pending": "Pending",
