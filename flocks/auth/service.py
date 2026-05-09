@@ -15,6 +15,7 @@ import aiosqlite
 from pydantic import BaseModel, Field
 
 from flocks.auth.context import AuthUser
+from flocks.extensions import ensure_callable_methods
 from flocks.storage.storage import Storage
 from flocks.utils.id import Identifier
 from flocks.utils.log import Log
@@ -64,8 +65,8 @@ class LocalUser(BaseModel):
         )
 
 
-class AuthService:
-    """Single-admin account and session service."""
+class LocalAuthBackend:
+    """Default local account/session backend."""
 
     _initialized: bool = False
     _initialized_db_path: Optional[str] = None
@@ -82,6 +83,8 @@ class AuthService:
         db_path = Storage.get_db_path()
         if cls._initialized and cls._initialized_db_path == str(db_path) and db_path.exists():
             return
+        # Switching to a new DB path (common in tests) must clear cached state.
+        cls._has_users_cached = False
         async with aiosqlite.connect(db_path) as db:
             await db.executescript(
                 """
@@ -586,3 +589,76 @@ class AuthService:
         except Exception as exc:
             log.warn("auth.migrate_legacy_sessions.failed", {"error": str(exc)})
             raise
+
+
+class _AuthServiceFacadeMeta(type):
+    """Delegate unknown class attributes to the configured backend."""
+
+    _MIRRORED_STATE_ATTRS = ("_initialized", "_initialized_db_path", "_has_users_cached")
+
+    def __getattr__(cls, name: str):
+        backend = cls.get_backend()
+        return getattr(backend, name)
+
+    def __setattr__(cls, name: str, value):
+        super().__setattr__(name, value)
+        if name in cls._MIRRORED_STATE_ATTRS and hasattr(cls, "_backend"):
+            backend = cls.get_backend()
+            if hasattr(backend, name):
+                setattr(backend, name, value)
+
+
+class AuthService(metaclass=_AuthServiceFacadeMeta):
+    """
+    Authentication facade.
+
+    The OSS default backend is ``LocalAuthBackend``. Flocks Pro packages can
+    swap in a compatible backend via ``register_backend``.
+    """
+
+    _backend = LocalAuthBackend
+    _initialized = LocalAuthBackend._initialized
+    _initialized_db_path = LocalAuthBackend._initialized_db_path
+    _has_users_cached = LocalAuthBackend._has_users_cached
+
+    @classmethod
+    def register_backend(cls, backend) -> None:
+        if backend is None:
+            raise ValueError("backend 不能为空")
+        ensure_callable_methods(
+            backend,
+            (
+                "init",
+                "has_users",
+                "get_bootstrap_status",
+                "bootstrap_admin",
+                "get_user_by_id",
+                "get_user_by_username",
+                "list_users",
+                "get_user_by_session_id",
+                "revoke_session",
+                "login",
+                "change_password",
+                "set_password",
+                "generate_admin_temp_password",
+                "reassign_orphan_sessions",
+                "migrate_legacy_sessions_to_admin",
+            ),
+            label="auth backend",
+        )
+        cls._backend = backend
+        for attr in _AuthServiceFacadeMeta._MIRRORED_STATE_ATTRS:
+            if hasattr(backend, attr):
+                setattr(backend, attr, getattr(cls, attr))
+        log.info("auth.backend.registered", {"backend": getattr(backend, "__name__", str(backend))})
+
+    @classmethod
+    def reset_backend(cls) -> None:
+        cls._backend = LocalAuthBackend
+        for attr in _AuthServiceFacadeMeta._MIRRORED_STATE_ATTRS:
+            setattr(LocalAuthBackend, attr, getattr(cls, attr))
+        log.info("auth.backend.reset", {"backend": "LocalAuthBackend"})
+
+    @classmethod
+    def get_backend(cls):
+        return cls._backend

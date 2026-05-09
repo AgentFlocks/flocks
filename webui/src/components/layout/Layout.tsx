@@ -308,6 +308,7 @@ export default function Layout() {
     {
       name: t('management'),
       items: [
+        { name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle },
         { name: t('accountManagement'), href: '/config', icon: UserCog },
       ],
     },

@@ -23,7 +23,9 @@ Safety guarantees
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import importlib.util
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -267,6 +269,9 @@ class PluginLoader:
             if extra_sources:
                 cls._load_sources_for_ext(ext, extra_sources, project_dir)
 
+        # 4. Installed package entry-points
+        cls._load_entry_points()
+
     @classmethod
     def load_for_extension(
         cls,
@@ -328,6 +333,43 @@ class PluginLoader:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    @classmethod
+    def _load_entry_points(cls) -> None:
+        """
+        Load installed package entry-points under ``flocks.plugins``.
+
+        Entry-point target is expected to be callable, supporting either:
+        - ``fn(loader_cls)``, or
+        - ``fn()``.
+        """
+        group = "flocks.plugins"
+        try:
+            eps = importlib.metadata.entry_points().select(group=group)
+        except Exception as e:
+            log.debug("plugin.entrypoints.scan_failed", {"group": group, "error": str(e)})
+            return
+
+        for ep in eps:
+            try:
+                target = ep.load()
+            except Exception as e:
+                log.warning("plugin.entrypoint.load_failed", {"name": ep.name, "error": str(e)})
+                continue
+
+            if not callable(target):
+                log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
+                continue
+
+            try:
+                signature = inspect.signature(target)
+                if len(signature.parameters) >= 1:
+                    target(cls)
+                else:
+                    target()
+                log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
+            except Exception as e:
+                log.warning("plugin.entrypoint.invoke_failed", {"name": ep.name, "error": str(e)})
 
     @classmethod
     def _load_sources_for_ext(

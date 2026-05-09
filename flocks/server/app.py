@@ -5,10 +5,12 @@ Main HTTP API server for AI-Native SecOps Platform
 """
 
 import asyncio
+import inspect
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Awaitable, Any
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +23,111 @@ from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
+from flocks.audit import emit_audit_event
+from flocks.extensions import (
+    FailPolicy,
+    handler_name,
+    normalize_fail_policy,
+    normalize_timeout,
+)
+from flocks.license import assert_license_active
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+
+HttpMiddlewareHook = Callable[[Request, dict[str, Any]], Awaitable[None]]
+
+
+@dataclass(order=True)
+class _HttpMiddlewareHookEntry:
+    priority: int
+    name: str
+    hook: HttpMiddlewareHook = field(compare=False)
+    timeout_seconds: Optional[float] = field(default=None, compare=False)
+    fail_policy: FailPolicy = field(default=FailPolicy.ISOLATE, compare=False)
+
+    @property
+    def critical(self) -> bool:
+        return self.fail_policy in {FailPolicy.PROPAGATE, FailPolicy.FAIL_CLOSED}
+
+
+_http_middleware_hooks: list[_HttpMiddlewareHookEntry] = []
+
+
+def register_http_middleware(
+    hook: HttpMiddlewareHook,
+    *,
+    priority: int = 100,
+    name: Optional[str] = None,
+    critical: bool = False,
+    timeout_seconds: Optional[float] = None,
+    fail_policy: FailPolicy | str | None = None,
+) -> None:
+    """
+    Register lightweight HTTP hook callbacks.
+
+    Hook receives:
+    - request
+    - context dict with ``stage`` in {"before_auth","after_auth","after_response"}
+    """
+    entry = _HttpMiddlewareHookEntry(
+        priority=priority,
+        name=handler_name(hook, name),
+        hook=hook,
+        timeout_seconds=normalize_timeout(timeout_seconds),
+        fail_policy=normalize_fail_policy(fail_policy, critical=critical),
+    )
+    _http_middleware_hooks[:] = [
+        existing for existing in _http_middleware_hooks
+        if existing.name != entry.name
+    ]
+    _http_middleware_hooks.append(entry)
+    _http_middleware_hooks.sort()
+
+
+async def _invoke_http_middleware_hook(
+    entry: _HttpMiddlewareHookEntry,
+    request: Request,
+    context: dict[str, Any],
+) -> None:
+    result = entry.hook(request, context)
+    if inspect.isawaitable(result):
+        await result
+
+
+async def _run_http_middleware_hooks(request: Request, context: dict[str, Any]) -> None:
+    for entry in list(_http_middleware_hooks):
+        started_at = time.perf_counter()
+        try:
+            if entry.timeout_seconds is not None:
+                await asyncio.wait_for(
+                    _invoke_http_middleware_hook(entry, request, context),
+                    timeout=entry.timeout_seconds,
+                )
+            else:
+                await _invoke_http_middleware_hook(entry, request, context)
+        except asyncio.TimeoutError:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            log = Log.create(service="server")
+            log.warning("http.middleware_hook.timeout", {
+                "name": entry.name,
+                "stage": context.get("stage"),
+                "duration_ms": duration_ms,
+                "timeout_ms": int((entry.timeout_seconds or 0) * 1000),
+                "critical": entry.critical,
+                "fail_policy": entry.fail_policy.value,
+            })
+            if entry.fail_policy != FailPolicy.ISOLATE:
+                raise
+        except Exception as exc:
+            log = Log.create(service="server")
+            log.warning("http.middleware_hook.failed", {
+                "name": entry.name,
+                "error": str(exc),
+                "stage": context.get("stage"),
+                "critical": entry.critical,
+                "fail_policy": entry.fail_policy.value,
+            })
+            if entry.fail_policy != FailPolicy.ISOLATE:
+                raise
 
 # Load .env file at startup
 try:
@@ -103,6 +209,9 @@ async def lifespan(app: FastAPI):
     # Initialize local auth/account tables
     await AuthService.init()
     log.info("auth.initialized")
+
+    # OSS default checker is AlwaysOk; Flocks Pro can swap at runtime.
+    await assert_license_active(feature="startup")
 
     # Best-effort migration: old sessions default to admin ownership.
     # The migration itself is idempotent (guarded by a persisted marker),
@@ -187,6 +296,14 @@ async def lifespan(app: FastAPI):
         from flocks.task.manager import TaskManager
         TaskManager.mark_start_failed(e)
         log.warning("task_manager.start.failed", {"error": str(e)})
+
+    # Start cloud heartbeat/profile scheduler (best-effort).
+    try:
+        from flocks.cloud.scheduler import CloudSyncScheduler
+        await CloudSyncScheduler.start()
+        log.info("cloud.sync.scheduler.started")
+    except Exception as e:
+        log.warning("cloud.sync.scheduler.start_failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
     try:
@@ -283,6 +400,14 @@ async def lifespan(app: FastAPI):
         log.info("task_manager.stopped")
     except Exception as e:
         log.warning("task_manager.stop.failed", {"error": str(e)})
+
+    # Stop cloud heartbeat/profile scheduler.
+    try:
+        from flocks.cloud.scheduler import CloudSyncScheduler
+        await CloudSyncScheduler.stop()
+        log.info("cloud.sync.scheduler.stopped")
+    except Exception as e:
+        log.warning("cloud.sync.scheduler.stop_failed", {"error": str(e)})
     
     # Stop Skill file watcher
     try:
@@ -547,6 +672,18 @@ async def log_requests(request: Request, call_next):
             "status": response.status_code,
             "duration": duration_ms,
         })
+        try:
+            await emit_audit_event(
+                "http_request",
+                {
+                    "method": request.method,
+                    "path": path,
+                    "status": response.status_code,
+                    "duration_ms": duration_ms,
+                },
+            )
+        except Exception as exc:
+            log.debug("audit.emit.failed", {"error": str(exc), "path": path})
 
     return response
 
@@ -555,7 +692,9 @@ async def log_requests(request: Request, call_next):
 async def auth_guard_middleware(request: Request, call_next):
     """Guard requests with local account auth, except public endpoints."""
     try:
+        await _run_http_middleware_hooks(request, {"stage": "before_auth"})
         _blocked, token, _user = await apply_auth_for_request(request)
+        await _run_http_middleware_hooks(request, {"stage": "after_auth", "user": _user})
     except StarletteHTTPException as exc:
         return JSONResponse(
             status_code=exc.status_code,
@@ -572,7 +711,12 @@ async def auth_guard_middleware(request: Request, call_next):
         )
 
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        await _run_http_middleware_hooks(
+            request,
+            {"stage": "after_response", "status_code": getattr(response, "status_code", None)},
+        )
+        return response
     finally:
         clear_auth_context(token)
 
@@ -697,6 +841,7 @@ from flocks.server.routes.logs import router as logs_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
+from flocks.server.routes.cloud_upgrade import router as cloud_upgrade_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -750,6 +895,7 @@ app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
+app.include_router(cloud_upgrade_router, prefix="/api/cloud", tags=["CloudUpgrade"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -812,6 +958,7 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
+app.include_router(cloud_upgrade_router, prefix="/cloud", tags=["CloudUpgrade"])
 
 
 @app.get("/", tags=["Root"])

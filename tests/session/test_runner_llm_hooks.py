@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -92,6 +93,49 @@ async def test_hook_pipeline_runs_llm_stages():
         ("llm.call.before", "req-1"),
         ("llm.call.after", "ok"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_hook_pipeline_timeout_isolated_by_default():
+    seen: list[str] = []
+
+    class _SlowHook(HookBase):
+        async def llm_before(self, ctx) -> None:
+            await asyncio.sleep(0.05)
+            seen.append("slow")
+
+    class _FastHook(HookBase):
+        async def llm_before(self, ctx) -> None:
+            seen.append("fast")
+
+    HookPipeline.register("test-slow-hook", _SlowHook(), timeout_seconds=0.01)
+    HookPipeline.register("test-fast-hook", _FastHook())
+    try:
+        await HookPipeline.run_llm_before({"request_id": "req-timeout"})
+    finally:
+        HookPipeline.unregister("test-slow-hook")
+        HookPipeline.unregister("test-fast-hook")
+
+    assert seen == ["fast"]
+
+
+@pytest.mark.asyncio
+async def test_hook_pipeline_timeout_can_propagate():
+    class _SlowHook(HookBase):
+        async def llm_before(self, ctx) -> None:
+            await asyncio.sleep(0.05)
+
+    HookPipeline.register(
+        "test-critical-slow-hook",
+        _SlowHook(),
+        timeout_seconds=0.01,
+        fail_policy="propagate",
+    )
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await HookPipeline.run_llm_before({"request_id": "req-timeout"})
+    finally:
+        HookPipeline.unregister("test-critical-slow-hook")
 
 
 @pytest.mark.asyncio

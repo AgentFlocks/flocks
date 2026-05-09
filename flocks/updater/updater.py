@@ -680,6 +680,31 @@ def _resolve_update_mirror_profile(
     return UpdateMirrorProfile(region=None, sources=sources)
 
 
+async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[str]:
+    """
+    Resolve effective sources by runtime edition state.
+
+    Flocks Pro mode prefers cloud manifest source.
+    """
+    sources = list(configured_sources)
+    edition = (os.getenv("FLOCKS_EDITION") or "").strip().lower()
+
+    if not edition:
+        try:
+            from flocks.storage.storage import Storage
+
+            cloud_session = await Storage.get("cloud:session", dict)
+            if isinstance(cloud_session, dict) and cloud_session.get("cloud_session_token"):
+                edition = "flockspro"
+        except Exception:
+            edition = ""
+
+    if edition == "flockspro" and "cloud-manifest" not in sources:
+        sources.insert(0, "cloud-manifest")
+
+    return sources
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitHub
 # ------------------------------------------------------------------ #
@@ -831,6 +856,48 @@ async def _fetch_gitlab_release(
     )
 
 
+async def _fetch_cloud_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
+    """
+    Fetch latest version from cloud manifest service.
+
+    Expected response keys:
+    - latest_version (required)
+    - release_notes / release_url (optional)
+    - zipball_url / tarball_url (optional)
+    """
+    manifest_base = os.getenv("FLOCKS_MANIFEST_BASE_URL", "").rstrip("/")
+    if not manifest_base:
+        raise ValueError("FLOCKS_MANIFEST_BASE_URL 未配置，无法使用 cloud-manifest 源")
+
+    url = f"{manifest_base}/v1/manifest/latest?channel=flockspro"
+    headers: dict[str, str] = {}
+    try:
+        from flocks.storage.storage import Storage
+
+        session = await Storage.get("cloud:session", dict)
+        token = session.get("cloud_session_token") if isinstance(session, dict) else None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    except Exception:
+        pass
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=headers, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+
+    latest = str(data.get("latest_version", "")).lstrip("v")
+    if not latest:
+        raise ValueError("manifest 响应缺少 latest_version")
+    return (
+        latest,
+        data.get("release_notes"),
+        data.get("release_url"),
+        data.get("zipball_url"),
+        data.get("tarball_url"),
+    )
+
+
 # ------------------------------------------------------------------ #
 # Multi-source dispatcher
 # ------------------------------------------------------------------ #
@@ -851,6 +918,8 @@ async def _fetch_release_from_source(
         return await _fetch_gitee_release(gitee_repo or repo, gitee_token)
     if source == "gitlab":
         return await _fetch_gitlab_release(repo, token, base_url)
+    if source == "cloud-manifest":
+        return await _fetch_cloud_manifest_release()
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -873,6 +942,13 @@ def _archive_url_for_source(
         base = (base_url or "https://gitlab.com").rstrip("/")
         proj = repo.split("/")[-1]
         return f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
+    if source == "cloud-manifest":
+        manifest_base = os.getenv("FLOCKS_MANIFEST_BASE_URL", "").rstrip("/")
+        if not manifest_base:
+            raise ValueError("FLOCKS_MANIFEST_BASE_URL 未配置")
+        raw_tag = tag if tag.startswith("v") else f"v{tag}"
+        ext = "zip" if fmt == "zip" else "tar.gz"
+        return f"{manifest_base}/v1/manifest/archive/{raw_tag}.{ext}"
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -1807,8 +1883,9 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
     current = get_current_version()
     mode = detect_deploy_mode()
     ucfg = await _get_updater_config()
+    effective_sources = await _resolve_sources_for_edition(ucfg.sources)
     profile = _resolve_update_mirror_profile(
-        ucfg.sources,
+        effective_sources,
         region=region,
         locale=locale,
     )
@@ -1873,8 +1950,9 @@ async def perform_update(
     If one source fails the download, the next source is tried automatically.
     """
     ucfg = await _get_updater_config()
+    effective_sources = await _resolve_sources_for_edition(ucfg.sources)
     profile = _resolve_update_mirror_profile(
-        ucfg.sources,
+        effective_sources,
         region=region,
         locale=locale,
     )
