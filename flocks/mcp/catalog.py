@@ -7,7 +7,7 @@ Provides discovery, search, and configuration generation for MCP servers.
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -78,6 +78,19 @@ class InstallSpec(BaseModel):
     note: Optional[str] = None
 
 
+class RemoteConfigSpec(BaseModel):
+    """Remote MCP configuration template stored in the catalog."""
+
+    model_config = {"extra": "allow"}
+
+    url: str = ""
+    transport: Literal["auto", "sse", "http"] = "auto"
+    headers: Optional[Dict[str, str]] = None
+    auth: Optional[Dict[str, Any]] = None
+    oauth: Optional[Any] = None
+    timeout: Optional[int] = None
+
+
 class CatalogEntry(BaseModel):
     """A single MCP server entry in the catalog."""
 
@@ -94,6 +107,7 @@ class CatalogEntry(BaseModel):
     stars: int = 0
     transport: str = "local"
     install: InstallSpec = Field(default_factory=InstallSpec)
+    remote: Optional[RemoteConfigSpec] = None
     env_vars: Dict[str, EnvVarSpec] = Field(default_factory=dict)
     system_deps: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
@@ -179,11 +193,24 @@ class CatalogEntry(BaseModel):
             return config
 
         elif self.transport == "remote":
-            return {
+            config: Dict[str, Any] = {
                 "type": "remote",
-                "url": env.get("url", ""),
+                "url": env.get("url", self.remote.url if self.remote else ""),
                 "enabled": False,
             }
+            if self.remote:
+                remote_template = self.remote.model_dump(exclude_none=True)
+                if "transport" in remote_template:
+                    config["transport"] = remote_template["transport"]
+                if remote_template.get("headers"):
+                    config["headers"] = remote_template["headers"]
+                if remote_template.get("auth"):
+                    config["auth"] = remote_template["auth"]
+                if "oauth" in remote_template:
+                    config["oauth"] = remote_template["oauth"]
+                if remote_template.get("timeout") is not None:
+                    config["timeout"] = remote_template["timeout"]
+            return config
 
         return {}
 

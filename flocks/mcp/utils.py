@@ -86,11 +86,21 @@ def resolve_url_template(url: str) -> str:
 def normalize_mcp_config_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize transport aliases to canonical backend config values."""
     normalized = dict(config)
-    transport = str(normalized.get("type", "")).strip().lower()
-    if transport == "sse":
+    server_type = str(normalized.get("type", "")).strip().lower()
+    if server_type == "sse":
         normalized["type"] = "remote"
-    elif transport == "stdio":
+        normalized.setdefault("transport", "sse")
+    elif server_type == "stdio":
         normalized["type"] = "local"
+
+    transport = str(normalized.get("transport", "")).strip().lower()
+    if normalized.get("type") in REMOTE_MCP_TYPES:
+        if transport in ("", "auto"):
+            normalized["transport"] = "auto"
+        elif transport in ("streamablehttp", "streamable_http", "http"):
+            normalized["transport"] = "http"
+        elif transport == "sse":
+            normalized["transport"] = "sse"
     return normalized
 
 
@@ -204,6 +214,12 @@ def build_mcp_headers(
     if auth_config and auth_config.get("location", "header") == "header":
         param_name = str(auth_config.get("param_name", "Authorization"))
         param_value = resolve_env_var(str(auth_config.get("value", "")))
+        if (
+            str(auth_config.get("scheme", "")).strip().lower() == "bearer"
+            and param_value
+            and not param_value.lower().startswith("bearer ")
+        ):
+            param_value = f"Bearer {param_value}"
         if param_value:
             headers.setdefault(param_name, param_value)
 
@@ -317,6 +333,49 @@ def extract_api_key_from_mcp_url(server_name: str, config: Dict[str, Any]) -> Di
         new_url += "#" + fragment
 
     return {**config, "url": new_url}
+
+
+def extract_auth_value_from_mcp_config(server_name: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Move plain-text ``auth.value`` into SecretManager and keep a secret reference."""
+    auth_config = config.get("auth")
+    if not isinstance(auth_config, dict):
+        return dict(config)
+
+    auth_value = auth_config.get("value")
+    if not isinstance(auth_value, str):
+        return dict(config)
+
+    auth_value = auth_value.strip()
+    if not auth_value or auth_value.startswith("{secret:") or auth_value.startswith("${"):
+        return dict(config)
+
+    updated_auth = dict(auth_config)
+    scheme = str(updated_auth.get("scheme", "")).strip().lower()
+    if (
+        not scheme
+        and str(updated_auth.get("location", "")).strip().lower() == "header"
+        and str(updated_auth.get("param_name", "")).strip().lower() == "authorization"
+        and auth_value.lower().startswith("bearer ")
+    ):
+        scheme = "bearer"
+    if scheme == "bearer":
+        updated_auth["scheme"] = "bearer"
+        if auth_value.lower().startswith("bearer "):
+            auth_value = auth_value[7:].strip()
+    elif "scheme" in updated_auth and not scheme:
+        updated_auth.pop("scheme", None)
+
+    secret_key = str(auth_config.get("secret_id") or f"{server_name}_mcp_key")
+    from flocks.security import get_secret_manager
+
+    get_secret_manager().set(secret_key, auth_value)
+
+    updated_auth["value"] = f"{{secret:{secret_key}}}"
+    updated_auth.pop("secret_id", None)
+
+    updated_config = dict(config)
+    updated_config["auth"] = updated_auth
+    return updated_config
 
 
 def resolve_env_var(value: str) -> str:
@@ -469,6 +528,8 @@ __all__ = [
     'build_mcp_url',
     'build_mcp_headers',
     'config_has_pending_credentials',
+    'extract_api_key_from_mcp_url',
+    'extract_auth_value_from_mcp_config',
     'get_connect_block_reason',
     'is_auth_related_error',
     'normalize_mcp_config',

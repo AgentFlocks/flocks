@@ -206,6 +206,7 @@ class McpRemoteConfig(BaseModel):
     type: Literal["remote", "sse"]
     url: str
     enabled: Optional[bool] = None
+    transport: Optional[Literal["auto", "sse", "http"]] = "auto"
     headers: Optional[Dict[str, str]] = None
     oauth: Optional[Union[McpOAuthConfig, Literal[False]]] = None
     timeout: Optional[int] = Field(None, gt=0)

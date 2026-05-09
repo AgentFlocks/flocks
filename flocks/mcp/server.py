@@ -200,6 +200,7 @@ class McpServerManager:
                 headers=config.get('headers'),
                 env=config.get('environment'),
                 auth_config=config.get('auth'),
+                transport=config.get('transport', 'auto'),
                 timeout=config.get('timeout', 30.0)
             )
             

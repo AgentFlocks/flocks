@@ -13,6 +13,7 @@ from flocks.mcp.utils import (
     build_mcp_url,
     config_has_pending_credentials,
     extract_api_key_from_mcp_url,
+    extract_auth_value_from_mcp_config,
     get_connect_block_reason,
     normalize_mcp_config,
     resolve_env_var,
@@ -94,6 +95,28 @@ class TestBuildMcpHeaders:
             "Authorization": "Bearer token123",
         }
 
+    def test_with_bearer_scheme_prefixes_secret_value(self):
+        """Bearer auth should prepend the scheme after resolving the secret."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            secret_file = Path(tmpdir) / ".secret.json"
+            secret_file.write_text(json.dumps({"demo_mcp_key": "token123"}))
+            secret_file.chmod(0o600)
+
+            from flocks.security.secrets import SecretManager
+            sm = SecretManager(secret_file=secret_file)
+            with mock.patch("flocks.security.secrets.get_secret_manager", return_value=sm):
+                headers = build_mcp_headers(
+                    None,
+                    {
+                        "type": "apikey",
+                        "location": "header",
+                        "param_name": "Authorization",
+                        "scheme": "bearer",
+                        "value": "{secret:demo_mcp_key}",
+                    },
+                )
+                assert headers == {"Authorization": "Bearer token123"}
+
     def test_header_secret_is_resolved(self):
         """Header values should resolve {secret:KEY} placeholders"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -123,6 +146,29 @@ class TestNormalizeMcpConfig:
             "type": "local",
             "command": ["uvx", "mcp-server", "--port", "8080"],
         }
+
+    def test_normalizes_sse_alias_to_remote_transport(self):
+        config = normalize_mcp_config(
+            {
+                "type": "sse",
+                "url": "https://example.com/sse",
+            }
+        )
+        assert config == {
+            "type": "remote",
+            "url": "https://example.com/sse",
+            "transport": "sse",
+        }
+
+    def test_normalizes_streamable_http_transport_alias(self):
+        config = normalize_mcp_config(
+            {
+                "type": "remote",
+                "url": "https://example.com/mcp",
+                "transport": "streamable_http",
+            }
+        )
+        assert config["transport"] == "http"
 
 
 class TestCredentialStateHelpers:
@@ -181,6 +227,82 @@ class TestExtractApiKeyFromMcpUrl:
 
         get_secret_manager.assert_not_called()
         assert updated["url"] == "https://example.com/mcp?apikey={secret:demo-mcp_mcp_key}"
+
+
+class TestExtractAuthValueFromMcpConfig:
+    """Test secret extraction from MCP auth config."""
+
+    def test_extracts_plain_auth_value_to_secret_reference(self):
+        saved_secrets: dict[str, str] = {}
+
+        class SecretManagerStub:
+            def set(self, key: str, value: str) -> None:
+                saved_secrets[key] = value
+
+        with mock.patch("flocks.security.get_secret_manager", return_value=SecretManagerStub()):
+            updated = extract_auth_value_from_mcp_config(
+                "demo-mcp",
+                {
+                    "type": "remote",
+                    "url": "https://example.com/sse",
+                    "auth": {
+                        "type": "apikey",
+                        "location": "header",
+                        "param_name": "Authorization",
+                        "scheme": "bearer",
+                        "value": "Bearer token123",
+                    },
+                },
+            )
+
+        assert saved_secrets == {"demo-mcp_mcp_key": "token123"}
+        assert updated["auth"]["value"] == "{secret:demo-mcp_mcp_key}"
+        assert updated["auth"]["scheme"] == "bearer"
+
+    def test_infers_bearer_scheme_from_authorization_header(self):
+        saved_secrets: dict[str, str] = {}
+
+        class SecretManagerStub:
+            def set(self, key: str, value: str) -> None:
+                saved_secrets[key] = value
+
+        with mock.patch("flocks.security.get_secret_manager", return_value=SecretManagerStub()):
+            updated = extract_auth_value_from_mcp_config(
+                "demo-mcp",
+                {
+                    "type": "remote",
+                    "url": "https://example.com/sse",
+                    "auth": {
+                        "type": "apikey",
+                        "location": "header",
+                        "param_name": "Authorization",
+                        "value": "Bearer token123",
+                    },
+                },
+            )
+
+        assert saved_secrets == {"demo-mcp_mcp_key": "token123"}
+        assert updated["auth"]["value"] == "{secret:demo-mcp_mcp_key}"
+        assert updated["auth"]["scheme"] == "bearer"
+
+    def test_keeps_existing_secret_reference_unchanged(self):
+        with mock.patch("flocks.security.get_secret_manager") as get_secret_manager:
+            updated = extract_auth_value_from_mcp_config(
+                "demo-mcp",
+                {
+                    "type": "remote",
+                    "url": "https://example.com/sse",
+                    "auth": {
+                        "type": "apikey",
+                        "location": "header",
+                        "param_name": "Authorization",
+                        "value": "{secret:demo-mcp_mcp_key}",
+                    },
+                },
+            )
+
+        get_secret_manager.assert_not_called()
+        assert updated["auth"]["value"] == "{secret:demo-mcp_mcp_key}"
 
 
 class TestResolveEnvVar:

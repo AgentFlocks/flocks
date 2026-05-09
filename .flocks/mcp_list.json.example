@@ -74,6 +74,16 @@
       "license": "Proprietary",
       "stars": 0,
       "transport": "remote",
+      "remote": {
+        "url": "https://mcp.threatbook.cn/mcp",
+        "transport": "auto",
+        "auth": {
+          "type": "apikey",
+          "location": "query",
+          "param_name": "apikey",
+          "value": "{secret:threatbook_mcp_key}"
+        }
+      },
       "env_vars": {
         "THREATBOOK_MCP_KEY": {
           "required": true,
@@ -99,6 +109,16 @@
       "license": "Proprietary",
       "stars": 0,
       "transport": "remote",
+      "remote": {
+        "url": "https://mcp.nsfocus.cn/mcp",
+        "transport": "auto",
+        "auth": {
+          "type": "apikey",
+          "location": "query",
+          "param_name": "apikey",
+          "value": "{secret:nsfocus_mcp_key}"
+        }
+      },
       "env_vars": {
         "NSFOCUS_MCP_KEY": {
           "required": true,
@@ -124,6 +144,16 @@
       "license": "Proprietary",
       "stars": 0,
       "transport": "remote",
+      "remote": {
+        "url": "https://mcp.ti.qianxin.com/ti-stream-mcp",
+        "transport": "auto",
+        "auth": {
+          "type": "apikey",
+          "location": "query",
+          "param_name": "apikey",
+          "value": "{secret:qianxin_mcp_key}"
+        }
+      },
       "env_vars": {
         "QIANXIN_MCP_KEY": {
           "required": true,

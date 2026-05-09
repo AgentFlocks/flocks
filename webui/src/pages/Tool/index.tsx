@@ -49,7 +49,7 @@ import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
 import type { MCPServerDetail, MCPCredentials, MCPCredentialInput, MCPCatalogEntry, MCPCatalogCategory } from '@/types';
-import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields } from './ToolSheets';
+import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig } from './ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from './ToolSheets';
 import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
@@ -1421,18 +1421,11 @@ function MCPServerDetailPanel({
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
             {(() => {
-              const connType = (serverDetail?.config?.type ?? (server.url ? 'sse' : 'stdio')) as 'stdio' | 'sse';
-              const detailFormData: MCPFormData = {
-                name: server.name,
-                connType,
-                command: Array.isArray(serverDetail?.config?.command)
-                  ? serverDetail.config.command.join(' ')
-                  : (serverDetail?.config?.command ?? ''),
-                args: Array.isArray(serverDetail?.config?.args)
-                  ? serverDetail.config.args.join('\n')
-                  : (typeof serverDetail?.config?.args === 'string' ? serverDetail.config.args : ''),
-                url: serverDetail?.config?.url ?? server.url ?? '',
-              };
+              const detailFormData: MCPFormData = buildMCPFormDataFromConfig(
+                server.name,
+                serverDetail?.config,
+                server.url,
+              );
               const mcpConnStatus: MCPConnStatus = testingConnection
                 ? 'testing'
                 : testResult?.success === true
