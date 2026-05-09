@@ -261,7 +261,7 @@ export default function EntitySheet({
           parts: [{ type: 'text', text: msg }],
         });
       } else if (msg) {
-        createAndSendRex(msg).catch(() => {});
+        createAndSendRex({ text: msg }).catch(() => {});
       }
     },
     [sessionId, createAndSendRex],
@@ -493,7 +493,7 @@ export default function EntitySheet({
                   emptyText={t('entity.rexReady')}
                   initialMessage={rexInitialMessage}
                   supportsVision={supportsVision}
-                  onCreateAndSend={!sessionId ? createAndSendRex : undefined}
+                  onCreateAndSend={!sessionId ? (text, imageParts) => createAndSendRex({ text, imageParts }) : undefined}
                   welcomeContent={!sessionId ? (
                     <div className="text-center max-w-md">
                       <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />

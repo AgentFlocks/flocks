@@ -10,7 +10,8 @@
  * mental model the user expects ("click to enlarge in place").
  */
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 
 interface ImageLightboxProps {
@@ -46,6 +47,9 @@ function releaseScrollLock(): void {
 }
 
 export default function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
+  const { t } = useTranslation('common');
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
   // Close on Escape so the overlay behaves like a normal modal.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -61,22 +65,30 @@ export default function ImageLightbox({ src, alt, onClose }: ImageLightboxProps)
     return releaseScrollLock;
   }, []);
 
+  // Move focus to the close button so keyboard users can dismiss immediately.
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  const label = alt || t('image.preview');
+
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-6 cursor-zoom-out"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
-      aria-label={alt || 'image preview'}
+      aria-label={label}
     >
       <button
+        ref={closeButtonRef}
         type="button"
         onClick={(e) => {
           e.stopPropagation();
           onClose();
         }}
         className="absolute top-4 right-4 inline-flex items-center justify-center w-10 h-10 rounded-full bg-white/10 text-white hover:bg-white/20 transition-colors"
-        aria-label="close"
+        aria-label={t('button.close')}
       >
         <X className="w-5 h-5" />
       </button>

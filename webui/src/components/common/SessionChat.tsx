@@ -157,30 +157,7 @@ interface ComposerAttachment {
 // the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
 // back doesn't lose the half-typed message. Keyed per session so two sessions
 // don't share a draft, and namespaced to avoid colliding with other features.
-const DRAFT_STORAGE_PREFIX = 'flocks:chat-draft:';
-
-function readChatDraft(sessionId?: string | null): string {
-  if (!sessionId || typeof window === 'undefined') return '';
-  try {
-    return window.localStorage.getItem(`${DRAFT_STORAGE_PREFIX}${sessionId}`) ?? '';
-  } catch {
-    return '';
-  }
-}
-
-function writeChatDraft(sessionId: string | null | undefined, value: string): void {
-  if (!sessionId || typeof window === 'undefined') return;
-  try {
-    const key = `${DRAFT_STORAGE_PREFIX}${sessionId}`;
-    if (value) {
-      window.localStorage.setItem(key, value);
-    } else {
-      window.localStorage.removeItem(key);
-    }
-  } catch {
-    // Quota / disabled storage — silently drop the draft rather than block typing.
-  }
-}
+import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
 
 // Backend stages emitted by ``SessionCompaction.process`` /
 // ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
@@ -1167,7 +1144,11 @@ export default function SessionChat({
           await onCreateAndSend(text, imageParts);
           setAttachments([]);
         } catch {
+          // Restore both the text and the attachment list so the user can
+          // retry without re-uploading images. Image data URLs are already
+          // in memory, so restoring the array is safe and cheap.
           setInput(rawText);
+          setAttachments(imageAttachmentsToSend);
         } finally {
           setSending(false);
         }
@@ -1180,6 +1161,7 @@ export default function SessionChat({
       setAttachments([]);
     } catch {
       setInput(rawText);
+      setAttachments(imageAttachmentsToSend);
     }
   };
 

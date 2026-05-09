@@ -97,7 +97,7 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
           className="flex-1 min-h-0"
           suggestions={SUGGESTIONS}
           supportsVision={supportsVision}
-          onCreateAndSend={!sessionId ? createAndSend : undefined}
+          onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
               <Bot className="w-10 h-10 text-purple-500 mx-auto mb-3" />

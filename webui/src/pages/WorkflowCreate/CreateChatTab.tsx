@@ -113,7 +113,7 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
       supportsVision={supportsVision}
       onStreamingDone={handleStreamingDone}
       onSSEEvent={handleSSEEvent}
-      onCreateAndSend={!sessionId ? createAndSend : undefined}
+      onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
     />
   );
 }

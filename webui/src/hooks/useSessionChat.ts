@@ -13,6 +13,13 @@ export interface UseSessionChatOptions {
   autoCreate?: boolean;
 }
 
+/** Options accepted by {@link useSessionChat} `createAndSend`. */
+export interface CreateAndSendOptions {
+  text: string;
+  imageParts?: ImagePartData[];
+  agent?: string;
+}
+
 export function useSessionChat({
   title,
   category,
@@ -94,11 +101,11 @@ export function useSessionChat({
   }, []);
 
   const createAndSend = useCallback(
-    async (
-      text: string,
-      imageParts?: ImagePartData[],
-      agent?: string,
-    ): Promise<string> => {
+    async ({
+      text,
+      imageParts,
+      agent,
+    }: CreateAndSendOptions): Promise<string> => {
       const sid = await create();
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),

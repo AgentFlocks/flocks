@@ -43,7 +43,7 @@ export default function ChatDialog({
 
   useEffect(() => {
     if (open && initialPrompt) {
-      createAndSend(initialPrompt).catch(() => {});
+      createAndSend({ text: initialPrompt }).catch(() => {});
     }
     if (!open) reset();
   }, [open, reset, initialPrompt, createAndSend]);
@@ -84,7 +84,7 @@ export default function ChatDialog({
           emptyText={t('chat.starting')}
           suggestions={suggestions}
           supportsVision={supportsVision}
-          onCreateAndSend={!sessionId ? createAndSend : undefined}
+          onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
               <Sparkles className="w-10 h-10 text-red-500 mx-auto mb-3" />

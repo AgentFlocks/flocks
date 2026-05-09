@@ -177,7 +177,7 @@ export default function ChatTab({
           // initialMessage is text-only; use createAndSend so the inline
           // image parts survive into the very first prompt instead of being
           // silently dropped (the previous bug for non-Session composers).
-          await createAndSendSession(text, imageParts);
+          await createAndSendSession({ text, imageParts });
         } else {
           setInitialMessage(text);
           await createSession();
