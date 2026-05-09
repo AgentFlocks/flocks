@@ -2,6 +2,10 @@
   "pageTitle": "工作流",
   "pageDescription": "管理和执行工作流",
   "createWorkflow": "创建工作流",
+  "section": {
+    "custom": "自定义工作流",
+    "builtin": "内置工作流"
+  },
   "emptyState": {
     "title": "暂无工作流",
     "description": "创建您的第一个工作流"

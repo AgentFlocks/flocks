@@ -81,6 +81,10 @@ class WorkflowCreateRequest(BaseModel):
     category: Optional[str] = Field("default", description="Workflow category")
     workflow_json: Dict[str, Any] = Field(..., alias="workflowJson", description="Workflow JSON definition")
     created_by: Optional[str] = Field(None, alias="createdBy", description="Creator")
+    source: Optional[Literal["project", "global"]] = Field(
+        "global",
+        description="Storage location: 'project' or 'global'; defaults to global user storage",
+    )
 
 
 class WorkflowUpdateRequest(BaseModel):
@@ -673,6 +677,7 @@ async def create_workflow(req: WorkflowCreateRequest):
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
 
+        source = req.source or "global"
         meta = {
             "id": workflow_id,
             "name": req.name,
@@ -684,10 +689,16 @@ async def create_workflow(req: WorkflowCreateRequest):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, req.workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, req.workflow_json, meta, global_store=(source == "global"))
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": req.workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": req.workflow_json,
+            "markdownContent": None,
+            "stats": stats,
+            "source": source,
+        }
 
         log.info("workflow.created", {"id": workflow_id, "name": req.name})
         await publish_event("workflow.created", {"id": workflow_id, "name": req.name})
@@ -1272,10 +1283,16 @@ async def import_workflow(workflow_json: Dict[str, Any]):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, global_store=True)
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": workflow_json,
+            "markdownContent": None,
+            "stats": stats,
+            "source": "global",
+        }
 
         log.info("workflow.imported", {"id": workflow_id, "name": name})
         await publish_event("workflow.created", {"id": workflow_id, "name": name})

@@ -81,6 +81,8 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(workflow_routes, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
+    monkeypatch.setattr(workflow_routes, "_workflow_dir", lambda workflow_id: project_root / workflow_id)
+    monkeypatch.setattr(workflow_routes, "_global_workflow_dir", lambda workflow_id: global_root / workflow_id)
     monkeypatch.setattr(fs_store, "_workspace_root", workspace_root, raising=False)
     monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
     monkeypatch.setattr(
@@ -96,7 +98,11 @@ def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         raising=False,
     )
 
-    yield
+    yield {
+        "workspace_root": workspace_root,
+        "project_root": project_root,
+        "global_root": global_root,
+    }
 
 
 # ===========================================================================
@@ -113,9 +119,28 @@ class TestWorkflowRoutes:
         assert isinstance(resp.json(), list)
 
     @pytest.mark.asyncio
-    async def test_create_workflow(self, client: AsyncClient):
+    async def test_create_workflow(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """POST /api/workflow creates a workflow and returns it."""
-        resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        from flocks.server import auth as auth_module
+
+        class _SecretManagerStub:
+            def get(self, key: str):
+                if key == auth_module.API_TOKEN_SECRET_ID:
+                    return "abc123"
+                return None
+
+        monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _SecretManagerStub())
+
+        resp = await client.post(
+            "/api/workflow",
+            json=_WORKFLOW_PAYLOAD,
+            headers={"Authorization": "Bearer abc123"},
+        )
         assert resp.status_code in (
             status.HTTP_200_OK,
             status.HTTP_201_CREATED,
@@ -123,6 +148,52 @@ class TestWorkflowRoutes:
         data = resp.json()
         assert data["name"] == "test-workflow"
         assert "id" in data
+        assert data["source"] == "global"
+        assert (isolated_workflow_filesystem["global_root"] / data["id"] / "workflow.json").is_file()
+        assert not (isolated_workflow_filesystem["project_root"] / data["id"] / "workflow.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_import_workflow_defaults_to_global_storage(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """POST /api/workflow/import stores imported workflows under global user storage by default."""
+        from flocks.server import auth as auth_module
+
+        class _SecretManagerStub:
+            def get(self, key: str):
+                if key == auth_module.API_TOKEN_SECRET_ID:
+                    return "abc123"
+                return None
+
+        monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _SecretManagerStub())
+
+        payload = {
+            **_WORKFLOW_JSON,
+            "name": "imported-workflow",
+            "metadata": {
+                "description": "Imported workflow",
+                "category": "default",
+            },
+        }
+
+        resp = await client.post(
+            "/api/workflow/import",
+            json=payload,
+            headers={"Authorization": "Bearer abc123"},
+        )
+        assert resp.status_code in (
+            status.HTTP_200_OK,
+            status.HTTP_201_CREATED,
+        ), resp.text
+
+        data = resp.json()
+        assert data["name"] == "imported-workflow"
+        assert data["source"] == "global"
+        assert (isolated_workflow_filesystem["global_root"] / data["id"] / "workflow.json").is_file()
+        assert not (isolated_workflow_filesystem["project_root"] / data["id"] / "workflow.json").exists()
 
     @pytest.mark.asyncio
     async def test_get_workflow(self, client: AsyncClient):

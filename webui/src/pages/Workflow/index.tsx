@@ -1,5 +1,6 @@
+import { useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Workflow as WorkflowIcon, Plus, ChevronRight } from 'lucide-react';
+import { Workflow as WorkflowIcon, Plus, ChevronRight, FolderOpen, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -11,6 +12,8 @@ export default function WorkflowPage() {
   const { t } = useTranslation('workflow');
   const navigate = useNavigate();
   const { workflows, loading, error, refetch } = useWorkflows();
+  const customWorkflows = useMemo(() => workflows.filter(isUserManaged), [workflows]);
+  const builtinWorkflows = useMemo(() => workflows.filter(workflow => !isUserManaged(workflow)), [workflows]);
 
   if (loading) {
     return (
@@ -70,14 +73,52 @@ export default function WorkflowPage() {
             }
           />
         ) : (
-          <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 px-2 py-2">
-            {workflows.map((workflow, index) => (
-              <WorkflowCard
-                key={workflow.id}
-                workflow={workflow}
-                index={index}
-              />
-            ))}
+          <div className="px-2 py-2">
+            {customWorkflows.length > 0 && (
+              <section aria-labelledby="workflow-custom-heading" className="mb-5">
+                <div className="flex items-center gap-2 mb-2.5 px-1">
+                  <FolderOpen className="w-4 h-4 text-slate-500" />
+                  <span id="workflow-custom-heading" className="text-sm font-semibold text-slate-700">
+                    {t('section.custom')}
+                  </span>
+                  <span className="text-xs text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded-full">
+                    {customWorkflows.length}
+                  </span>
+                </div>
+                <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {customWorkflows.map((workflow, index) => (
+                    <WorkflowCard
+                      key={workflow.id}
+                      workflow={workflow}
+                      index={index}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {builtinWorkflows.length > 0 && (
+              <section aria-labelledby="workflow-builtin-heading">
+                <div className="flex items-center gap-2 mb-2.5 px-1">
+                  <Sparkles className="w-4 h-4 text-purple-500" />
+                  <span id="workflow-builtin-heading" className="text-sm font-semibold text-purple-700">
+                    {t('section.builtin')}
+                  </span>
+                  <span className="text-xs text-purple-400 bg-purple-50 px-1.5 py-0.5 rounded-full">
+                    {builtinWorkflows.length}
+                  </span>
+                </div>
+                <div className="grid gap-3 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {builtinWorkflows.map((workflow, index) => (
+                    <WorkflowCard
+                      key={workflow.id}
+                      workflow={workflow}
+                      index={index}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
           </div>
         )}
       </div>
@@ -85,20 +126,30 @@ export default function WorkflowPage() {
   );
 }
 
-// 多组卡片配色，按索引轮换，避免整页同一颜色
-const CARD_PALETTES: { bg: string; border: string; icon: string; name: string }[] = [
-  { bg: 'bg-slate-50', border: 'border-slate-200', icon: 'bg-slate-100 text-slate-600', name: 'text-slate-900' },
-  { bg: 'bg-red-50', border: 'border-red-200', icon: 'bg-red-100 text-red-600', name: 'text-red-900' },
-  { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'bg-emerald-100 text-emerald-600', name: 'text-emerald-900' },
-  { bg: 'bg-amber-50', border: 'border-amber-200', icon: 'bg-amber-100 text-amber-600', name: 'text-amber-900' },
+function isUserManaged(workflow: Workflow): boolean {
+  return workflow.source !== 'project';
+}
+
+const BUILTIN_PALETTES: { bg: string; border: string; icon: string; name: string }[] = [
+  { bg: 'bg-purple-50', border: 'border-purple-200', icon: 'bg-purple-100 text-purple-600', name: 'text-purple-900' },
   { bg: 'bg-violet-50', border: 'border-violet-200', icon: 'bg-violet-100 text-violet-600', name: 'text-violet-900' },
-  { bg: 'bg-rose-50', border: 'border-rose-200', icon: 'bg-rose-100 text-rose-600', name: 'text-rose-900' },
+  { bg: 'bg-sky-50', border: 'border-sky-200', icon: 'bg-sky-100 text-sky-600', name: 'text-sky-900' },
+  { bg: 'bg-teal-50', border: 'border-teal-200', icon: 'bg-teal-100 text-teal-600', name: 'text-teal-900' },
+  { bg: 'bg-emerald-50', border: 'border-emerald-200', icon: 'bg-emerald-100 text-emerald-600', name: 'text-emerald-900' },
 ];
+
+const CUSTOM_PALETTE = {
+  bg: 'bg-slate-50',
+  border: 'border-slate-200',
+  icon: 'bg-slate-100 text-slate-600',
+  name: 'text-slate-900',
+};
 
 function WorkflowCard({ workflow, index = 0 }: { workflow: Workflow; index?: number }) {
   const { t } = useTranslation('workflow');
   const navigate = useNavigate();
-  const palette = CARD_PALETTES[index % CARD_PALETTES.length];
+  const isCustomWorkflow = isUserManaged(workflow);
+  const palette = isCustomWorkflow ? CUSTOM_PALETTE : BUILTIN_PALETTES[index % BUILTIN_PALETTES.length];
 
   const successRate =
     workflow.stats.callCount > 0
@@ -118,12 +169,17 @@ function WorkflowCard({ workflow, index = 0 }: { workflow: Workflow; index?: num
       {/* 顶部：图标 + 名称 + 状态 */}
       <div className="flex items-start gap-3 px-4 pt-4 pb-2">
         <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${palette.icon}`}>
-          <WorkflowIcon className="w-4 h-4" />
+          {isCustomWorkflow ? <FolderOpen className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
         </div>
         <div className="min-w-0 flex-1">
           <span className={`text-sm font-semibold leading-tight block truncate ${palette.name}`}>
             {workflow.name}
           </span>
+          {workflow.source && (
+            <span className="text-[10px] text-gray-400 font-mono">
+              {workflow.source}
+            </span>
+          )}
           <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
             <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-white/80 text-gray-600">
               {t(`status.${workflow.status}` as any) ?? workflow.status}

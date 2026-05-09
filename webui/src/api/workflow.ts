@@ -156,6 +156,7 @@ export const workflowAPI = {
     category?: string;
     workflowJson: WorkflowJSON;
     createdBy?: string;
+    source?: 'project' | 'global';
   }) =>
     client.post<Workflow>('/api/workflow', data),
   
