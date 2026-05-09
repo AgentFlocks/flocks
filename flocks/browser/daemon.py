@@ -14,6 +14,7 @@ from cdp_use.client import CDPClient
 
 from . import DEFAULT_AGENT_WORKSPACE, INTERNAL_URL_PREFIXES
 from . import _ipc as ipc
+from .utils import load_env_file
 
 
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
@@ -57,16 +58,6 @@ def _load_env() -> None:
         if not path.exists():
             continue
         _load_env_file(path)
-
-
-def _load_env_file(path: Path) -> None:
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
 
 _load_env()
 
