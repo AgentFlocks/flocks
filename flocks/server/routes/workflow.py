@@ -44,6 +44,7 @@ from flocks.workflow.fs_store import (
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
 )
+from flocks.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.workflow.execution_store import (
     create_execution_record,
     normalize_execution_status as _normalize_execution_status,
@@ -447,6 +448,10 @@ def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
 
 
+def _syslog_config_key(workflow_id: str) -> str:
+    return f"{WORKFLOW_SYSLOG_CONFIG_PREFIX}{workflow_id}"
+
+
 async def _run_workflow_execution_task(
     *,
     workflow_id: str,
@@ -809,6 +814,17 @@ async def delete_workflow(workflow_id: str):
                 except Exception:
                     pass
         except Exception:
+            pass
+
+        try:
+            from flocks.syslog.manager import default_manager as _syslog_default_manager
+
+            await _syslog_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(_syslog_config_key(workflow_id))
+        except Storage.NotFoundError:
             pass
 
         log.info("workflow.deleted", {"id": workflow_id})
@@ -1385,6 +1401,19 @@ class KafkaConfigRequest(BaseModel):
     outputTopic: Optional[str] = None
 
 
+class SyslogConfigRequest(BaseModel):
+    """Per-workflow syslog listener configuration (experimental)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = False
+    protocol: str = "udp"
+    host: str = "0.0.0.0"
+    port: int = 5140
+    msg_format: str = Field("auto", alias="format")
+    input_key: str = Field("syslog_message", alias="inputKey")
+
+
 @router.post("/workflow/{workflow_id}/publish")
 async def publish_workflow_as_api(workflow_id: str):
     """
@@ -1557,6 +1586,50 @@ async def get_kafka_config(workflow_id: str):
     except Exception as e:
         log.error("workflow.kafka_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get Kafka config: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/syslog-config")
+async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
+    """
+    Save syslog listener configuration for a workflow.
+    When enabled, starts UDP/TCP listener and passes parsed messages to workflow inputs.
+    """
+    try:
+        if not _read_workflow_from_fs(workflow_id):
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+        config = {
+            "workflowId": workflow_id,
+            "enabled": req.enabled,
+            "protocol": req.protocol,
+            "host": req.host,
+            "port": req.port,
+            "format": req.msg_format,
+            "inputKey": req.input_key,
+            "updatedAt": int(time.time() * 1000),
+        }
+        await Storage.write(_syslog_config_key(workflow_id), config)
+
+        from flocks.syslog.manager import default_manager as _syslog_default_manager
+
+        await _syslog_default_manager.restart_workflow(workflow_id)
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.syslog_config.save.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to save syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-config")
+async def get_syslog_config(workflow_id: str):
+    """Get saved syslog configuration for a workflow."""
+    try:
+        config = await Storage.read(_syslog_config_key(workflow_id))
+        return config
+    except Exception as e:
+        log.error("workflow.syslog_config.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog config: {str(e)}")
 
 
 # =============================================================================

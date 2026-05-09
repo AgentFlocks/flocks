@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Loader2, ChevronDown, ChevronRight, Globe, StopCircle,
-  Check, Clock, CheckCircle, XCircle, AlertCircle, Wifi, FlaskConical,
+  Loader2, ChevronDown, ChevronRight, StopCircle,
+  Clock, CheckCircle, XCircle, AlertCircle, FlaskConical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   workflowAPI,
   Workflow,
   WorkflowExecution,
-  WorkflowService,
   WorkflowJSON,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
@@ -485,252 +484,6 @@ function TestSection({
 }
 
 // ─────────────────────────────────────────────
-// 区块2：发布为 API
-// ─────────────────────────────────────────────
-function PublishSection({ workflowId }: { workflowId: string }) {
-  const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(true);
-  const [service, setService] = useState<WorkflowService | null>(null);
-  const [loadingService, setLoadingService] = useState(true);
-  const [publishing, setPublishing] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [error, setError] = useState('');
-  const [apiKeyVisible, setApiKeyVisible] = useState(false);
-
-  const fetchService = useCallback(async () => {
-    try {
-      const res = await workflowAPI.getService(workflowId);
-      setService(res.data);
-    } catch {
-      setService(null);
-    } finally {
-      setLoadingService(false);
-    }
-  }, [workflowId]);
-
-  useEffect(() => {
-    fetchService();
-  }, [fetchService]);
-
-  const handlePublish = async () => {
-    setError('');
-    setPublishing(true);
-    try {
-      const res = await workflowAPI.publish(workflowId);
-      setService(res.data);
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.publishFailed')));
-    } finally {
-      setPublishing(false);
-    }
-  };
-
-  const handleUnpublish = async () => {
-    setError('');
-    setStopping(true);
-    try {
-      await workflowAPI.unpublish(workflowId);
-      await fetchService();
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.stopFailed')));
-    } finally {
-      setStopping(false);
-    }
-  };
-
-  const maskedKey = (key?: string) => {
-    if (!key) return '***';
-    return apiKeyVisible ? key : `${key.slice(0, 4)}${'*'.repeat(Math.max(0, key.length - 8))}${key.slice(-4)}`;
-  };
-
-  const badge = service && (
-    <WorkflowStatusBadge status={service.status} />
-  );
-
-  return (
-    <div className="border-b border-gray-100">
-      <SectionHeader title={t('detail.run.publishSection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} badge={badge} />
-      {expanded && (
-        <div className="p-4 space-y-3">
-          {loadingService ? (
-            <div className="flex items-center justify-center py-4">
-              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
-            </div>
-          ) : service && service.status !== 'stopped' ? (
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Invoke URL</label>
-                <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
-                  <span className="text-xs font-mono text-gray-700 flex-1 truncate">{service.invokeUrl ?? ''}</span>
-                  <CopyButton text={service.invokeUrl ?? ''} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">API Key</label>
-                <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
-                  <span className="text-xs font-mono text-gray-700 flex-1 truncate">
-                    {maskedKey(service.apiKey)}
-                  </span>
-                  <button
-                    onClick={() => setApiKeyVisible(v => !v)}
-                    className="text-xs text-red-500 hover:text-red-700 flex-shrink-0 px-1"
-                  >
-                    {apiKeyVisible ? t('detail.run.apiKeyHide') : t('detail.run.apiKeyShow')}
-                  </button>
-                  <CopyButton text={service.apiKey ?? ''} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">{t('detail.run.curlExample')}</label>
-                <div className="bg-gray-900 rounded-lg px-3 py-2 relative">
-                  <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap">{`curl -X POST ${service.invokeUrl ?? ''} \\
-  -H "Content-Type: application/json" \\
-  -H "X-API-Key: ${service.apiKey ?? ''}" \\
-  -d '{"inputs": {}}'`}</pre>
-                  <div className="absolute top-2 right-2">
-                    <CopyButton text={`curl -X POST ${service.invokeUrl ?? ''} \\\n  -H "Content-Type: application/json" \\\n  -H "X-API-Key: ${service.apiKey ?? ''}" \\\n  -d '{"inputs": {}}'`} />
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={handleUnpublish}
-                disabled={stopping}
-                className="w-full flex items-center justify-center gap-2 py-2 border border-red-200 text-red-600 text-xs font-medium rounded-lg hover:bg-red-50 disabled:opacity-60 transition-colors"
-              >
-                {stopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
-                {stopping ? t('detail.run.stopping') : t('detail.run.stopService')}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-gray-500 leading-relaxed">
-                {t('detail.run.publishDesc')}
-              </p>
-              <button
-                onClick={handlePublish}
-                disabled={publishing}
-                className="w-full flex items-center justify-center gap-2 py-2 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-60 transition-colors"
-              >
-                {publishing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Globe className="w-3.5 h-3.5" />}
-                {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
-              </button>
-              {publishing && (
-                <p className="text-xs text-gray-400 text-center">{t('detail.run.dockerStarting')}</p>
-              )}
-            </div>
-          )}
-          {error && (
-            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
-              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-              {error}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// 区块3：Kafka 配置
-// ─────────────────────────────────────────────
-function KafkaSection({ workflowId }: { workflowId: string }) {
-  const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [inputBroker, setInputBroker] = useState('');
-  const [inputTopic, setInputTopic] = useState('');
-  const [inputGroupId, setInputGroupId] = useState('');
-  const [outputBroker, setOutputBroker] = useState('');
-  const [outputTopic, setOutputTopic] = useState('');
-
-  useEffect(() => {
-    workflowAPI.getKafkaConfig(workflowId).then(res => {
-      if (res.data) {
-        setInputBroker(res.data.inputBroker || '');
-        setInputTopic(res.data.inputTopic || '');
-        setInputGroupId(res.data.inputGroupId || '');
-        setOutputBroker(res.data.outputBroker || '');
-        setOutputTopic(res.data.outputTopic || '');
-      }
-    }).catch(() => {});
-  }, [workflowId]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await workflowAPI.saveKafkaConfig(workflowId, {
-        inputBroker, inputTopic, inputGroupId, outputBroker, outputTopic,
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // ignore - stub endpoint may return 501
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const inputField = (label: string, value: string, onChange: (v: string) => void, placeholder: string) => (
-    <div>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      <input
-        type="text"
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full text-xs border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-500"
-      />
-    </div>
-  );
-
-  return (
-    <div className="border-b border-gray-100">
-      <SectionHeader
-        title={t('detail.run.kafkaSection')}
-        expanded={expanded}
-        onToggle={() => setExpanded(v => !v)}
-        badge={<span className="text-xs text-gray-400 font-normal">{t('detail.run.kafkaExperimental')}</span>}
-      />
-      {expanded && (
-        <div className="p-4 space-y-4">
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
-              <Wifi className="w-3.5 h-3.5" /> {t('detail.run.inputConfig')}
-            </p>
-            {inputField('Broker', inputBroker, setInputBroker, 'localhost:9092')}
-            {inputField('Topic', inputTopic, setInputTopic, 'workflow-input')}
-            {inputField('Consumer Group', inputGroupId, setInputGroupId, 'flocks-consumer')}
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
-              <Wifi className="w-3.5 h-3.5 rotate-180" /> {t('detail.run.outputConfig')}
-            </p>
-            {inputField('Broker', outputBroker, setOutputBroker, 'localhost:9092')}
-            {inputField('Topic', outputTopic, setOutputTopic, 'workflow-output')}
-          </div>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full flex items-center justify-center gap-2 py-2 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
-          >
-            {saving ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : saved ? (
-              <Check className="w-3.5 h-3.5 text-green-500" />
-            ) : null}
-            {saving ? t('detail.run.savingConfig') : saved ? t('detail.run.savedConfig') : t('detail.run.saveConfig')}
-          </button>
-          <p className="text-xs text-gray-400 text-center">{t('detail.run.kafkaHint')}</p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
 // 单步详情组件
 // ─────────────────────────────────────────────
 function StepDetail({ step, index, hasInputs, hasOutputs }: {
@@ -1036,8 +789,6 @@ export default function RunTab({
         onExecutionChange={onLatestExecutionChange}
         onExecutionSettled={onExecutionSettled}
       />
-      <PublishSection workflowId={workflow.id} />
-      <KafkaSection workflowId={workflow.id} />
       <HistorySection
         workflowId={workflow.id}
         latestExecutionId={latestExecution?.id}

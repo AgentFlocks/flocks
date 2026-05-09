@@ -229,6 +229,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
+    # Start syslog listeners for workflows with syslog enabled
+    try:
+        from flocks.syslog.manager import default_manager as default_syslog_manager
+
+        await default_syslog_manager.start_all()
+        log.info("syslog.manager.started")
+    except Exception as e:
+        log.warning("syslog.manager.start_failed", {"error": str(e)})
+
     try:
         from flocks.updater.updater import recover_upgrade_state
 
@@ -273,6 +282,15 @@ async def lifespan(app: FastAPI):
         log.info("channel.gateway.stopped")
     except Exception as e:
         log.warning("channel.gateway.stop_failed", {"error": str(e)})
+
+    # Stop syslog listeners
+    try:
+        from flocks.syslog.manager import default_manager as default_syslog_manager
+
+        await default_syslog_manager.stop_all()
+        log.info("syslog.manager.stopped")
+    except Exception as e:
+        log.warning("syslog.manager.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:
