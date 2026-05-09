@@ -2,12 +2,13 @@ schema_version: 1
 provider: tdp_api
 
 # Service-level connectivity probe.
-# `system_status` with `action: all` is a lightweight multi-endpoint health
-# check; it verifies HMAC-SHA256 signing and basic platform reachability.
+# Use a single lightweight read-only overview endpoint here instead of the
+# stricter multi-endpoint system-status aggregate. This keeps the connectivity
+# check lenient while still verifying signing and basic reachability.
 connectivity:
-  tool: tdp_system_status
+  tool: tdp_dashboard_status
   params:
-    action: all
+    action: status
 
 # Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
 # `label` is the default (English) display string; `label_cn` is the

@@ -302,6 +302,27 @@ class TestMigration:
         assert services["tdp_api_v3_3_10"]["base_url"] == "https://tdp.example"
         assert services["tdp_api_v3_3_10"]["apiKey"] == "{secret:tdp_key}"
 
+    def test_migration_canonicalizes_legacy_ssl_verify_alias(self, isolated_env, api_root):
+        _, user_config = isolated_env
+        _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
+        config_path = _write_flocks_json(user_config, {
+            "api_services": {
+                "tdp_api": {
+                    "enabled": True,
+                    "base_url": "https://tdp.example",
+                    "ssl_verify": True,
+                },
+            },
+        })
+
+        actions = migrate_api_services()
+
+        assert actions == {"tdp_api_v3_3_10": "copied"}
+        services = json.loads(config_path.read_text(encoding="utf-8"))["api_services"]
+        assert services["tdp_api"]["ssl_verify"] is True
+        assert services["tdp_api_v3_3_10"]["verify_ssl"] is True
+        assert "ssl_verify" not in services["tdp_api_v3_3_10"]
+
     def test_idempotent_when_storage_key_exists(self, isolated_env, api_root):
         _, user_config = isolated_env
         _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
@@ -504,6 +525,41 @@ class TestConfigWriterFallback:
 
         captured = capsys.readouterr()
         assert "api_service.write.shadowed_legacy" not in captured.err
+
+    def test_set_api_service_promotes_ssl_verify_alias_to_verify_ssl(self, isolated_env, api_root):
+        _, user_config = isolated_env
+        from flocks.config.config_writer import ConfigWriter
+
+        _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
+        _write_flocks_json(user_config, {"api_services": {}})
+        versioning._reset_descriptor_cache()
+
+        ConfigWriter.set_api_service("tdp_api_v3_3_10", {
+            "base_url": "https://tdp.example",
+            "ssl_verify": False,
+        })
+
+        services = json.loads((user_config / "flocks.json").read_text(encoding="utf-8"))["api_services"]
+        assert services["tdp_api_v3_3_10"]["verify_ssl"] is False
+        assert "ssl_verify" not in services["tdp_api_v3_3_10"]
+
+    def test_set_api_service_drops_alias_when_verify_ssl_already_present(self, isolated_env, api_root):
+        _, user_config = isolated_env
+        from flocks.config.config_writer import ConfigWriter
+
+        _write_provider_yaml(api_root / "tdp_v3_3_10", service_id="tdp_api", version="3.3.10")
+        _write_flocks_json(user_config, {"api_services": {}})
+        versioning._reset_descriptor_cache()
+
+        ConfigWriter.set_api_service("tdp_api_v3_3_10", {
+            "base_url": "https://tdp.example",
+            "ssl_verify": True,
+            "verify_ssl": False,
+        })
+
+        services = json.loads((user_config / "flocks.json").read_text(encoding="utf-8"))["api_services"]
+        assert services["tdp_api_v3_3_10"]["verify_ssl"] is False
+        assert "ssl_verify" not in services["tdp_api_v3_3_10"]
 
     def test_get_api_service_raw_handles_null_api_services(self, isolated_env, api_root):
         """``"api_services": null`` in flocks.json must not crash the reader."""

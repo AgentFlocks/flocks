@@ -469,6 +469,22 @@ class ConfigWriter:
     # API Services CRUD  (api_services section)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_api_service_config(service_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonicalize API service config keys before persisting.
+
+        ``verify_ssl`` is the canonical field. ``ssl_verify`` remains a
+        read-time compatibility alias, but writers should never persist both
+        fields at once or keep writing the legacy alias forward.
+        """
+        normalized = dict(service_config)
+        if "verify_ssl" in normalized:
+            normalized.pop("ssl_verify", None)
+            return normalized
+        if "ssl_verify" in normalized:
+            normalized["verify_ssl"] = normalized.pop("ssl_verify")
+        return normalized
+
     @classmethod
     def get_api_service_raw(cls, service_id: str) -> Optional[Dict[str, Any]]:
         """Read a single ``api_services`` entry (raw, secrets unresolved).
@@ -513,7 +529,7 @@ class ConfigWriter:
         """
         data = cls._read_raw()
         services = data.setdefault("api_services", {})
-        services[service_id] = service_config
+        services[service_id] = cls._normalize_api_service_config(service_config)
         cls._write_raw(data)
         log.info("config_writer.api_service_set", {"service_id": service_id})
 

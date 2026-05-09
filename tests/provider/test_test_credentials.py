@@ -363,6 +363,54 @@ class TestTestCredentialsToolExecution:
             mock_tr.execute.assert_awaited_once_with(tool_name="qingteng_login")
 
     @pytest.mark.asyncio
+    async def test_declared_manifest_probe_is_used_before_heuristic_tool_selection(self):
+        """A declared connectivity probe should bypass heuristic tool sorting."""
+        from flocks.server.routes.provider import test_provider_credentials
+        from flocks.tool.probe_loader import ConnectivitySpec
+
+        heuristic_tool = _make_tool_info("tdp_assets_domain_list")
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "tdp_api_v3_3_10")),
+            patch(
+                "flocks.tool.probe_loader.get_connectivity_spec",
+                return_value=ConnectivitySpec(
+                    tool="tdp_dashboard_status",
+                    params={"action": "status"},
+                ),
+            ),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            mock_tr.list_tools.return_value = [heuristic_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.tdp_api": ["tdp_assets_domain_list"],
+            }
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=True,
+                output={"status": "ok"},
+            ))
+
+            result = await test_provider_credentials("tdp_api_v3_3_10")
+
+            assert result["success"] is True, result
+            assert result["tool_tested"] == "tdp_dashboard_status"
+            assert result["probe_source"] == "manifest"
+            mock_tr.execute.assert_awaited_once_with(
+                tool_name="tdp_dashboard_status",
+                action="status",
+            )
+
+    @pytest.mark.asyncio
     async def test_login_probe_does_not_overmatch_business_tools(self):
         """`_is_login_probe` must only match dedicated probes — not arbitrary
         business tools whose names happen to contain ``login`` (e.g. TDP's
