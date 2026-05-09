@@ -8,9 +8,16 @@ interface CopyButtonProps {
   text: string;
   /** Icon size class, e.g. "w-3 h-3" or "w-3.5 h-3.5". Defaults to "w-3.5 h-3.5". */
   size?: string;
+  label?: string;
+  className?: string;
 }
 
-export default function CopyButton({ text, size = 'w-3.5 h-3.5' }: CopyButtonProps) {
+export default function CopyButton({
+  text,
+  size = 'w-3.5 h-3.5',
+  label,
+  className,
+}: CopyButtonProps) {
   const { t } = useTranslation('common');
   const [copied, setCopied] = useState(false);
   const toast = useToast();
@@ -31,12 +38,16 @@ export default function CopyButton({ text, size = 'w-3.5 h-3.5' }: CopyButtonPro
   return (
     <button
       onClick={handleCopy}
-      className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
-      title={t('button.copy')}
+      aria-label={label ?? t('button.copy')}
+      className={className ?? 'p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0'}
+      title={label ?? t('button.copy')}
     >
-      {copied
-        ? <Check className={`${size} text-green-500`} />
-        : <Copy className={size} />}
+      <span className="inline-flex items-center gap-1.5">
+        {copied
+          ? <Check className={`${size} text-green-500`} />
+          : <Copy className={size} />}
+        {label && <span>{label}</span>}
+      </span>
     </button>
   );
 }

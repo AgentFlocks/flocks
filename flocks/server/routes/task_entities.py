@@ -51,6 +51,7 @@ class SchedulerUpdateRequest(BaseModel):
     cron_description: Optional[str] = Field(None, alias="cronDescription")
     timezone: Optional[str] = None
     user_prompt: Optional[str] = Field(None, alias="userPrompt")
+    context: Optional[dict] = None
     workspace_directory: Optional[str] = Field(None, alias="workspaceDirectory")
 
 
