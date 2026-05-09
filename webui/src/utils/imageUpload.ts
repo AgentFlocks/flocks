@@ -150,11 +150,19 @@ export async function compressImageFile(
  * Pick compression parameters based on how many images the user has attached
  * in this turn. More images → tighter cap so the combined base64 body stays
  * well under typical 1 MB body limits at upstream gateways.
+ *
+ * For a single image we deliberately leave `maxEdge` unset so that
+ * `compressImageFile` can apply its passthrough fast-path for small images
+ * (≤ IMAGE_PASSTHROUGH_BYTES). The passthrough is gated on
+ * `opts.maxEdge === undefined`, so returning the default value here would
+ * bypass it and force-compress tiny PNGs into lower-quality JPEGs.
  */
 export function batchCompressOptions(
   count: number,
-): { maxEdge: number; quality: number } {
+): { maxEdge?: number; quality: number } {
   if (count >= 4) return { maxEdge: 768, quality: 0.78 };
   if (count >= 2) return { maxEdge: 1024, quality: 0.80 };
-  return { maxEdge: IMAGE_MAX_EDGE_PX, quality: IMAGE_QUALITY };
+  // Single image: omit maxEdge so compressImageFile may skip re-encoding
+  // small files entirely.
+  return { quality: IMAGE_QUALITY };
 }

@@ -10,6 +10,8 @@ Subclasses only need to define class attributes and get_models().
 import os
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import httpx
+
 from flocks.provider.provider import (
     BaseProvider,
     ChatMessage,
@@ -21,6 +23,13 @@ from flocks.provider.provider import (
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_base")
+
+# Shared HTTP timeout used by every OpenAI-style provider (OpenAIProvider,
+# OpenAICompatibleProvider, OpenAIBaseProvider). Centralised here so a single
+# change covers all three providers. Granular values (instead of a flat
+# timeout) let small control-plane requests fail fast while multimodal
+# (image) uploads get the headroom they need on slow links.
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
 
 
 # Canonical OpenAI-style content translation, shared by every provider that
@@ -40,6 +49,11 @@ log = Log.create(service="provider.openai_base")
 _OPENAI_NATIVE_BLOCK_TYPES = frozenset({
     "image_url", "input_audio", "audio", "refusal", "file",
 })
+
+# Flocks-internal block types that the translation logic knows about. Used to
+# distinguish "known type with missing/invalid fields" from "genuinely unknown
+# type" when logging dropped blocks.
+_FLOCKS_INTERNAL_BLOCK_TYPES = frozenset({"text", "image"})
 
 
 def _summarise_block(block: Any) -> Dict[str, Any]:
@@ -108,8 +122,10 @@ def format_openai_content(content: Any) -> Any:
       → ``{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}``
     * ``{"type": "text", "text": ...}`` is preserved.
     * Already-OpenAI-native block types are passed through unchanged.
-    * Unknown block types are silently dropped to avoid sending malformed
-      payloads that would otherwise trigger a 400 from the gateway.
+    * Unknown block types are dropped and logged at DEBUG level to avoid
+      sending malformed payloads that would otherwise trigger a 400 from
+      the gateway. Callers should monitor for ``unknown_block_dropped`` log
+      events when adding new block kinds.
     """
     if not isinstance(content, list):
         return content
@@ -130,10 +146,59 @@ def format_openai_content(content: Any) -> Any:
             })
         elif block_type in _OPENAI_NATIVE_BLOCK_TYPES:
             formatted.append(block)
-    # Guard: an empty list is rejected by OpenAI-compatible APIs with a 400.
-    # Fall back to ``None`` so the serialised message omits the ``content``
-    # field entirely (accepted by every provider for e.g. tool-call messages).
-    return formatted if formatted else None
+        elif block_type in _FLOCKS_INTERNAL_BLOCK_TYPES:
+            # Known type but missing required fields (e.g. image without data/mimeType,
+            # or text with a non-string value). Log at debug with the actual keys present
+            # to make it easy to diagnose upstream encoding bugs.
+            log.debug("openai_base.malformed_block_dropped", {
+                "type": block_type,
+                "keys": sorted(block.keys()),
+            })
+        else:
+            log.debug("openai_base.unknown_block_dropped", {"type": block_type})
+    # Return the translated list as-is (possibly empty). Callers that need to
+    # omit the ``content`` field entirely (e.g. assistant messages with
+    # tool_calls only) are responsible for detecting the empty-list case and
+    # dropping the key themselves. Returning ``None`` here risks silencing a
+    # 400 for user/system roles where ``content=null`` is not permitted.
+    return formatted
+
+
+def format_openai_messages(messages: List["ChatMessage"]) -> list:
+    """Convert a ``ChatMessage`` list to the OpenAI chat-completions wire format.
+
+    Shared by all three OpenAI-style providers (``OpenAIProvider``,
+    ``OpenAICompatibleProvider``, ``OpenAIBaseProvider``) so the role-aware
+    content-null guard lives in exactly one place.
+
+    Content-null rules (OpenAI chat completions spec):
+    * ``user`` / ``system`` / ``tool`` roles MUST have non-null content.
+    * ``assistant`` messages with ``tool_calls`` MAY omit ``content`` (null is
+      accepted) — we omit the key entirely for cleaner serialisation.
+    * An empty translated list (all blocks were dropped/malformed) is treated
+      the same as no content: safe fallback is ``""`` for non-assistant roles
+      and key-omission for assistant-with-tool-calls.
+    """
+    formatted = []
+    for m in messages:
+        role = m.role if isinstance(m.role, str) else m.role.value
+        content = format_openai_content(m.content)
+        d: Dict[str, Any] = {"role": role}
+        if isinstance(content, list) and not content:
+            if role == "assistant" and m.tool_calls:
+                pass  # omit content key — null is valid for tool-call-only turns
+            else:
+                d["content"] = ""
+        else:
+            d["content"] = content
+        if m.tool_calls:
+            d["tool_calls"] = m.tool_calls
+        if m.tool_call_id:
+            d["tool_call_id"] = m.tool_call_id
+        if m.name:
+            d["name"] = m.name
+        formatted.append(d)
+    return formatted
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -540,12 +605,7 @@ class OpenAIBaseProvider(BaseProvider):
             )
             if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
                 trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
-            # Multimodal requests can carry several MB of base64 image data, so
-            # write/read timeouts need real headroom — a flat 120s default tends
-            # to abort the request mid-upload over slow links and surface as an
-            # opaque "connection error" to the caller. Keep connect short so we
-            # fail fast on truly unreachable endpoints.
-            timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
+            timeout = DEFAULT_HTTP_TIMEOUT
             http_client = httpx.AsyncClient(
                 trust_env=trust_env,
                 verify=verify_ssl,
@@ -595,20 +655,7 @@ class OpenAIBaseProvider(BaseProvider):
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:
         """Convert ChatMessage list to OpenAI API dicts, preserving tool_calls / tool results."""
-        formatted = []
-        for m in messages:
-            d: Dict[str, Any] = {
-                "role": m.role,
-                "content": OpenAIBaseProvider._format_content(m.content),
-            }
-            if m.tool_calls:
-                d["tool_calls"] = m.tool_calls
-            if m.tool_call_id:
-                d["tool_call_id"] = m.tool_call_id
-            if m.name:
-                d["name"] = m.name
-            formatted.append(d)
-        return formatted
+        return format_openai_messages(messages)
 
     async def chat(
         self, model_id: str, messages: List[ChatMessage], **kwargs

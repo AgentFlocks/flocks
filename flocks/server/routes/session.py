@@ -27,6 +27,13 @@ log = Log.create(service="session-routes")
 # Default agent name constant
 DEFAULT_AGENT = "rex"
 
+# File extensions that are safe to persist when materialising data-URL uploads.
+# Intentionally narrow: any extension outside this set is rejected to prevent
+# OS tools (Finder, ``open``) from misidentifying content based on the
+# extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
+# ".exe").
+_UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+
 # Import monitor for metrics endpoint
 from flocks.utils.monitor import get_monitor
 
@@ -450,14 +457,11 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     # filesystem errors: deletion of the session record is the contract,
     # the upload cleanup is incidental.
     try:
-        from flocks.workspace.manager import WorkspaceManager
         import shutil
+        from flocks.workspace.manager import WorkspaceManager
 
-        uploads_root = (
-            WorkspaceManager.get_instance().get_workspace_dir()
-            / "uploads"
-            / sessionID
-        )
+        ws = WorkspaceManager.get_instance()
+        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
         if uploads_root.exists() and uploads_root.is_dir():
             shutil.rmtree(uploads_root, ignore_errors=True)
             log.info("session.uploads.cleaned", {
@@ -2191,7 +2195,9 @@ async def _process_session_message(
             raw_bytes = base64.b64decode(encoded)
 
             ws = WorkspaceManager.get_instance()
-            uploads_root = ws.get_workspace_dir() / "uploads" / sessionID
+            # Use resolve_workspace_path to guard against path traversal if
+            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
+            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
             uploads_root.mkdir(parents=True, exist_ok=True)
 
             ext_map = {
@@ -2202,8 +2208,8 @@ async def _process_session_message(
             ext = ext_map.get(mime_hint, "")
             if not ext and filename_hint:
                 _, _, tail = filename_hint.rpartition(".")
-                if tail and len(tail) <= 5:
-                    ext = "." + tail
+                if tail.lower() in _UPLOAD_SAFE_EXTS:
+                    ext = "." + tail.lower()
             unique_name = f"{Identifier.create('upload')}{ext}"
             target = uploads_root / unique_name
             target.write_bytes(raw_bytes)

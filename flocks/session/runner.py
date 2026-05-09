@@ -363,26 +363,27 @@ class SessionRunner:
     # Provider IDs whose adapters are known to translate Flocks' internal
     # ``{"type": "image", "mimeType": ..., "data": <base64>}`` block into
     # the provider-native multimodal format (e.g. OpenAI ``image_url`` or
-    # Anthropic vision blocks). Custom/derived providers can opt in by
-    # including any of these substrings in their id.
+    # Anthropic vision blocks).
     #
-    # ``custom-`` is included because user-created providers (created via
-    # ``POST /api/custom/providers``) are registered with ids like
-    # ``custom-gpt4o`` and use the ``@ai-sdk/openai-compatible`` adapter,
-    # which already converts ``image`` blocks into ``image_url`` correctly.
-    _MULTIMODAL_PROVIDER_PREFIXES = (
+    # Matched with exact equality (no substring matching) to prevent false
+    # positives such as a user-configured "not-openai" or an internal
+    # "xxx-llm-gateway" id being mistakenly classified as multimodal-capable.
+    #
+    # ``custom-`` providers (created via ``POST /api/custom/providers``) are
+    # checked separately via ``startswith`` because their ids follow the
+    # pattern ``custom-<user-chosen-name>`` and they always use the
+    # ``@ai-sdk/openai-compatible`` adapter that handles vision blocks.
+    _MULTIMODAL_PROVIDER_NAMES = frozenset({
         "anthropic", "openai", "azure",
-        "vertex", "bedrock", "gateway", "openrouter",
-        "custom-",
-    )
+        "vertex", "bedrock", "openrouter",
+    })
 
     def _model_supports_vision(self) -> bool:
         """Best-effort vision capability lookup from the model definition.
 
-        Returns ``True`` only when explicitly declared on the model entry
-        (``capabilities.supports_vision`` or modalities containing ``image``).
-        Avoids a brittle provider-id whitelist while still defaulting to a
-        safe ``False`` for unknown configurations.
+        Returns ``True`` only when explicitly declared on the model entry via
+        ``capabilities.supports_vision``. Defaults to a safe ``False`` for
+        unknown configurations.
         """
         try:
             from flocks.provider.provider import Provider as _Provider
@@ -395,22 +396,6 @@ class SessionRunner:
                         if caps and getattr(caps, "supports_vision", False):
                             return True
                         break
-            try:
-                manager = _Provider.get_model_manager() if hasattr(_Provider, "get_model_manager") else None
-            except Exception:
-                manager = None
-            if manager is not None:
-                definition = manager.get_model(self.provider_id, self.model_id)
-                if definition is not None:
-                    caps = getattr(definition, "capabilities", None)
-                    if caps:
-                        if getattr(caps, "supports_vision", False):
-                            return True
-                        modalities = getattr(caps, "modalities", None)
-                        if modalities:
-                            inputs = getattr(modalities, "input", None) or []
-                            if "image" in inputs:
-                                return True
         except Exception as exc:
             log.debug("runner.vision_lookup.failed", {"error": str(exc)})
         return False
@@ -419,13 +404,20 @@ class SessionRunner:
         """Whether the active provider/model can accept image content blocks.
 
         Decision order:
-          1. The model definition explicitly advertises vision support.
-          2. The provider id matches a known multimodal provider family.
+          1. The model definition explicitly advertises vision support
+             (``capabilities.supports_vision`` on the model entry).
+          2. The provider id is an exact match against the known multimodal
+             provider name set, or starts with ``"custom-"`` (user-registered
+             OpenAI-compatible providers that inherit vision capability from
+             their underlying model).
         """
         if self._model_supports_vision():
             return True
         provider_id = (self.provider_id or "").lower()
-        return any(prefix in provider_id for prefix in self._MULTIMODAL_PROVIDER_PREFIXES)
+        return (
+            provider_id in self._MULTIMODAL_PROVIDER_NAMES
+            or provider_id.startswith("custom-")
+        )
 
     def _append_file_content_block(
         self,

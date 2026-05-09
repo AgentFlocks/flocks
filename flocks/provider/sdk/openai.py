@@ -17,9 +17,11 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.provider.sdk.openai_base import (
+    DEFAULT_HTTP_TIMEOUT,
     _coerce_bool,
     extract_reasoning_content,
     format_openai_content,
+    format_openai_messages,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -78,15 +80,10 @@ class OpenAIProvider(BaseProvider):
                 if isinstance(cfg_settings, dict) and "trust_env" in cfg_settings:
                     trust_env = _coerce_bool(cfg_settings.get("trust_env"), trust_env)
                 verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
-                # Match ``OpenAIBaseProvider._get_client`` so all OpenAI-style
-                # providers share the same generous write/read headroom for
-                # multimodal (image) payloads. A flat 120s timeout tends to
-                # abort mid-upload over slow links.
-                timeout = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
                 http_client = httpx.AsyncClient(
                     trust_env=trust_env,
                     verify=verify_ssl,
-                    timeout=timeout,
+                    timeout=DEFAULT_HTTP_TIMEOUT,
                 )
 
                 if base_url:
@@ -122,23 +119,13 @@ class OpenAIProvider(BaseProvider):
         """
         return list(getattr(self, "_config_models", []))
     
-    # Delegated to the shared canonical implementation in ``openai_base``.
+    # Delegated to the shared canonical implementations in ``openai_base``.
     _format_content = staticmethod(format_openai_content)
 
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:
         """Convert ChatMessage list to OpenAI API dicts, preserving tool_calls / tool results."""
-        formatted = []
-        for msg in messages:
-            m: dict = {"role": msg.role, "content": OpenAIProvider._format_content(msg.content)}
-            if msg.tool_calls:
-                m["tool_calls"] = msg.tool_calls
-            if msg.tool_call_id:
-                m["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                m["name"] = msg.name
-            formatted.append(m)
-        return formatted
+        return format_openai_messages(messages)
 
     async def chat(
         self,
