@@ -2,6 +2,10 @@
   "pageTitle": "Workflows",
   "pageDescription": "Manage and execute workflows",
   "createWorkflow": "Create Workflow",
+  "section": {
+    "custom": "Custom Workflows",
+    "builtin": "Built-in Workflows"
+  },
   "emptyState": {
     "title": "No Workflows",
     "description": "Create your first workflow"

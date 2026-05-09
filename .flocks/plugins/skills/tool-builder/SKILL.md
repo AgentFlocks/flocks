@@ -448,6 +448,8 @@ If validation fails: **fix the file immediately** and re-validate.
 
 Attempt to load the tool into the registry to catch schema/handler errors:
 
+A tool is not considered complete unless it can be successfully discovered, loaded, and registered by the tool system, not just written to disk or pass static validation.
+
 **YAML-HTTP tools (Mode A):**
 ```bash
 uv run python -c "
@@ -578,6 +580,7 @@ Tool created: {name}
   Path: {file_path}
   Static validation: PASS
   Load test: PASS
+  Tool system registration: PASS
   Smoke test: {PASS/WARN/FAIL} — {details}
   Hot-reload: automatic (file watcher active — no restart or manual refresh needed)
 
