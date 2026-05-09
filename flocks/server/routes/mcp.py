@@ -30,9 +30,12 @@ from flocks.mcp.utils import (
     REMOTE_MCP_TYPES,
     extract_api_key_from_mcp_url,
     extract_auth_value_from_mcp_config,
+    extract_sensitive_headers_from_mcp_config,
     get_connect_block_reason,
+    mask_sensitive_mcp_config_for_frontend,
     normalize_mcp_config,
     normalize_mcp_config_aliases,
+    restore_masked_mcp_config_secrets,
     should_allow_unconnected_add,
     should_skip_connect_on_add,
 )
@@ -46,6 +49,7 @@ log = Log.create(service="routes.mcp")
 
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize backend transport names for the frontend form."""
+    server_config = mask_sensitive_mcp_config_for_frontend(server_config)
     transport = str(server_config.get("type", "sse")).strip().lower()
     if transport in LOCAL_MCP_TYPES:
         transport = "stdio"
@@ -163,6 +167,7 @@ def _prepare_mcp_config_for_save(name: str, config: Dict[str, Any]) -> Dict[str,
     """Normalize config and move any plain-text remote secrets into SecretManager."""
     clean_config = extract_api_key_from_mcp_url(name, normalize_mcp_config(config))
     clean_config = extract_auth_value_from_mcp_config(name, clean_config)
+    clean_config = extract_sensitive_headers_from_mcp_config(name, clean_config)
     return clean_config
 
 
@@ -357,6 +362,7 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
 
         merged_config = dict(base_config)
         merged_config.update(normalize_mcp_config(request.config))
+        merged_config = restore_masked_mcp_config_secrets(base_config, merged_config)
 
         success = await MCP.connect(temp_name, merged_config)
         if not success:
@@ -463,6 +469,9 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
 
         updated_config = dict(existing_config)
         updated_config.update(normalize_mcp_config(request.config))
+        updated_config = restore_masked_mcp_config_secrets(
+            existing_config, updated_config
+        )
         clean_config = _prepare_mcp_config_for_save(name, updated_config)
         _persist_mcp_server_config(name, clean_config)
 

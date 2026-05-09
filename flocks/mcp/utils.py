@@ -43,6 +43,17 @@ _AUTH_ERROR_KEYWORDS = (
 
 REMOTE_MCP_TYPES = frozenset({"remote", "sse"})
 LOCAL_MCP_TYPES = frozenset({"local", "stdio"})
+MCP_MASKED_SECRET_VALUE = "***"
+
+
+def _is_secret_placeholder(value: str) -> bool:
+    """Return True when the value is already secret-backed or intentionally blank."""
+    stripped = value.strip()
+    return (
+        not stripped
+        or stripped.startswith("{secret:")
+        or stripped.startswith("${")
+    )
 
 
 def resolve_url_template(url: str) -> str:
@@ -101,6 +112,8 @@ def normalize_mcp_config_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
             normalized["transport"] = "http"
         elif transport == "sse":
             normalized["transport"] = "sse"
+        else:
+            normalized["transport"] = "auto"
     return normalized
 
 
@@ -378,6 +391,124 @@ def extract_auth_value_from_mcp_config(server_name: str, config: Dict[str, Any])
     return updated_config
 
 
+def extract_sensitive_headers_from_mcp_config(
+    server_name: str, config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Move plain-text sensitive headers into SecretManager."""
+    headers = config.get("headers")
+    if config.get("type") not in REMOTE_MCP_TYPES or not isinstance(headers, dict):
+        return dict(config)
+
+    updated_headers = dict(headers)
+    secrets = None
+    extracted = False
+
+    for header_name, header_value in headers.items():
+        header_key = str(header_name).strip()
+        if header_key.lower() not in _SENSITIVE_HEADER_NAMES:
+            continue
+        if not isinstance(header_value, str):
+            continue
+
+        normalized_value = header_value.strip()
+        if _is_secret_placeholder(normalized_value):
+            continue
+
+        if secrets is None:
+            from flocks.security import get_secret_manager
+
+            secrets = get_secret_manager()
+
+        secret_key = f"{server_name}_{sanitize_name(header_key)}_header"
+        secrets.set(secret_key, normalized_value)
+        updated_headers[header_name] = f"{{secret:{secret_key}}}"
+        extracted = True
+
+    if not extracted:
+        return dict(config)
+
+    updated_config = dict(config)
+    updated_config["headers"] = updated_headers
+    return updated_config
+
+
+def mask_sensitive_mcp_config_for_frontend(
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Mask plain-text secrets before returning MCP config to the frontend."""
+    masked_config = dict(config)
+
+    auth_config = config.get("auth")
+    if isinstance(auth_config, dict):
+        auth_value = auth_config.get("value")
+        if isinstance(auth_value, str) and not _is_secret_placeholder(auth_value):
+            masked_auth = dict(auth_config)
+            masked_auth["value"] = MCP_MASKED_SECRET_VALUE
+            masked_config["auth"] = masked_auth
+
+    headers = config.get("headers")
+    if isinstance(headers, dict):
+        masked_headers = dict(headers)
+        changed = False
+        for header_name, header_value in headers.items():
+            if str(header_name).strip().lower() not in _SENSITIVE_HEADER_NAMES:
+                continue
+            if not isinstance(header_value, str):
+                continue
+            if _is_secret_placeholder(header_value):
+                continue
+            masked_headers[header_name] = MCP_MASKED_SECRET_VALUE
+            changed = True
+        if changed:
+            masked_config["headers"] = masked_headers
+
+    return masked_config
+
+
+def restore_masked_mcp_config_secrets(
+    previous_config: Dict[str, Any], updated_config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Restore masked frontend sentinel values back to their previous secrets."""
+    restored_config = dict(updated_config)
+
+    previous_auth = previous_config.get("auth")
+    next_auth = updated_config.get("auth")
+    if (
+        isinstance(previous_auth, dict)
+        and isinstance(next_auth, dict)
+        and next_auth.get("value") == MCP_MASKED_SECRET_VALUE
+        and isinstance(previous_auth.get("value"), str)
+    ):
+        restored_auth = dict(next_auth)
+        restored_auth["value"] = previous_auth["value"]
+        restored_config["auth"] = restored_auth
+
+    previous_headers = previous_config.get("headers")
+    next_headers = updated_config.get("headers")
+    if isinstance(previous_headers, dict) and isinstance(next_headers, dict):
+        previous_by_name = {
+            str(header_name).strip().lower(): header_value
+            for header_name, header_value in previous_headers.items()
+        }
+        restored_headers = dict(next_headers)
+        changed = False
+        for header_name, header_value in next_headers.items():
+            normalized_header = str(header_name).strip().lower()
+            if (
+                normalized_header not in _SENSITIVE_HEADER_NAMES
+                or header_value != MCP_MASKED_SECRET_VALUE
+            ):
+                continue
+            if normalized_header not in previous_by_name:
+                continue
+            restored_headers[header_name] = previous_by_name[normalized_header]
+            changed = True
+        if changed:
+            restored_config["headers"] = restored_headers
+
+    return restored_config
+
+
 def resolve_env_var(value: str) -> str:
     """
     Resolve environment variable or secret placeholder.
@@ -523,6 +654,7 @@ def resolve_conflict(tool_name: str, attempt: int = 0) -> str:
 
 
 __all__ = [
+    'MCP_MASKED_SECRET_VALUE',
     'REMOTE_MCP_TYPES',
     'LOCAL_MCP_TYPES',
     'build_mcp_url',
@@ -530,10 +662,13 @@ __all__ = [
     'config_has_pending_credentials',
     'extract_api_key_from_mcp_url',
     'extract_auth_value_from_mcp_config',
+    'extract_sensitive_headers_from_mcp_config',
     'get_connect_block_reason',
     'is_auth_related_error',
+    'mask_sensitive_mcp_config_for_frontend',
     'normalize_mcp_config',
     'normalize_mcp_config_aliases',
+    'restore_masked_mcp_config_secrets',
     'resolve_url_template',
     'resolve_env_var',
     'sanitize_name',
