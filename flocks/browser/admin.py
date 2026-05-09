@@ -26,7 +26,7 @@ def _load_env() -> None:
     for path in env_paths:
         if not path.exists():
             continue
-        _load_env_file(path)
+        load_env_file(path)
 
 _load_env()
 

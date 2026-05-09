@@ -45,7 +45,7 @@ def _load_env() -> None:
     for path in (Path(__file__).resolve().parents[2] / ".env", AGENT_WORKSPACE / ".env"):
         if not path.exists():
             continue
-        _load_env_file(path)
+        load_env_file(path)
 
 _load_env()
 
