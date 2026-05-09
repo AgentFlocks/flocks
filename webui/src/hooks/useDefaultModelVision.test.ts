@@ -18,8 +18,8 @@ function makeResolvedResp(provider_id = 'openai', model_id = 'gpt-4o') {
   return { data: { provider_id, model_id } };
 }
 
-function makeDefResp(caps: Record<string, unknown>) {
-  return { data: { capabilities: caps } };
+function makeDefResp(caps: Record<string, unknown>, fetchFrom: 'predefined' | 'customizable' = 'customizable') {
+  return { data: { fetch_from: fetchFrom, capabilities: caps } };
 }
 
 describe('useDefaultModelVision', () => {
@@ -42,12 +42,20 @@ describe('useDefaultModelVision', () => {
     await waitFor(() => expect(result.current).toBe(true));
   });
 
-  it('returns false for a non-vision model', async () => {
+  it('returns false for a non-vision customizable model', async () => {
     mockResolved.mockResolvedValue(makeResolvedResp());
     mockDefinition.mockResolvedValue(makeDefResp({ supports_vision: false }));
 
     const { result } = renderHook(() => useDefaultModelVision());
     await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  it('returns null for a predefined (built-in) model even when it declares vision support', async () => {
+    mockResolved.mockResolvedValue(makeResolvedResp());
+    mockDefinition.mockResolvedValue(makeDefResp({ supports_vision: true }, 'predefined'));
+
+    const { result } = renderHook(() => useDefaultModelVision());
+    await waitFor(() => expect(result.current).toBeNull());
   });
 
   it('returns null when capabilities are absent', async () => {

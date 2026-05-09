@@ -2116,12 +2116,16 @@ function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
         onClick={() => !disabled && onChange(!checked)}
         className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${
           disabled
-            ? 'bg-gray-200 cursor-not-allowed'
+            ? checked
+              ? 'bg-green-200 cursor-not-allowed'   // locked-ON: muted green
+              : 'bg-gray-200 cursor-not-allowed'    // locked-OFF: light gray
             : checked ? 'bg-green-600' : 'bg-gray-400'
         }`}
       >
         <span className={`absolute top-1 w-4 h-4 rounded-full shadow-sm transition-transform ${
-          disabled ? 'bg-gray-400' : 'bg-white'
+          disabled
+            ? checked ? 'bg-white' : 'bg-gray-400'
+            : 'bg-white'
         } ${checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'}`} />
       </button>
       <span className={`text-sm ${disabled ? 'text-gray-400' : 'text-gray-700'}`}>{label}</span>
@@ -2629,15 +2633,17 @@ function ModelDetailSheet({
   const { t } = useTranslation('model');
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
-  // Predefined (catalog/SDK) models have their vision capability set by the
-  // provider definition and should not be overridden by the user — only
-  // user-added models (fetch_from === 'customizable') can toggle it freely.
   const isPredefined = model.fetch_from === 'predefined';
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
   const [supportsTools, setSupportsTools] = useState(features.includes('tool_call') || !!model.capabilities?.supports_tools);
-  const [supportsVision, setSupportsVision] = useState(features.includes('vision') || !!model.capabilities?.supports_vision);
+  // For predefined models vision is always treated as disabled — only user-added
+  // (customizable) models may have vision enabled so the multimodal upload flow
+  // is only unlocked when the user has explicitly configured a vision model.
+  const [supportsVision, setSupportsVision] = useState(
+    isPredefined ? false : (features.includes('vision') || !!model.capabilities?.supports_vision),
+  );
   const [supportsStreaming, setSupportsStreaming] = useState(!!model.capabilities?.supports_streaming);
   const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
   const [inputPrice, setInputPrice] = useState(model.pricing ? String(model.pricing.input) : '0');

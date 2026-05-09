@@ -41,7 +41,13 @@ async function resolveVisionSupport(): Promise<VisionState> {
     const { provider_id, model_id } = resolvedResp.data;
     if (!provider_id || !model_id) return null;
     const defResp = await modelV2API.getDefinition(provider_id, model_id);
-    const caps: any = defResp.data?.capabilities;
+    const def: any = defResp.data;
+    // Predefined (catalog/SDK) models have vision handled at the provider
+    // level.  We intentionally treat them as non-vision here so that only
+    // user-added (fetch_from === 'customizable') models that have explicitly
+    // enabled vision trigger the multimodal upload flow.
+    if (!def || def.fetch_from !== 'customizable') return null;
+    const caps = def.capabilities;
     if (!caps) return null;
     if (
       caps.supports_vision === true ||
