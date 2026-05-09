@@ -411,37 +411,515 @@ def generate_postman_collection(requests: List[Dict], base_url: str) -> Dict:
     return collection
 
 
+def load_spec(spec_path: str) -> Dict[str, Any]:
+    """Load a web2cli spec from disk."""
+    with open(spec_path, encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError("Spec file must contain a JSON object")
+    return payload
+
+
+def generate_verify_materials_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate verify metadata from a web2cli spec."""
+    verify = spec.get("verify", {}) if isinstance(spec.get("verify"), dict) else {}
+    columns = spec.get("columns", [])
+    column_names = [column.get("name") for column in columns if isinstance(column, dict) and column.get("name")]
+
+    return {
+        "site": spec.get("site", ""),
+        "command": spec.get("command", ""),
+        "args": verify.get("args", {}),
+        "expect": {
+            "rowCount": verify.get("rowCount", {"min": 1}),
+            "columns": verify.get("columns", column_names),
+            "types": verify.get(
+                "types",
+                {
+                    column.get("name"): column.get("type", "string")
+                    for column in columns
+                    if isinstance(column, dict) and column.get("name")
+                },
+            ),
+            "notEmpty": verify.get("notEmpty", column_names[: min(3, len(column_names))]),
+            "patterns": verify.get("patterns", {}),
+        },
+    }
+
+
+def generate_markdown_docs_from_spec(spec: Dict[str, Any], title: str = "API Documentation") -> str:
+    """Generate Markdown documentation from a web2cli spec."""
+    operation = spec.get("operation", {})
+    args = spec.get("args", [])
+    columns = spec.get("columns", [])
+    verify = generate_verify_materials_from_spec(spec)
+
+    md = f"""# {title}
+
+> Auto-generated Web2CLI Specification
+> Site: `{spec.get("site", "")}`
+> Command: `{spec.get("command", "")}`
+
+## 概览
+
+- **描述**: {spec.get("description", "N/A")}
+- **策略**: `{spec.get("strategy", "PUBLIC")}`
+- **Base URL**: `{spec.get("baseUrl", "")}`
+- **Method**: `{operation.get("method", "GET")}`
+- **Endpoint**: `{operation.get("endpoint", "/")}`
+
+## 参数
+
+"""
+
+    if args:
+        md += "| 参数 | 类型 | 默认值 | 说明 |\n"
+        md += "|------|------|--------|------|\n"
+        for arg in args:
+            md += f"| `{arg.get('name', '')}` | `{arg.get('type', 'string')}` | `{arg.get('default', '')}` | {arg.get('help', '')} |\n"
+        md += "\n"
+    else:
+        md += "无参数。\n\n"
+
+    md += "## 输出列\n\n"
+    md += "| 列名 | 类型 | 路径 |\n"
+    md += "|------|------|------|\n"
+    for column in columns:
+        md += f"| `{column.get('name', '')}` | `{column.get('type', 'string')}` | `{column.get('path', '')}` |\n"
+
+    md += "\n## 验证建议\n\n"
+    md += f"- 默认参数: `{json.dumps(verify['args'], ensure_ascii=False)}`\n"
+    md += f"- 最少行数: `{verify['expect']['rowCount'].get('min', 0)}`\n"
+    md += f"- 必填列: `{', '.join(verify['expect']['notEmpty'])}`\n"
+
+    return md
+
+
+def generate_postman_collection_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Generate a minimal Postman collection from a web2cli spec."""
+    operation = spec.get("operation", {})
+    headers = operation.get("headers", {}) if isinstance(operation.get("headers"), dict) else {}
+    body_template = operation.get("bodyTemplate", {}) if isinstance(operation.get("bodyTemplate"), dict) else {}
+    endpoint = operation.get("endpoint", "/")
+    path_parts = endpoint.lstrip("/").split("/") if endpoint.lstrip("/") else []
+
+    request = {
+        "method": operation.get("method", "GET"),
+        "url": {
+            "raw": f"{{{{base_url}}}}{endpoint}",
+            "host": ["{{base_url}}"],
+            "path": path_parts,
+        },
+        "header": [{"key": key, "value": value} for key, value in headers.items()],
+    }
+    if body_template:
+        request["body"] = {
+            "mode": "raw",
+            "raw": json.dumps(body_template, ensure_ascii=False),
+            "options": {"raw": {"language": "json"}},
+        }
+
+    return {
+        "info": {
+            "name": f"{spec.get('site', 'captured')} {spec.get('command', 'command')}",
+            "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        },
+        "item": [
+            {
+                "name": spec.get("command", endpoint),
+                "request": request,
+            }
+        ],
+        "variable": [{"key": "base_url", "value": spec.get("baseUrl", "")}],
+    }
+
+
+def generate_python_cli_from_spec(spec: Dict[str, Any]) -> str:
+    """Generate a fixed command CLI script from a web2cli spec."""
+    spec_json = json.dumps(spec, indent=2, ensure_ascii=False)
+    return '''#!/usr/bin/env python3
+"""
+Auto-generated Web2CLI command script.
+Generated from web2cli-spec.json
+"""
+
+import argparse
+import csv
+import json
+import sys
+from typing import Any, Dict, List
+
+import requests
+
+
+SPEC = ''' + spec_json + '''
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _coerce_bool(value: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value}")
+
+
+def _type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "string"
+
+
+class APIClient:
+    """Fixed command client generated from a web2cli spec."""
+
+    @staticmethod
+    def _load_cookie_items(auth_state_path: str) -> List[Dict[str, Any]]:
+        payload = _load_json(auth_state_path)
+        cookies = payload.get("cookies", [])
+        if isinstance(cookies, list):
+            return [cookie for cookie in cookies if isinstance(cookie, dict)]
+        return []
+
+    @staticmethod
+    def _load_storage_map(payload: Dict[str, Any]) -> Dict[str, str]:
+        values = {}
+        for origin_entry in payload.get("origins", []):
+            if not isinstance(origin_entry, dict):
+                continue
+            for item in origin_entry.get("localStorage", []):
+                if isinstance(item, dict) and item.get("name"):
+                    values[item["name"]] = item.get("value", "")
+        return values
+
+    @staticmethod
+    def _resolve_header_value(payload: Dict[str, Any], rule: Dict[str, Any]) -> str | None:
+        source = rule.get("source")
+        key = rule.get("key")
+        if source == "cookie":
+            for cookie in payload.get("cookies", []):
+                if isinstance(cookie, dict) and cookie.get("name") == key:
+                    return str(cookie.get("value", ""))
+        if source == "localStorage":
+            return APIClient._load_storage_map(payload).get(str(key))
+        return None
+
+    @staticmethod
+    def _resolve_template(value: Any, args: Dict[str, Any]) -> Any:
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            return args.get(value[2:-1], value)
+        if isinstance(value, dict):
+            return {key: APIClient._resolve_template(item, args) for key, item in value.items()}
+        if isinstance(value, list):
+            return [APIClient._resolve_template(item, args) for item in value]
+        return value
+
+    @staticmethod
+    def _tokenize_path(path: str) -> List[str]:
+        if not path or path == "$":
+            return []
+        normalized = path
+        if normalized.startswith("$."):
+            normalized = normalized[2:]
+        elif normalized.startswith("$"):
+            normalized = normalized[1:]
+        normalized = normalized.replace("[]", ".[]")
+        return [token for token in normalized.split(".") if token]
+
+    @classmethod
+    def _extract_many(cls, value: Any, path: str) -> List[Any]:
+        tokens = cls._tokenize_path(path)
+        current = [value]
+        for token in tokens:
+            next_values = []
+            if token == "[]":
+                for item in current:
+                    if isinstance(item, list):
+                        next_values.extend(item)
+            else:
+                for item in current:
+                    if isinstance(item, dict) and token in item:
+                        next_values.append(item[token])
+            current = next_values
+            if not current:
+                break
+        return current
+
+    @classmethod
+    def _extract_first(cls, value: Any, path: str) -> Any:
+        if not path or path == "$":
+            return value
+        values = cls._extract_many(value, path)
+        return values[0] if values else None
+
+    def __init__(self, base_url: str = SPEC.get("baseUrl", ""), auth_state: str = "auth-state.json"):
+        self.base_url = (base_url or SPEC.get("baseUrl", "")).rstrip("/")
+        self.auth_state_path = auth_state
+        self.auth_state = _load_json(auth_state) if auth_state else {}
+        self.session = requests.Session()
+        self._apply_auth_state()
+
+    def _apply_auth_state(self) -> None:
+        strategy = SPEC.get("strategy", "PUBLIC")
+        auth = SPEC.get("auth", {})
+        headers = SPEC.get("operation", {}).get("headers", {})
+        if isinstance(headers, dict) and headers:
+            self.session.headers.update(headers)
+
+        if strategy in {"COOKIE", "HEADER"}:
+            for cookie in self._load_cookie_items(self.auth_state_path):
+                name = cookie.get("name")
+                if not name:
+                    continue
+                kwargs = {}
+                if cookie.get("domain"):
+                    kwargs["domain"] = cookie["domain"]
+                if cookie.get("path"):
+                    kwargs["path"] = cookie["path"]
+                self.session.cookies.set(name, cookie.get("value", ""), **kwargs)
+
+        if strategy == "HEADER":
+            for rule in auth.get("requiredHeaders", []):
+                if not isinstance(rule, dict) or not rule.get("name"):
+                    continue
+                value = self._resolve_header_value(self.auth_state, rule)
+                if value:
+                    self.session.headers[str(rule["name"])] = value
+
+    def build_request(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        operation = SPEC.get("operation", {})
+        endpoint = operation.get("endpoint", "/")
+        query = self._resolve_template(operation.get("queryTemplate", {}), args)
+        body = self._resolve_template(operation.get("bodyTemplate", {}), args)
+        return {
+            "method": operation.get("method", "GET"),
+            "url": f"{self.base_url}{endpoint}",
+            "params": query or None,
+            "json": body or None,
+        }
+
+    def _project_rows(self, payload: Any) -> List[Dict[str, Any]]:
+        row_source = SPEC.get("rowSource", {})
+        collection_path = row_source.get("collectionPath") or row_source.get("path") or "$"
+        collection = self._extract_many(payload, collection_path) if collection_path != "$" else [payload]
+        if not collection:
+            return []
+
+        rows = []
+        columns = SPEC.get("columns", [])
+        for index, row in enumerate(collection, start=1):
+            projected = {}
+            for column in columns:
+                if not isinstance(column, dict) or not column.get("name"):
+                    continue
+                rel_path = column.get("relativePath") or column.get("path") or "$"
+                if rel_path == "__index__":
+                    value = index
+                elif rel_path.startswith("$."):
+                    value = self._extract_first(payload, rel_path)
+                else:
+                    value = self._extract_first(row, rel_path)
+                projected[column["name"]] = value
+            rows.append(projected)
+        return rows
+
+    def run(self, args: Dict[str, Any]) -> List[Dict[str, Any]]:
+        request_options = self.build_request(args)
+        response = self.session.request(
+            request_options["method"],
+            request_options["url"],
+            params=request_options["params"],
+            json=request_options["json"],
+        )
+        response.raise_for_status()
+        return self._project_rows(response.json())
+
+
+def verify_rows(rows: List[Dict[str, Any]], verify_spec: Dict[str, Any]) -> List[str]:
+    errors = []
+    expect = verify_spec.get("expect", verify_spec)
+    row_count = expect.get("rowCount", {})
+    min_rows = row_count.get("min")
+    max_rows = row_count.get("max")
+
+    if min_rows is not None and len(rows) < min_rows:
+        errors.append(f"rowCount too small: expected >= {min_rows}, got {len(rows)}")
+    if max_rows is not None and len(rows) > max_rows:
+        errors.append(f"rowCount too large: expected <= {max_rows}, got {len(rows)}")
+
+    columns = expect.get("columns", [])
+    types = expect.get("types", {})
+    not_empty = expect.get("notEmpty", [])
+    patterns = expect.get("patterns", {})
+
+    for row in rows:
+        for column in columns:
+            if column not in row:
+                errors.append(f"missing column: {column}")
+        for column in not_empty:
+            if row.get(column) in (None, "", [], {}):
+                errors.append(f"empty required column: {column}")
+        for column, expected_type in types.items():
+            if column in row and row[column] is not None and _type_name(row[column]) != expected_type:
+                errors.append(
+                    f"type mismatch for {column}: expected {expected_type}, got {_type_name(row[column])}"
+                )
+        for column, pattern in patterns.items():
+            if column in row and row[column] is not None:
+                import re
+                if not re.search(pattern, str(row[column])):
+                    errors.append(f"pattern mismatch for {column}: {pattern}")
+
+    return errors
+
+
+def _print_rows(rows: List[Dict[str, Any]], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+    if not rows:
+        return
+    columns = list(rows[0].keys())
+    if output_format == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+        return
+    print("\\t".join(columns))
+    for row in rows:
+        print("\\t".join("" if row.get(column) is None else str(row.get(column)) for column in columns))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=SPEC.get("description", "Generated Web2CLI command"))
+    parser.add_argument("--base-url", default=SPEC.get("baseUrl", ""), help="Override base URL")
+    parser.add_argument(
+        "--auth-state",
+        default=(SPEC.get("auth", {}) or {}).get("stateFile", "auth-state.json"),
+        help="Path to auth state JSON",
+    )
+    parser.add_argument("--format", choices=["json", "csv", "table"], default="json", help="Output format")
+    parser.add_argument("--verify", action="store_true", help="Validate rows against embedded or external verify spec")
+    parser.add_argument("--verify-spec", help="Optional verify JSON path")
+    for arg in SPEC.get("args", []):
+        if not isinstance(arg, dict) or not arg.get("name"):
+            continue
+        option = "--" + str(arg["name"]).replace("_", "-")
+        arg_type = arg.get("type", "string")
+        kwargs = {
+            "dest": arg["name"],
+            "default": arg.get("default"),
+            "help": arg.get("help", ""),
+        }
+        if arg_type == "int":
+            kwargs["type"] = int
+        elif arg_type == "float":
+            kwargs["type"] = float
+        elif arg_type == "bool":
+            kwargs["type"] = _coerce_bool
+        else:
+            kwargs["type"] = str
+        parser.add_argument(option, **kwargs)
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    parsed = parser.parse_args()
+    runtime_args = {
+        item["name"]: getattr(parsed, item["name"])
+        for item in SPEC.get("args", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    client = APIClient(base_url=parsed.base_url, auth_state=parsed.auth_state)
+    rows = client.run(runtime_args)
+
+    if parsed.verify:
+        verify_spec = _load_json(parsed.verify_spec) if parsed.verify_spec else SPEC.get("verify", {})
+        errors = verify_rows(rows, verify_spec)
+        if errors:
+            raise SystemExit("\\n".join(errors))
+
+    _print_rows(rows, parsed.format)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Generate CLI/docs from captured APIs')
-    parser.add_argument('input', help='Input JSON file with captured requests')
+    parser = argparse.ArgumentParser(description='Generate CLI/docs from captured APIs or a web2cli spec')
+    parser.add_argument('input', nargs='?', help='Input JSON file with captured requests')
+    parser.add_argument('--spec', help='Input web2cli-spec.json file')
     parser.add_argument('--output', '-o', help='Output file')
     parser.add_argument('--base-url', '-u', default='https://example.com', help='Base URL')
-    parser.add_argument('--format', '-f', choices=['python', 'markdown', 'postman'],
+    parser.add_argument('--format', '-f', choices=['python', 'markdown', 'postman', 'verify'],
                        default='markdown', help='Output format')
     parser.add_argument('--title', '-t', default='API Documentation', help='Document title')
 
     args = parser.parse_args()
 
-    # Load input
-    with open(args.input) as f:
-        data = json.load(f)
+    if not args.input and not args.spec:
+        parser.error('either input or --spec is required')
 
-    # Handle both array and object formats
-    requests = data if isinstance(data, list) else data.get('requests', [])
-
-    if not requests:
-        print("No requests found in input file", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Processing {len(requests)} requests, {len(group_endpoints(requests))} unique endpoints...")
-
-    # Generate output
-    if args.format == 'python':
-        output = generate_python_client(requests, args.base_url)
-    elif args.format == 'postman':
-        output = json.dumps(generate_postman_collection(requests, args.base_url), indent=2, ensure_ascii=False)
+    if args.spec:
+        spec = load_spec(args.spec)
+        if args.format == 'python':
+            output = generate_python_cli_from_spec(spec)
+        elif args.format == 'verify':
+            output = json.dumps(generate_verify_materials_from_spec(spec), indent=2, ensure_ascii=False)
+        elif args.format == 'postman':
+            output = json.dumps(generate_postman_collection_from_spec(spec), indent=2, ensure_ascii=False)
+        else:
+            output = generate_markdown_docs_from_spec(spec, args.title)
     else:
-        output = generate_markdown_docs(requests, args.title)
+        # Load input
+        with open(args.input, encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Handle both array and object formats
+        requests = data if isinstance(data, list) else data.get('requests', [])
+
+        if not requests:
+            print("No requests found in input file", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Processing {len(requests)} requests, {len(group_endpoints(requests))} unique endpoints...")
+
+        # Generate output
+        if args.format == 'python':
+            output = generate_python_client(requests, args.base_url)
+        elif args.format == 'postman':
+            output = json.dumps(generate_postman_collection(requests, args.base_url), indent=2, ensure_ascii=False)
+        elif args.format == 'verify':
+            print("verify output requires --spec", file=sys.stderr)
+            sys.exit(1)
+        else:
+            output = generate_markdown_docs(requests, args.title)
 
     # Write output
     output_path = args.output

@@ -44,6 +44,13 @@ from flocks.workflow.fs_store import (
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
 )
+from flocks.workflow.execution_store import (
+    create_execution_record,
+    normalize_execution_status as _normalize_execution_status,
+    record_execution_result as _record_execution_result,
+    resolve_execution_outcome as _resolve_execution_outcome,
+    workflow_execution_key as _workflow_execution_key,
+)
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.tools import get_tool_registry
 from flocks.config.config import Config
@@ -81,6 +88,10 @@ class WorkflowCreateRequest(BaseModel):
     category: Optional[str] = Field("default", description="Workflow category")
     workflow_json: Dict[str, Any] = Field(..., alias="workflowJson", description="Workflow JSON definition")
     created_by: Optional[str] = Field(None, alias="createdBy", description="Creator")
+    source: Optional[Literal["project", "global"]] = Field(
+        "global",
+        description="Storage location: 'project' or 'global'; defaults to global user storage",
+    )
 
 
 class WorkflowUpdateRequest(BaseModel):
@@ -138,6 +149,10 @@ class WorkflowExecutionResponse(BaseModel):
     duration: Optional[float] = Field(None, description="Duration (seconds)")
     executionLog: List[Dict[str, Any]] = Field(default_factory=list, description="Execution log")
     errorMessage: Optional[str] = Field(None, description="Error message")
+    currentNodeId: Optional[str] = Field(None, description="Current running node ID")
+    currentNodeType: Optional[str] = Field(None, description="Current running node type")
+    currentPhase: Optional[str] = Field(None, description="Current execution phase")
+    currentStepIndex: Optional[int] = Field(None, description="Current step index")
 
 
 class WorkflowCenterPublishRequest(BaseModel):
@@ -432,65 +447,6 @@ def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
 
 
-def _workflow_execution_key(exec_id: str) -> str:
-    return f"workflow_execution/{exec_id}"
-
-
-def _normalize_execution_status(status: str) -> str:
-    """Map runner status values to API status values."""
-    normalized = (status or "").strip().upper()
-    if normalized == "SUCCEEDED":
-        return "success"
-    if normalized == "FAILED":
-        return "error"
-    if normalized == "TIMED_OUT":
-        return "timeout"
-    if normalized == "CANCELLED":
-        return "cancelled"
-    return (status or "error").strip().lower() or "error"
-
-
-def _extract_business_failure_message(outputs: Dict[str, Any]) -> Optional[str]:
-    """Return a user-facing failure reason from workflow outputs."""
-    for key in ("reason", "error_message", "errorMessage", "message"):
-        value = outputs.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _resolve_execution_outcome(result: RunWorkflowResult) -> tuple[str, Optional[str]]:
-    """Resolve API execution status from runner status and workflow outputs."""
-    status_value = _normalize_execution_status(result.status)
-    error_message = result.error
-
-    if status_value != "success" or not isinstance(result.outputs, dict):
-        return status_value, error_message
-
-    if result.outputs.get("workflow_success") is False:
-        return (
-            "error",
-            error_message
-            or _extract_business_failure_message(result.outputs)
-            or "Workflow reported business failure.",
-        )
-
-    return status_value, error_message
-
-
-async def _record_execution_result(workflow_id: str, exec_id: str, exec_data: Dict[str, Any]) -> None:
-    """Persist the final execution record and audit trail."""
-    await Storage.write(_workflow_execution_key(exec_id), exec_data)
-    try:
-        await Recorder.record_workflow_execution(
-            exec_id=exec_id,
-            workflow_id=workflow_id,
-            run_result=exec_data,
-        )
-    except Exception:
-        pass
-
-
 async def _run_workflow_execution_task(
     *,
     workflow_id: str,
@@ -505,21 +461,37 @@ async def _run_workflow_execution_task(
     start_time = time.time()
     step_history: list[dict[str, Any]] = []
     loop = asyncio.get_running_loop()
-    def _on_step_complete(step_result) -> None:
-        step_dict = step_result.model_dump(mode="json")
-        step_history.append(step_dict)
+
+    def _write_progress(update_fields: Dict[str, Any]) -> None:
         try:
             current = asyncio.run_coroutine_threadsafe(Storage.read(exec_key), loop).result(timeout=5)
-            update = {
-                **current,
-                "executionLog": list(step_history),
-            }
-            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, update), loop).result(timeout=5)
+            current.update(update_fields)
+            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, current), loop).result(timeout=5)
         except Exception as exc:
             log.warning("workflow.step_progress.write_failed", {
                 "exec_id": exec_id,
                 "error": str(exc),
             })
+
+    def _on_step_start(_run_id, step_index, node, _inputs):
+        _write_progress({
+            "currentNodeId": getattr(node, "id", None),
+            "currentNodeType": getattr(node, "type", None),
+            "currentPhase": "running",
+            "currentStepIndex": step_index,
+        })
+        return step_index
+
+    def _on_step_complete(step_result) -> None:
+        step_dict = step_result.model_dump(mode="json")
+        step_history.append(step_dict)
+        _write_progress({
+            "executionLog": list(step_history),
+            "currentNodeId": step_dict.get("node_id"),
+            "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+            "currentPhase": "running",
+            "currentStepIndex": len(step_history),
+        })
 
     try:
         result: RunWorkflowResult = await asyncio.to_thread(
@@ -528,6 +500,7 @@ async def _run_workflow_execution_task(
             inputs=req.inputs or {},
             timeout_s=req.timeout_s,
             trace=req.trace,
+            on_step_start=_on_step_start,
             on_step_complete=_on_step_complete,
             cancel=cancel_event.is_set,
             tool_context=tool_context,
@@ -543,6 +516,10 @@ async def _run_workflow_execution_task(
             "duration": duration,
             "executionLog": result.history or list(step_history),
             "errorMessage": error_message,
+            "currentNodeId": result.last_node_id,
+            "currentNodeType": current_data.get("currentNodeType"),
+            "currentPhase": status_value,
+            "currentStepIndex": result.steps,
         })
 
         if status_value == "success":
@@ -566,6 +543,7 @@ async def _run_workflow_execution_task(
             "duration": duration,
             "errorMessage": str(exc),
             "executionLog": list(step_history),
+            "currentPhase": "cancelled" if cancel_event.is_set() else "error",
         })
         if current_data["status"] == "error":
             await _update_workflow_stats(workflow_id, False, duration)
@@ -687,6 +665,7 @@ async def create_workflow(req: WorkflowCreateRequest):
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
 
+        source = req.source or "global"
         meta = {
             "id": workflow_id,
             "name": req.name,
@@ -698,10 +677,16 @@ async def create_workflow(req: WorkflowCreateRequest):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, req.workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, req.workflow_json, meta, global_store=(source == "global"))
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": req.workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": req.workflow_json,
+            "markdownContent": None,
+            "stats": stats,
+            "source": source,
+        }
 
         log.info("workflow.created", {"id": workflow_id, "name": req.name})
         await publish_event("workflow.created", {"id": workflow_id, "name": req.name})
@@ -861,21 +846,11 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             agent=req.agent,
         )
 
-        # Create execution record
-        exec_id = str(uuid.uuid4())
-        start_ms = int(time.time() * 1000)
-        
-        exec_data = {
-            "id": exec_id,
-            "workflowId": workflow_id,
-            "inputParams": req.inputs or {},
-            "status": "running",
-            "startedAt": start_ms,
-            "executionLog": [],
-        }
-        
-        # Save initial execution record
-        await Storage.write(_workflow_execution_key(exec_id), exec_data)
+        exec_data = await create_execution_record(
+            workflow_id,
+            input_params=req.inputs or {},
+        )
+        exec_id = str(exec_data["id"])
         
         cancel_event = threading.Event()
         task = asyncio.create_task(
@@ -1286,10 +1261,16 @@ async def import_workflow(workflow_json: Dict[str, Any]):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, global_store=True)
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": workflow_json,
+            "markdownContent": None,
+            "stats": stats,
+            "source": "global",
+        }
 
         log.info("workflow.imported", {"id": workflow_id, "name": name})
         await publish_event("workflow.created", {"id": workflow_id, "name": name})

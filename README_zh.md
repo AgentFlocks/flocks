@@ -218,8 +218,7 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 非浏览器客户端（TUI / SDK / 脚本）：
 
-- **本机回环**（`127.0.0.1` / `::1` / `localhost`，且请求不带 `x-forwarded-for` 头）会被自动识别为 `local-service` 管理员，满足同机的 TUI、插件子进程、CLI 调用。
-- **远程**调用必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
+- 所有非浏览器客户端（包括本机回环调用）都必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
 
   在 **服务端** 生成（或轮换）token，会持久化到服务端本机的 secret store：
 

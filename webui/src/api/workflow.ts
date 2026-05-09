@@ -120,6 +120,10 @@ export interface WorkflowExecution {
   duration?: number;
   executionLog: WorkflowExecutionStep[];
   errorMessage?: string;
+  currentNodeId?: string;
+  currentNodeType?: string;
+  currentPhase?: string;
+  currentStepIndex?: number;
 }
 
 export interface WorkflowNodeExecution {
@@ -156,6 +160,7 @@ export const workflowAPI = {
     category?: string;
     workflowJson: WorkflowJSON;
     createdBy?: string;
+    source?: 'project' | 'global';
   }) =>
     client.post<Workflow>('/api/workflow', data),
   

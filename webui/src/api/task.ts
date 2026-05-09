@@ -134,6 +134,7 @@ export interface TaskUpdateParams {
   description?: string;
   priority?: TaskPriority;
   tags?: string[];
+  context?: Record<string, any>;
   executionMode?: ExecutionMode;
   agentName?: string;
   workflowID?: string;

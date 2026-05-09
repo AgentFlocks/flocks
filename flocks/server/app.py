@@ -366,8 +366,6 @@ def _should_log_request(path: str, status_code: int) -> bool:
 #      ``_FLOCKS_WEBUI_*`` origin inferred from the current CLI launch.
 #   2. Explicit ``server.cors`` in flocks.json → append user-configured
 #      origins without discarding the runtime ones.
-#   3. Fallback → only localhost (any port) via regex.
-#
 # We deliberately do NOT auto-whitelist wildcard binds such as ``0.0.0.0``:
 # matching ``[^/]+:<port>`` would accept every host on that port, effectively
 # disabling CORS.  Remote deployments that bind to wildcard hosts must keep
@@ -380,14 +378,8 @@ def _should_log_request(path: str, status_code: int) -> bool:
 # import time — which would otherwise cache ``HOME`` before test harnesses
 # can monkey-patch it.
 
-_LOCALHOST_ORIGIN_RE = r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$"
-
-_LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_LOOPBACK_ORIGIN_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _WILDCARD_HOSTS = {"0.0.0.0", "::"}
-
-
-def _is_localhost(host: str) -> bool:
-    return host in _LOCALHOST_HOSTS
 
 
 def _format_host_for_url(host: str) -> str:
@@ -398,11 +390,13 @@ def _format_host_for_url(host: str) -> str:
 
 
 def _append_origin(origins: list[str], host: str, port: str) -> None:
-    if not host or not port or _is_localhost(host) or host in _WILDCARD_HOSTS:
+    if not host or not port or host in _WILDCARD_HOSTS:
         return
-    origin = f"http://{_format_host_for_url(host)}:{port}"
-    if origin not in origins:
-        origins.append(origin)
+    hosts = sorted(_LOOPBACK_ORIGIN_HOSTS) if host in _LOOPBACK_ORIGIN_HOSTS else [host]
+    for candidate_host in hosts:
+        origin = f"http://{_format_host_for_url(candidate_host)}:{port}"
+        if origin not in origins:
+            origins.append(origin)
 
 
 def _read_cors_config() -> tuple[list[str], Optional[str]]:
@@ -435,7 +429,7 @@ def _read_cors_config() -> tuple[list[str], Optional[str]]:
     except Exception:
         pass
 
-    return origins, _LOCALHOST_ORIGIN_RE
+    return origins, None
 
 
 class _DeferredCORSMiddleware:
@@ -629,9 +623,8 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
-            "error": type(exc).__name__,
-            "message": str(exc),
-            "traceback": tb,
+            "error": "InternalServerError",
+            "message": "Internal server error",
         }
     )
 

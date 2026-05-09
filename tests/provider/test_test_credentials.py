@@ -228,10 +228,28 @@ class TestTestCredentialsToolExecution:
             )
 
     @pytest.mark.asyncio
-    async def test_service_uses_enum_action_instead_of_placeholder_string(self):
-        """Connectivity checks should use enum-backed action values, not the generic 'test' placeholder."""
+    async def test_onesec_service_prefers_threat_probe_and_uses_enum_action(self):
+        """OneSEC should prefer the read-only threat probe over the older DNS probe."""
         from flocks.server.routes.provider import test_provider_credentials
 
+        onesec_threat_tool = ToolInfo(
+            name="onesec_threat",
+            description="OneSEC threat grouped tool",
+            category=ToolCategory.CUSTOM,
+            parameters=[
+                ToolParameter(
+                    name="action",
+                    type=ParameterType.STRING,
+                    description="Threat action",
+                    required=True,
+                    enum=[
+                        "threat_query_bd_version",
+                        "threat_virus_scan",
+                        "threat_update_bd_version",
+                    ],
+                )
+            ],
+        )
         onesec_dns_tool = ToolInfo(
             name="onesec_dns",
             description="OneSEC DNS grouped tool",
@@ -265,9 +283,9 @@ class TestTestCredentialsToolExecution:
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
-            mock_tr.list_tools.return_value = [onesec_dns_tool]
+            mock_tr.list_tools.return_value = [onesec_dns_tool, onesec_threat_tool]
             mock_tr._dynamic_tools_by_module = {
-                "flocks.tool.generated.onesec": ["onesec_dns"],
+                "flocks.tool.generated.onesec": ["onesec_dns", "onesec_threat"],
             }
             mock_tr.execute = AsyncMock(return_value=ToolResult(
                 success=True,
@@ -277,10 +295,10 @@ class TestTestCredentialsToolExecution:
             result = await test_provider_credentials("onesec_api")
 
             assert result["success"] is True, result
-            assert result["tool_tested"] == "onesec_dns"
+            assert result["tool_tested"] == "onesec_threat"
             mock_tr.execute.assert_awaited_once_with(
-                tool_name="onesec_dns",
-                action="dns_get_public_ip_list",
+                tool_name="onesec_threat",
+                action="threat_query_bd_version",
             )
 
     @pytest.mark.asyncio
@@ -343,6 +361,54 @@ class TestTestCredentialsToolExecution:
             assert result["success"] is True, result
             assert result["tool_tested"] == "qingteng_login"
             mock_tr.execute.assert_awaited_once_with(tool_name="qingteng_login")
+
+    @pytest.mark.asyncio
+    async def test_declared_manifest_probe_is_used_before_heuristic_tool_selection(self):
+        """A declared connectivity probe should bypass heuristic tool sorting."""
+        from flocks.server.routes.provider import test_provider_credentials
+        from flocks.tool.probe_loader import ConnectivitySpec
+
+        heuristic_tool = _make_tool_info("tdp_assets_domain_list")
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "valid-creds"
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+            patch(_PATCH_TOOL_REGISTRY) as mock_tr,
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "tdp_api_v3_3_10")),
+            patch(
+                "flocks.tool.probe_loader.get_connectivity_spec",
+                return_value=ConnectivitySpec(
+                    tool="tdp_system_status",
+                    params={"action": "service"},
+                ),
+            ),
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = None
+
+            mock_tr.init = MagicMock()
+            mock_tr.list_tools.return_value = [heuristic_tool]
+            mock_tr._dynamic_tools_by_module = {
+                "flocks.tool.generated.tdp_api": ["tdp_assets_domain_list"],
+            }
+            mock_tr.execute = AsyncMock(return_value=ToolResult(
+                success=True,
+                output={"status": "ok"},
+            ))
+
+            result = await test_provider_credentials("tdp_api_v3_3_10")
+
+            assert result["success"] is True, result
+            assert result["tool_tested"] == "tdp_system_status"
+            assert result["probe_source"] == "manifest"
+            mock_tr.execute.assert_awaited_once_with(
+                tool_name="tdp_system_status",
+                action="service",
+            )
 
     @pytest.mark.asyncio
     async def test_login_probe_does_not_overmatch_business_tools(self):
@@ -754,3 +820,83 @@ class TestTestCredentialsInlineConfigFallback:
             assert configured.api_key == "gateway-api-key"
             assert configured.base_url == "https://gateway.internal/v1"
             assert configured.custom_settings["verify_ssl"] is False
+
+    @pytest.mark.asyncio
+    async def test_requested_azure_deployment_model_is_used_for_provider_test(self):
+        from flocks.server.routes.provider import TestCredentialRequest, test_provider_credentials
+
+        provider = MagicMock()
+        provider._config = MagicMock(
+            custom_settings={},
+            base_url="https://example-resource.openai.azure.com/",
+        )
+        provider.chat = AsyncMock(return_value=MagicMock(content="Paris"))
+
+        model = MagicMock()
+        model.id = "customer-prod-deployment"
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "azure-api-key"
+
+        mock_config = MagicMock()
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=mock_config),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls._load_dynamic_providers = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials(
+                "azure-openai",
+                TestCredentialRequest(model_id="customer-prod-deployment"),
+            )
+
+            assert result["success"] is True, result
+            assert result["model_id"] == "customer-prod-deployment"
+            provider.chat.assert_awaited_once()
+            assert provider.chat.await_args.args[0] == "customer-prod-deployment"
+
+    @pytest.mark.asyncio
+    async def test_unsaved_azure_deployment_can_be_tested_without_model_definition(self):
+        from flocks.server.routes.provider import TestCredentialRequest, test_provider_credentials
+
+        provider = MagicMock()
+        provider._config = MagicMock(
+            custom_settings={},
+            base_url="https://example-resource.openai.azure.com/",
+        )
+        provider.chat = AsyncMock(return_value=MagicMock(content="Paris"))
+
+        catalog_model = MagicMock()
+        catalog_model.id = "gpt-5.4"
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.return_value = "azure-api-key"
+
+        mock_config = MagicMock()
+
+        with (
+            patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
+            patch(_PATCH_CONFIG_GET, new_callable=AsyncMock, return_value=mock_config),
+            patch(_PATCH_PROVIDER) as mock_provider_cls,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls._load_dynamic_providers = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [catalog_model]
+
+            result = await test_provider_credentials(
+                "azure-openai",
+                TestCredentialRequest(model_id="unsaved-prod-deployment"),
+            )
+
+            assert result["success"] is True, result
+            assert result["model_id"] == "unsaved-prod-deployment"
+            provider.chat.assert_awaited_once()
+            assert provider.chat.await_args.args[0] == "unsaved-prod-deployment"

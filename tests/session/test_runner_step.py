@@ -918,3 +918,37 @@ async def test_record_usage_if_available_swallows_runtime_error():
     )
     with patch.dict("sys.modules", {"flocks.provider.usage_service": fake_module}):
         await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
+    runner = _make_runner("ses_runner_node_ref")
+    user_message = UserMessageInfo(
+        id="msg_user_node_ref",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts",
+        AsyncMock(return_value=[
+            SimpleNamespace(
+                type="text",
+                text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
+            ),
+        ]),
+    )
+
+    chat_messages = await runner._to_chat_messages([user_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "user"
+    assert isinstance(chat_messages[0].content, str)
+    assert "Selected workflow node context:" in chat_messages[0].content
+    assert "node_id: query_fofa" in chat_messages[0].content
+    assert "node_type: python" in chat_messages[0].content
+    assert "只修改这个节点的代码并保留其他节点不变" in chat_messages[0].content

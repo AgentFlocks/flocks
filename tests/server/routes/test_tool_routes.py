@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import AsyncClient
 
+from flocks.auth.context import AuthUser
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
 from flocks.tool.registry import Tool, ToolCategory, ToolInfo, ToolRegistry, ToolResult
@@ -28,6 +29,33 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
             ToolRegistry._tools.pop(tool.info.name, None)
 
 
+class _FakeSessionUser:
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+    def to_auth_user(self) -> AuthUser:
+        return AuthUser(
+            id=f"usr_{self.role}",
+            username=f"{self.role}-user",
+            role=self.role,
+            status="active",
+            must_reset_password=False,
+        )
+
+
+def _patch_session_user(monkeypatch: pytest.MonkeyPatch, role: str) -> None:
+    from flocks.server import auth as auth_module
+
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeSessionUser(role)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+
+
 async def _create_session_and_message(title: str) -> tuple[str, str]:
     session = await Session.create(
         project_id="default",
@@ -45,6 +73,49 @@ async def _create_session_and_message(title: str) -> tuple[str, str]:
 
 
 class TestToolRouteSecurity:
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_create_plugin_tool(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        _patch_session_user(monkeypatch, "viewer")
+
+        response = await client.post(
+            "/api/tools",
+            headers={"cookie": "flocks_session=viewer-session"},
+            json={
+                "name": "viewer_created_tool",
+                "description": "should be rejected",
+                "handler": {
+                    "type": "http",
+                    "method": "GET",
+                    "url": "https://example.com",
+                },
+            },
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_update_plugin_tool(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        _patch_session_user(monkeypatch, "viewer")
+
+        response = await client.put(
+            "/api/tools/existing_tool",
+            headers={"cookie": "flocks_session=viewer-session"},
+            json={"description": "nope"},
+        )
+
+        assert response.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_delete_plugin_tool(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        _patch_session_user(monkeypatch, "viewer")
+
+        response = await client.delete(
+            "/api/tools/existing_tool",
+            headers={"cookie": "flocks_session=viewer-session"},
+        )
+
+        assert response.status_code == 403
+
     @pytest.mark.asyncio
     async def test_execute_blocks_direct_bash_access(self, client: AsyncClient):
         response = await client.post(

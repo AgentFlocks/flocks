@@ -3,6 +3,7 @@ import { AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat, { type SSEChatEvent } from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { workflowAPI, Workflow } from '@/api/workflow';
 
 const FALLBACK_POLL_MS = 10_000;
@@ -13,6 +14,7 @@ interface CreateChatTabProps {
 
 export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps) {
   const { t } = useTranslation('workflow');
+  const supportsVision = useDefaultModelVision();
 
   const exampleQuestions = t('create.chat.exampleQuestions', { returnObjects: true }) as string[];
 
@@ -83,12 +85,6 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
     return () => clearInterval(timer);
   }, [sessionId, snapshotReady, detectNewWorkflow]);
 
-  const handleCreateAndSend = useCallback(
-    async (text: string) => {
-      await createAndSend(text);
-    },
-    [createAndSend],
-  );
 
   if (error) {
     return (
@@ -114,9 +110,10 @@ export default function CreateChatTab({ onWorkflowCreated }: CreateChatTabProps)
       placeholder={t('create.chat.inputPlaceholder')}
       className="h-full"
       suggestions={exampleQuestions}
+      supportsVision={supportsVision}
       onStreamingDone={handleStreamingDone}
       onSSEEvent={handleSSEEvent}
-      onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
+      onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
     />
   );
 }

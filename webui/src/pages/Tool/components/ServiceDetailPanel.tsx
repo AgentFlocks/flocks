@@ -12,7 +12,7 @@ import { toolAPI } from '@/api/tool';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { EnabledBadge } from './badges';
-import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, MCPFormFields } from '../ToolSheets';
+import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MCPFormFields } from '../ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
 
@@ -126,6 +126,10 @@ export function MCPServerDetailPanel({
 
   const handleTestConnection = async () => {
     if (!formData) return;
+    if (getMCPFormError(formData) === 'invalidHeaders') {
+      alert(t('alert.invalidHeaders'));
+      return;
+    }
     setTestingConnection(true);
     setTestResult(null);
     const currentConfig = buildMCPConfigFromForm(formData);
@@ -151,6 +155,10 @@ export function MCPServerDetailPanel({
 
   const handleSaveConfig = async () => {
     if (!formData || !isDirty) return;
+    if (getMCPFormError(formData) === 'invalidHeaders') {
+      alert(t('alert.invalidHeaders'));
+      return;
+    }
     try {
       setSavingConfig(true);
       setTestResult(null);

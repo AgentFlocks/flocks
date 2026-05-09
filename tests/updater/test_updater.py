@@ -1746,6 +1746,69 @@ async def test_perform_update_retries_uv_sync_on_first_failure(
 
 
 @pytest.mark.asyncio
+async def test_perform_update_rolls_back_when_windows_uv_sync_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_download(**_kw):
+        return archive_path
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        if "sync" in cmd:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout or 0)
+        return 0, "", ""
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_a, **_kw: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_a, **_kw: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else r"C:\tools\uv.exe",
+    )
+    monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
+    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_a, **_kw: None)
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_a: events.append("restore"))
+
+    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False)]
+
+    assert progresses[-1].stage == "error"
+    expected_timeout = updater._dependency_sync_timeout_seconds()
+    assert progresses[-1].message == (
+        f"Dependency sync timed out after {expected_timeout}s while running uv sync."
+    )
+    assert events == ["restore"]
+
+
+@pytest.mark.asyncio
 async def test_perform_update_fails_after_uv_sync_retry_exhausted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

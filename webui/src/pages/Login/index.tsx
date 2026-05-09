@@ -82,7 +82,7 @@ export default function LoginPage() {
           <div>
             {t('login.recoverPassword')}
             {' '}
-            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin generate-one-time-password --username admin_user_name</code>
+            <code className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-700">flocks admin generate-one-time-password --username admin</code>
           </div>
         </div>
       </form>

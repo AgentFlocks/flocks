@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import BROWSER_LABEL, PROJECT_ROOT, get_browser_version
 from . import _ipc as ipc
+from .utils import load_env_file
 
 
 NAME = os.environ.get("BU_NAME", "default")
@@ -25,17 +26,7 @@ def _load_env() -> None:
     for path in env_paths:
         if not path.exists():
             continue
-        _load_env_file(path)
-
-
-def _load_env_file(path: Path) -> None:
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
+        load_env_file(path)
 
 _load_env()
 

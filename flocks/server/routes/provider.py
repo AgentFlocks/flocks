@@ -2320,9 +2320,15 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             requested_model_id = body.model_id if body else None
             test_model_id = requested_model_id or models[0].id
 
-            # Validate model belongs to this provider
+            # Validate model belongs to this provider. Azure OpenAI is the
+            # exception: users may test a deployment name before saving it.
             valid_ids = {m.id for m in models}
-            if test_model_id not in valid_ids:
+            is_unsaved_azure_deployment = (
+                requested_model_id
+                and provider_id in {"azure-openai", "azure"}
+                and test_model_id not in valid_ids
+            )
+            if test_model_id not in valid_ids and not is_unsaved_azure_deployment:
                 response = {
                     "success": False,
                     "message": f"模型 '{test_model_id}' 不属于该 Provider",
@@ -2519,6 +2525,11 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 # actions (which would each trigger a fresh login attempt).
                 if _is_login_probe(t) or _is_action_dispatch_login_probe(t):
                     priority = -1
+                # OneSEC grouped tools all look equally generic to the default
+                # heuristic, but the threat probe maps to a safer read-only
+                # version query than the legacy DNS probe.
+                elif provider_id == "onesec_api" and name_lower == "onesec_threat":
+                    priority = 0
                 # Prefer query/scan style tools first, and push upload/file tools last.
                 elif "ip" in name_lower:
                     priority = 0

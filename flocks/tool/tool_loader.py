@@ -504,29 +504,14 @@ def _build_execution_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     if not code or not code.strip():
         raise ValueError(f"Empty execution code in {yaml_path}")
 
-    code_body = code.rstrip()
-    wrapper_lines = ["async def _tool_exec(**_kw_):", "    import asyncio"]
-    for line in code_body.splitlines():
-        wrapper_lines.append(f"    {line}")
-    wrapper_source = "\n".join(wrapper_lines)
-
-    compiled = compile(wrapper_source, str(yaml_path), "exec")
-
     async def handler(ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        ns: Dict[str, Any] = {}
-        exec(compiled, ns)
-        _tool_exec = ns["_tool_exec"]
-        try:
-            result = await _tool_exec(**kwargs)
-            if isinstance(result, ToolResult):
-                return result
-            if isinstance(result, dict):
-                success = result.pop("success", True)
-                error = result.pop("error", None)
-                return ToolResult(success=success, output=result, error=error)
-            return ToolResult(success=True, output=result)
-        except Exception as e:
-            return ToolResult(success=False, error=str(e))
+        return ToolResult(
+            success=False,
+            error=(
+                "Inline YAML execution is disabled for safety. "
+                "Use handler.type=script for trusted Python tool handlers."
+            ),
+        )
 
     return handler
 

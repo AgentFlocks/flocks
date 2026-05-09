@@ -19,6 +19,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from flocks.auth.context import AuthUser
+from flocks.server.auth import require_admin
 from flocks.tool.registry import (
     Tool,
     ToolCategory,
@@ -83,6 +85,13 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from flocks.server.routes.tool import router
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="admin-test",
+        username="admin-test",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api/tools")
     client = TestClient(app, raise_server_exceptions=True)
 
@@ -106,7 +115,40 @@ def _read_settings() -> dict:
     return ConfigWriter.list_tool_settings()
 
 
+def _viewer_client() -> TestClient:
+    from flocks.server.routes.tool import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _viewer_auth(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="viewer-test",
+            username="viewer-test",
+            role="viewer",
+            status="active",
+            must_reset_password=False,
+        )
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/tools")
+    return TestClient(app, raise_server_exceptions=True)
+
+
 # ─── Tests ───────────────────────────────────────────────────────────────────
+
+def test_tool_mutation_routes_require_admin():
+    client = _viewer_client()
+
+    responses = [
+        client.patch("/api/tools/anything", json={"enabled": True}),
+        client.post("/api/tools/anything/reset"),
+        client.post("/api/tools/refresh"),
+        client.post("/api/tools/anything/reload"),
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403, 403]
+
 
 class TestToolInfoResponse:
     def test_lists_factory_default_and_no_setting_initially(self, tool_client):

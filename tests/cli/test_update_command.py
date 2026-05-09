@@ -35,6 +35,78 @@ def test_update_cli_accepts_force_option(monkeypatch, tmp_path) -> None:
     assert captured == {"check": False, "yes": True, "force": True, "region": "cn"}
 
 
+def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    check_regions: list[str | None] = []
+    confirm_prompts: list[str] = []
+    captured: dict[str, object] = {}
+    answers = iter([True, True])
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        check_regions.append(region)
+        zipball_url = "https://example.com/flocks.zip"
+        tarball_url = "https://example.com/flocks.tar.gz"
+        if region == "cn":
+            zipball_url = "https://gitee.example.com/flocks.zip"
+            tarball_url = "https://gitee.example.com/flocks.tar.gz"
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url=zipball_url,
+            tarball_url=tarball_url,
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    async def fake_perform_update(
+        latest_tag: str,
+        *,
+        zipball_url: str | None = None,
+        tarball_url: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
+    ):
+        captured["latest_tag"] = latest_tag
+        captured["zipball_url"] = zipball_url
+        captured["tarball_url"] = tarball_url
+        captured["perform_region"] = region
+        captured["restart"] = restart
+        async for step in _fake_progress():
+            yield step
+
+    def fake_confirm(prompt: str, default: bool = False) -> bool:
+        confirm_prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_cmd.typer, "confirm", fake_confirm)
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=False, yes=False, force=False, region=None))
+
+    assert check_regions == ["cn"]
+    assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
+    assert captured == {
+        "latest_tag": "2026.4.2",
+        "zipball_url": "https://gitee.example.com/flocks.zip",
+        "tarball_url": "https://gitee.example.com/flocks.tar.gz",
+        "perform_region": "cn",
+        "restart": False,
+    }
+    assert "已切换为中国镜像源" not in output.getvalue()
+
+
 async def _fake_progress():
     yield UpdateProgress(stage="fetching", message="fetching")
     yield UpdateProgress(stage="done", message="done", success=True)

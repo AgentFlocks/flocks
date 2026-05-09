@@ -12,6 +12,7 @@ Implements session/prompt.ts SessionPrompt namespace pattern.
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -94,6 +95,38 @@ LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
 # reasoning and content generation phases; a tight inter-chunk timeout causes
 # spurious failures in those cases.
 LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
+
+_WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
+
+
+def _expand_workflow_node_ref(text: str) -> str:
+    """Translate the web UI's node-ref marker into model-readable text.
+
+    WorkflowDetail chat prefixes a user turn with ``@@node:<id>|<type>`` when
+    the user picks a node from the canvas. Before this fix the marker was only
+    rendered/decorated in the UI; the backend passed it through verbatim, so
+    the model saw an opaque token instead of an explicit instruction to focus
+    on that node.
+    """
+    if not text:
+        return text
+    match = _WORKFLOW_NODE_REF_RE.match(text)
+    if not match:
+        return text
+
+    node_id = match.group(1).strip()
+    node_type = match.group(2).strip()
+    user_request = match.group(3).lstrip("\n")
+
+    parts = [
+        "Selected workflow node context:",
+        f"- node_id: {node_id}",
+        f"- node_type: {node_type}",
+        "- Focus the requested workflow modification on this node unless the user explicitly asks for broader workflow changes.",
+    ]
+    if user_request.strip():
+        parts.extend(["", "User request:", user_request])
+    return "\n".join(parts)
 
 
 async def _iter_with_chunk_timeout(
@@ -360,8 +393,64 @@ class SessionRunner:
 
         return {"compacted": compacted, "persisted": persisted}
 
+    # Provider IDs whose adapters are known to translate Flocks' internal
+    # ``{"type": "image", "mimeType": ..., "data": <base64>}`` block into
+    # the provider-native multimodal format (e.g. OpenAI ``image_url`` or
+    # Anthropic vision blocks).
+    #
+    # Matched with exact equality (no substring matching) to prevent false
+    # positives such as a user-configured "not-openai" or an internal
+    # "xxx-llm-gateway" id being mistakenly classified as multimodal-capable.
+    #
+    # ``custom-`` providers (created via ``POST /api/custom/providers``) are
+    # checked separately via ``startswith`` because their ids follow the
+    # pattern ``custom-<user-chosen-name>`` and they always use the
+    # ``@ai-sdk/openai-compatible`` adapter that handles vision blocks.
+    _MULTIMODAL_PROVIDER_NAMES = frozenset({
+        "anthropic", "openai", "azure",
+        "vertex", "bedrock", "openrouter",
+    })
+
+    def _model_supports_vision(self) -> bool:
+        """Best-effort vision capability lookup from the model definition.
+
+        Returns ``True`` only when explicitly declared on the model entry via
+        ``capabilities.supports_vision``. Defaults to a safe ``False`` for
+        unknown configurations.
+        """
+        try:
+            from flocks.provider.provider import Provider as _Provider
+
+            provider = _Provider.get(self.provider_id)
+            if provider is not None:
+                for model in getattr(provider, "_config_models", []) or []:
+                    if model.id == self.model_id:
+                        caps = getattr(model, "capabilities", None)
+                        if caps and getattr(caps, "supports_vision", False):
+                            return True
+                        break
+        except Exception as exc:
+            log.debug("runner.vision_lookup.failed", {"error": str(exc)})
+        return False
+
     def _supports_multimodal_user_content(self) -> bool:
-        return self.provider_id in {"anthropic", "openai", "openai-compatible"}
+        """Whether the active provider/model can accept image content blocks.
+
+        Decision order:
+          1. The model definition explicitly advertises vision support
+             (``capabilities.supports_vision`` on the model entry).
+          2. The provider id is an exact match against the known multimodal
+             provider name set, or starts with ``"custom-"`` (user-registered
+             OpenAI-compatible providers that inherit vision capability from
+             their underlying model).
+        """
+        if self._model_supports_vision():
+            return True
+        provider_id = (self.provider_id or "").lower()
+        return (
+            provider_id in self._MULTIMODAL_PROVIDER_NAMES
+            or provider_id.startswith("custom-")
+        )
 
     def _append_file_content_block(
         self,
@@ -375,10 +464,33 @@ class SessionRunner:
         """Append an appropriate content block for *url* into *blocks*.
 
         Images are embedded as base64 for multimodal-capable providers; other
-        file types are extracted as text.  Falls back to a plain markdown link
-        when extraction is not possible.
+        file types are extracted as text. We *never* spill a raw ``data:`` URL
+        into the text fallback — doing so previously caused OpenAI to tokenize
+        the entire base64 payload (~250k tokens for a single screenshot,
+        blowing past the model's context window).
         """
-        if self._supports_multimodal_user_content() and mime.startswith("image/"):
+        is_image = mime.startswith("image/")
+        multimodal_ok = self._supports_multimodal_user_content()
+
+        log.info("runner.file_part.dispatch", {
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "mime": mime,
+            "filename": filename,
+            "is_image": is_image,
+            "multimodal_supported": multimodal_ok,
+            "url_scheme": url.split(":", 1)[0] if url else None,
+            "url_size": len(url),
+        })
+
+        # For images we ALWAYS try the multimodal path first, regardless of
+        # provider whitelist. The whitelist guards against silently degrading
+        # to a text fallback that would tokenize the entire base64 payload —
+        # but since fallback now never embeds the URL, "force-try multimodal"
+        # is strictly safer: providers that genuinely cannot handle ``image``
+        # blocks will surface a precise error, which is far better UX than a
+        # 250k-token context_length_exceeded error.
+        if is_image:
             import base64 as _b64
             data = read_file_part_bytes(url)
             if data:
@@ -388,16 +500,44 @@ class SessionRunner:
                     "data": _b64.b64encode(data).decode("utf-8"),
                 })
                 return
+            log.warn("runner.file_part.image_decode_failed", {
+                "provider_id": self.provider_id,
+                "filename": filename,
+            })
+            # Image bytes could not be read — fall through to placeholder
+            # (which is intentionally tiny, never the raw URL).
 
-        extracted_text = extract_file_text(mime=mime, filename=filename, url=url)
+        extracted_text = extract_file_text(mime=mime, filename=filename, url=url) if not is_image else None
         if extracted_text:
             text_fallbacks.append(extracted_text)
             blocks.append({"type": "text", "text": extracted_text})
             return
 
-        text_fallbacks.append(
-            f"[File: {filename}]({url})" if url else f"[File: {filename}]"
-        )
+        # Final fallback — for images we either lack vision support or could
+        # not decode the bytes. Either way, refuse to embed the raw URL when
+        # it is a data URI; the base64 payload would otherwise be sent to the
+        # LLM as plain text and explode the prompt token count. Also clamp the
+        # placeholder to a hard byte cap as a belt-and-braces measure.
+        MAX_PLACEHOLDER_CHARS = 200
+        if is_image:
+            placeholder = (
+                f"[Image: {filename} — model does not support image input; "
+                f"the image was omitted from the prompt]"
+            )
+            log.info("runner.file_part.image_skipped", {
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "reason": "multimodal_unsupported" if not multimodal_ok else "decode_failed",
+                "filename": filename,
+            })
+        else:
+            safe_url = url if url and not url.startswith("data:") else ""
+            placeholder = (
+                f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
+            )
+        if len(placeholder) > MAX_PLACEHOLDER_CHARS:
+            placeholder = placeholder[:MAX_PLACEHOLDER_CHARS] + "…"
+        text_fallbacks.append(placeholder)
 
     @classmethod
     async def loop(cls, session_id: str) -> Optional['MessageInfo']:
@@ -829,15 +969,51 @@ class SessionRunner:
             if last_finished:
                 from flocks.session.prompt_strings import SYNTHETIC_MESSAGE_MARKERS
                 for chat_msg in chat_messages:
-                    if chat_msg.role == "user":
-                        if not any(marker in chat_msg.content for marker in SYNTHETIC_MESSAGE_MARKERS):
-                            # Wrap with reminder
-                            chat_msg.content = f"""<system-reminder>
-The user sent the following message:
-{chat_msg.content}
+                    if chat_msg.role != "user":
+                        continue
 
-Please address this message and continue with your tasks.
-</system-reminder>"""
+                    content = chat_msg.content
+
+                    if isinstance(content, str):
+                        if any(marker in content for marker in SYNTHETIC_MESSAGE_MARKERS):
+                            continue
+                        chat_msg.content = (
+                            "<system-reminder>\n"
+                            "The user sent the following message:\n"
+                            f"{content}\n\n"
+                            "Please address this message and continue with your tasks.\n"
+                            "</system-reminder>"
+                        )
+                    elif isinstance(content, list):
+                        # Multimodal user content (e.g. image_url blocks).
+                        # Naively f-stringing the whole list would call
+                        # ``str(list)`` and serialize every image block — base64
+                        # data and all — into plain text, which both blows up
+                        # the token count AND makes vision-capable models
+                        # respond with "I see only base64 text". Wrap *only*
+                        # the first text block instead, leaving image blocks
+                        # untouched. If there is no text block at all (rare —
+                        # an image-only turn), skip wrapping entirely.
+                        first_text_idx: Optional[int] = None
+                        for idx, block in enumerate(content):
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                first_text_idx = idx
+                                break
+                        if first_text_idx is None:
+                            continue
+                        text_val = content[first_text_idx].get("text") or ""
+                        if any(marker in text_val for marker in SYNTHETIC_MESSAGE_MARKERS):
+                            continue
+                        content[first_text_idx] = {
+                            "type": "text",
+                            "text": (
+                                "<system-reminder>\n"
+                                "The user sent the following message:\n"
+                                f"{text_val}\n\n"
+                                "Please address this message and continue with your tasks.\n"
+                                "</system-reminder>"
+                            ),
+                        }
         
         # Add max steps warning if this is the last step (matching Flocks)
         if is_last_step:
@@ -1541,7 +1717,20 @@ Please address this message and continue with your tasks.
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
-        
+
+        # Identify the last USER message — only that one keeps real image
+        # bytes in its content blocks. Earlier turns get a short text
+        # placeholder so we don't ship hundreds of KB of base64 back to the
+        # model on every follow-up. Even providers that count vision tokens
+        # natively (OpenAI proper) charge per resent image, and gateways that
+        # tokenize the data URL as plain text (e.g. some Azure proxies) will
+        # blow past the context window after the second turn otherwise.
+        last_user_msg_id: Optional[str] = None
+        for _msg in messages:
+            _role = _msg.role if isinstance(_msg.role, str) else getattr(_msg.role, "value", None)
+            if _role == "user":
+                last_user_msg_id = _msg.id
+
         # Add system prompts
         if system_prompts:
             chat_messages.append(ChatMessage(
@@ -1553,6 +1742,7 @@ Please address this message and continue with your tasks.
         for msg in messages:
             if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
                 turn_index += 1
+            is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
             parts = await Message.parts(msg.id, self.session.id)
             
@@ -1562,7 +1752,7 @@ Please address this message and continue with your tasks.
                 if content.strip():
                     chat_messages.append(ChatMessage(
                         role=msg.role if isinstance(msg.role, str) else msg.role.value,
-                        content=content,
+                        content=_expand_workflow_node_ref(content),
                     ))
                 continue
             
@@ -1574,23 +1764,41 @@ Please address this message and continue with your tasks.
                     if hasattr(part, 'type'):
                         if part.type == "text" and hasattr(part, 'text'):
                             if not getattr(part, 'ignored', False) and part.text.strip():
-                                user_content_parts.append(part.text)
+                                normalized_text = _expand_workflow_node_ref(part.text)
+                                user_content_parts.append(normalized_text)
                                 user_content_blocks.append({
                                     "type": "text",
-                                    "text": part.text,
+                                    "text": normalized_text,
                                 })
                         elif part.type == "file" and hasattr(part, 'mime'):
                             mime = getattr(part, 'mime', '')
                             if mime != 'application/x-directory':
                                 filename = getattr(part, 'filename', 'file')
                                 url = getattr(part, 'url', '')
-                                self._append_file_content_block(
-                                    user_content_blocks,
-                                    user_content_parts,
-                                    mime=mime,
-                                    filename=filename,
-                                    url=url,
-                                )
+                                # Image bytes only ride on the latest user
+                                # turn — older turns are reduced to a short,
+                                # opaque placeholder. Crucially the placeholder
+                                # does NOT include the filename: leaking
+                                # earlier filenames was making the model
+                                # confidently misidentify the *current* image
+                                # as one of the older ones (it would echo back
+                                # the older filename instead of describing the
+                                # newly-attached picture).
+                                if mime.startswith("image/") and not is_latest_user_turn:
+                                    stub = "[earlier image omitted]"
+                                    user_content_parts.append(stub)
+                                    user_content_blocks.append({
+                                        "type": "text",
+                                        "text": stub,
+                                    })
+                                else:
+                                    self._append_file_content_block(
+                                        user_content_blocks,
+                                        user_content_parts,
+                                        mime=mime,
+                                        filename=filename,
+                                        url=url,
+                                    )
                         elif part.type == "compaction":
                             user_content_parts.append("What did we do so far?")
                             user_content_blocks.append({

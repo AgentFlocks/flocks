@@ -37,6 +37,24 @@ def test_handshake_403_needs_chrome_remote_debugging_prompt() -> None:
     assert admin._needs_chrome_remote_debugging_prompt(msg)
 
 
+def test_load_env_uses_shared_loader_for_existing_files(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo_env = tmp_path / ".env"
+    workspace_env = workspace / ".env"
+    repo_env.write_text("TOKEN=repo\n", encoding="utf-8")
+    workspace_env.write_text("TOKEN=workspace\n", encoding="utf-8")
+    loaded_paths = []
+
+    monkeypatch.setattr(admin, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("BH_AGENT_WORKSPACE", str(workspace))
+    monkeypatch.setattr(admin, "load_env_file", lambda path: loaded_paths.append(path))
+
+    admin._load_env()
+
+    assert loaded_paths == [repo_env, workspace_env]
+
+
 def test_stale_websocket_does_not_open_chrome_inspect() -> None:
     msg = "no close frame received or sent"
     assert not admin._needs_chrome_remote_debugging_prompt(msg)

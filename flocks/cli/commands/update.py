@@ -37,13 +37,23 @@ def update_command(
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
     from flocks.updater import check_update, perform_update, detect_deploy_mode
 
-    with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
-        info = await check_update(region=region)
+    if not yes and not check and region is None:
+        use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
+        if use_cn_mirror:
+            region = "cn"
 
-    if info.error:
-        append_upgrade_text_log(f"ERROR version_check: {info.error}")
-        console.print(f"[red]检查失败：{info.error}[/red]")
-        raise typer.Exit(1)
+    async def _load_update_info(selected_region: str | None):
+        with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
+            info = await check_update(region=selected_region)
+
+        if info.error:
+            append_upgrade_text_log(f"ERROR version_check: {info.error}")
+            console.print(f"[red]检查失败：{info.error}[/red]")
+            raise typer.Exit(1)
+
+        return info
+
+    info = await _load_update_info(region)
 
     _print_version_table(info)
 

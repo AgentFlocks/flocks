@@ -1431,7 +1431,7 @@ def tail_lines(path: Path, lines: int) -> list[str]:
         return [line.rstrip("\n") for line in deque(handle, maxlen=max(lines, 0))]
 
 
-def _emit_service_log_tail(console, log_path: Path, service_label: str, lines: int = 40) -> None:
+def _emit_service_log_tail(console, log_path: Path, service_label: str, lines: int = 10) -> None:
     """Print the last *lines* lines of *log_path* to help diagnose failed daemon startups."""
     if lines <= 0:
         return

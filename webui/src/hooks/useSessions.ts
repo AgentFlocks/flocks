@@ -177,6 +177,7 @@ export function useSessionMessages(sessionId?: string) {
         sessionID: msg.info.sessionID,
         role: msg.info.role,
         parts: msg.parts || [],
+        parentID: msg.info.parentID,
         agent: msg.info.agent,
         model: msg.info.model,
         timestamp: msg.info.time?.created || Date.now(),
@@ -226,6 +227,7 @@ export function useSessionMessages(sessionId?: string) {
           updated[existingIndex] = {
             ...existing,
             ...messageInfo,
+            parentID: messageInfo.parentID ?? existing.parentID,
             timestamp: messageInfo.time?.created || existing.timestamp,
             // Preserve compacted/finish from the authoritative refetch data —
             // SSE events never carry these fields, so a naive spread would
@@ -273,6 +275,7 @@ export function useSessionMessages(sessionId?: string) {
           sessionID: messageInfo.sessionID,
           role: messageInfo.role,
           parts: [],
+          parentID: messageInfo.parentID,
           agent: messageInfo.agent,
           model: messageInfo.model,
           timestamp: messageInfo.time?.created || Date.now(),

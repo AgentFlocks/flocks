@@ -542,13 +542,11 @@ Body: { "inputs": <样例数据> }
 
 ### 创建路径（写入）
 
-新建/修改工作流时，写入路径须与 **`flocks/workflow/center.py`**、**`flocks/server/routes/workflow.py`** 采用的规范目录一致（**`plugins/workflows/`**），不要用已退居兼容用途的旧目录作为主落点：
+新建工作流时，写入路径必须在 用户级（全局）目录下：
 
 - **用户级（全局）**：`~/.flocks/plugins/workflows/<slug-or-folder>/`（`workflow.json`、`workflow.md`、`meta.json` 由 API 写入时可能同目录）
-- **项目级**：`<workspace>/.flocks/plugins/workflows/<slug-or-folder>/`，其中 `<workspace>` 为从当前工作目录向上查找时**第一个**含有 `.flocks` 的目录（与服务端 `_find_workspace_root()` 一致）；若需用户级、与仓库无关的工作流，则用上面的「用户级」路径。
   - ⚠️ 任务输出（报告、artifacts）**不**写入此目录，统一写入 `~/.flocks/workspace/outputs/<YYYY-MM-DD>/`（见全局文件输出约定）
 
-> **说明**：历史上 workflow-builder 曾统一写 `~/.flocks/workflow/<id>/`，因此你会看到旧数据在该路径下；**当前代码在扫描与 API 落盘上以 `plugins/workflows/` 为规范路径**（`~/.flocks/workflow/`、`plugins/workflow/` 等仍为兼容扫描路径，且优先级更低）。
 
 ### 读取路径（扫描）
 
@@ -559,16 +557,14 @@ Body: { "inputs": <样例数据> }
 | 优先级（低→高） | 路径 | 说明 |
 |---|---|---|
 | 1 | `~/.flocks/plugins/workflow/` | 全局 legacy |
-| 2 | `~/.flocks/workflow/` | 全局旧主路径（兼容） |
-| 3 | `~/.flocks/plugins/workflows/` | **全局规范路径（推荐新工作流露地）** |
+| 2 | `~/.flocks/plugins/workflows/` | **全局规范路径（推荐新工作流露地）** |
 
 **项目（workspace 下）**
 
 | 优先级（低→高） | 路径 | 说明 |
 |---|---|---|
 | 1 | `<workspace>/.flocks/plugins/workflow/` | 项目 legacy |
-| 2 | `<workspace>/.flocks/workflow/` | 项目旧路径（兼容） |
-| 3 | `<workspace>/.flocks/plugins/workflows/` | **项目规范路径（推荐新工作流露地）** |
+| 2 | `<workspace>/.flocks/plugins/workflows/` | **项目规范路径（推荐新工作流露地）** |
 
 ### ⚠️ 绝对路径规范（重要）
 
@@ -588,7 +584,6 @@ python3 -c "from pathlib import Path; p=Path.cwd(); ws=next((x for x in [p,*p.pa
 
 **正确示例**：
 - `<HOME_DIR>/.flocks/plugins/workflows/alert_triage/workflow.json` ✅（用户级）
-- `<WORKSPACE>/.flocks/plugins/workflows/phishing-email-detection/workflow.json` ✅（项目级）
 
 **错误示例**：
 - `.flocks/plugins/workflows/alert_triage/workflow.json` ❌（未展开相对路径，易写错磁盘位置）

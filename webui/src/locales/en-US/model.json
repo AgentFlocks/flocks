@@ -100,6 +100,7 @@
     "capabilities": "Capabilities",
     "toolCall": "Tool Calling",
     "vision": "Vision",
+    "visionPredefinedHint": "Vision capability for built-in models is set by the model definition and cannot be changed manually. Add a custom model to override it.",
     "streaming": "Streaming",
     "reasoning": "Reasoning",
     "pricing": "Pricing (per 1M tokens)",
@@ -119,7 +120,16 @@
     "loadFailed": "Failed to load provider catalog",
     "noModelsToTest": "No enabled models to test",
     "batchTestDone": "Batch test complete",
-    "batchTestSummary": "{{success}} succeeded, {{failed}} failed"
+    "batchTestSummary": "{{success}} succeeded, {{failed}} failed",
+    "azureDeploymentName": "Azure Deployment Name",
+    "azureDeploymentPlaceholder": "e.g. my-gpt-4o-prod",
+    "azureDeploymentHint": "Azure OpenAI requests use the deployment name, not a fixed model name. The preset models are examples; enter your own deployment name here.",
+    "azureDeploymentDisplayName": "Display Name (optional)",
+    "azureDeploymentDisplayPlaceholder": "e.g. GPT-4o Production",
+    "azureDeploymentRequired": "Select at least one preset model or enter an Azure deployment name",
+    "azureModelIdHint": "For Azure OpenAI, Model ID should be the deployment name from Azure Portal.",
+    "azureCustomDeployments": "Custom Azure Deployments",
+    "azureNoCustomDeployments": "No custom Azure deployment has been added yet."
   },
   "wizard": {
     "providerSaved": "Provider Saved",

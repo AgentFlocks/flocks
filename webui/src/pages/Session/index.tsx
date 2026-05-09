@@ -16,6 +16,8 @@ import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
+import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 
@@ -46,6 +48,7 @@ export default function SessionPage() {
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
+  const supportsVision = useDefaultModelVision();
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
@@ -153,7 +156,10 @@ export default function SessionPage() {
     }
   }, [creating, addSession, toast, t]);
 
-  const handleCreateAndSend = useCallback(async (text: string) => {
+  const handleCreateAndSend = useCallback(async (
+    text: string,
+    imageParts?: ImagePartData[],
+  ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       const newSessionId = response.data.id;
@@ -161,7 +167,9 @@ export default function SessionPage() {
       addSession(response.data);
       setSelectedSessionId(newSessionId);
 
-      const payload: Record<string, unknown> = { parts: [{ type: 'text', text }] };
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+      };
       if (selectedAgent) payload.agent = selectedAgent;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
@@ -620,6 +628,7 @@ export default function SessionPage() {
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
           onStreamingDone={() => setPendingInitialMessage(null)}
+          supportsVision={supportsVision}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}

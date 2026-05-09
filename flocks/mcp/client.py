@@ -8,7 +8,7 @@ import asyncio
 import os
 import tempfile
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.client.sse import sse_client
@@ -63,6 +63,7 @@ class McpClient:
         headers: Optional[Dict[str, str]] = None,
         env: Optional[Dict[str, str]] = None,
         auth_config: Optional[Dict[str, Any]] = None,
+        transport: Literal["auto", "sse", "http"] = "auto",
         timeout: float = 30.0
     ):
         """
@@ -76,6 +77,7 @@ class McpClient:
             headers: Extra HTTP headers for remote MCP connections
             env: Extra environment variables for local server subprocess
             auth_config: Authentication configuration
+            transport: Preferred remote transport (auto | sse | http)
             timeout: Timeout in seconds
         """
         self.name = name
@@ -85,6 +87,7 @@ class McpClient:
         self.headers = headers
         self.env = env
         self.auth_config = auth_config
+        self.transport = transport
         self.timeout = timeout
         
         self.session: Optional[ClientSession] = None
@@ -116,53 +119,108 @@ class McpClient:
             raise ValueError(f"Unknown server type: {self.server_type}")
     
     async def _connect_remote(self) -> None:
-        """Connect to remote server (try Streamable HTTP first, fall back to SSE)"""
+        """Connect to a remote server using the configured transport strategy."""
         full_url = build_mcp_url(self.url, self.auth_config)
         request_headers = build_mcp_headers(self.headers, self.auth_config)
-        
+
+        if self.transport == "http":
+            log.info("mcp.client.connecting", {
+                "server": self.name,
+                "type": "remote",
+                "strategy": "streamable_http_only",
+            })
+            await self._connect_streamable_http_only(full_url, request_headers)
+            return
+
+        if self.transport == "sse":
+            log.info("mcp.client.connecting", {
+                "server": self.name,
+                "type": "remote",
+                "strategy": "sse_only",
+            })
+            await self._connect_sse_only(full_url, request_headers)
+            return
+
         log.info("mcp.client.connecting", {
             "server": self.name,
             "type": "remote",
-            "strategy": "streamable_http_then_sse"
+            "strategy": "streamable_http_then_sse",
         })
-        
-        # Try Streamable HTTP first
+        await self._connect_auto(full_url, request_headers)
+
+    async def _connect_streamable_http_only(
+        self, full_url: str, headers: Optional[Dict[str, str]]
+    ) -> None:
+        """Connect using only Streamable HTTP."""
         try:
-            await self._do_connect_streamable_http(full_url, request_headers)
+            await self._do_connect_streamable_http(full_url, headers)
             self._transport_type = "streamable_http"
-            return
         except asyncio.TimeoutError:
-            # Timeout means server is reachable but slow — don't fall back
             await self._cleanup_connection()
             log.error("mcp.client.timeout", {
                 "server": self.name,
-                "transport": "streamable_http"
+                "transport": "streamable_http",
+            })
+            raise RuntimeError(f"Connection timeout: {self.name}")
+        except Exception as e:
+            root_cause = _extract_root_cause(e)
+            await self._cleanup_connection()
+            raise RuntimeError(f"Connection failed: {self.name}: {root_cause}")
+
+    async def _connect_sse_only(
+        self, full_url: str, headers: Optional[Dict[str, str]]
+    ) -> None:
+        """Connect using only SSE."""
+        try:
+            await self._do_connect_sse(full_url, headers)
+            self._transport_type = "sse"
+        except asyncio.TimeoutError:
+            await self._cleanup_connection()
+            log.error("mcp.client.timeout", {
+                "server": self.name,
+                "transport": "sse",
+            })
+            raise RuntimeError(f"Connection timeout: {self.name}")
+        except Exception as e:
+            root_cause = _extract_root_cause(e)
+            await self._cleanup_connection()
+            raise RuntimeError(f"Connection failed: {self.name}: {root_cause}")
+
+    async def _connect_auto(
+        self, full_url: str, headers: Optional[Dict[str, str]]
+    ) -> None:
+        """Connect using auto-detection: HTTP first, then SSE."""
+        try:
+            await self._do_connect_streamable_http(full_url, headers)
+            self._transport_type = "streamable_http"
+            return
+        except asyncio.TimeoutError:
+            await self._cleanup_connection()
+            log.error("mcp.client.timeout", {
+                "server": self.name,
+                "transport": "streamable_http",
             })
             raise RuntimeError(f"Connection timeout: {self.name}")
         except Exception as e:
             log.info("mcp.client.streamable_http_failed", {
                 "server": self.name,
                 "error": str(e),
-                "fallback": "sse"
+                "fallback": "sse",
             })
-            # Clean up failed attempt before trying SSE
             await self._cleanup_connection()
-        
-        # Fall back to SSE
+
         try:
-            await self._do_connect_sse(full_url, request_headers)
+            await self._do_connect_sse(full_url, headers)
             self._transport_type = "sse"
             return
         except Exception as e:
             root_cause = _extract_root_cause(e)
             log.error("mcp.client.all_transports_failed", {
                 "server": self.name,
-                "error": root_cause
+                "error": root_cause,
             })
             await self._cleanup_connection()
-            raise RuntimeError(
-                f"Connection failed: {self.name}: {root_cause}"
-            )
+            raise RuntimeError(f"Connection failed: {self.name}: {root_cause}")
     
     async def _do_connect_streamable_http(
         self, full_url: str, headers: Optional[Dict[str, str]] = None
