@@ -12,6 +12,7 @@ Implements session/prompt.ts SessionPrompt namespace pattern.
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -94,6 +95,38 @@ LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
 # reasoning and content generation phases; a tight inter-chunk timeout causes
 # spurious failures in those cases.
 LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
+
+_WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
+
+
+def _expand_workflow_node_ref(text: str) -> str:
+    """Translate the web UI's node-ref marker into model-readable text.
+
+    WorkflowDetail chat prefixes a user turn with ``@@node:<id>|<type>`` when
+    the user picks a node from the canvas. Before this fix the marker was only
+    rendered/decorated in the UI; the backend passed it through verbatim, so
+    the model saw an opaque token instead of an explicit instruction to focus
+    on that node.
+    """
+    if not text:
+        return text
+    match = _WORKFLOW_NODE_REF_RE.match(text)
+    if not match:
+        return text
+
+    node_id = match.group(1).strip()
+    node_type = match.group(2).strip()
+    user_request = match.group(3).lstrip("\n")
+
+    parts = [
+        "Selected workflow node context:",
+        f"- node_id: {node_id}",
+        f"- node_type: {node_type}",
+        "- Focus the requested workflow modification on this node unless the user explicitly asks for broader workflow changes.",
+    ]
+    if user_request.strip():
+        parts.extend(["", "User request:", user_request])
+    return "\n".join(parts)
 
 
 async def _iter_with_chunk_timeout(
@@ -1719,7 +1752,7 @@ class SessionRunner:
                 if content.strip():
                     chat_messages.append(ChatMessage(
                         role=msg.role if isinstance(msg.role, str) else msg.role.value,
-                        content=content,
+                        content=_expand_workflow_node_ref(content),
                     ))
                 continue
             
@@ -1731,10 +1764,11 @@ class SessionRunner:
                     if hasattr(part, 'type'):
                         if part.type == "text" and hasattr(part, 'text'):
                             if not getattr(part, 'ignored', False) and part.text.strip():
-                                user_content_parts.append(part.text)
+                                normalized_text = _expand_workflow_node_ref(part.text)
+                                user_content_parts.append(normalized_text)
                                 user_content_blocks.append({
                                     "type": "text",
-                                    "text": part.text,
+                                    "text": normalized_text,
                                 })
                         elif part.type == "file" and hasattr(part, 'mime'):
                             mime = getattr(part, 'mime', '')

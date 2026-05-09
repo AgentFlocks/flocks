@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, FolderOpen, Plus, Clock } from 'lucide-react';
 import SessionChat, { NodeRef, type SSEChatEvent } from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
-import { workflowAPI, Workflow, WorkflowNode } from '@/api/workflow';
+import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
 import client from '@/api/client';
 
@@ -49,6 +49,7 @@ function pushStoredSession(workflowId: string, session: StoredSession) {
 
 interface ChatTabProps {
   workflow: Workflow;
+  onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
   selectedNode?: WorkflowNode | null;
@@ -57,6 +58,7 @@ interface ChatTabProps {
 
 export default function ChatTab({
   workflow,
+  onLatestExecutionChange,
   onWorkflowUpdated,
   onFirstMessageSent,
   selectedNode,
@@ -213,8 +215,40 @@ export default function ChatTab({
   // SSE events: react to API-driven workflow changes immediately
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
-      if (!onWorkflowUpdated) return;
       const { type, properties } = event;
+      if (
+        type === 'message.part.updated'
+        && properties?.part?.type === 'tool'
+        && properties.part.tool === 'run_workflow'
+      ) {
+        const state = properties.part.state as Record<string, any> | undefined;
+        const metadata = (state?.metadata ?? {}) as Record<string, any>;
+        const workflowId = metadata.workflow_id;
+        if (
+          workflowId === workflowIdRef.current
+          && metadata.workflow_execution_id
+        ) {
+          const status =
+            state?.status === 'completed'
+              ? 'success'
+              : state?.status === 'error'
+              ? 'error'
+              : (metadata.status ?? 'running');
+          onLatestExecutionChange?.({
+            id: String(metadata.workflow_execution_id),
+            workflowId,
+            inputParams: {},
+            status,
+            startedAt: Number(state?.time?.start ?? Date.now()),
+            executionLog: [],
+            currentNodeId: metadata.current_node_id,
+            currentNodeType: metadata.current_node_type,
+            currentPhase: metadata.phase,
+            currentStepIndex: metadata.step_index,
+          });
+        }
+      }
+      if (!onWorkflowUpdated) return;
       if (
         (type === 'workflow.updated' || type === 'workflow.created') &&
         properties?.id === workflowIdRef.current
@@ -222,7 +256,7 @@ export default function ChatTab({
         checkWorkflowUpdate();
       }
     },
-    [onWorkflowUpdated, checkWorkflowUpdate],
+    [onLatestExecutionChange, onWorkflowUpdated, checkWorkflowUpdate],
   );
 
   // Fallback: low-frequency polling for filesystem-driven changes (Rex writes directly)

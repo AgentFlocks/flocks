@@ -10,7 +10,7 @@ Tests cover:
 """
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from typing import Dict, Any
 
 # Import the tool system
@@ -263,12 +263,79 @@ class TestRunWorkflowToolExecution:
             assert "SUCCEEDED" in result.output
             assert "run-123" in result.output
             assert "Steps executed: 1" in result.output
-            assert result.metadata["status"] == "SUCCEEDED"
+            assert result.metadata["status"] == "success"
             assert result.metadata["steps"] == 1
             assert result.metadata["run_id"] == "run-123"
             
             # Check that permission was requested
             assert len(tool_context_with_permission._permissions_requested) > 0
+
+    @pytest.mark.anyio
+    async def test_run_workflow_registered_id_updates_execution_history(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        metadata_updates: list[dict[str, Any]] = []
+        tool_context_with_permission._metadata_callback = metadata_updates.append
+
+        def run_side_effect(**kwargs):
+            kwargs["on_step_start"]("run-registered", 1, MagicMock(id="node-1", type="python"), {})
+            kwargs["on_step_complete"]({
+                "node_id": "node-1",
+                "node_type": "python",
+                "outputs": {"message": "ok"},
+            })
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id="run-registered",
+                steps=1,
+                last_node_id="node-1",
+                outputs={"message": "ok"},
+                history=[{"node_id": "node-1", "node_type": "python", "outputs": {"message": "ok"}}],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(return_value={
+            "id": "exec-registered",
+            "workflowId": "test-workflow-001",
+            "inputParams": {"name": "Flocks"},
+            "status": "running",
+            "startedAt": 1,
+            "executionLog": [],
+        })
+        storage_read = AsyncMock(return_value={
+            "id": "exec-registered",
+            "workflowId": "test-workflow-001",
+            "inputParams": {"name": "Flocks"},
+            "status": "running",
+            "startedAt": 1,
+            "executionLog": [],
+        })
+        storage_write = AsyncMock(return_value=None)
+        record_result = AsyncMock(return_value=None)
+
+        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)), \
+             patch.object(run_workflow_module, "read_workflow_from_fs", return_value={"id": "test-workflow-001", "workflowJson": simple_workflow}), \
+             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"), \
+             patch.object(run_workflow_module, "create_execution_record", create_execution), \
+             patch.object(run_workflow_module.Storage, "read", storage_read), \
+             patch.object(run_workflow_module.Storage, "write", storage_write), \
+             patch.object(run_workflow_module, "record_execution_result", record_result):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow="test-workflow-001",
+                inputs={"name": "Flocks"},
+            )
+
+        assert result.success is True
+        assert result.metadata["workflow_execution_id"] == "exec-registered"
+        create_execution.assert_awaited_once()
+        record_result.assert_awaited_once()
+        assert storage_write.await_count >= 1
+        assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
     
     @pytest.mark.anyio
     async def test_run_workflow_with_inputs(self, tool_context_with_permission, workflow_with_inputs):
@@ -447,7 +514,7 @@ class TestRunWorkflowToolExecution:
             
             assert result.success is False
             assert "FAILED" in result.output
-            assert result.metadata["status"] == "FAILED"
+            assert result.metadata["status"] == "error"
 
 
 # =============================================================================

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -61,26 +62,32 @@ def read_workflow_dir(
 
     try:
         workflow_json = json.loads(json_file.read_text(encoding="utf-8"))
+        json_mtime_ms = int(json_file.stat().st_mtime * 1000)
 
         meta_file = wf_dir / "meta.json"
         if meta_file.is_file():
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
         else:
-            mtime_ms = int(json_file.stat().st_mtime * 1000)
             meta = {
                 "name": workflow_json.get("name", workflow_id),
                 "description": workflow_json.get("description"),
                 "category": workflow_json.get("category", "default"),
                 "status": "active",
                 "createdBy": None,
-                "createdAt": mtime_ms,
-                "updatedAt": mtime_ms,
+                "createdAt": json_mtime_ms,
+                "updatedAt": json_mtime_ms,
             }
 
         md_file = wf_dir / "workflow.md"
         markdown_content: Optional[str] = None
+        updated_candidates = [json_mtime_ms]
         if md_file.is_file():
             markdown_content = md_file.read_text(encoding="utf-8")
+            updated_candidates.append(int(md_file.stat().st_mtime * 1000))
+        if meta_file.is_file():
+            updated_candidates.append(int(meta_file.stat().st_mtime * 1000))
+            updated_candidates.append(int(meta.get("updatedAt") or 0))
+        meta = {**meta, "updatedAt": max(updated_candidates)}
 
         return {
             **meta,
@@ -105,3 +112,50 @@ def read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
         if data is not None:
             result = data
     return result
+
+
+def resolve_workflow_id_from_source(workflow: Any) -> Optional[str]:
+    """Resolve a canonical workflow ID from a tool/runtime workflow argument.
+
+    This is intentionally conservative: only return an ID when it maps cleanly to
+    a workflow already discoverable from the filesystem.
+    """
+    if isinstance(workflow, dict):
+        candidate = workflow.get("id")
+        if isinstance(candidate, str) and candidate.strip():
+            workflow_id = candidate.strip()
+            if read_workflow_from_fs(workflow_id) is not None:
+                return workflow_id
+        return None
+
+    if isinstance(workflow, Path):
+        workflow_path = workflow.expanduser()
+    elif isinstance(workflow, str):
+        raw = workflow.strip()
+        if not raw:
+            return None
+        if read_workflow_from_fs(raw) is not None:
+            return raw
+        workflow_path = Path(raw).expanduser()
+    else:
+        return None
+
+    if not workflow_path.is_file():
+        return None
+
+    try:
+        resolved = workflow_path.resolve()
+    except OSError:
+        return None
+
+    for root, _source in workflow_scan_dirs():
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            continue
+        parts = relative.parts
+        if len(parts) == 2 and parts[1] == "workflow.json":
+            workflow_id = parts[0]
+            if read_workflow_from_fs(workflow_id) is not None:
+                return workflow_id
+    return None

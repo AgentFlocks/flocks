@@ -43,7 +43,16 @@
     },
     "topBar": {
       "collapsePanel": "收起面板",
-      "expandPanel": "展开面板"
+      "expandPanel": "展开面板",
+      "runningStage": "当前阶段：{{phase}} · 节点：{{node}}",
+      "phase": {
+        "queued": "排队中",
+        "running": "执行中",
+        "success": "已完成",
+        "error": "执行失败",
+        "timeout": "超时",
+        "cancelled": "已取消"
+      }
     },
     "rightPanel": {
       "tabOverview": "概览",
@@ -119,16 +128,20 @@
       "runtimeStatus": "执行状态：{{status}}",
       "runtimeInputs": "真实输入",
       "runtimeOutputs": "真实输出",
+      "expandJsonBlock": "展开{{label}}",
+      "collapseJsonBlock": "收起{{label}}",
       "runNodeSection": "单节点执行",
       "runNodeHint": "隔离执行当前节点",
       "runNodeUnsupported": "当前节点类型暂不支持",
       "runNodeUnsupportedDesc": "Branch 和 Loop 节点暂不支持单节点执行。",
       "runNodeInputs": "执行输入",
+      "copyInput": "复制输入",
       "useLatestInputs": "使用最近一次输入",
       "restoreSuggestedInputs": "恢复建议输入",
       "runNodeAction": "执行节点",
       "runningNode": "执行中...",
       "runNodeSuccess": "执行成功",
+      "copyOutput": "复制输出",
       "runNodeError": "执行错误",
       "runNodeStdout": "标准输出",
       "runNodeTraceback": "错误堆栈",
