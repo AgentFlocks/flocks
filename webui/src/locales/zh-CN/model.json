@@ -100,6 +100,7 @@
     "capabilities": "能力",
     "toolCall": "工具调用",
     "vision": "视觉",
+    "visionPredefinedHint": "内置模型的视觉能力由模型定义决定，不可手动修改。如需自定义，请新增模型。",
     "streaming": "流式输出",
     "reasoning": "推理",
     "pricing": "价格（每百万 Token）",

@@ -100,6 +100,7 @@
     "capabilities": "Capabilities",
     "toolCall": "Tool Calling",
     "vision": "Vision",
+    "visionPredefinedHint": "Vision capability for built-in models is set by the model definition and cannot be changed manually. Add a custom model to override it.",
     "streaming": "Streaming",
     "reasoning": "Reasoning",
     "pricing": "Pricing (per 1M tokens)",

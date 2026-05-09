@@ -2095,23 +2095,36 @@ Provider: ${provider.name} (${provider.id})
   );
 }
 
-function ToggleField({ label, checked, onChange }: {
-  label: string; checked: boolean; onChange: (v: boolean) => void;
+function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** Tooltip text shown when the toggle is disabled. */
+  disabledHint?: string;
 }) {
   return (
-    <label className="flex items-center gap-3 cursor-pointer w-full min-w-0">
+    <label
+      className={`flex items-center gap-3 w-full min-w-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+      title={disabled ? disabledHint : undefined}
+    >
       <button
         type="button"
         role="switch"
         aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${checked ? 'bg-green-600' : 'bg-gray-400'}`}
+        disabled={disabled}
+        onClick={() => !disabled && onChange(!checked)}
+        className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${
+          disabled
+            ? 'bg-gray-200 cursor-not-allowed'
+            : checked ? 'bg-green-600' : 'bg-gray-400'
+        }`}
       >
-        <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
-          checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'
-        }`} />
+        <span className={`absolute top-1 w-4 h-4 rounded-full shadow-sm transition-transform ${
+          disabled ? 'bg-gray-400' : 'bg-white'
+        } ${checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'}`} />
       </button>
-      <span className="text-sm text-gray-700">{label}</span>
+      <span className={`text-sm ${disabled ? 'text-gray-400' : 'text-gray-700'}`}>{label}</span>
     </label>
   );
 }
@@ -2616,6 +2629,10 @@ function ModelDetailSheet({
   const { t } = useTranslation('model');
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
+  // Predefined (catalog/SDK) models have their vision capability set by the
+  // provider definition and should not be overridden by the user — only
+  // user-added models (fetch_from === 'customizable') can toggle it freely.
+  const isPredefined = model.fetch_from === 'predefined';
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
@@ -2760,7 +2777,13 @@ function ModelDetailSheet({
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
               <div className="grid grid-cols-2 gap-2">
                 <ToggleField label={t('form.toolCall')} checked={supportsTools} onChange={setSupportsTools} />
-                <ToggleField label={t('form.vision')} checked={supportsVision} onChange={setSupportsVision} />
+                <ToggleField
+                  label={t('form.vision')}
+                  checked={supportsVision}
+                  onChange={setSupportsVision}
+                  disabled={isPredefined}
+                  disabledHint={t('form.visionPredefinedHint')}
+                />
                 <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
                 <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
               </div>
