@@ -118,6 +118,92 @@ def _safe_relpath(path: str, start: Optional[str]) -> str:
         return path
 
 
+def _looks_like_filename_only_intent(raw_path: str, resolved_path: str, base_dir: str) -> bool:
+    """
+    Best-effort detect "user gave only a filename (no directory)" intent.
+
+    Cases considered filename-only:
+    - Relative path without any directory separator (e.g. ``hello.txt``)
+    - Absolute path that points to the source root + basename
+      (common when model auto-expands a bare filename to cwd/source dir)
+    """
+    normalized = (raw_path or "").replace("\\", "/")
+    if not raw_path:
+        return False
+    if not os.path.isabs(raw_path):
+        return "/" not in normalized
+    try:
+        return os.path.realpath(os.path.dirname(resolved_path)) == os.path.realpath(base_dir)
+    except Exception:
+        return False
+
+
+async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
+    """Resolve owner username from auth context, then session ownership."""
+    try:
+        from flocks.auth.context import get_current_auth_user
+        auth_user = get_current_auth_user()
+        if auth_user and getattr(auth_user, "username", None):
+            return str(auth_user.username)
+    except Exception:
+        pass
+
+    session_id = getattr(ctx, "session_id", None)
+    if not session_id or session_id == "default":
+        return None
+    try:
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session and getattr(session, "owner_username", None):
+            return str(session.owner_username)
+    except Exception:
+        pass
+    return None
+
+
+async def _maybe_redirect_to_default_outputs(
+    ctx: ToolContext,
+    *,
+    original_path: str,
+    resolved_path: str,
+    base_dir: str,
+) -> str:
+    """
+    For filename-only writes, force stable default output location.
+
+    This prevents nondeterministic writes to source root when user did not
+    specify a directory and model expanded filename against cwd.
+    """
+    if not _looks_like_filename_only_intent(original_path, resolved_path, base_dir):
+        return resolved_path
+    if os.path.exists(resolved_path):
+        # Existing file writes should remain explicit and deterministic.
+        return resolved_path
+
+    filename = os.path.basename(original_path) or os.path.basename(resolved_path)
+    if not filename:
+        return resolved_path
+
+    try:
+        from flocks.workspace.manager import WorkspaceManager
+
+        owner_username = await _resolve_owner_username(ctx)
+        outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
+            username=owner_username
+        )
+        redirected = str((outputs_dir / filename).resolve())
+        if redirected != resolved_path:
+            log.info(
+                "write.default_output_redirect",
+                {"from": resolved_path, "to": redirected, "session_id": ctx.session_id},
+            )
+        return redirected
+    except Exception as exc:
+        log.debug("write.default_output_redirect.failed", {"error": str(exc)})
+        return resolved_path
+
+
 async def _resolve_sandbox_file_path(
     ctx: ToolContext,
     filepath: str,
@@ -210,10 +296,16 @@ async def write_tool(
             content = str(content)
 
     # Resolve path
+    base_dir = Instance.get_directory() or os.getcwd()
     filepath = filePath
     if not os.path.isabs(filepath):
-        base_dir = Instance.get_directory() or os.getcwd()
         filepath = os.path.join(base_dir, filepath)
+    filepath = await _maybe_redirect_to_default_outputs(
+        ctx,
+        original_path=filePath,
+        resolved_path=filepath,
+        base_dir=base_dir,
+    )
 
     filepath, sandbox_error, sandbox = await _resolve_sandbox_file_path(ctx, filepath)
     if sandbox_error:

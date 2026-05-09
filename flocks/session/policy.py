@@ -44,20 +44,58 @@ class SessionPolicy:
     def is_admin(user: Optional["AuthUser"]) -> bool:
         return bool(user and user.role == "admin")
 
+    @staticmethod
+    def is_local_shared(session: "SessionInfo") -> bool:
+        metadata = getattr(session, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        return bool(metadata.get("shared_local"))
+
+    @staticmethod
+    def _shared_read_user_ids(session: "SessionInfo") -> set[str]:
+        metadata = getattr(session, "metadata", None)
+        if not isinstance(metadata, dict):
+            return set()
+        raw = metadata.get("shared_read_access_user_ids", [])
+        if not isinstance(raw, list):
+            return set()
+        return {str(item) for item in raw if item}
+
+    @classmethod
+    def is_shared_read_only(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
+        if user is None:
+            return False
+        if cls.is_owner(session, user):
+            return False
+        if cls.is_local_shared(session):
+            return True
+        return user.id in cls._shared_read_user_ids(session)
+
     @classmethod
     def can_read(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
         """
         Whether the session should be visible in listings / fetch.
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
-        - Admin: sees everything.
-        - Otherwise: owner only.
+        - Logged-in users: owner or local-shared readers.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return True
-        if cls.is_admin(resolved):
+        if cls.is_owner(session, resolved):
             return True
+        return cls.is_shared_read_only(session, resolved)
+
+    @classmethod
+    def can_write(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
+        """
+        Session write permission.
+
+        Shared users are read-only. Only owner can write.
+        """
+        resolved = cls._resolve_user(user)
+        if resolved is None:
+            return False
         return cls.is_owner(session, resolved)
 
     @classmethod
@@ -65,4 +103,4 @@ class SessionPolicy:
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_admin(resolved) or cls.is_owner(session, resolved)
+        return cls.is_owner(session, resolved)

@@ -35,10 +35,10 @@ def test_is_owner_by_username_fallback():
     assert SessionPolicy.is_owner(session, user) is True
 
 
-def test_can_read_admin_sees_everything():
+def test_can_read_admin_cannot_read_private_of_others():
     admin = _make_user(user_id="usr_admin", username="root", role="admin")
     session = _make_session(owner_user_id="usr_other", owner_username="bob")
-    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_read(session, admin) is False
 
 
 def test_can_read_private_hides_from_other_member():
@@ -47,21 +47,31 @@ def test_can_read_private_hides_from_other_member():
     assert SessionPolicy.can_read(session, bob) is False
 
 
-def test_can_delete_requires_admin_or_owner():
+def test_can_delete_requires_owner_only():
     owner = _make_user()
     admin = _make_user(user_id="usr_admin", username="root", role="admin")
     stranger = _make_user(user_id="usr_x", username="x")
     session = _make_session()
     assert SessionPolicy.can_delete(session, owner) is True
-    assert SessionPolicy.can_delete(session, admin) is True
+    assert SessionPolicy.can_delete(session, admin) is False
     assert SessionPolicy.can_delete(session, stranger) is False
 
 
-def test_can_read_requires_owner_or_admin():
+def test_can_read_requires_owner_for_private_session():
     owner = _make_user()
     admin = _make_user(user_id="usr_admin", username="root", role="admin")
     stranger = _make_user(user_id="usr_x", username="x")
     session = _make_session()
     assert SessionPolicy.can_read(session, owner) is True
-    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_read(session, admin) is False
     assert SessionPolicy.can_read(session, stranger) is False
+
+
+def test_can_read_local_shared_visible_to_all_local_users():
+    owner = _make_user()
+    admin = _make_user(user_id="usr_admin", username="root", role="admin")
+    stranger = _make_user(user_id="usr_x", username="x")
+    session = _make_session(metadata={"shared_local": True})
+    assert SessionPolicy.can_read(session, owner) is True
+    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_read(session, stranger) is True

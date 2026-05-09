@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download,
+  MoreHorizontal, PencilLine, Download, Share2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -257,6 +257,21 @@ export default function SessionPage() {
     }
   }, [t, toast]);
 
+  const handleShareSession = useCallback(async (sessionId: string, nextShared: boolean) => {
+    try {
+      if (nextShared) {
+        await sessionApi.shareLocal(sessionId);
+        toast.success(t('shareEnabled'));
+      } else {
+        await sessionApi.unshareLocal(sessionId);
+        toast.success(t('shareDisabled'));
+      }
+      await refetchSessions();
+    } catch (err: any) {
+      toast.error(t('shareUpdateFailed'), err.message);
+    }
+  }, [refetchSessions, t, toast]);
+
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
     setCheckedIds(new Set());
@@ -449,6 +464,11 @@ export default function SessionPage() {
                       ) : (
                         <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
                           <span className="truncate">{session.title}</span>
+                          {session.isShared && (
+                            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                              {t('sharedTag')}
+                            </span>
+                          )}
                         </h3>
                       )}
                     </div>
@@ -496,6 +516,18 @@ export default function SessionPage() {
                           >
                             <Download className="w-3.5 h-3.5" />
                             <span>{t('downloadJson')}</span>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setOpenMenuSessionId(null);
+                              void handleShareSession(session.id, !session.isShared);
+                            }}
+                            disabled={session.canWrite === false}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Share2 className="w-3.5 h-3.5" />
+                            <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
                           </button>
                           <div className="mx-2.5 my-1 border-t border-gray-100" />
                           <button
@@ -610,6 +642,7 @@ export default function SessionPage() {
           key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
           live
+          hideInput={selectedSession?.canWrite === false}
           display={{ compact: false, showActions: true, showTimestamp: false }}
           agentName={selectedAgent}
           className="flex-1 min-h-0"

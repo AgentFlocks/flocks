@@ -9,7 +9,10 @@ Memory files stay in ~/.flocks/data/memory/ (agent-managed, not migrated).
 This manager provides a read-only view into data/memory/ for the WebUI.
 """
 
+import datetime as dt
 import os
+import re
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -29,7 +32,31 @@ TEXT_EXTENSIONS = {
 }
 
 # Conventional subdirectories (created on init, not enforced)
-CONVENTION_DIRS = ["outputs", "knowledge"]
+CONVENTION_DIRS = ["outputs", "knowledge", "users", "shared"]
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
 def _get_workspace_dir() -> Path:
@@ -75,10 +102,15 @@ class WorkspaceManager:
     # Directory resolution
     # ------------------------------------------------------------------ #
 
-    def get_workspace_dir(self) -> Path:
+    def get_workspace_dir(self, user_id: Optional[str] = None, *, shared: bool = False) -> Path:
         if self._workspace_dir is None:
             self._workspace_dir = _get_workspace_dir()
-        return self._workspace_dir
+        root = self._workspace_dir
+        if shared:
+            return root / "shared"
+        if user_id:
+            return root / "users" / user_id
+        return root
 
     def get_memory_dir(self) -> Path:
         """Return path to agent-managed memory directory (read-only view)."""
@@ -86,6 +118,54 @@ class WorkspaceManager:
             from flocks.config.config import Config
             self._memory_dir = Config.get_data_path() / "memory"
         return self._memory_dir
+
+    @staticmethod
+    def normalize_username_for_path(username: str) -> str:
+        """
+        Normalize username to a filesystem-safe directory component.
+        """
+        value = (username or "").strip()
+        value = value.replace("/", "_").replace("\\", "_")
+        value = re.sub(r"[\x00-\x1f\x7f]+", "_", value)
+        value = re.sub(r"\s+", "_", value)
+        value = value.strip(" .")
+        if not value:
+            value = "anonymous"
+        if value.upper() in _WINDOWS_RESERVED_NAMES:
+            value = f"user_{value}"
+        return value
+
+    def get_user_workspace_dir(self, username: str) -> Path:
+        """
+        Return per-username workspace root under ``workspace/users/<username>``.
+        """
+        root = self.get_workspace_dir()
+        return root / "users" / self.normalize_username_for_path(username)
+
+    def get_default_outputs_dir(
+        self,
+        *,
+        username: Optional[str] = None,
+        today: Optional[dt.date] = None,
+        include_today: bool = True,
+    ) -> Path:
+        """
+        Return and create the default outputs directory.
+
+        - OSS default: ``workspace/outputs/<today>``
+        - Pro-style override when username provided:
+          ``workspace/users/<username>/outputs/<today>``
+        """
+        self.ensure_dirs()
+        if username:
+            base = self.get_user_workspace_dir(username) / "outputs"
+        else:
+            base = self.get_workspace_dir() / "outputs"
+        if include_today:
+            day = (today or dt.date.today()).isoformat()
+            base = base / day
+        base.mkdir(parents=True, exist_ok=True)
+        return base
 
     def ensure_dirs(self) -> None:
         """Create workspace root and conventional subdirectories if absent.
@@ -99,8 +179,54 @@ class WorkspaceManager:
         workspace.mkdir(parents=True, exist_ok=True)
         for name in CONVENTION_DIRS:
             (workspace / name).mkdir(exist_ok=True)
+        # shared area conventions
+        for name in ["outputs", "knowledge"]:
+            (workspace / "shared" / name).mkdir(parents=True, exist_ok=True)
         self._dirs_ensured = True
         log.info("workspace.dirs.ensured", {"path": str(workspace)})
+
+    def migrate_root_workspace_to_user(self, admin_user_id: str, *, dry_run: bool = False) -> dict:
+        """
+        Migrate legacy single-user layout to users/shared layout.
+
+        - ``outputs`` -> ``users/<admin_user_id>/outputs``
+        - ``knowledge`` -> ``shared/knowledge`` (team-shared by design)
+        """
+        self.ensure_dirs()
+        root = self.get_workspace_dir()
+        user_root = self.get_workspace_dir(admin_user_id)
+        shared_root = self.get_workspace_dir(shared=True)
+
+        legacy_outputs = root / "outputs"
+        legacy_knowledge = root / "knowledge"
+        target_outputs = user_root / "outputs"
+        target_knowledge = shared_root / "knowledge"
+
+        summary = {"moved_outputs": False, "moved_knowledge": False, "dry_run": dry_run}
+
+        if legacy_outputs.exists():
+            summary["moved_outputs"] = True
+            if not dry_run:
+                target_outputs.parent.mkdir(parents=True, exist_ok=True)
+                if target_outputs.exists():
+                    for child in legacy_outputs.iterdir():
+                        shutil.move(str(child), str(target_outputs / child.name))
+                    legacy_outputs.rmdir()
+                else:
+                    shutil.move(str(legacy_outputs), str(target_outputs))
+
+        if legacy_knowledge.exists():
+            summary["moved_knowledge"] = True
+            if not dry_run:
+                target_knowledge.parent.mkdir(parents=True, exist_ok=True)
+                if target_knowledge.exists():
+                    for child in legacy_knowledge.iterdir():
+                        shutil.move(str(child), str(target_knowledge / child.name))
+                    legacy_knowledge.rmdir()
+                else:
+                    shutil.move(str(legacy_knowledge), str(target_knowledge))
+
+        return summary
 
     # ------------------------------------------------------------------ #
     # Path safety

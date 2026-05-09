@@ -214,8 +214,7 @@ class SystemPrompt:
 
         from flocks.workspace.manager import WorkspaceManager
         ws = WorkspaceManager.get_instance()
-        today = datetime.now().strftime("%Y-%m-%d")
-        outputs_dir = str(ws.get_workspace_dir() / "outputs" / today)
+        outputs_dir = str(ws.get_default_outputs_dir())
 
         env_info = [
             "Here is some useful information about the environment you are running in:",
