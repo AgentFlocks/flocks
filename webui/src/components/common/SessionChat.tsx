@@ -25,6 +25,7 @@ import { useToast } from './Toast';
 import { QuestionTool } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
@@ -38,6 +39,7 @@ import { formatSmartTime } from '@/utils/time';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
+  buildPromptParts,
   compressImageFile,
   getFileExtension,
   isImageFile,
@@ -116,9 +118,18 @@ export interface SessionChatProps {
   onError?: (message: string) => void;
   /**
    * Called when the user sends a message but sessionId is not yet available.
-   * The parent should create a session and update sessionId + initialMessage props.
+   * The parent should create a session and dispatch the prompt (with the
+   * provided text and any image attachments) to the new session.
+   *
+   * `imageParts` carries inline image data URLs — parents that don't yet
+   * support image input can ignore the second argument.
+   *
+   * The return value is intentionally typed as ``unknown`` so callers can
+   * pass ``useSessionChat().createAndSend`` (which resolves to the new
+   * session id) directly without an empty ``async (..) => { await ... }``
+   * shim.
    */
-  onCreateAndSend?: (text: string) => Promise<void> | void;
+  onCreateAndSend?: (text: string, imageParts?: ImagePartData[]) => Promise<unknown> | unknown;
   /**
    * Whether the current model supports vision/image analysis.
    * true = allow images; false = block images with a UI warning; null/undefined = allow (unknown).
@@ -141,6 +152,12 @@ interface ComposerAttachment {
   isImage?: boolean;
   error?: string;
 }
+
+// Composer drafts are persisted to ``localStorage`` so navigating away from
+// the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
+// back doesn't lose the half-typed message. Keyed per session so two sessions
+// don't share a draft, and namespaced to avoid colliding with other features.
+import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
 
 // Backend stages emitted by ``SessionCompaction.process`` /
 // ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
@@ -346,11 +363,18 @@ export default function SessionChat({
   const showTimestamp = display?.showTimestamp ?? false;
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
-  const [input, setInput] = useState('');
+  // Restore any persisted draft on first mount so navigating away (e.g.
+  // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
+  // message. Subsequent session changes are re-hydrated by the effect below.
+  const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  // Lightbox preview for composer thumbnails. Shares the same overlay
+  // component used by message bubbles so the click-to-enlarge gesture is
+  // consistent across the upload tray and the rendered chat history.
+  const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
@@ -673,7 +697,19 @@ export default function SessionChat({
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();
+    // Swap the draft when the session changes — needed for callers that
+    // don't force a remount (Session/index.tsx does, but other consumers
+    // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
+    setInput(readChatDraft(sessionId));
   }, [sessionId, clearPendingQuestions]);
+
+  // Persist the draft on every keystroke. localStorage writes are synchronous
+  // and cheap, so debouncing isn't worth the added latency on send (which
+  // depends on the draft being flushed). Drafts are removed when ``input``
+  // becomes empty (e.g. after a successful send).
+  useEffect(() => {
+    writeChatDraft(sessionId, input);
+  }, [sessionId, input]);
 
   // Recover streaming state after page refresh / session switch
   useEffect(() => {
@@ -1045,14 +1081,8 @@ export default function SessionChat({
     } as Message);
 
     try {
-      const payloadParts: Array<Record<string, unknown>> = [];
-      if (text) payloadParts.push({ type: 'text', text });
-      imageParts.forEach((img) => {
-        payloadParts.push({ type: 'file', url: img.url, mime: img.mime, filename: img.filename });
-      });
-
       const payload: Record<string, unknown> = {
-        parts: payloadParts,
+        parts: buildPromptParts(text, imageParts),
       };
       if (agentName) payload.agent = agentName;
 
@@ -1111,10 +1141,14 @@ export default function SessionChat({
       if (onCreateAndSend) {
         setSending(true);
         try {
-          await onCreateAndSend(text);
+          await onCreateAndSend(text, imageParts);
           setAttachments([]);
         } catch {
+          // Restore both the text and the attachment list so the user can
+          // retry without re-uploading images. Image data URLs are already
+          // in memory, so restoring the array is safe and cheap.
           setInput(rawText);
+          setAttachments(imageAttachmentsToSend);
         } finally {
           setSending(false);
         }
@@ -1127,6 +1161,7 @@ export default function SessionChat({
       setAttachments([]);
     } catch {
       setInput(rawText);
+      setAttachments(imageAttachmentsToSend);
     }
   };
 
@@ -1669,8 +1704,11 @@ export default function SessionChat({
                               <img
                                 src={attachment.dataUrl}
                                 alt={attachment.name}
-                                className="w-16 h-16 object-cover"
+                                className="w-16 h-16 object-cover cursor-zoom-in"
                                 title={attachment.name}
+                                onClick={() =>
+                                  setComposerPreview({ url: attachment.dataUrl!, alt: attachment.name })
+                                }
                               />
                             )}
                             <button
@@ -1808,6 +1846,13 @@ export default function SessionChat({
           </div>
         </div>
       )}
+      {composerPreview && (
+        <ImageLightbox
+          src={composerPreview.url}
+          alt={composerPreview.alt}
+          onClose={() => setComposerPreview(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1866,6 +1911,11 @@ function ChatMessageBubbleInner({
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
+  // Lightbox state for inline image previews. Browsers block top-level
+  // navigation to ``data:`` URLs (the format we send for chat images), so a
+  // ``window.open`` would land on a blank page. We open an in-app overlay
+  // instead — same UX, no popup blocker / data-URL restriction headaches.
+  const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     const hasArchived = compactedMessages && compactedMessages.length > 0;
     return (
@@ -1984,14 +2034,14 @@ function ChatMessageBubbleInner({
                   <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
                     {fileParts.map((part, i) => {
                       const isImage = (part.mime || '').startsWith('image/');
-                      if (isImage) {
+                      if (isImage && part.url) {
                         return (
                           <img
                             key={part.id || `file-${i}`}
                             src={part.url}
-                            alt=""
+                            alt={part.filename || ''}
                             className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                            onClick={() => window.open(part.url, '_blank')}
+                            onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
                           />
                         );
                       }
@@ -2194,6 +2244,13 @@ function ChatMessageBubbleInner({
           </div>
         )}
       </div>
+      {previewImage && (
+        <ImageLightbox
+          src={previewImage.url}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 }

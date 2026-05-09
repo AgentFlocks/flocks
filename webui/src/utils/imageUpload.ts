@@ -61,6 +61,45 @@ export interface ImagePartData {
   filename: string;
 }
 
+/** A single ``parts[]`` entry in the ``prompt_async`` request body. */
+export type PromptPart = Record<string, unknown>;
+
+/**
+ * Build the canonical ``parts: []`` array sent to ``/api/session/{id}/prompt_async``.
+ *
+ * The wire-format invariant is:
+ *   - text always comes first (when present)
+ *   - each image follows as ``{type: 'file', url, mime, filename}``
+ *   - the array must NEVER be empty — text-only callers fall back to a
+ *     synthetic empty-text entry so the backend contract (a non-empty
+ *     ``parts`` list) is preserved
+ *
+ * Centralised so all four send sites (Session/index.tsx, useSessionChat,
+ * SessionChat live preview + payload) emit the same shape and a future
+ * change to the wire format only touches one file.
+ */
+export function buildPromptParts(
+  text: string,
+  imageParts?: ImagePartData[],
+): PromptPart[] {
+  const parts: PromptPart[] = [];
+  if (text) parts.push({ type: 'text', text });
+  if (imageParts && imageParts.length > 0) {
+    for (const img of imageParts) {
+      parts.push({
+        type: 'file',
+        url: img.url,
+        mime: img.mime,
+        filename: img.filename,
+      });
+    }
+  }
+  if (parts.length === 0) {
+    parts.push({ type: 'text', text });
+  }
+  return parts;
+}
+
 /** Lower-cased extension (without the leading dot) or ``''`` for no extension. */
 export function getFileExtension(filename: string): string {
   const normalized = filename.toLowerCase();

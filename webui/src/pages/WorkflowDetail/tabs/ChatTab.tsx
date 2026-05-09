@@ -3,6 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle, FolderOpen, Plus, Clock } from 'lucide-react';
 import SessionChat, { NodeRef, type SSEChatEvent } from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
+import type { ImagePartData } from '@/utils/imageUpload';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
 import client from '@/api/client';
@@ -65,6 +67,7 @@ export default function ChatTab({
   onNodeRefDismiss,
 }: ChatTabProps) {
   const { t } = useTranslation('workflow');
+  const supportsVision = useDefaultModelVision();
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [initialMessage, setInitialMessage] = useState<string | null>(null);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
@@ -84,6 +87,7 @@ export default function ChatTab({
     loading: initializing,
     error,
     create: createSession,
+    createAndSend: createAndSendSession,
     reset: resetSession,
   } = useSessionChat({
     title: t('detail.chat.sessionTitle', { name: workflow.name }),
@@ -163,20 +167,29 @@ export default function ChatTab({
 
   // First message — via SessionChat's onCreateAndSend callback
   const handleCreateAndSend = useCallback(
-    async (text: string) => {
-      if (hasCreatedRef.current || !text.trim()) return;
+    async (text: string, imageParts?: ImagePartData[]) => {
+      const hasImages = (imageParts?.length ?? 0) > 0;
+      // Allow image-only messages (no text) to flow through.
+      if (hasCreatedRef.current || (!text.trim() && !hasImages)) return;
       hasCreatedRef.current = true;
       onFirstMessageSent?.();
 
       try {
-        setInitialMessage(text);
-        await createSession();
+        if (hasImages) {
+          // initialMessage is text-only; use createAndSend so the inline
+          // image parts survive into the very first prompt instead of being
+          // silently dropped (the previous bug for non-Session composers).
+          await createAndSendSession({ text, imageParts });
+        } else {
+          setInitialMessage(text);
+          await createSession();
+        }
       } catch {
         hasCreatedRef.current = false;
         setInitialMessage(null);
       }
     },
-    [onFirstMessageSent, createSession],
+    [onFirstMessageSent, createSession, createAndSendSession],
   );
 
   const handleNewSession = useCallback(() => {
@@ -343,6 +356,7 @@ export default function ChatTab({
           onStreamingDone={handleStreamingDone}
           initialMessage={initialMessage}
           onSSEEvent={handleSSEEvent}
+          supportsVision={supportsVision}
           onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
           welcomeContent={!sessionId ? <WorkflowWelcome workflow={workflow} error={error} onRetry={() => { hasCreatedRef.current = false; resetSession(); }} /> : undefined}
         />
