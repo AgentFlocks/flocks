@@ -1,0 +1,65 @@
+name: af_network
+description: >
+  Sangfor AF v8.0.48 network tool. Query routing tables (IPv4 and IPv6)
+  and network-related status information.
+description_cn: >
+  深信服 AF v8.0.48 网络工具。通过 `action` 参数查询路由表（IPv4/IPv6）
+  及网络相关状态信息。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: af_api_v8_0_48
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        网络查询动作名，可选值：
+        - get_routes
+          用途: 获取后台 IPv4 路由信息列表
+          必填: 无
+          常用: routeType（ALL_ROUTE/STATIC_ROUTE/DIRECT_ROUTE 等）、_start、_length
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - get_routes_ipv6
+          用途: 获取后台 IPv6 路由信息列表
+          必填: 无
+          常用: routeType、_start、_length
+          风险提示: 只读查询接口
+          是否任务型: 否
+      enum:
+        - get_routes
+        - get_routes_ipv6
+    routeType:
+      type: string
+      description: >
+        路由类型过滤：ALL_ROUTE=所有路由，STATIC_ROUTE=静态路由，
+        DIRECT_ROUTE=直连路由，OSPF_ROUTE=OSPF路由，RIP_ROUTE=RIP路由，
+        VPN_ROUTE=VPN路由，SSL_VPN_ROUTE=SSL VPN路由，
+        IBGP_ROUTE=IBGP路由，EBGP_ROUTE=EBGP路由
+      enum:
+        - ALL_ROUTE
+        - STATIC_ROUTE
+        - DIRECT_ROUTE
+        - OSPF_ROUTE
+        - RIP_ROUTE
+        - VPN_ROUTE
+        - SSL_VPN_ROUTE
+        - IBGP_ROUTE
+        - EBGP_ROUTE
+    _start:
+      type: integer
+      description: 分页起始位置（从0开始）
+    _length:
+      type: integer
+      description: 每页最大返回数量（最大200，默认100）
+    _search:
+      type: string
+      description: 模糊搜索关键字
+  required:
+    - action
+handler:
+  type: script
+  script_file: af.handler.py
+  function: network
