@@ -51,8 +51,9 @@ describe('useDefaultModelVision', () => {
   });
 
   it('returns false for a predefined (built-in) model even when it declares vision support', async () => {
-    // Predefined models are treated as non-vision regardless of capability
-    // flags so the UI shows the "not supported" hint and blocks uploads.
+    // Built-in models must explicitly reject image uploads (not return
+    // null / unknown) so SessionChat shows the "model does not support
+    // images" toast instead of silently letting them through.
     mockResolved.mockResolvedValue(makeResolvedResp());
     mockDefinition.mockResolvedValue(makeDefResp({ supports_vision: true }, 'predefined'));
 

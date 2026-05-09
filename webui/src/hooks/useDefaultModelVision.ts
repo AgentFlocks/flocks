@@ -43,12 +43,13 @@ async function resolveVisionSupport(): Promise<VisionState> {
     const defResp = await modelV2API.getDefinition(provider_id, model_id);
     const def: any = defResp.data;
     if (!def) return null;
-    // Predefined (catalog/SDK) models have their vision capability sourced
-    // from the provider definition and are deliberately reported as
-    // non-vision here. The product decision is that multimodal uploads are
-    // only unlocked for user-added models the user has explicitly opted
-    // into. Returning ``false`` (instead of ``null``) makes the chat UI
-    // surface the "model does not support images" hint and block uploads.
+    // Predefined (catalog/SDK) models are treated as **explicitly non-vision**
+    // (return false, not null) so the chat composer actively *rejects* image
+    // uploads with the "model does not support images" hint. Returning null
+    // would fall through to the best-effort "allow upload" branch in
+    // SessionChat (`supportsVision === false` is the rejection trigger), which
+    // is exactly the bug we're avoiding here. Vision is only unlocked by
+    // user-added (customizable) models that have explicitly enabled it.
     if (def.fetch_from !== 'customizable') return false;
     const caps = def.capabilities;
     if (!caps) return null;
