@@ -287,7 +287,9 @@ def migrate_api_services(*, backup: bool = True) -> Dict[str, str]:
 
     for desc in pending:
         # Deep-copy via JSON round-trip; api_services blocks are pure JSON.
-        services[desc.storage_key] = json.loads(json.dumps(services[desc.service_id]))
+        copied = json.loads(json.dumps(services[desc.service_id]))
+        from flocks.config.config_writer import ConfigWriter
+        services[desc.storage_key] = ConfigWriter._normalize_api_service_config(copied)
         actions[desc.storage_key] = "copied"
         log.info("versioning.migrated", {
             "service_id": desc.service_id,
