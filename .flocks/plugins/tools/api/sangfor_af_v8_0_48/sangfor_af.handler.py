@@ -124,7 +124,7 @@ async def _login(
     try:
         async with session.post(
             url,
-            json={"obj": {"name": username, "password": password}},
+            json={"name": username, "password": password},
             ssl=verify_ssl,
         ) as resp:
             data = await resp.json(content_type=None)
@@ -506,9 +506,16 @@ async def _do_get_system_version(ctx: ToolContext, **params: Any) -> ToolResult:
 
 async def _do_get_interface_status(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    iface = params.get("interfaceNames", "")
-    path = f"{API_V1}/interfacestatus/{iface}" if iface else f"{API_V1}/interfacestatus"
-    return await _call("GET", path, action="get_interface_status")
+    # AF8.0.x: /interfacestatus returns 1002; use /interfaces (list) or
+    # /interfaces/status?interfaceName=<name> (single interface query).
+    iface = params.get("interfaceNames") or params.get("interfaceName") or ""
+    if iface:
+        return await _call(
+            "GET", f"{API_V1}/interfaces/status",
+            params={"interfaceName": iface},
+            action="get_interface_status",
+        )
+    return await _call("GET", f"{API_V1}/interfaces", action="get_interface_status")
 
 
 async def _do_get_runtime_status(ctx: ToolContext, **params: Any) -> ToolResult:

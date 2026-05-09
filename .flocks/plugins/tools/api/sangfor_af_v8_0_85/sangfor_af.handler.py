@@ -112,7 +112,7 @@ async def _login(session, base_url, username, password, verify_ssl):
     try:
         async with session.post(
             url,
-            json={"obj": {"name": username, "password": password}},
+            json={"name": username, "password": password},
             ssl=verify_ssl,
         ) as resp:
             data = await resp.json(content_type=None)
@@ -292,25 +292,38 @@ async def _do_get_user_traffic_rank(ctx: ToolContext, **params: Any) -> ToolResu
 
 async def _do_get_ip_traffic_trend(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "topNumber", "unit", "minutes")
+    # /iptraffics is not a paged endpoint; _start/_length must not be sent.
+    # topNumber must be int — AF returns code=1001 for any non-int value.
+    query = _pick(params, "vsys", "topNumber", "unit", "minutes")
+    if "topNumber" in query:
+        try:
+            query["topNumber"] = int(query["topNumber"])
+        except (TypeError, ValueError):
+            pass
     return await _call("GET", f"{API_V1}/iptraffics", params=query or None, action="get_ip_traffic_trend")
 
 
 async def _do_get_app_traffic_rank(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "line", "topNumber")
+    query = _pick(params, "vsys", "line", "topNumber")
+    if "topNumber" in query:
+        try:
+            query["topNumber"] = int(query["topNumber"])
+        except (TypeError, ValueError):
+            pass
     return await _call("GET", f"{API_V1}/apptrafficrank", params=query or None, action="get_app_traffic_rank")
 
 
 async def _do_get_session_dailys(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "ip")
+    query = _pick(params, "vsys", "ip")
     return await _call("GET", f"{API_V1}/sessiondailys", params=query or None, action="get_session_dailys")
 
 
 async def _do_get_session_details(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "srcIP", "dstIP", "protocol")
+    # Endpoint needs explicit filters; without them AF returns 1004 "没有返回值".
+    query = _pick(params, "vsys", "srcIP", "dstIP", "protocol", "srcPort", "dstPort")
     return await _call("GET", f"{API_V1}/sessiondetails", params=query or None, action="get_session_details")
 
 
@@ -322,7 +335,8 @@ async def _do_get_session_count_trend(ctx: ToolContext, **params: Any) -> ToolRe
 
 async def _do_get_session_src_ip(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "srcIP")
+    # srcIP is required; AF returns 1004 "没有返回值" when omitted.
+    query = _pick(params, "vsys", "srcIP")
     return await _call("GET", f"{API_V1}/sessionsrcip", params=query or None, action="get_session_src_ip")
 
 
@@ -346,8 +360,9 @@ async def _do_get_monitor_ips(ctx: ToolContext, **params: Any) -> ToolResult:
 
 async def _do_get_sessions(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    query = _pick(params, "_start", "_length", "vsys", "srcIP", "dstIP", "protocol", "srcPort", "dstPort")
-    return await _call("GET", f"{API_V1}/sessions", params=query or None, action="get_sessions")
+    body = _pick(params, "_start", "_length", "vsys", "srcIP", "dstIP", "protocol", "srcPort", "dstPort")
+    # AF8.0.x requires POST + ?_method=GET for /sessions; plain GET returns 1002.
+    return await _call("POST", f"{API_V1}/sessions", params={"_method": "GET"}, json=body or {}, action="get_sessions")
 
 
 # Statistics (monitoring sub-section)
@@ -463,9 +478,16 @@ async def _do_get_system_version(ctx: ToolContext, **params: Any) -> ToolResult:
 
 async def _do_get_interface_status(ctx: ToolContext, **params: Any) -> ToolResult:
     del ctx
-    iface = params.get("interfaceNames", "")
-    path = f"{API_V1}/interfacestatus/{iface}" if iface else f"{API_V1}/interfacestatus"
-    return await _call("GET", path, action="get_interface_status")
+    # AF8.0.x: /interfacestatus returns 1002; use /interfaces (list) or
+    # /interfaces/status?interfaceName=<name> (single interface query).
+    iface = params.get("interfaceNames") or params.get("interfaceName") or ""
+    if iface:
+        return await _call(
+            "GET", f"{API_V1}/interfaces/status",
+            params={"interfaceName": iface},
+            action="get_interface_status",
+        )
+    return await _call("GET", f"{API_V1}/interfaces", action="get_interface_status")
 
 
 async def _do_get_runtime_status(ctx: ToolContext, **params: Any) -> ToolResult:
