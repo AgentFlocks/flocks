@@ -261,6 +261,17 @@ export interface MCPServerConfig {
   url?: string;
   command?: string | string[];
   args?: string[];
+  transport?: 'auto' | 'sse' | 'http';
+  headers?: Record<string, string>;
+  auth?: {
+    type?: string;
+    scheme?: 'bearer' | string;
+    location?: 'header' | 'query';
+    param_name?: string;
+    value?: string;
+    secret_id?: string;
+  } | null;
+  oauth?: boolean | Record<string, any> | null;
 }
 
 export interface MCPServerDetail {
