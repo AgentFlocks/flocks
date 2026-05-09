@@ -70,5 +70,45 @@
     "missingBindingId": "Missing binding_id in callback URL.",
     "exchangeFailed": "Failed to complete login exchange",
     "failedTitle": "Login Failed"
+  },
+  "audit": {
+    "title": "Audit Logs",
+    "description": "Review Pro audit events with filters for event type, actor, and time range.",
+    "loading": "Loading...",
+    "empty": "No audit events",
+    "total": "Total {{total}}",
+    "page": "Page {{page}} / {{pageCount}}",
+    "actions": {
+      "search": "Search",
+      "exportExcel": "Download Excel",
+      "exporting": "Downloading...",
+      "reset": "Reset",
+      "prev": "Prev",
+      "next": "Next"
+    },
+    "filters": {
+      "eventType": "Event type (event_type)",
+      "allEventTypes": "All event types",
+      "actor": "Actor username (username)",
+      "allResults": "All results"
+    },
+    "result": {
+      "success": "Success",
+      "failed": "Failed"
+    },
+    "table": {
+      "time": "Time",
+      "eventType": "Event",
+      "actor": "Actor",
+      "resource": "Resource",
+      "result": "Result",
+      "payload": "Details"
+    },
+    "errors": {
+      "fetch": "Failed to fetch audit logs",
+      "export": "Failed to export audit logs",
+      "forbidden": "Only admins can view audit logs",
+      "unavailable": "Audit logs are not available in this edition"
+    }
   }
 }

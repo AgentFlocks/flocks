@@ -4,6 +4,8 @@ Local account authentication routes.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
@@ -18,6 +20,68 @@ from flocks.server.auth import (
 )
 
 router = APIRouter()
+
+
+def _parse_event_type(event_type: str) -> tuple[str, str]:
+    if "." in event_type:
+        category, action = event_type.split(".", 1)
+        return category, action
+    return event_type, "event"
+
+
+async def _emit_auth_audit_fallback(event_type: str, payload: dict[str, Any]) -> None:
+    """Persist auth audit directly when flocks audit sink is still no-op."""
+    try:
+        from flocks.audit import NullAuditSink, get_sink
+
+        sink_cls = get_sink()
+        if sink_cls is not NullAuditSink:
+            return
+    except Exception:
+        return
+
+    try:
+        from flockspro.audit.service import AuditEvent
+        from flockspro.audit.sinks import SqliteAuditSink
+    except Exception:
+        # OSS or flockspro not installed: nothing to persist.
+        return
+
+    category, action = _parse_event_type(event_type)
+    failed = "failed" in action or bool(payload.get("error") or payload.get("reason"))
+    user_id = payload.get("user_id")
+    username = payload.get("username")
+    session_id = payload.get("session_id")
+    event = AuditEvent(
+        event_type=event_type,
+        category=category,
+        action=action,
+        status="error" if failed else "ok",
+        result="failed" if failed else "success",
+        user_id=str(user_id) if user_id else None,
+        user_name=str(username) if username else None,
+        resource_type="session",
+        resource_id=str(session_id) if session_id else None,
+        session_id=str(session_id) if session_id else None,
+        ip=str(payload.get("ip")) if payload.get("ip") else None,
+        payload=payload,
+        metadata=payload,
+    )
+    await SqliteAuditSink().write(event)
+
+
+async def _emit_auth_audit(event_type: str, payload: dict) -> None:
+    try:
+        from flocks.audit import emit_audit_event
+
+        await emit_audit_event(event_type, payload)
+    except Exception:
+        # Audit failures must not block auth flow.
+        pass
+    try:
+        await _emit_auth_audit_fallback(event_type, payload)
+    except Exception:
+        pass
 
 
 class BootstrapStatusResponse(BaseModel):
@@ -123,9 +187,30 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
             payload.password,
         )
     except ValueError as exc:
+        await _emit_auth_audit(
+            "account.login_failed",
+            {
+                "username": payload.username,
+                "reason": str(exc),
+                "ip": getattr(getattr(request, "client", None), "host", None),
+            },
+        )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     set_session_cookie(response, session_id, secure=should_use_secure_cookie(request))
+    await _emit_auth_audit(
+        "account.login",
+        {
+            "actor_id": user.username,
+            "actor_name": user.username,
+            "user_id": user.id,
+            "user_name": user.username,
+            "username": user.username,
+            "role": user.role,
+            "session_id": session_id,
+            "ip": getattr(getattr(request, "client", None), "host", None),
+        },
+    )
     return _to_me_response(user)
 
 
@@ -139,11 +224,24 @@ async def cloud_login_init(request: Request, return_to: str | None = None) -> Cl
 
 @router.post("/logout", summary="退出登录")
 async def logout(response: Response, request: Request) -> dict:
-    require_user(request)
+    user = require_user(request)
     session_id = request.cookies.get("flocks_session")
     if session_id:
         await AuthService.revoke_session(session_id)
     clear_session_cookie(response)
+    await _emit_auth_audit(
+        "account.logout",
+        {
+            "actor_id": user.username,
+            "actor_name": user.username,
+            "user_id": user.id,
+            "user_name": user.username,
+            "username": user.username,
+            "role": user.role,
+            "session_id": session_id,
+            "ip": getattr(getattr(request, "client", None), "host", None),
+        },
+    )
     return {"success": True}
 
 

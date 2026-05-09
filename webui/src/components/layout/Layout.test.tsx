@@ -17,6 +17,7 @@ const {
   getActiveNotifications,
   ackNotification,
   getNotificationAckStatus,
+  flocksproUsersApi,
   useAuth,
   useStats,
 } = vi.hoisted(() => ({
@@ -43,6 +44,9 @@ const {
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
   getNotificationAckStatus: vi.fn(),
+  flocksproUsersApi: {
+    hasCapability: vi.fn(),
+  },
   useAuth: vi.fn(),
   useStats: vi.fn(),
 }));
@@ -73,6 +77,10 @@ vi.mock('@/api/notifications', () => ({
   getActiveNotifications,
   ackNotification,
   getNotificationAckStatus,
+}));
+
+vi.mock('@/api/flocksproUsers', () => ({
+  flocksproUsersApi,
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -237,6 +245,7 @@ describe('Layout onboarding entry', () => {
     providerAPI.getServiceCredentials.mockResolvedValue({
       data: { has_credential: false },
     });
+    flocksproUsersApi.hasCapability.mockResolvedValue(false);
 
     mcpAPI.getCredentials.mockResolvedValue({
       data: { has_credential: false },

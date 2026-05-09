@@ -70,5 +70,45 @@
     "missingBindingId": "缺少 binding_id，无法完成登录。",
     "exchangeFailed": "登录回调处理失败",
     "failedTitle": "登录失败"
+  },
+  "audit": {
+    "title": "审计日志",
+    "description": "查看 Pro 审计事件，支持按事件类型、用户与时间范围筛选。",
+    "loading": "加载中...",
+    "empty": "暂无审计记录",
+    "total": "共 {{total}} 条",
+    "page": "第 {{page}} / {{pageCount}} 页",
+    "actions": {
+      "search": "查询",
+      "exportExcel": "下载 Excel",
+      "exporting": "下载中...",
+      "reset": "重置",
+      "prev": "上一页",
+      "next": "下一页"
+    },
+    "filters": {
+      "eventType": "事件类型（event_type）",
+      "allEventTypes": "全部事件类型",
+      "actor": "操作者用户名（username）",
+      "allResults": "全部结果"
+    },
+    "result": {
+      "success": "成功",
+      "failed": "失败"
+    },
+    "table": {
+      "time": "时间",
+      "eventType": "事件",
+      "actor": "操作者",
+      "resource": "资源",
+      "result": "结果",
+      "payload": "详情"
+    },
+    "errors": {
+      "fetch": "获取审计日志失败",
+      "export": "导出审计日志失败",
+      "forbidden": "仅管理员可查看审计日志",
+      "unavailable": "当前版本不支持审计日志"
+    }
   }
 }

@@ -355,6 +355,10 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             "session_action",
             {
                 "action": "create",
+                "actor_id": current_user.username,
+                "actor_name": current_user.username,
+                "user_name": current_user.username,
+                "username": current_user.username,
                 "session_id": session.id,
                 "owner_user_id": current_user.id,
                 "project_id": session.project_id,
@@ -503,6 +507,10 @@ async def delete_session(sessionID: str, request: Request) -> bool:
             "session_action",
             {
                 "action": "delete",
+                "actor_id": current_user.username,
+                "actor_name": current_user.username,
+                "user_name": current_user.username,
+                "username": current_user.username,
                 "session_id": sessionID,
                 "owner_user_id": current_user.id,
                 "project_id": session.project_id,

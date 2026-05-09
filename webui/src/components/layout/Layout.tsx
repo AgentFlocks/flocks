@@ -17,6 +17,7 @@ import {
   Sparkles,
   ArrowUpCircle,
   UserCog,
+  ShieldCheck,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -31,6 +32,7 @@ import {
   getNotificationAckStatus,
   type UserNotification,
 } from '@/api/notifications';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
@@ -80,6 +82,7 @@ export default function Layout() {
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
+  const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -165,6 +168,30 @@ export default function Layout() {
       window.removeEventListener('focus', handleWindowFocus);
     };
   }, [refreshUpdateStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.id || user.role !== 'admin') {
+      setHasFlocksproCapability(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void flocksproUsersApi.hasCapability()
+      .then((ok) => {
+        if (!cancelled) {
+          setHasFlocksproCapability(ok);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setHasFlocksproCapability(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -308,8 +335,11 @@ export default function Layout() {
     {
       name: t('management'),
       items: [
-        { name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle },
         { name: t('accountManagement'), href: '/config', icon: UserCog },
+        ...(hasFlocksproCapability && user?.role === 'admin'
+          ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
+          : []),
+        { name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle },
       ],
     },
   ];

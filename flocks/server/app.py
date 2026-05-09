@@ -23,7 +23,6 @@ from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
-from flocks.audit import emit_audit_event
 from flocks.extensions import (
     FailPolicy,
     handler_name,
@@ -672,18 +671,6 @@ async def log_requests(request: Request, call_next):
             "status": response.status_code,
             "duration": duration_ms,
         })
-        try:
-            await emit_audit_event(
-                "http_request",
-                {
-                    "method": request.method,
-                    "path": path,
-                    "status": response.status_code,
-                    "duration_ms": duration_ms,
-                },
-            )
-        except Exception as exc:
-            log.debug("audit.emit.failed", {"error": str(exc), "path": path})
 
     return response
 
