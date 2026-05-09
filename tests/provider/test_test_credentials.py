@@ -381,8 +381,8 @@ class TestTestCredentialsToolExecution:
             patch(
                 "flocks.tool.probe_loader.get_connectivity_spec",
                 return_value=ConnectivitySpec(
-                    tool="tdp_dashboard_status",
-                    params={"action": "status"},
+                    tool="tdp_system_status",
+                    params={"action": "service"},
                 ),
             ),
         ):
@@ -403,11 +403,11 @@ class TestTestCredentialsToolExecution:
             result = await test_provider_credentials("tdp_api_v3_3_10")
 
             assert result["success"] is True, result
-            assert result["tool_tested"] == "tdp_dashboard_status"
+            assert result["tool_tested"] == "tdp_system_status"
             assert result["probe_source"] == "manifest"
             mock_tr.execute.assert_awaited_once_with(
-                tool_name="tdp_dashboard_status",
-                action="status",
+                tool_name="tdp_system_status",
+                action="service",
             )
 
     @pytest.mark.asyncio

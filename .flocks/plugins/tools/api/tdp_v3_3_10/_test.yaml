@@ -2,13 +2,13 @@ schema_version: 1
 provider: tdp_api
 
 # Service-level connectivity probe.
-# Use a single lightweight read-only overview endpoint here instead of the
-# stricter multi-endpoint system-status aggregate. This keeps the connectivity
-# check lenient while still verifying signing and basic reachability.
+# Use a single lightweight system-status endpoint here instead of the stricter
+# multi-endpoint aggregate. This keeps the connectivity check focused on basic
+# service health without coupling it to every subsystem state.
 connectivity:
-  tool: tdp_dashboard_status
+  tool: tdp_system_status
   params:
-    action: status
+    action: service
 
 # Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
 # `label` is the default (English) display string; `label_cn` is the
