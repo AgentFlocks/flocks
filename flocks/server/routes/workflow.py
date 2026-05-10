@@ -527,11 +527,6 @@ async def _run_workflow_execution_task(
             "currentStepIndex": result.steps,
         })
 
-        if status_value == "success":
-            await _update_workflow_stats(workflow_id, True, duration)
-        elif status_value in {"error", "timeout"}:
-            await _update_workflow_stats(workflow_id, False, duration)
-
         await _record_execution_result(workflow_id, exec_id, current_data)
         log.info("workflow.executed", {
             "id": workflow_id,
@@ -550,8 +545,6 @@ async def _run_workflow_execution_task(
             "executionLog": list(step_history),
             "currentPhase": "cancelled" if cancel_event.is_set() else "error",
         })
-        if current_data["status"] == "error":
-            await _update_workflow_stats(workflow_id, False, duration)
         await _record_execution_result(workflow_id, exec_id, current_data)
         log.error("workflow.execute.error", {
             "id": workflow_id,
@@ -590,18 +583,6 @@ async def _get_workflow_stats(workflow_id: str) -> Dict[str, Any]:
         return _compute_avg_runtime(data)
     except Exception:
         return dict(_DEFAULT_STATS)
-
-
-async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
-    """Update workflow statistics"""
-    stats = await _get_workflow_stats(workflow_id)
-    stats["callCount"] += 1
-    if success:
-        stats["successCount"] += 1
-    else:
-        stats["errorCount"] += 1
-    stats["totalRuntime"] += duration
-    await Storage.write(_workflow_stats_key(workflow_id), stats)
 
 
 # =============================================================================
@@ -1065,7 +1046,6 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
         raw_status = result.get("status", "SUCCEEDED") if isinstance(result, dict) else "SUCCEEDED"
         status_value = _normalize_execution_status(raw_status)
         success = status_value == "success"
-        await _update_workflow_stats(workflow_id, success, duration)
         exec_data.update({
             "outputResults": result.get("outputs", {}) if isinstance(result, dict) else {},
             "status": status_value,
@@ -1077,21 +1057,18 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
         return result
     except (WorkflowNotFoundError, WorkflowNotPublishedError) as e:
         duration = time.time() - started
-        await _update_workflow_stats(workflow_id, False, duration)
         exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
                           "duration": duration, "errorMessage": str(e)})
         await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
         duration = time.time() - started
-        await _update_workflow_stats(workflow_id, False, duration)
         exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
                           "duration": duration, "errorMessage": str(e)})
         await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         duration = time.time() - started
-        await _update_workflow_stats(workflow_id, False, duration)
         exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
                           "duration": duration, "errorMessage": str(e)})
         await _record_execution_result(workflow_id, exec_id, exec_data)

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+from flocks.workflow.execution_store import (
+    create_execution_record,
+    record_execution_result,
+    resolve_execution_outcome,
+)
 from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.runner import run_workflow
 
@@ -136,18 +142,52 @@ class SyslogManager:
             log.warning("syslog.workflow_json_missing", {"workflow_id": workflow_id})
             return
         inputs = {input_key: syslog_msg}
+
+        exec_data = await create_execution_record(
+            workflow_id,
+            input_params={"_trigger": "syslog", **inputs},
+        )
+        exec_id = exec_data["id"]
+        start_time = time.time()
+
         try:
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
                 inputs=inputs,
                 trace=False,
             )
+            status, error_msg = resolve_execution_outcome(result)
+            duration = time.time() - start_time
+            exec_data.update({
+                "status": status,
+                "outputResults": result.outputs if isinstance(result.outputs, dict) else {},
+                "finishedAt": int(time.time() * 1000),
+                "duration": duration,
+                "errorMessage": error_msg,
+                "executionLog": list(result.history or []),
+                "currentNodeId": result.last_node_id,
+                "currentPhase": status,
+                "currentStepIndex": result.steps,
+            })
         except Exception as exc:
+            duration = time.time() - start_time
             log.error(
                 "syslog.workflow_run_failed",
-                {"workflow_id": workflow_id, "error": str(exc)},
+                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
             )
+            exec_data.update({
+                "status": "error",
+                "errorMessage": str(exc),
+                "finishedAt": int(time.time() * 1000),
+                "duration": duration,
+                "currentPhase": "error",
+            })
+        finally:
+            try:
+                await record_execution_result(workflow_id, exec_id, exec_data)
+            except Exception as exc:
+                log.warning("syslog.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
 
 
 default_manager = SyslogManager()

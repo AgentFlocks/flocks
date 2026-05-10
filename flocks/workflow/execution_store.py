@@ -11,6 +11,43 @@ from flocks.storage.storage import Storage
 from flocks.workflow.runner import RunWorkflowResult
 
 
+def _workflow_stats_key(workflow_id: str) -> str:
+    return f"workflow/{workflow_id}/stats"
+
+
+_DEFAULT_STATS: Dict[str, Any] = {
+    "callCount": 0,
+    "successCount": 0,
+    "errorCount": 0,
+    "totalRuntime": 0.0,
+    "avgRuntime": 0.0,
+    "thumbsUp": 0,
+    "thumbsDown": 0,
+}
+
+
+async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
+    """Increment workflow call/success/error counters and update avgRuntime."""
+    try:
+        key = _workflow_stats_key(workflow_id)
+        try:
+            stats: Dict[str, Any] = await Storage.read(key) or dict(_DEFAULT_STATS)
+        except Exception:
+            stats = dict(_DEFAULT_STATS)
+        stats["callCount"] = stats.get("callCount", 0) + 1
+        if success:
+            stats["successCount"] = stats.get("successCount", 0) + 1
+        else:
+            stats["errorCount"] = stats.get("errorCount", 0) + 1
+        total = stats.get("totalRuntime", 0.0) + duration
+        stats["totalRuntime"] = total
+        call_count = stats["callCount"]
+        stats["avgRuntime"] = (total / call_count) if call_count > 0 else 0.0
+        await Storage.write(key, stats)
+    except Exception:
+        pass
+
+
 def workflow_execution_key(exec_id: str) -> str:
     """Return the storage key for one workflow execution."""
     return f"workflow_execution/{exec_id}"
@@ -98,8 +135,20 @@ async def record_execution_result(
     exec_id: str,
     exec_data: Dict[str, Any],
 ) -> None:
-    """Persist the final execution record and audit trail."""
+    """Persist the final execution record, audit trail, and workflow stats."""
     await Storage.write(workflow_execution_key(exec_id), exec_data)
+
+    # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
+    # are reflected in the UI stats panel.
+    status = exec_data.get("status", "error")
+    success = status == "success"
+    duration = exec_data.get("duration")
+    if not isinstance(duration, (int, float)):
+        started_at = exec_data.get("startedAt", 0)
+        finished_at = exec_data.get("finishedAt", int(time.time() * 1000))
+        duration = max(0.0, (finished_at - started_at) / 1000.0)
+    await _update_workflow_stats(workflow_id, success, float(duration))
+
     try:
         await Recorder.record_workflow_execution(
             exec_id=exec_id,
