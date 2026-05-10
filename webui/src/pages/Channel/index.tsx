@@ -138,6 +138,8 @@ interface WeixinChannelConfig {
   defaultAgent?: string;
   dmPolicy?: string;
   allowFrom?: string[];
+  groupPolicy?: string;
+  groupAllowFrom?: string[];
   sendChunkDelay?: number;
   dataDir?: string;
 }
@@ -193,6 +195,7 @@ function defaultWeixinConfig(): WeixinChannelConfig {
   return {
     enabled: false,
     dmPolicy: 'open',
+    groupPolicy: 'all',
     sendChunkDelay: 1.5,
   };
 }
@@ -1699,6 +1702,26 @@ function WeixinPanel({ config, onChange, onQrLoginSuccess }: WeixinPanelProps) {
             placeholder={t('weixin.allowFromPlaceholder')}
           />
         </FieldRow>
+        <FieldRow label={t('weixin.groupPolicy')} hint={t('weixin.groupPolicyHint')}>
+          <Select
+            value={config.groupPolicy ?? 'all'}
+            onChange={(v) => set('groupPolicy', v)}
+            options={[
+              { value: 'all', label: t('weixin.groupPolicyAll') },
+              { value: 'allowlist', label: t('weixin.groupPolicyAllowlist') },
+              { value: 'disabled', label: t('weixin.groupPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        {(config.groupPolicy ?? 'all') === 'allowlist' && (
+          <FieldRow label={t('weixin.groupAllowFrom')} hint={t('weixin.groupAllowFromHint')}>
+            <TagsInput
+              value={config.groupAllowFrom ?? []}
+              onChange={(v) => set('groupAllowFrom', v.length ? v : undefined)}
+              placeholder={t('weixin.groupAllowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
       </Section>
 
       <Section title={t('weixin.advanced')} description={t('weixin.advancedDesc')} defaultOpen={false}>

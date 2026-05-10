@@ -82,13 +82,18 @@ class WeixinChannel(ChannelPlugin):
     - ``accountId`` — iLink bot account ID (``WEIXIN_ACCOUNT_ID`` env var as fallback)
 
     Optional config keys:
-    - ``baseUrl``        — iLink API base URL (defaults to ilinkai.weixin.qq.com)
-    - ``cdnBaseUrl``     — iLink CDN base URL (defaults to novac2c.cdn.weixin.qq.com)
-    - ``dmPolicy``       — ``"open"`` (default) | ``"disabled"`` | ``"allowlist"``
-    - ``allowFrom``      — comma-separated list of allowed sender user IDs
-    - ``sendChunkDelay`` — seconds between multi-chunk messages (default 1.5)
-    - ``dataDir``        — override path for storing sync_buf / context-token / media cache
-                          (default: ~/.flocks/workspace/channels/weixin)
+    - ``baseUrl``          — iLink API base URL (defaults to ilinkai.weixin.qq.com)
+    - ``cdnBaseUrl``       — iLink CDN base URL (defaults to novac2c.cdn.weixin.qq.com)
+    - ``dmPolicy``         — ``"open"`` (default) | ``"disabled"`` | ``"allowlist"``
+    - ``allowFrom``        — list of allowed sender user IDs for DM allowlist mode
+    - ``groupPolicy``      — ``"all"`` (default) | ``"disabled"`` | ``"allowlist"``
+                            Controls whether group chat messages are processed.
+                            Note: iLink Bot accounts may not receive group events in
+                            ordinary WeChat groups depending on account type.
+    - ``groupAllowFrom``   — list of allowed group / room IDs for group allowlist mode
+    - ``sendChunkDelay``   — seconds between multi-chunk messages (default 1.5)
+    - ``dataDir``          — override path for storing sync_buf / context-token / media cache
+                            (default: ~/.flocks/workspace/channels/weixin)
     """
 
     def __init__(self) -> None:
@@ -99,6 +104,8 @@ class WeixinChannel(ChannelPlugin):
         self._cdn_base_url: str = WEIXIN_CDN_BASE_URL
         self._dm_policy: str = "open"
         self._allow_from: list[str] = []
+        self._group_policy: str = "all"
+        self._group_allow_from: list[str] = []
         self._send_chunk_delay: float = 1.5
         self._send_chunk_retries: int = 4
         self._data_dir: Optional[str] = None
@@ -156,6 +163,13 @@ class WeixinChannel(ChannelPlugin):
                     "default": "open",
                 },
                 "allowFrom": {"type": "string", "description": "allowlist 模式下允许的发送者 user_id，逗号分隔"},
+                "groupPolicy": {
+                    "type": "string",
+                    "enum": ["all", "disabled", "allowlist"],
+                    "description": "群聊策略",
+                    "default": "all",
+                },
+                "groupAllowFrom": {"type": "string", "description": "群聊 allowlist 模式下允许的群 / 房间 ID，逗号分隔"},
                 "sendChunkDelay": {"type": "number", "description": "多段消息发送间隔（秒）", "default": 1.5},
                 "dataDir": {"type": "string", "description": "状态文件 / 媒体缓存存储目录（默认 ~/.flocks/workspace/channels/weixin）"},
             },
@@ -195,6 +209,9 @@ class WeixinChannel(ChannelPlugin):
         self._dm_policy = str(config.get("dmPolicy") or "open").lower()
         raw_allow = config.get("allowFrom") or ""
         self._allow_from = [s.strip() for s in str(raw_allow).split(",") if s.strip()]
+        self._group_policy = str(config.get("groupPolicy") or "all").lower()
+        raw_group_allow = config.get("groupAllowFrom") or ""
+        self._group_allow_from = [s.strip() for s in str(raw_group_allow).split(",") if s.strip()]
         self._send_chunk_delay = float(config.get("sendChunkDelay") or 1.5)
         self._send_chunk_retries = int(config.get("sendChunkRetries") or 4)
         self._data_dir = config.get("dataDir")
@@ -359,7 +376,10 @@ class WeixinChannel(ChannelPlugin):
 
         chat_type_str, effective_chat_id = guess_chat_type(message, self._account_id)
 
-        if chat_type_str != "group" and not self._is_dm_allowed(sender_id):
+        if chat_type_str == "group":
+            if not self._is_group_allowed(effective_chat_id):
+                return
+        elif not self._is_dm_allowed(sender_id):
             return
 
         # Download the first inbound media item (image / video / voice / file).
@@ -385,7 +405,7 @@ class WeixinChannel(ChannelPlugin):
             text=text,
             media_url=media_url,
             media_mime=media_mime,
-            mentioned=chat_type == ChatType.GROUP,
+            mentioned=False,
             raw=message,
         )
         log.info("weixin.inbound", {
@@ -431,6 +451,13 @@ class WeixinChannel(ChannelPlugin):
             return False
         if self._dm_policy == "allowlist":
             return sender_id in self._allow_from
+        return True
+
+    def _is_group_allowed(self, chat_id: str) -> bool:
+        if self._group_policy == "disabled":
+            return False
+        if self._group_policy == "allowlist":
+            return chat_id in self._group_allow_from
         return True
 
     # ------------------------------------------------------------------
