@@ -252,6 +252,30 @@ def test_resolve_frontend_npm_candidates_adds_system_fallback_on_windows(
     }
 
 
+def test_resolve_frontend_npm_candidates_keeps_single_candidate_off_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    node_home = tmp_path / "tools" / "node"
+    node_bin = node_home / "bin"
+    node_bin.mkdir(parents=True)
+    (node_bin / "node").write_text("", encoding="utf-8")
+    bundled_npm = node_bin / "npm"
+    bundled_npm.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
+    monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(updater, "_find_executable", lambda name: f"/usr/bin/{name}")
+
+    candidates = updater._resolve_frontend_npm_candidates(
+        npm_registry="https://registry.npmmirror.com/"
+    )
+
+    assert [candidate.npm for candidate in candidates] == [str(bundled_npm)]
+    assert candidates[0].source == "bundled"
+
+
 def test_find_executable_ignores_wsl_mnt_paths(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1684,8 +1708,6 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     staged_webui = staged_root / "webui"
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
-    (staged_webui / "dist").mkdir()
-    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1714,12 +1736,23 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         run_calls.append((list(cmd), timeout, env))
         if cmd == [str(bundled_npm), "install"]:
+            bundled_modules = staged_webui / "node_modules" / "@esbuild"
+            bundled_modules.mkdir(parents=True, exist_ok=True)
+            (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
             return 0, "", ""
         if cmd == [str(bundled_npm), "run", "build"]:
+            stale_dist = staged_webui / "dist"
+            stale_dist.mkdir(exist_ok=True)
+            (stale_dist / "stale.txt").write_text("stale", encoding="utf-8")
             return 1, "", "bundled build failed"
         if cmd == [system_npm, "install"]:
+            assert not (staged_webui / "node_modules").exists()
+            assert not (staged_webui / "dist").exists()
             return 0, "", ""
         if cmd == [system_npm, "run", "build"]:
+            dist_dir = staged_webui / "dist"
+            dist_dir.mkdir(exist_ok=True)
+            (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
             return 0, "", ""
         if "sync" in cmd:
             return 0, "", ""
@@ -1789,8 +1822,6 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
-    (staged_webui / "dist").mkdir()
-    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1819,10 +1850,18 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         run_calls.append((list(cmd), timeout, env))
         if cmd == [str(bundled_npm), "ci"]:
+            bundled_modules = staged_webui / "node_modules" / "@esbuild"
+            bundled_modules.mkdir(parents=True, exist_ok=True)
+            (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
         if cmd == [system_npm, "ci"]:
+            assert not (staged_webui / "node_modules").exists()
+            assert not (staged_webui / "dist").exists()
             return 0, "", ""
         if cmd == [system_npm, "run", "build"]:
+            dist_dir = staged_webui / "dist"
+            dist_dir.mkdir(exist_ok=True)
+            (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
             return 0, "", ""
         if "sync" in cmd:
             return 0, "", ""

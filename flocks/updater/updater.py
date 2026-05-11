@@ -386,6 +386,14 @@ def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[s
     )
 
 
+def _reset_staged_frontend_workspace(staged_webui_dir: Path) -> None:
+    """Remove transient frontend build artifacts before retrying another npm candidate."""
+    for name in ("node_modules", "dist"):
+        target = staged_webui_dir / name
+        if target.exists():
+            _safe_remove(target)
+
+
 def _dependency_sync_timeout_seconds() -> int:
     """Return the timeout budget for ``uv sync`` during self-update."""
     if sys.platform == "win32":
@@ -2020,20 +2028,22 @@ async def perform_update(
                     )
                     if is_last_attempt:
                         break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
                     _record_update_journal(
                         "WARN "
-                        f"{final_frontend_error} Retrying staged frontend rebuild with fallback npm/node "
-                        f"after {attempt_source} attempt."
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
                     )
                     continue
                 if code != 0:
                     final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
                     if is_last_attempt:
                         break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
                     _record_update_journal(
                         "WARN "
-                        f"{final_frontend_error} Retrying staged frontend rebuild with fallback npm/node "
-                        f"after {attempt_source} attempt."
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
                     )
                     continue
 
@@ -2051,20 +2061,22 @@ async def perform_update(
                     )
                     if is_last_attempt:
                         break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
                     _record_update_journal(
                         "WARN "
-                        f"{final_frontend_error} Retrying staged frontend rebuild with fallback npm/node "
-                        f"after {attempt_source} attempt."
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
                     )
                     continue
                 if code != 0:
                     final_frontend_error = f"Frontend build failed: {err}"
                     if is_last_attempt:
                         break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
                     _record_update_journal(
                         "WARN "
-                        f"{final_frontend_error} Retrying staged frontend rebuild with fallback npm/node "
-                        f"after {attempt_source} attempt."
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
                     )
                     continue
 
@@ -2653,25 +2665,38 @@ def _resolve_frontend_npm_candidates(*, npm_registry: str | None = None) -> list
         )
 
     system_npm = _resolve_system_npm_executable()
-    if system_npm is not None:
+    if system_npm is not None and sys.platform == "win32":
         if sys.platform == "win32":
             normalized_system_npm = system_npm.replace("/", "\\").lower()
             duplicate = any(
                 candidate.npm.replace("/", "\\").lower() == normalized_system_npm
                 for candidate in candidates
             )
-        else:
-            duplicate = any(candidate.npm == system_npm for candidate in candidates)
         if not duplicate:
             candidates.append(
                 _FrontendNpmCandidate(
                     npm=system_npm,
                     env=_build_frontend_subprocess_env_for_node_dir(
-                        None if sys.platform == "win32" else _bundled_node_install_dir(),
+                        None,
                         npm_registry=npm_registry,
                     ),
-                    source="system" if sys.platform == "win32" else "default",
+                    source="system",
                 )
             )
+
+    if candidates:
+        return candidates
+
+    if system_npm is not None:
+        candidates.append(
+            _FrontendNpmCandidate(
+                npm=system_npm,
+                env=_build_frontend_subprocess_env_for_node_dir(
+                    None,
+                    npm_registry=npm_registry,
+                ),
+                source="default",
+            )
+        )
 
     return candidates
