@@ -18,6 +18,7 @@ export interface Session {
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
   ownerUserID?: string;
+  ownerUsername?: string;
   canDelete?: boolean;
 }
 

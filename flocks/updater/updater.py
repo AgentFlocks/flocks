@@ -84,6 +84,15 @@ class UpdateMirrorProfile:
     pip_index_url: str | None = None
 
 
+@dataclass(frozen=True)
+class _FrontendNpmCandidate:
+    """A single npm launcher candidate for staged frontend rebuilds."""
+
+    npm: str
+    env: dict[str, str] | None
+    source: str
+
+
 # ------------------------------------------------------------------ #
 # Install root
 # ------------------------------------------------------------------ #
@@ -349,13 +358,16 @@ def _build_uv_sync_env() -> dict[str, str] | None:
     return {"PATH": os.pathsep.join([current_path] + missing)}
 
 
-def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[str, str] | None:
+def _build_frontend_subprocess_env_for_node_dir(
+    node_dir: Path | None,
+    *,
+    npm_registry: str | None = None,
+) -> dict[str, str] | None:
     """Build supplemental env vars for frontend npm commands."""
     env: dict[str, str] = {}
     if npm_registry:
         env["npm_config_registry"] = npm_registry
 
-    node_dir = _bundled_node_install_dir()
     if node_dir is not None:
         node_bin = str(node_dir if sys.platform == "win32" else node_dir / "bin")
         current_path = os.environ.get("PATH", "")
@@ -364,6 +376,22 @@ def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[s
             env["PATH"] = node_bin if not current_path else node_bin + os.pathsep + current_path
 
     return env or None
+
+
+def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[str, str] | None:
+    """Build supplemental env vars for frontend npm commands."""
+    return _build_frontend_subprocess_env_for_node_dir(
+        _bundled_node_install_dir(),
+        npm_registry=npm_registry,
+    )
+
+
+def _reset_staged_frontend_workspace(staged_webui_dir: Path) -> None:
+    """Remove transient frontend build artifacts before retrying another npm candidate."""
+    for name in ("node_modules", "dist"):
+        target = staged_webui_dir / name
+        if target.exists():
+            _safe_remove(target)
 
 
 def _dependency_sync_timeout_seconds() -> int:
@@ -1974,71 +2002,93 @@ async def perform_update(
     # ------------------------------------------------------------------ #
     staged_webui_dir = content_root / "webui"
     if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
-        npm = _resolve_npm_executable()
-        if npm:
-            yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
-            npm_env = _build_frontend_subprocess_env(npm_registry=profile.npm_registry)
+        npm_candidates = _resolve_frontend_npm_candidates(npm_registry=profile.npm_registry)
+        if npm_candidates:
             install_subcommand = "ci" if (staged_webui_dir / "package-lock.json").exists() else "install"
-            install_cmd = [npm, install_subcommand]
             install_label = f"npm {install_subcommand}"
-            try:
-                code, _, err = await _run_async(
-                    install_cmd,
-                    cwd=staged_webui_dir,
-                    timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
-                    env=npm_env,
-                )
-            except subprocess.TimeoutExpired:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                _fe_dep_timeout = (
-                    "Frontend dependency install timed out after "
-                    f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
-                )
-                _record_update_journal(f"ERROR {_fe_dep_timeout}")
-                yield UpdateProgress(
-                    stage="error",
-                    message=_fe_dep_timeout,
-                    success=False,
-                )
-                return
-            if code != 0:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                _fe_dep = f"Frontend dependency install failed ({install_label}): {err}"
-                _record_update_journal(f"ERROR {_fe_dep}")
-                yield UpdateProgress(
-                    stage="error",
-                    message=_fe_dep,
-                    success=False,
-                )
-                return
+            final_frontend_error: str | None = None
 
-            yield UpdateProgress(stage="building", message="Building frontend...")
-            try:
-                code, _, err = await _run_async(
-                    [npm, "run", "build"],
-                    cwd=staged_webui_dir,
-                    timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
-                    env=npm_env,
-                )
-            except subprocess.TimeoutExpired:
+            for index, candidate in enumerate(npm_candidates):
+                attempt_source = candidate.source
+                is_last_attempt = index == len(npm_candidates) - 1
+
+                yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
+                install_cmd = [candidate.npm, install_subcommand]
+                try:
+                    code, _, err = await _run_async(
+                        install_cmd,
+                        cwd=staged_webui_dir,
+                        timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                        env=candidate.env,
+                    )
+                except subprocess.TimeoutExpired:
+                    final_frontend_error = (
+                        "Frontend dependency install timed out after "
+                        f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
+                    )
+                    if is_last_attempt:
+                        break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
+                    _record_update_journal(
+                        "WARN "
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
+                    )
+                    continue
+                if code != 0:
+                    final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
+                    if is_last_attempt:
+                        break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
+                    _record_update_journal(
+                        "WARN "
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
+                    )
+                    continue
+
+                yield UpdateProgress(stage="building", message="Building frontend...")
+                try:
+                    code, _, err = await _run_async(
+                        [candidate.npm, "run", "build"],
+                        cwd=staged_webui_dir,
+                        timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
+                        env=candidate.env,
+                    )
+                except subprocess.TimeoutExpired:
+                    final_frontend_error = (
+                        f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
+                    )
+                    if is_last_attempt:
+                        break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
+                    _record_update_journal(
+                        "WARN "
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
+                    )
+                    continue
+                if code != 0:
+                    final_frontend_error = f"Frontend build failed: {err}"
+                    if is_last_attempt:
+                        break
+                    _reset_staged_frontend_workspace(staged_webui_dir)
+                    _record_update_journal(
+                        "WARN "
+                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
+                        f"npm/node after {attempt_source} attempt."
+                    )
+                    continue
+
+                final_frontend_error = None
+                break
+
+            if final_frontend_error is not None:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                _fe_build_timeout = (
-                    f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
-                )
-                _record_update_journal(f"ERROR {_fe_build_timeout}")
+                _record_update_journal(f"ERROR {final_frontend_error}")
                 yield UpdateProgress(
                     stage="error",
-                    message=_fe_build_timeout,
-                    success=False,
-                )
-                return
-            if code != 0:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                _fe_build = f"Frontend build failed: {err}"
-                _record_update_journal(f"ERROR {_fe_build}")
-                yield UpdateProgress(
-                    stage="error",
-                    message=_fe_build,
+                    message=final_frontend_error,
                     success=False,
                 )
                 return
@@ -2566,17 +2616,87 @@ def _find_executable(name: str) -> str | None:
 
 def _resolve_npm_executable() -> str | None:
     """Resolve npm from bundled Node first, then standard executable probing."""
-    node_dir = _bundled_node_install_dir()
-    if node_dir is not None:
-        candidates = (
-            [node_dir / "npm.cmd", node_dir / "npm", node_dir / "bin" / "npm"]
-            if sys.platform == "win32"
-            else [node_dir / "bin" / "npm", node_dir / "npm"]
-        )
-        for candidate in candidates:
-            if candidate.exists():
-                return str(candidate)
+    candidates = _resolve_frontend_npm_candidates()
+    if candidates:
+        return candidates[0].npm
+    return None
 
+
+def _resolve_bundled_npm_executable() -> tuple[str, Path] | None:
+    """Resolve npm from the bundled Node.js install, if available."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is None:
+        return None
+
+    candidates = (
+        [node_dir / "npm.cmd", node_dir / "npm", node_dir / "bin" / "npm"]
+        if sys.platform == "win32"
+        else [node_dir / "bin" / "npm", node_dir / "npm"]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate), node_dir
+    return None
+
+
+def _resolve_system_npm_executable() -> str | None:
+    """Resolve npm without relying on the bundled Node.js install."""
     if sys.platform == "win32":
         return _find_executable("npm.cmd") or _find_executable("npm")
     return _find_executable("npm") or _find_executable("npm.cmd")
+
+
+def _resolve_frontend_npm_candidates(*, npm_registry: str | None = None) -> list[_FrontendNpmCandidate]:
+    """Resolve npm candidates for staged frontend rebuilds."""
+    candidates: list[_FrontendNpmCandidate] = []
+
+    bundled = _resolve_bundled_npm_executable()
+    if bundled is not None:
+        bundled_npm, node_dir = bundled
+        candidates.append(
+            _FrontendNpmCandidate(
+                npm=bundled_npm,
+                env=_build_frontend_subprocess_env_for_node_dir(
+                    node_dir,
+                    npm_registry=npm_registry,
+                ),
+                source="bundled",
+            )
+        )
+
+    system_npm = _resolve_system_npm_executable()
+    if system_npm is not None and sys.platform == "win32":
+        if sys.platform == "win32":
+            normalized_system_npm = system_npm.replace("/", "\\").lower()
+            duplicate = any(
+                candidate.npm.replace("/", "\\").lower() == normalized_system_npm
+                for candidate in candidates
+            )
+        if not duplicate:
+            candidates.append(
+                _FrontendNpmCandidate(
+                    npm=system_npm,
+                    env=_build_frontend_subprocess_env_for_node_dir(
+                        None,
+                        npm_registry=npm_registry,
+                    ),
+                    source="system",
+                )
+            )
+
+    if candidates:
+        return candidates
+
+    if system_npm is not None:
+        candidates.append(
+            _FrontendNpmCandidate(
+                npm=system_npm,
+                env=_build_frontend_subprocess_env_for_node_dir(
+                    None,
+                    npm_registry=npm_registry,
+                ),
+                source="default",
+            )
+        )
+
+    return candidates

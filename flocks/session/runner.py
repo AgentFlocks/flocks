@@ -12,6 +12,8 @@ Implements session/prompt.ts SessionPrompt namespace pattern.
 import asyncio
 import json
 import os
+import re
+import sys
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
@@ -93,6 +95,38 @@ LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
 # reasoning and content generation phases; a tight inter-chunk timeout causes
 # spurious failures in those cases.
 LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
+
+_WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
+
+
+def _expand_workflow_node_ref(text: str) -> str:
+    """Translate the web UI's node-ref marker into model-readable text.
+
+    WorkflowDetail chat prefixes a user turn with ``@@node:<id>|<type>`` when
+    the user picks a node from the canvas. Before this fix the marker was only
+    rendered/decorated in the UI; the backend passed it through verbatim, so
+    the model saw an opaque token instead of an explicit instruction to focus
+    on that node.
+    """
+    if not text:
+        return text
+    match = _WORKFLOW_NODE_REF_RE.match(text)
+    if not match:
+        return text
+
+    node_id = match.group(1).strip()
+    node_type = match.group(2).strip()
+    user_request = match.group(3).lstrip("\n")
+
+    parts = [
+        "Selected workflow node context:",
+        f"- node_id: {node_id}",
+        f"- node_type: {node_type}",
+        "- Focus the requested workflow modification on this node unless the user explicitly asks for broader workflow changes.",
+    ]
+    if user_request.strip():
+        parts.extend(["", "User request:", user_request])
+    return "\n".join(parts)
 
 
 async def _iter_with_chunk_timeout(
@@ -222,14 +256,18 @@ class SessionRunner:
         )
         return result.tool_infos, dict(result.metadata)
 
-    async def _get_prompt_tool_names(self, agent: AgentInfo) -> Tuple[str, ...]:
-        """Resolve callable tool names used to gate system prompt guidance."""
-        result = await list_session_callable_tool_infos(
-            session_id=self.session.id,
-            declared_tool_names=getattr(agent, "tools", None),
-            step=self._step,
-        )
-        return tuple(sorted(tool_info.name for tool_info in result.tool_infos))
+    @staticmethod
+    def _get_prompt_tool_names_from_schema(tools: List[Dict[str, Any]]) -> Tuple[str, ...]:
+        """Resolve prompt guidance tool names from the loaded tool schema."""
+        names = {
+            str(function.get("name", "")).strip()
+            for tool in tools
+            if isinstance(tool, dict)
+            for function in [tool.get("function", {})]
+            if isinstance(function, dict)
+        }
+        names.discard("")
+        return tuple(sorted(names))
 
     async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
         if not self.callbacks.event_publish_callback:
@@ -816,7 +854,8 @@ class SessionRunner:
             return StepResult(action="stop", error=error)
         
         # Build prompts and tools
-        prompt_tool_names = await self._get_prompt_tool_names(agent)
+        tools = await self._build_callable_tool_schema(agent, messages)
+        prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
         async def sandbox_prompt_factory() -> Optional[str]:
             return await self._build_sandbox_prompt(agent)
@@ -840,7 +879,6 @@ class SessionRunner:
             tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
-        tools = await self._build_callable_tool_schema(agent, messages)
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -1675,7 +1713,7 @@ class SessionRunner:
                 if content.strip():
                     chat_messages.append(ChatMessage(
                         role=msg.role if isinstance(msg.role, str) else msg.role.value,
-                        content=content,
+                        content=_expand_workflow_node_ref(content),
                     ))
                 continue
             
@@ -1687,10 +1725,11 @@ class SessionRunner:
                     if hasattr(part, 'type'):
                         if part.type == "text" and hasattr(part, 'text'):
                             if not getattr(part, 'ignored', False) and part.text.strip():
-                                user_content_parts.append(part.text)
+                                normalized_text = _expand_workflow_node_ref(part.text)
+                                user_content_parts.append(normalized_text)
                                 user_content_blocks.append({
                                     "type": "text",
-                                    "text": part.text,
+                                    "text": normalized_text,
                                 })
                         elif part.type == "file" and hasattr(part, 'mime'):
                             mime = getattr(part, 'mime', '')

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -44,6 +44,10 @@ vi.mock('react-i18next', () => ({
         'form.timezoneShanghai': 'Asia/Shanghai（北京时间 UTC+8）',
         'form.normalLabel': '普通',
         'form.selectWorkflow': '请选择 Workflow',
+        'form.workflowParamsLabel': 'Workflow 参数',
+        'form.workflowParamsHint': '（JSON 对象，会作为 workflow inputs 传入）',
+        'form.workflowParamsPlaceholder': '{\n  "keyword": "example"\n}',
+        'form.workflowParamsInvalid': 'Workflow 参数必须是合法的 JSON 对象',
         'taskSheet.entityType': '任务',
         'taskSheet.createFailed': '创建失败',
         'taskSheet.saveFailed': '保存失败',
@@ -231,5 +235,61 @@ describe('TaskSheet', () => {
 
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('创建 workflow 定时任务时提交 JSON 参数到 context', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Workflow' }));
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '每日工作流');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 8 * * *');
+
+    const paramsField = screen.getByDisplayValue('{}');
+    fireEvent.change(paramsField, { target: { value: '{"keyword":"ioc","limit":10}' } });
+
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    await waitFor(() => {
+      expect(mocks.createScheduler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionMode: 'workflow',
+          context: { keyword: 'ioc', limit: 10 },
+        }),
+      );
+    });
+  });
+
+  it('workflow 参数不是 JSON 对象时阻止提交', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Workflow' }));
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '错误参数');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 8 * * *');
+
+    const paramsField = screen.getByDisplayValue('{}');
+    fireEvent.change(paramsField, { target: { value: '[]' } });
+
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    await waitFor(() => {
+      expect(mocks.toastError).toHaveBeenCalledWith('创建失败', 'Workflow 参数必须是合法的 JSON 对象');
+    });
+    expect(mocks.createScheduler).not.toHaveBeenCalled();
   });
 });

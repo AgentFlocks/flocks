@@ -53,6 +53,7 @@ class InboundMessage:
     chat_type: ChatType = ChatType.DIRECT
     text: str = ""
     media_url: Optional[str] = None
+    media_mime: Optional[str] = None
     reply_to_id: Optional[str] = None
     thread_id: Optional[str] = None
     mentioned: bool = False

@@ -30,7 +30,7 @@ import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
-
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 // ─── Context ──────────────────────────────────────────────────────────────────
 
 interface EntitySheetCtx {
@@ -133,6 +133,7 @@ export default function EntitySheet({
   footerLeft,
 }: EntitySheetProps) {
   const { t } = useTranslation('common');
+  const supportsVision = useDefaultModelVision();
   const showTabs = !(hideRex && hideTest);
   const hasFormTab = !hideForm;
   const title =
@@ -260,7 +261,7 @@ export default function EntitySheet({
           parts: [{ type: 'text', text: msg }],
         });
       } else if (msg) {
-        createAndSendRex(msg).catch(() => {});
+        createAndSendRex({ text: msg }).catch(() => {});
       }
     },
     [sessionId, createAndSendRex],
@@ -491,7 +492,8 @@ export default function EntitySheet({
                   className="flex-1"
                   emptyText={t('entity.rexReady')}
                   initialMessage={rexInitialMessage}
-                  onCreateAndSend={!sessionId ? async (text: string) => { await createAndSendRex(text); } : undefined}
+                  supportsVision={supportsVision}
+                  onCreateAndSend={!sessionId ? (text, imageParts) => createAndSendRex({ text, imageParts }) : undefined}
                   welcomeContent={!sessionId ? (
                     <div className="text-center max-w-md">
                       <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />

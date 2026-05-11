@@ -285,10 +285,13 @@ def _tool_tags(plugin_id: str, description: str) -> list[str]:
     manual_tags: dict[str, list[str]] = {
         "fofa": ["network-mapping", "network", "threat-intelligence"],
         "greynoise": ["threat-intelligence", "network", "ioc"],
+        "ngsoc": ["siem", "network", "threat-intelligence"],
         "ngtip_api": ["threat-intelligence", "ioc"],
         "onesec": ["edr", "hids", "threat-intelligence"],
-        "onesig": ["network", "web-security", "threat-intelligence"],
+        # onesig is a Secure Internet Gateway — network only, not web-security/EDR
+        "onesig": ["network", "threat-intelligence"],
         "qingteng": ["hids", "edr", "vulnerability"],
+        "sangfor_af": ["waf", "network"],
         "sangfor_sip": ["siem", "network", "threat-intelligence"],
         "sangfor_xdr": ["xdr", "edr", "ndr"],
         "skyeye_api": ["ndr", "network", "threat-intelligence"],
@@ -300,8 +303,10 @@ def _tool_tags(plugin_id: str, description: str) -> list[str]:
         "mcp": ["integration"],
         "python": ["integration"],
     }
-    if plugin_id in manual_tags:
-        return _safe_tags(manual_tags[plugin_id])
+    # Support versioned plugin IDs: "sangfor_af_v8_0_48" matches key "sangfor_af".
+    for key, tags in manual_tags.items():
+        if plugin_id == key or plugin_id.startswith(f"{key}_"):
+            return _safe_tags(tags)
 
     text = (f"{plugin_id} {description}").lower()
     inferred: list[str] = []

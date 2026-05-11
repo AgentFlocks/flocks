@@ -1,4 +1,7 @@
 {
+  "image": {
+    "preview": "Image Preview"
+  },
   "button": {
     "save": "Save",
     "saving": "Saving...",

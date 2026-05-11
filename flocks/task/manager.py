@@ -813,9 +813,7 @@ class TaskManager:
 
     @staticmethod
     def _with_db_connection() -> sqlite3.Connection:
-        conn = sqlite3.connect(Storage.get_db_path())
-        conn.row_factory = sqlite3.Row
-        return conn
+        return Storage.connect_sync()
 
     @classmethod
     def _legacy_tables_exist(cls) -> bool:

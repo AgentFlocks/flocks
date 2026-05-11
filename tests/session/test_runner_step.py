@@ -364,6 +364,19 @@ class TestBuildTools:
         assert [tool["function"]["name"] for tool in tools2] == ["read"]
         assert selector_mock.await_count == 2
 
+    def test_prompt_tool_names_from_schema_uses_loaded_tool_names(self):
+        runner = _make_runner()
+
+        prompt_tool_names = runner._get_prompt_tool_names_from_schema([
+            {"type": "function", "function": {"name": "memory_search"}},
+            {"type": "function", "function": {"name": "bash"}},
+            {"type": "function", "function": {"name": "bash"}},
+            {"type": "function", "function": {}},
+            {"type": "other"},
+        ])
+
+        assert prompt_tool_names == ("bash", "memory_search")
+
     @pytest.mark.asyncio
     async def test_build_tools_calls_selector_for_each_runner_instance(self):
         shared_cache = {}
@@ -1081,7 +1094,6 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
     monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
@@ -1097,6 +1109,57 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
 
     assert captured_kwargs["model_id"] == runner.model_id
     assert captured_kwargs["provider_id"] == runner.provider_id
+
+
+@pytest.mark.asyncio
+async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(monkeypatch):
+    runner = _make_runner("ses_runner_prompt_guidance_tool_names")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_prompt_guidance",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=["read"])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_prompt_guidance")
+    build_system_prompts = AsyncMock(return_value=[])
+    tool_schema = [
+        {"type": "function", "function": {"name": "memory_search", "description": "", "parameters": {}}},
+        {"type": "function", "function": {"name": "bash", "description": "", "parameters": {}}},
+    ]
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", build_system_prompts)
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=tool_schema))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    build_system_prompts.assert_awaited_once()
+    assert build_system_prompts.await_args.kwargs["prompt_tool_names"] == ("bash", "memory_search")
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1187,6 @@ async def test_process_step_records_usage_after_success(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
     monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
@@ -1177,7 +1239,6 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
     monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
@@ -1266,3 +1327,37 @@ async def test_record_usage_if_available_swallows_runtime_error():
     )
     with patch.dict("sys.modules", {"flocks.provider.usage_service": fake_module}):
         await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
+    runner = _make_runner("ses_runner_node_ref")
+    user_message = UserMessageInfo(
+        id="msg_user_node_ref",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts",
+        AsyncMock(return_value=[
+            SimpleNamespace(
+                type="text",
+                text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
+            ),
+        ]),
+    )
+
+    chat_messages = await runner._to_chat_messages([user_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "user"
+    assert isinstance(chat_messages[0].content, str)
+    assert "Selected workflow node context:" in chat_messages[0].content
+    assert "node_id: query_fofa" in chat_messages[0].content
+    assert "node_type: python" in chat_messages[0].content
+    assert "只修改这个节点的代码并保留其他节点不变" in chat_messages[0].content

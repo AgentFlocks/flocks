@@ -100,11 +100,12 @@ async def _get_db() -> aiosqlite.Connection:
         db_path = Storage.get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        _db_conn = await aiosqlite.connect(str(db_path))
+        _db_conn = await aiosqlite.connect(
+            str(db_path),
+            timeout=Storage._sqlite_timeout_s,
+        )
         _db_conn.row_factory = aiosqlite.Row
-
-        await _db_conn.execute("PRAGMA journal_mode=WAL")
-        await _db_conn.execute("PRAGMA busy_timeout=5000")
+        await Storage.configure_connection(_db_conn)
         await _db_conn.executescript(_DDL)
         await _migrate_legacy_binding_agent_ids(_db_conn)
         _db_ready = True

@@ -31,6 +31,34 @@ def test_max_dim_default_is_no_resize(fake_png) -> None:
     assert _run(fake_png, 4592, 2286) == (4592, 2286)
 
 
+def test_load_env_uses_shared_loader_for_existing_files(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    repo_env = repo_root / ".env"
+    workspace_env = workspace / ".env"
+    repo_env.write_text("TOKEN=repo\n", encoding="utf-8")
+    workspace_env.write_text("TOKEN=workspace\n", encoding="utf-8")
+    loaded_paths = []
+
+    class _FakeModulePath:
+        def resolve(self):
+            return self
+
+        @property
+        def parents(self):
+            return [None, None, repo_root]
+
+    monkeypatch.setattr(helpers, "AGENT_WORKSPACE", workspace)
+    monkeypatch.setattr(helpers, "Path", lambda _value: _FakeModulePath())
+    monkeypatch.setattr(helpers, "load_env_file", lambda path: loaded_paths.append(path))
+
+    helpers._load_env()
+
+    assert loaded_paths == [repo_env, workspace_env]
+
+
 def test_page_info_raises_clear_error_on_js_exception() -> None:
     def fake_send(req):
         return {}

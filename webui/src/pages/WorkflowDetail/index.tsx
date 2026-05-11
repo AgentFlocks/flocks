@@ -235,6 +235,7 @@ export default function WorkflowDetail() {
       {/* 顶部工具栏 */}
       <TopBar
         workflow={workflow}
+        latestExecution={latestExecution}
         panelOpen={panelOpen}
         onTogglePanel={() => setPanelOpen((v) => !v)}
       />

@@ -140,6 +140,7 @@ export default function RightPanel({
         {activeTab === 'chat' && (
           <ChatTab
             workflow={workflow}
+            onLatestExecutionChange={onLatestExecutionChange}
             onWorkflowUpdated={onWorkflowUpdated}
             onFirstMessageSent={onFirstMessageSent}
             selectedNode={selectedNode}

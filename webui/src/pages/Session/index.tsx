@@ -16,7 +16,8 @@ import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
-import { defaultModelAPI, modelV2API } from '@/api/provider';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
+import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 
@@ -47,7 +48,7 @@ export default function SessionPage() {
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
-  const [supportsVision, setSupportsVision] = useState<boolean | null>(null);
+  const supportsVision = useDefaultModelVision();
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
@@ -59,35 +60,6 @@ export default function SessionPage() {
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
-
-  // Fetch the default LLM model capabilities to determine vision support
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const resolvedResp = await defaultModelAPI.getResolved();
-        if (cancelled) return;
-        const { provider_id, model_id } = resolvedResp.data;
-        const defResp = await modelV2API.getDefinition(provider_id, model_id);
-        if (cancelled) return;
-        const caps = defResp.data?.capabilities;
-        if (caps) {
-          // Only set false when explicitly not supported; otherwise keep null (unknown = allow)
-          if (caps.supports_vision === true ||
-              caps.modalities?.input?.includes('image') ||
-              (caps.features ?? []).includes('vision')) {
-            setSupportsVision(true);
-          } else if (caps.supports_vision === false) {
-            setSupportsVision(false);
-          }
-          // else: leave as null — user can try, backend will handle unsupported modality
-        }
-      } catch {
-        // If we can't determine vision support, remain null (allow by default)
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
@@ -184,7 +156,10 @@ export default function SessionPage() {
     }
   }, [creating, addSession, toast, t]);
 
-  const handleCreateAndSend = useCallback(async (text: string) => {
+  const handleCreateAndSend = useCallback(async (
+    text: string,
+    imageParts?: ImagePartData[],
+  ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       const newSessionId = response.data.id;
@@ -192,7 +167,9 @@ export default function SessionPage() {
       addSession(response.data);
       setSelectedSessionId(newSessionId);
 
-      const payload: Record<string, unknown> = { parts: [{ type: 'text', text }] };
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+      };
       if (selectedAgent) payload.agent = selectedAgent;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);

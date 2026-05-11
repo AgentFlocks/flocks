@@ -25,4 +25,5 @@ tools:
   - background_cancel
   - session_list
   - channel_message
+  - tool_search
 # prompt is left empty – injected dynamically by prompt_builder.py

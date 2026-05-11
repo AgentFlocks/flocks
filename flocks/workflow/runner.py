@@ -250,6 +250,7 @@ def run_workflow(
     ensure_requirements: bool = True,
     requirements_installer: Optional[RequirementsInstaller] = None,
     sandbox_requirements_installer: Optional[SandboxRequirementsInstaller] = None,
+    on_step_start: Optional[Any] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
     cancel: Optional[Callable[[], bool]] = None,
@@ -398,8 +399,13 @@ def run_workflow(
 
     _on_step_start = None
     _on_step_end = None
-    if on_step_complete is not None:
+    if on_step_start is not None:
+        _on_step_start = lambda _rid, _step, _node, _inp: on_step_start(
+            _rid, _step, _node, _inp
+        )
+    elif on_step_complete is not None:
         _on_step_start = lambda _rid, _step, _node, _inp: True
+    if on_step_complete is not None:
         _on_step_end = lambda _token, step_result: on_step_complete(step_result)
 
     try:

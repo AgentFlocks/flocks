@@ -1,4 +1,7 @@
 {
+  "image": {
+    "preview": "图片预览"
+  },
   "button": {
     "save": "保存",
     "saving": "保存中...",

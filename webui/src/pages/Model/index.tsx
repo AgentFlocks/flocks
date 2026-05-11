@@ -16,6 +16,7 @@ import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
 import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
 import { useSSE } from '@/hooks/useSSE';
+import { MODEL_CHANGED_EVENT } from '@/hooks/useDefaultModelVision';
 import {
   providerAPI, modelV2API, usageAPI,
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
@@ -2094,23 +2095,40 @@ Provider: ${provider.name} (${provider.id})
   );
 }
 
-function ToggleField({ label, checked, onChange }: {
-  label: string; checked: boolean; onChange: (v: boolean) => void;
+function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  /** Tooltip text shown when the toggle is disabled. */
+  disabledHint?: string;
 }) {
   return (
-    <label className="flex items-center gap-3 cursor-pointer w-full min-w-0">
+    <label
+      className={`flex items-center gap-3 w-full min-w-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+      title={disabled ? disabledHint : undefined}
+    >
       <button
         type="button"
         role="switch"
         aria-checked={checked}
-        onClick={() => onChange(!checked)}
-        className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${checked ? 'bg-green-600' : 'bg-gray-400'}`}
+        disabled={disabled}
+        onClick={() => !disabled && onChange(!checked)}
+        className={`relative w-10 h-6 rounded-full transition-colors flex-shrink-0 ${
+          disabled
+            ? checked
+              ? 'bg-green-200 cursor-not-allowed'   // locked-ON: muted green
+              : 'bg-gray-200 cursor-not-allowed'    // locked-OFF: light gray
+            : checked ? 'bg-green-600' : 'bg-gray-400'
+        }`}
       >
-        <span className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${
-          checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'
-        }`} />
+        <span className={`absolute top-1 w-4 h-4 rounded-full shadow-sm transition-transform ${
+          disabled
+            ? checked ? 'bg-white' : 'bg-gray-400'
+            : 'bg-white'
+        } ${checked ? 'translate-x-5 left-0' : 'translate-x-1 left-0'}`} />
       </button>
-      <span className="text-sm text-gray-700">{label}</span>
+      <span className={`text-sm ${disabled ? 'text-gray-400' : 'text-gray-700'}`}>{label}</span>
     </label>
   );
 }
@@ -2615,11 +2633,17 @@ function ModelDetailSheet({
   const { t } = useTranslation('model');
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
+  const isPredefined = model.fetch_from === 'predefined';
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
   const [supportsTools, setSupportsTools] = useState(features.includes('tool_call') || !!model.capabilities?.supports_tools);
-  const [supportsVision, setSupportsVision] = useState(features.includes('vision') || !!model.capabilities?.supports_vision);
+  // For predefined models vision is always treated as disabled — only user-added
+  // (customizable) models may have vision enabled so the multimodal upload flow
+  // is only unlocked when the user has explicitly configured a vision model.
+  const [supportsVision, setSupportsVision] = useState(
+    isPredefined ? false : (features.includes('vision') || !!model.capabilities?.supports_vision),
+  );
   const [supportsStreaming, setSupportsStreaming] = useState(!!model.capabilities?.supports_streaming);
   const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
   const [inputPrice, setInputPrice] = useState(model.pricing ? String(model.pricing.input) : '0');
@@ -2759,7 +2783,13 @@ function ModelDetailSheet({
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.capabilities')}</label>
               <div className="grid grid-cols-2 gap-2">
                 <ToggleField label={t('form.toolCall')} checked={supportsTools} onChange={setSupportsTools} />
-                <ToggleField label={t('form.vision')} checked={supportsVision} onChange={setSupportsVision} />
+                <ToggleField
+                  label={t('form.vision')}
+                  checked={supportsVision}
+                  onChange={setSupportsVision}
+                  disabled={isPredefined}
+                  disabledHint={t('form.visionPredefinedHint')}
+                />
                 <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
                 <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
               </div>
@@ -2864,6 +2894,13 @@ function SetDefaultModelDialog({
       await defaultModelAPI.set('llm', providerId, modelId);
       toast.success(t('dashboard.defaultModelUpdated'));
       onSaved({ provider_id: providerId, model_id: modelId });
+      // Tell every chat composer (Session, Agent / Workflow / Skill creators,
+      // EntitySheet, ChatDialog, …) to re-resolve the default model's vision
+      // capability so the "model does not support images" hint reflects the
+      // new selection without a page reload.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent(MODEL_CHANGED_EVENT));
+      }
     } catch {
       toast.error(t('operationFailed'));
     } finally {

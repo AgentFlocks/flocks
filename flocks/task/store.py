@@ -32,8 +32,11 @@ class TaskStore:
         if cls._initialized:
             return
         await Storage._ensure_init()
-        cls._conn = await aiosqlite.connect(Storage._db_path)
-        await cls._conn.execute("PRAGMA foreign_keys = ON")
+        cls._conn = await aiosqlite.connect(
+            Storage._db_path,
+            timeout=Storage._sqlite_timeout_s,
+        )
+        await Storage.configure_connection(cls._conn)
         await cls._conn.executescript(_TASKS_DDL)
         for stmt in _INDEX_STMTS:
             await cls._conn.execute(stmt)
