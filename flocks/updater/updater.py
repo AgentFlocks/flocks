@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from typing import Any, AsyncGenerator
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -62,6 +62,16 @@ _PRESERVE_NAMES: set[str] = {
 }
 
 log = Log.create(service="updater")
+
+
+@dataclass(frozen=True)
+class CloudManifestRelease:
+    version: str
+    release_notes: str | None
+    release_url: str | None
+    bundle_url: str
+    bundle_sha256: str | None
+    bundle_format: str
 
 
 def _record_update_journal(message: str) -> None:
@@ -684,23 +694,15 @@ async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[st
     """
     Resolve effective sources by runtime edition state.
 
-    Flocks Pro mode prefers cloud manifest source.
+    Flocks Pro mode is explicitly selected by the runtime edition. A bound
+    cloud account alone is still valid OSS state and must keep OSS sources.
     """
     sources = list(configured_sources)
     edition = (os.getenv("FLOCKS_EDITION") or "").strip().lower()
 
-    if not edition:
-        try:
-            from flocks.storage.storage import Storage
-
-            cloud_session = await Storage.get("cloud:session", dict)
-            if isinstance(cloud_session, dict) and cloud_session.get("cloud_session_token"):
-                edition = "flockspro"
-        except Exception:
-            edition = ""
-
-    if edition == "flockspro" and "cloud-manifest" not in sources:
-        sources.insert(0, "cloud-manifest")
+    if edition == "flockspro":
+        # Pro edition is hard-locked to cloud manifest bundle channel.
+        return ["cloud-manifest"]
 
     return sources
 
@@ -799,6 +801,40 @@ def _download_filename_for_url(url: str, filename: str) -> str:
     return str(Path(filename).with_suffix(".zip"))
 
 
+def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str:
+    normalized = (manifest_format or "").strip().lower().replace("tgz", "tar.gz")
+    if normalized in {"zip", "tar.gz"}:
+        return normalized
+
+    path = urlparse(url).path.lower()
+    if path.endswith(".zip"):
+        return "zip"
+    if path.endswith(".tar.gz") or path.endswith(".tgz"):
+        return "tar.gz"
+    return "tar.gz"
+
+
+def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
+    return f"flocks-{latest_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = __import__("hashlib").sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_download_sha256(path: Path, expected_sha256: str | None) -> None:
+    expected = (expected_sha256 or "").strip().lower()
+    if not expected:
+        return
+    actual = _sha256_file(path).lower()
+    if actual != expected:
+        raise ValueError(f"bundle sha256 mismatch: expected {expected}, got {actual}")
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitLab
 # ------------------------------------------------------------------ #
@@ -856,20 +892,16 @@ async def _fetch_gitlab_release(
     )
 
 
-async def _fetch_cloud_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
+async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
     """
-    Fetch latest version from cloud manifest service.
-
-    Expected response keys:
-    - latest_version (required)
-    - release_notes / release_url (optional)
-    - zipball_url / tarball_url (optional)
+    Fetch latest Pro bundle manifest from cloud.
     """
     manifest_base = os.getenv("FLOCKS_MANIFEST_BASE_URL", "").rstrip("/")
     if not manifest_base:
         raise ValueError("FLOCKS_MANIFEST_BASE_URL 未配置，无法使用 cloud-manifest 源")
 
-    url = f"{manifest_base}/v1/manifest/latest?channel=flockspro"
+    channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
+    url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
     headers: dict[str, str] = {}
     try:
         from flocks.storage.storage import Storage
@@ -885,17 +917,48 @@ async def _fetch_cloud_manifest_release() -> tuple[str, str | None, str | None, 
         resp = await client.get(url, headers=headers, follow_redirects=True)
         resp.raise_for_status()
         data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("manifest 响应格式无效")
 
-    latest = str(data.get("latest_version", "")).lstrip("v")
+    if bool(data.get("frozen")):
+        raise ValueError("cloud manifest channel is frozen")
+    frozen_until_raw = str(data.get("frozen_until") or "").strip()
+    if frozen_until_raw:
+        text = frozen_until_raw[:-1] + "+00:00" if frozen_until_raw.endswith("Z") else frozen_until_raw
+        frozen_until = datetime.fromisoformat(text)
+        if frozen_until.tzinfo is None:
+            frozen_until = frozen_until.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < frozen_until:
+            raise ValueError("cloud manifest channel frozen_until not reached")
+
+    latest = str(data.get("compare_version") or data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
     if not latest:
-        raise ValueError("manifest 响应缺少 latest_version")
-    return (
-        latest,
-        data.get("release_notes"),
-        data.get("release_url"),
-        data.get("zipball_url"),
-        data.get("tarball_url"),
+        raise ValueError("manifest 响应缺少 compare_version/display_version")
+    bundle_url = str(
+        data.get("bundle_url")
+        or data.get("url")
+        or data.get("zipball_url")
+        or data.get("tarball_url")
+        or ""
+    ).strip()
+    if not bundle_url:
+        raise ValueError("manifest 响应缺少 bundle_url")
+    bundle_format = _archive_format_for_url(bundle_url, str(data.get("bundle_format") or data.get("archive_format") or ""))
+    return CloudManifestRelease(
+        version=latest.lstrip("v"),
+        release_notes=data.get("release_notes") or data.get("notes"),
+        release_url=data.get("release_url") or bundle_url,
+        bundle_url=bundle_url,
+        bundle_sha256=str(data.get("bundle_sha256") or "").strip() or None,
+        bundle_format=bundle_format,
     )
+
+
+async def _fetch_cloud_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
+    info = await _fetch_cloud_manifest_release_info()
+    if info.bundle_format == "zip":
+        return info.version, info.release_notes, info.release_url, info.bundle_url, None
+    return info.version, info.release_notes, info.release_url, None, info.bundle_url
 
 
 # ------------------------------------------------------------------ #
@@ -1166,6 +1229,52 @@ def _detect_archive_root(extracted_dir: Path) -> Path:
     if len(children) == 1 and children[0].is_dir():
         return children[0]
     return extracted_dir
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_pro_bundle_content(content_root: Path) -> tuple[Path, Path | None, dict[str, Any]]:
+    """
+    Return the OSS source root and optional flockspro wheel when an archive is a
+    Pro bundle. Plain OSS archives are returned unchanged.
+    """
+    manifest_path = content_root / "manifest.json"
+    flocks_dir = content_root / "flocks"
+    if not manifest_path.is_file() or not flocks_dir.is_dir():
+        return content_root, None, {}
+
+    manifest = _load_json_file(manifest_path)
+    wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
+    wheel_path = content_root / wheel_value if wheel_value else None
+    if wheel_path is None or not wheel_path.is_file():
+        wheels = sorted((content_root / "wheels").glob("*.whl"))
+        wheel_path = wheels[0] if wheels else None
+    return flocks_dir, wheel_path, manifest
+
+
+def _venv_python_path(install_root: Path) -> Path:
+    if sys.platform == "win32":
+        return install_root / ".venv" / "Scripts" / "python.exe"
+    return install_root / ".venv" / "bin" / "python"
+
+
+def _write_pro_bundle_install_marker(manifest: dict[str, Any]) -> None:
+    marker = _flocks_root() / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "installed_version": manifest.get("display_version"),
+        "oss_version": manifest.get("oss_version"),
+        "flockspro_component_version": manifest.get("flockspro_component_version"),
+        "build_id": manifest.get("build_id"),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
 
 
 class _NullConsole:
@@ -1897,12 +2006,24 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
             update_allowed=(mode != "docker"),
         )
 
+    bundle_sha256: str | None = None
+    bundle_format: str | None = None
     try:
-        tag, notes, url, zipball, tarball = await get_latest_release(
-            repo=ucfg.repo,
-            token=ucfg.token,
-            sources_override=profile.sources,
-        )
+        if profile.sources == ["cloud-manifest"]:
+            manifest_info = await _fetch_cloud_manifest_release_info()
+            tag = manifest_info.version
+            notes = manifest_info.release_notes
+            url = manifest_info.release_url
+            bundle_sha256 = manifest_info.bundle_sha256
+            bundle_format = manifest_info.bundle_format
+            zipball = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
+            tarball = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
+        else:
+            tag, notes, url, zipball, tarball = await get_latest_release(
+                repo=ucfg.repo,
+                token=ucfg.token,
+                sources_override=profile.sources,
+            )
     except Exception as exc:
         log.warning("updater.check_failed", {"error": str(exc)})
         return VersionInfo(
@@ -1913,6 +2034,16 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
         )
 
     has_update = _parse_version(tag) > _parse_version(current)
+    log.info(
+        "updater.check.result",
+        {
+            "current": current,
+            "latest": tag,
+            "has_update": has_update,
+            "sources": profile.sources,
+            "region": profile.region,
+        },
+    )
     return VersionInfo(
         current_version=current,
         latest_version=tag,
@@ -1921,6 +2052,8 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
         release_url=url,
         zipball_url=zipball,
         tarball_url=tarball,
+        bundle_sha256=bundle_sha256,
+        bundle_format=bundle_format if bundle_format in {"zip", "tar.gz"} else None,
         deploy_mode=mode,
         update_allowed=(mode != "docker"),
     )
@@ -1936,6 +2069,8 @@ async def perform_update(
     *,
     zipball_url: str | None = None,
     tarball_url: str | None = None,
+    bundle_sha256: str | None = None,
+    bundle_format: str | None = None,
     restart: bool = True,
     locale: str | None = None,
     region: str | None = None,
@@ -1960,7 +2095,35 @@ async def perform_update(
     current_version = get_current_version()
     handover_active = False
 
+    cloud_manifest_info: CloudManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
+    if profile.sources == ["cloud-manifest"]:
+        if not (zipball_url or tarball_url):
+            try:
+                cloud_manifest_info = await _fetch_cloud_manifest_release_info()
+            except Exception as exc:
+                log.error("updater.cloud_manifest.fetch_failed", {"error": str(exc)})
+                yield UpdateProgress(
+                    stage="error",
+                    message="Failed to check the Pro bundle manifest. Please check your network connection.",
+                    success=False,
+                )
+                return
+            if _parse_version(cloud_manifest_info.version) != _parse_version(latest_tag):
+                yield UpdateProgress(
+                    stage="error",
+                    message="Requested Pro bundle version does not match the latest approved manifest.",
+                    success=False,
+                )
+                return
+            if cloud_manifest_info.bundle_format == "zip":
+                zipball_url = cloud_manifest_info.bundle_url
+            else:
+                tarball_url = cloud_manifest_info.bundle_url
+            bundle_sha256 = cloud_manifest_info.bundle_sha256
+            bundle_format = cloud_manifest_info.bundle_format
+        primary_bundle_url = zipball_url or tarball_url or ""
+        fmt = _archive_format_for_url(primary_bundle_url, bundle_format)
 
     # ------------------------------------------------------------------ #
     # Step 1 – download source archive
@@ -1971,7 +2134,7 @@ async def perform_update(
     tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-update-"))
     if sys.platform == "win32":
         tmp_dir = _resolve_windows_long_path(tmp_dir)
-    archive_filename = f"flocks-{latest_tag}.{fmt}"
+    archive_filename = _archive_filename_for_format(latest_tag, fmt)
     try:
         archive_path = await _download_with_fallback(
             sources=profile.sources,
@@ -1987,6 +2150,8 @@ async def perform_update(
             base_url=ucfg.base_url,
             gitee_repo=ucfg.gitee_repo,
         )
+        if profile.sources == ["cloud-manifest"]:
+            await asyncio.to_thread(_verify_download_sha256, archive_path, bundle_sha256)
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         log.error("updater.download.all_failed", {"error": str(exc)})
@@ -2029,6 +2194,7 @@ async def perform_update(
             archive_path,
             extract_dir,
         )
+        content_root, pro_wheel_path, pro_bundle_manifest = _resolve_pro_bundle_content(content_root)
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         msg = f"Failed to extract files: {exc}"
@@ -2280,6 +2446,24 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
 
+    if pro_wheel_path is not None:
+        yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...")
+        python_path = _venv_python_path(install_root)
+        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), str(pro_wheel_path)]
+        code, _, err = await _run_async(
+            install_cmd,
+            cwd=install_root,
+            timeout=180,
+            env=sync_env,
+        )
+        if code != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            yield UpdateProgress(stage="error", message=f"Flocks Pro component install failed: {err}", success=False)
+            return
+        if pro_bundle_manifest:
+            _write_pro_bundle_install_marker(pro_bundle_manifest)
+
     if sys.platform == "win32":
         validation_error = await _validate_windows_restart_runtime(install_root)
         if validation_error:
@@ -2307,6 +2491,7 @@ async def perform_update(
     # killing the Vite proxy and calling os.execv.
     # ------------------------------------------------------------------ #
     if not restart:
+        log.info("updater.apply.done", {"version": latest_tag, "restart": False, "region": profile.region})
         yield UpdateProgress(
             stage="done",
             message=f"Upgraded to v{latest_tag}",

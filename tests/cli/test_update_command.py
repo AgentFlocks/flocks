@@ -67,6 +67,8 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         *,
         zipball_url: str | None = None,
         tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
         restart: bool = True,
         locale: str | None = None,
         region: str | None = None,
@@ -74,6 +76,8 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         captured["latest_tag"] = latest_tag
         captured["zipball_url"] = zipball_url
         captured["tarball_url"] = tarball_url
+        captured["bundle_sha256"] = bundle_sha256
+        captured["bundle_format"] = bundle_format
         captured["perform_region"] = region
         captured["restart"] = restart
         async for step in _fake_progress():
@@ -91,6 +95,8 @@ def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypa
         "latest_tag": "2026.4.2",
         "zipball_url": "https://example.com/flocks.zip",
         "tarball_url": "https://example.com/flocks.tar.gz",
+        "bundle_sha256": None,
+        "bundle_format": None,
         "check_region": "cn",
         "perform_region": "cn",
         "restart": False,

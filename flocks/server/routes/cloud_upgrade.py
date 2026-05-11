@@ -4,8 +4,11 @@ Cloud upgrade request orchestration routes (OSS-side).
 
 from __future__ import annotations
 
+import asyncio
 import os
+import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Optional, Literal
 from uuid import uuid4
 
@@ -16,8 +19,11 @@ from pydantic import BaseModel, Field
 from flocks.cloud.binding import CloudBindingService
 from flocks.server.auth import require_admin
 from flocks.storage.storage import Storage
+from flocks.updater import check_update, perform_update
 
 router = APIRouter()
+_AUTO_UPGRADE_TASKS: set[asyncio.Task[None]] = set()
+_AUTO_UPGRADE_REQUEST_IDS: set[str] = set()
 
 
 def _activation_base_url() -> str:
@@ -66,6 +72,180 @@ async def _push_request_id(request_id: str) -> None:
     if request_id not in ids:
         ids.append(request_id)
         await Storage.set("cloud:upgrade_request_ids", ids, "json")
+
+
+def _is_approved(record: dict[str, Any]) -> bool:
+    return str(record.get("status", "")).strip().lower() == "approved"
+
+
+async def _maybe_activate_pro_license(record: dict[str, Any]) -> None:
+    activate_key = str(record.get("activate_key") or "").strip()
+    if not activate_key:
+        return
+    details = record.setdefault("details", {})
+    if details.get("license_activated_at"):
+        return
+    try:
+        from flockspro.license.runtime import get_license_checker
+
+        checker = get_license_checker()
+        activate_fn = getattr(checker, "activate", None)
+        if callable(activate_fn):
+            activate_fn(activate_key)
+            details["license_activated_at"] = datetime.now(UTC).isoformat()
+    except Exception as exc:
+        details["license_activate_error"] = str(exc)
+
+
+async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
+    details = record.setdefault("details", {})
+    try:
+        from flockspro.license.runtime import get_license_checker
+
+        checker = get_license_checker()
+        refresh_fn = getattr(checker, "refresh", None)
+        if callable(refresh_fn):
+            await refresh_fn()  # type: ignore[misc]
+            details["license_refreshed_at"] = datetime.now(UTC).isoformat()
+    except Exception as exc:
+        details["license_refresh_error"] = str(exc)
+
+
+async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.setdefault("details", {})
+    details["auto_install_result"] = "running"
+    details["auto_install_started_at"] = datetime.now(UTC).isoformat()
+    info = await check_update()
+    if info.error:
+        raise ValueError(info.error)
+    if not info.has_update:
+        details["auto_install_result"] = "already_latest"
+        details["auto_install_version"] = info.current_version
+        details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+        await _report_pro_bundle_installation(record, install_result="success")
+        return record
+
+    target_version = info.latest_version
+    if not target_version:
+        raise ValueError("missing target version")
+
+    details["auto_install_target"] = target_version
+    final_stage = ""
+    final_message = ""
+    async for progress in perform_update(
+        target_version,
+        zipball_url=info.zipball_url,
+        tarball_url=info.tarball_url,
+        bundle_sha256=info.bundle_sha256,
+        bundle_format=info.bundle_format,
+        restart=False,
+    ):
+        final_stage = progress.stage
+        final_message = progress.message
+        if progress.stage == "error":
+            raise ValueError(progress.message)
+
+    details["auto_install_result"] = "done" if final_stage == "done" else "unknown"
+    details["auto_install_version"] = target_version
+    details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+    details["auto_install_message"] = final_message
+    await _report_pro_bundle_installation(record, install_result="success")
+    return record
+
+
+def _read_pro_bundle_install_marker() -> dict[str, Any]:
+    marker = Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))) / "run" / "pro-bundle-installed.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _report_pro_bundle_installation(
+    record: dict[str, Any],
+    *,
+    install_result: str,
+    error_message: str | None = None,
+) -> None:
+    details = record.setdefault("details", {})
+    try:
+        cloud_session = await CloudBindingService.require_bound_session()
+    except Exception as exc:
+        details["install_receipt_error"] = str(exc)
+        return
+    marker = _read_pro_bundle_install_marker()
+    payload = {
+        "license_id": record.get("activate_key"),
+        "fingerprint": cloud_session.get("fingerprint"),
+        "install_id": cloud_session.get("install_id"),
+        "installed_version": marker.get("installed_version") or details.get("auto_install_target") or details.get("auto_install_version") or "",
+        "oss_version": marker.get("oss_version"),
+        "flockspro_component_version": marker.get("flockspro_component_version"),
+        "build_id": marker.get("build_id"),
+        "install_result": install_result,
+        "error_message": error_message,
+        "reported_at": datetime.now(UTC).isoformat(),
+    }
+    act_base = _activation_base_url()
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{act_base}/v1/pro-bundles/installations",
+                json=payload,
+                headers={"Authorization": f"Bearer {cloud_session['cloud_session_token']}"},
+            )
+            resp.raise_for_status()
+            details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
+    except Exception as exc:
+        details["install_receipt_error"] = str(exc)
+
+
+async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]:
+    if not _is_approved(record):
+        return record
+    details = record.setdefault("details", {})
+    if details.get("auto_install_result") in {"done", "already_latest"}:
+        return record
+    try:
+        await _maybe_activate_pro_license(record)
+        await _maybe_refresh_pro_license(record)
+        await _run_auto_upgrade_install(record)
+        record["status"] = "activated"
+    except Exception as exc:
+        details["auto_install_result"] = "failed"
+        details["auto_install_error"] = str(exc)
+        await _report_pro_bundle_installation(record, install_result="failed", error_message=str(exc))
+    finally:
+        record["updated_at"] = datetime.now(UTC).isoformat()
+    return record
+
+
+async def _run_auto_activate_upgrade_task(request_id: str, record: dict[str, Any]) -> None:
+    try:
+        updated = await _maybe_auto_activate_upgrade(record)
+        await Storage.set(_request_key(request_id), updated, "json")
+    except Exception as exc:
+        record.setdefault("details", {})["auto_install_error"] = str(exc)
+        record.setdefault("details", {})["auto_install_result"] = "failed"
+        record["updated_at"] = datetime.now(UTC).isoformat()
+        await Storage.set(_request_key(request_id), record, "json")
+    finally:
+        _AUTO_UPGRADE_REQUEST_IDS.discard(request_id)
+
+
+def _schedule_auto_activate_upgrade(request_id: str, record: dict[str, Any]) -> None:
+    if not _is_approved(record):
+        return
+    details = record.setdefault("details", {})
+    if details.get("auto_install_result") in {"running", "done", "already_latest"}:
+        return
+    if request_id in _AUTO_UPGRADE_REQUEST_IDS:
+        return
+    _AUTO_UPGRADE_REQUEST_IDS.add(request_id)
+    task = asyncio.create_task(_run_auto_activate_upgrade_task(request_id, dict(record)))
+    _AUTO_UPGRADE_TASKS.add(task)
+    task.add_done_callback(_AUTO_UPGRADE_TASKS.discard)
 
 
 def _raise_cloud_service_error(exc: Exception) -> None:
@@ -150,6 +330,8 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
 
     await Storage.set(_request_key(record["request_id"]), record, "json")
     await _push_request_id(record["request_id"])
+    _schedule_auto_activate_upgrade(record["request_id"], record)
+    await Storage.set(_request_key(record["request_id"]), record, "json")
     return UpgradeRequestStatus(**record)
 
 
@@ -204,6 +386,8 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
     else:
         raw["updated_at"] = datetime.now(UTC).isoformat()
 
+    await Storage.set(_request_key(request_id), raw, "json")
+    _schedule_auto_activate_upgrade(request_id, raw)
     await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)
 

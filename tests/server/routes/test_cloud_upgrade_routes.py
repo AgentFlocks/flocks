@@ -312,3 +312,96 @@ async def test_cancel_approved_request_falls_back_to_local_cancel_when_cloud_rej
     payload = resp.json()
     assert payload["status"] == "cancelled"
 
+
+async def test_refresh_approved_request_schedules_auto_activate_install(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "")
+    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
+    request_id = "req_auto_001"
+    await Storage.set(
+        f"cloud:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "approved",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_auto",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {"company": "acme"},
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    scheduled: list[str] = []
+
+    def _fake_schedule(request_id_arg: str, record: dict):
+        scheduled.append(request_id_arg)
+        record.setdefault("details", {})["auto_install_task_scheduled_at"] = "2026-05-08T08:01:00+00:00"
+
+    monkeypatch.setattr(cloud_routes, "_schedule_auto_activate_upgrade", _fake_schedule)
+
+    resp = await client.post(f"/api/cloud/upgrade-requests/{request_id}/refresh")
+    assert resp.status_code == status.HTTP_200_OK
+    payload = resp.json()
+    assert payload["status"] == "approved"
+    assert payload["details"]["auto_install_task_scheduled_at"] == "2026-05-08T08:01:00+00:00"
+    assert scheduled == [request_id]
+
+
+async def test_auto_activate_reports_already_latest_install(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import cloud_upgrade as cloud_routes
+
+    reported: list[tuple[str, str | None]] = []
+
+    async def _fake_check_update():
+        return type(
+            "VersionInfoLike",
+            (),
+            {
+                "error": None,
+                "has_update": False,
+                "current_version": "2026.5.9",
+                "latest_version": None,
+                "zipball_url": None,
+                "tarball_url": None,
+                "bundle_sha256": None,
+                "bundle_format": None,
+            },
+        )()
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        reported.append((install_result, error_message))
+
+    async def _noop(_record: dict):
+        return None
+
+    monkeypatch.setattr(cloud_routes, "check_update", _fake_check_update)
+    monkeypatch.setattr(cloud_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(cloud_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(cloud_routes, "_report_pro_bundle_installation", _fake_report)
+
+    record = {
+        "request_id": "req_auto_002",
+        "status": "approved",
+        "activate_key": "key_auto",
+        "details": {},
+        "created_at": "2026-05-08T08:00:00+00:00",
+        "updated_at": "2026-05-08T08:00:00+00:00",
+    }
+
+    payload = await cloud_routes._maybe_auto_activate_upgrade(record)
+    assert payload["status"] == "activated"
+    assert payload["details"]["auto_install_result"] == "already_latest"
+    assert payload["details"]["auto_install_version"] == "2026.5.9"
+    assert reported == [("success", None)]
+

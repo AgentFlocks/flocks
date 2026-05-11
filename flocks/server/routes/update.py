@@ -71,6 +71,8 @@ async def apply_update(
 
     zipball_url: str | None = None
     tarball_url: str | None = None
+    bundle_sha256: str | None = None
+    bundle_format: str | None = None
 
     if target_version:
         version_to_apply = target_version
@@ -85,6 +87,8 @@ async def apply_update(
         version_to_apply = info.latest_version
         zipball_url = info.zipball_url
         tarball_url = info.tarball_url
+        bundle_sha256 = info.bundle_sha256
+        bundle_format = info.bundle_format
 
     log.info("update.apply.start", {"target": version_to_apply})
 
@@ -93,6 +97,8 @@ async def apply_update(
             version_to_apply,
             zipball_url=zipball_url,
             tarball_url=tarball_url,
+            bundle_sha256=bundle_sha256,
+            bundle_format=bundle_format,
             locale=locale,
         )
         try:

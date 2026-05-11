@@ -27,6 +27,8 @@ class VersionInfo(BaseModel):
     release_url: str | None = None
     zipball_url: str | None = None
     tarball_url: str | None = None
+    bundle_sha256: str | None = None
+    bundle_format: Literal["zip", "tar.gz"] | None = None
     error: str | None = None
     deploy_mode: DeployMode = "source"
     update_allowed: bool = True
