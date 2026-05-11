@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowUpCircle, Cloud, X } from 'lucide-react';
+import { ArrowUpCircle, LogIn, X } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
-import { authApi, type CloudBindingSessionStatus } from '@/api/auth';
+import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
 import {
-  cloudUpgradeApi,
+  consoleUpgradeApi,
   type UpgradeRequestCreatePayload,
   type UpgradeRequestStatus,
-} from '@/api/cloudUpgrade';
+} from '@/api/consoleUpgrade';
 import { extractErrorMessage } from '@/utils/error';
 
 interface UpgradeApplyFormState {
@@ -31,14 +31,13 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
   notes: '',
 };
 
-export default function FlocksProUpgradePage() {
+export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
   const [searchParams, setSearchParams] = useSearchParams();
-  const [bindingStatus, setBindingStatus] = useState<CloudBindingSessionStatus | null>(null);
-  const [bindingLoading, setBindingLoading] = useState(false);
-  const [syncNowLoading, setSyncNowLoading] = useState(false);
-  const [bindingError, setBindingError] = useState<string | null>(null);
-  const [bindingSuccess, setBindingSuccess] = useState<string | null>(null);
+  const [consoleLoginStatus, setConsoleLoginStatus] = useState<ConsoleLoginSessionStatus | null>(null);
+  const [consoleLoginLoading, setConsoleLoginLoading] = useState(false);
+  const [consoleLoginError, setConsoleLoginError] = useState<string | null>(null);
+  const [consoleLoginSuccess, setConsoleLoginSuccess] = useState<string | null>(null);
   const [requests, setRequests] = useState<UpgradeRequestStatus[]>([]);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
@@ -69,23 +68,23 @@ export default function FlocksProUpgradePage() {
     [activeRequestId, visibleRequests],
   );
 
-  const refreshBindingStatus = useCallback(async () => {
-    setBindingLoading(true);
-    setBindingError(null);
+  const refreshConsoleLoginStatus = useCallback(async () => {
+    setConsoleLoginLoading(true);
+    setConsoleLoginError(null);
     try {
-      const data = await authApi.cloudBindingStatus();
-      setBindingStatus(data);
+      const data = await authApi.consoleLoginSession();
+      setConsoleLoginStatus(data);
     } catch (err) {
-      setBindingError(extractErrorMessage(err, t('errors.fetchBindingStatus')));
+      setConsoleLoginError(extractErrorMessage(err, t('errors.fetchConsoleLoginStatus')));
     } finally {
-      setBindingLoading(false);
+      setConsoleLoginLoading(false);
     }
   }, [t]);
 
   const refreshRequests = useCallback(async () => {
     setRequestError(null);
     try {
-      const data = await cloudUpgradeApi.listRequests();
+      const data = await consoleUpgradeApi.listRequests();
       setRequests(data);
       const nextVisible = data.filter((item) => {
         const status = (item.status || '').toLowerCase();
@@ -115,38 +114,40 @@ export default function FlocksProUpgradePage() {
   }, [activeRequestId, visibleRequests]);
 
   useEffect(() => {
-    void refreshBindingStatus();
+    void refreshConsoleLoginStatus();
     void refreshRequests();
-  }, [refreshBindingStatus, refreshRequests]);
+  }, [refreshConsoleLoginStatus, refreshRequests]);
 
   useEffect(() => {
-    const bindResult = searchParams.get('bind');
-    const cloudBindStatus = searchParams.get('cloud_bind_status');
-    const cloudBindingId = searchParams.get('binding_id');
+    const loginResult = searchParams.get('login');
+    const consoleLoginStatusParam = searchParams.get('console_login_status');
+    const consoleLoginId = searchParams.get('console_login_id');
+    const state = searchParams.get('state') ?? undefined;
     const passportUid = searchParams.get('passport_uid') ?? undefined;
-    if (!bindResult && !cloudBindStatus) {
+    if (!loginResult && !consoleLoginStatusParam) {
       return;
     }
     let cancelled = false;
     const finalize = async () => {
       try {
-        if (bindResult === 'success') {
-          await refreshBindingStatus();
-        } else if (cloudBindStatus === 'success' && cloudBindingId) {
-          await authApi.exchangeCloudBinding(cloudBindingId, passportUid);
-          await refreshBindingStatus();
+        if (loginResult === 'success') {
+          await refreshConsoleLoginStatus();
+        } else if (consoleLoginStatusParam === 'success' && consoleLoginId) {
+          await authApi.finishConsoleLogin(consoleLoginId, state, passportUid);
+          await refreshConsoleLoginStatus();
         }
       } catch (err) {
         if (!cancelled) {
-          setBindingError(extractErrorMessage(err, t('errors.exchangeBinding')));
+          setConsoleLoginError(extractErrorMessage(err, t('errors.finishConsoleLogin')));
         }
       } finally {
         if (!cancelled) {
           const nextParams = new URLSearchParams(searchParams);
-          nextParams.delete('bind');
+          nextParams.delete('login');
           nextParams.delete('message');
-          nextParams.delete('cloud_bind_status');
-          nextParams.delete('binding_id');
+          nextParams.delete('console_login_status');
+          nextParams.delete('console_login_id');
+          nextParams.delete('state');
           nextParams.delete('passport_uid');
           setSearchParams(nextParams, { replace: true });
         }
@@ -156,42 +157,28 @@ export default function FlocksProUpgradePage() {
     return () => {
       cancelled = true;
     };
-  }, [refreshBindingStatus, searchParams, setSearchParams, t]);
+  }, [refreshConsoleLoginStatus, searchParams, setSearchParams, t]);
 
-  const startCloudBinding = async () => {
-    setBindingError(null);
-    setBindingSuccess(null);
+  const startConsoleLogin = async () => {
+    setConsoleLoginError(null);
+    setConsoleLoginSuccess(null);
     try {
       const returnTo = `${window.location.origin}/flockspro-upgrade/callback`;
-      const result = await authApi.initCloudBinding(returnTo);
-      window.location.href = result.portal_login_url;
+      const result = await authApi.startConsoleLogin(returnTo);
+      window.location.href = result.passport_login_url;
     } catch (err) {
-      setBindingError(extractErrorMessage(err, t('errors.startBinding')));
+      setConsoleLoginError(extractErrorMessage(err, t('errors.startConsoleLogin')));
     }
   };
 
-  const unbindCloudAccount = async () => {
-    setBindingError(null);
-    setBindingSuccess(null);
+  const logoutConsoleLogin = async () => {
+    setConsoleLoginError(null);
+    setConsoleLoginSuccess(null);
     try {
-      await authApi.unbindCloudAccount();
-      await refreshBindingStatus();
+      await authApi.logoutConsoleLogin();
+      await refreshConsoleLoginStatus();
     } catch (err) {
-      setBindingError(extractErrorMessage(err, t('errors.unbindBinding')));
-    }
-  };
-
-  const syncCloudProfileNow = async () => {
-    setBindingError(null);
-    setBindingSuccess(null);
-    setSyncNowLoading(true);
-    try {
-      await authApi.syncCloudProfileNow();
-      setBindingSuccess(t('binding.syncNowSuccess'));
-    } catch (err) {
-      setBindingError(extractErrorMessage(err, t('errors.syncNow')));
-    } finally {
-      setSyncNowLoading(false);
+      setConsoleLoginError(extractErrorMessage(err, t('errors.logoutConsoleLogin')));
     }
   };
 
@@ -216,7 +203,7 @@ export default function FlocksProUpgradePage() {
         applicant_phone: applyForm.applicantPhone.trim() || undefined,
         notes: applyForm.notes.trim() || undefined,
       };
-      const created = await cloudUpgradeApi.createRequest(payload);
+      const created = await consoleUpgradeApi.createRequest(payload);
       setDismissedRejectedRequestIds((prev) => {
         const next = new Set(prev);
         requests
@@ -240,7 +227,7 @@ export default function FlocksProUpgradePage() {
       return;
     }
     try {
-      const latest = await cloudUpgradeApi.refreshRequest(activeRequest.request_id);
+      const latest = await consoleUpgradeApi.refreshRequest(activeRequest.request_id);
       setRequests((prev) =>
         prev.map((item) => (item.request_id === latest.request_id ? latest : item)),
       );
@@ -254,7 +241,7 @@ export default function FlocksProUpgradePage() {
       return;
     }
     try {
-      const latest = await cloudUpgradeApi.cancelRequest(activeRequest.request_id);
+      const latest = await consoleUpgradeApi.cancelRequest(activeRequest.request_id);
       setRequests((prev) =>
         prev.map((item) => (item.request_id === latest.request_id ? latest : item)),
       );
@@ -263,7 +250,7 @@ export default function FlocksProUpgradePage() {
     }
   };
 
-  const canApplyUpgrade = bindingStatus?.bound === true;
+  const canApplyUpgrade = consoleLoginStatus?.logged_in === true;
   const hasOpenRequest = requests.some((item) =>
     ['pending', 'reviewing', 'approved'].includes((item.status || '').toLowerCase()),
   );
@@ -274,7 +261,7 @@ export default function FlocksProUpgradePage() {
     activeRequest?.status === 'pending' ||
     activeRequest?.status === 'reviewing' ||
     activeRequest?.status === 'approved';
-  const boundAccountName = bindingStatus?.account_name?.trim() ?? '';
+  const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
 
   const dismissRejectedRequest = (requestId: string) => {
     setDismissedRejectedRequestIds((prev) => {
@@ -306,58 +293,50 @@ export default function FlocksProUpgradePage() {
       />
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
-        <h2 className="text-lg font-semibold text-gray-900">{t('binding.title')}</h2>
+        <h2 className="text-lg font-semibold text-gray-900">{t('consoleLogin.title')}</h2>
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="text-sm text-gray-800">
-              {t('binding.accountLabel')}
+              {t('consoleLogin.accountLabel')}
               <span className="font-medium">
-                {bindingLoading
-                  ? t('binding.loading')
-                  : bindingStatus?.bound
-                  ? boundAccountName
-                  : t('binding.unbound')}
+                {consoleLoginLoading
+                  ? t('consoleLogin.loading')
+                  : consoleLoginStatus?.logged_in
+                  ? consoleAccountName
+                  : t('consoleLogin.unbound')}
               </span>
             </div>
-            {bindingStatus?.bound ? (
+            {consoleLoginStatus?.logged_in ? (
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => void syncCloudProfileNow()}
-                  className="inline-flex items-center gap-2 rounded-lg border border-blue-300 px-3 py-2 text-sm text-blue-700 hover:bg-blue-50 disabled:opacity-50"
-                  disabled={syncNowLoading}
-                >
-                  {syncNowLoading ? t('binding.syncNowLoading') : t('binding.syncNowAction')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void unbindCloudAccount()}
+                  onClick={() => void logoutConsoleLogin()}
                   className="inline-flex items-center gap-2 rounded-lg border border-red-300 px-3 py-2 text-sm text-red-700 hover:bg-red-50"
                 >
-                  {t('binding.unbindAction')}
+                  {t('consoleLogin.logoutAction')}
                 </button>
               </div>
             ) : (
               <button
                 type="button"
-                onClick={() => void startCloudBinding()}
+                onClick={() => void startConsoleLogin()}
                 className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
               >
-                <Cloud className="w-4 h-4" />
-                {t('binding.bindAction')}
+                <LogIn className="w-4 h-4" />
+                {t('consoleLogin.loginAction')}
               </button>
             )}
           </div>
         </div>
 
-        {bindingError && (
+        {consoleLoginError && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-            {bindingError}
+            {consoleLoginError}
           </div>
         )}
-        {bindingSuccess && (
+        {consoleLoginSuccess && (
           <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
-            {bindingSuccess}
+            {consoleLoginSuccess}
           </div>
         )}
       </div>
@@ -389,7 +368,7 @@ export default function FlocksProUpgradePage() {
 
         {!canApplyUpgrade && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-            {t('upgrade.bindFirst')}
+            {t('upgrade.loginFirst')}
           </div>
         )}
         {requestError && (

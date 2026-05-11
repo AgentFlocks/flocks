@@ -1,6 +1,6 @@
 {
   "title": "Flocks Pro Upgrade",
-  "description": "Complete cloud account login, upgrade application, and upgrade execution locally.",
+  "description": "Complete console account login, upgrade application, and upgrade execution locally.",
   "actions": {
     "refresh": "Refresh",
     "cancel": "Cancel",
@@ -9,36 +9,32 @@
     "submitting": "Submitting..."
   },
   "errors": {
-    "fetchBindingStatus": "Failed to load login status",
-    "startBinding": "Failed to start cloud account login",
-    "exchangeBinding": "Failed to complete cloud login callback",
-    "unbindBinding": "Failed to log out cloud account",
-    "syncNow": "Connectivity test failed",
+    "fetchConsoleLoginStatus": "Failed to load login status",
+    "startConsoleLogin": "Failed to start console account login",
+    "finishConsoleLogin": "Failed to complete console login callback",
+    "logoutConsoleLogin": "Failed to log out console account",
     "fetchRequests": "Failed to load upgrade requests",
     "createRequest": "Failed to create upgrade request",
     "refreshRequest": "Failed to refresh request status",
     "cancelRequest": "Failed to cancel request"
   },
-  "binding": {
-    "title": "Cloud Account Login",
-    "description": "Start login locally, sign in on cloud portal, and return to local confirmation.",
-    "accountLabel": "Cloud account: ",
+  "consoleLogin": {
+    "title": "Console Account Login",
+    "description": "Start login locally, sign in on console, and return to local confirmation.",
+    "accountLabel": "Console account: ",
     "loading": "Loading...",
-    "bound": "Cloud account logged in",
+    "bound": "Console account logged in",
     "unbound": "Not logged in",
     "unknownAccount": "Unknown account",
     "missingAccountHint": "Current session does not include account name, please log out and log in again.",
-    "bindAction": "Cloud Login",
-    "unbindAction": "Log Out",
-    "syncNowAction": "Test Connectivity",
-    "syncNowLoading": "Testing...",
-    "syncNowSuccess": "Connectivity OK"
+    "loginAction": "Console Login",
+    "logoutAction": "Log Out"
   },
   "upgrade": {
     "title": "Upgrade to Flocks Pro",
     "description": "Submit application, track approval status, and manually refresh status.",
     "applyAction": "Apply for Upgrade",
-    "bindFirst": "Log in cloud account before applying for upgrade.",
+    "loginFirst": "Log in console account before applying for upgrade.",
     "pendingRequestExists": "An upgrade request is already active. Refresh status or cancel it before creating a new one.",
     "currentRequest": "Current Request",
     "status": "Status",
@@ -66,8 +62,8 @@
     "formRequiredError": "Company and applicant name are required"
   },
   "callback": {
-    "processing": "Completing cloud login, please wait...",
-    "missingBindingId": "Missing binding_id in callback URL.",
+    "processing": "Completing console login, please wait...",
+    "missingConsoleLoginId": "Missing console_login_id in callback URL.",
     "exchangeFailed": "Failed to complete login exchange",
     "failedTitle": "Login Failed"
   },

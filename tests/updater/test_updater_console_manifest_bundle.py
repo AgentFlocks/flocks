@@ -6,7 +6,7 @@ from flocks.updater import updater
 
 
 @pytest.mark.asyncio
-async def test_fetch_cloud_manifest_release_uses_bundle_url(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Resp:
         def raise_for_status(self) -> None:
             return None
@@ -33,9 +33,9 @@ async def test_fetch_cloud_manifest_release_uses_bundle_url(monkeypatch: pytest.
             assert "channel=flockspro" in url
             return _Resp()
 
-    monkeypatch.setenv("FLOCKS_MANIFEST_BASE_URL", "https://manifest.example.com")
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
     monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
-    result = await updater._fetch_cloud_manifest_release()
+    result = await updater._fetch_console_manifest_release()
     assert result == (
         "2026.5.10",
         "bundle release",
@@ -43,13 +43,13 @@ async def test_fetch_cloud_manifest_release_uses_bundle_url(monkeypatch: pytest.
         None,
         "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
     )
-    info = await updater._fetch_cloud_manifest_release_info()
+    info = await updater._fetch_console_manifest_release_info()
     assert info.bundle_sha256 == "abc123"
     assert info.bundle_format == "tar.gz"
 
 
 @pytest.mark.asyncio
-async def test_fetch_cloud_manifest_release_blocks_frozen_channel(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_console_manifest_release_blocks_frozen_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Resp:
         def raise_for_status(self) -> None:
             return None
@@ -71,8 +71,8 @@ async def test_fetch_cloud_manifest_release_blocks_frozen_channel(monkeypatch: p
         async def get(self, url, headers=None, follow_redirects=True):
             return _Resp()
 
-    monkeypatch.setenv("FLOCKS_MANIFEST_BASE_URL", "https://manifest.example.com")
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
     monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
     with pytest.raises(ValueError, match="frozen"):
-        await updater._fetch_cloud_manifest_release()
+        await updater._fetch_console_manifest_release()
 

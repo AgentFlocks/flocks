@@ -296,13 +296,13 @@ async def lifespan(app: FastAPI):
         TaskManager.mark_start_failed(e)
         log.warning("task_manager.start.failed", {"error": str(e)})
 
-    # Start cloud heartbeat/profile scheduler (best-effort).
+    # Start console heartbeat/profile scheduler (best-effort).
     try:
-        from flocks.cloud.scheduler import CloudSyncScheduler
-        await CloudSyncScheduler.start()
-        log.info("cloud.sync.scheduler.started")
+        from flocks.console.scheduler import ConsoleSyncScheduler
+        await ConsoleSyncScheduler.start()
+        log.info("console.sync.scheduler.started")
     except Exception as e:
-        log.warning("cloud.sync.scheduler.start_failed", {"error": str(e)})
+        log.warning("console.sync.scheduler.start_failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
     try:
@@ -400,13 +400,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("task_manager.stop.failed", {"error": str(e)})
 
-    # Stop cloud heartbeat/profile scheduler.
+    # Stop console heartbeat/profile scheduler.
     try:
-        from flocks.cloud.scheduler import CloudSyncScheduler
-        await CloudSyncScheduler.stop()
-        log.info("cloud.sync.scheduler.stopped")
+        from flocks.console.scheduler import ConsoleSyncScheduler
+        await ConsoleSyncScheduler.stop()
+        log.info("console.sync.scheduler.stopped")
     except Exception as e:
-        log.warning("cloud.sync.scheduler.stop_failed", {"error": str(e)})
+        log.warning("console.sync.scheduler.stop_failed", {"error": str(e)})
     
     # Stop Skill file watcher
     try:
@@ -828,7 +828,7 @@ from flocks.server.routes.logs import router as logs_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
-from flocks.server.routes.cloud_upgrade import router as cloud_upgrade_router
+from flocks.server.routes.console_upgrade import router as console_upgrade_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -882,7 +882,7 @@ app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
-app.include_router(cloud_upgrade_router, prefix="/api/cloud", tags=["CloudUpgrade"])
+app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -945,7 +945,7 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
-app.include_router(cloud_upgrade_router, prefix="/cloud", tags=["CloudUpgrade"])
+app.include_router(console_upgrade_router, prefix="/console", tags=["ConsoleUpgrade"])
 
 
 @app.get("/", tags=["Root"])

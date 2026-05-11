@@ -579,7 +579,7 @@ class ConfigInfo(BaseModel):
     portal_base_url: Optional[str] = Field(
         None,
         alias="portalBaseUrl",
-        description="Cloud portal base URL used by OSS cloud-account binding redirect.",
+        description="Console portal base URL used by OSS console account login redirect.",
     )
 
     @model_validator(mode='after')

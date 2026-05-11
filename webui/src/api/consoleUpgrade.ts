@@ -33,29 +33,29 @@ export interface UpgradeRequestStatus {
   updated_at: string;
 }
 
-export const cloudUpgradeApi = {
+export const consoleUpgradeApi = {
   createRequest: async (payload: UpgradeRequestCreatePayload): Promise<UpgradeRequestStatus> => {
-    const response = await client.post('/api/cloud/upgrade-requests', payload);
+    const response = await client.post('/api/console/upgrade-requests', payload);
     return response.data;
   },
 
   listRequests: async (): Promise<UpgradeRequestStatus[]> => {
-    const response = await client.get('/api/cloud/upgrade-requests');
+    const response = await client.get('/api/console/upgrade-requests');
     return response.data;
   },
 
   getRequest: async (requestId: string): Promise<UpgradeRequestStatus> => {
-    const response = await client.get(`/api/cloud/upgrade-requests/${requestId}`);
+    const response = await client.get(`/api/console/upgrade-requests/${requestId}`);
     return response.data;
   },
 
   refreshRequest: async (requestId: string): Promise<UpgradeRequestStatus> => {
-    const response = await client.post(`/api/cloud/upgrade-requests/${requestId}/refresh`);
+    const response = await client.post(`/api/console/upgrade-requests/${requestId}/refresh`);
     return response.data;
   },
 
   cancelRequest: async (requestId: string): Promise<UpgradeRequestStatus> => {
-    const response = await client.post(`/api/cloud/upgrade-requests/${requestId}/cancel`);
+    const response = await client.post(`/api/console/upgrade-requests/${requestId}/cancel`);
     return response.data;
   },
 };

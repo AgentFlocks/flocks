@@ -21,29 +21,23 @@ export interface ResetPasswordResult {
   must_reset_password: boolean;
 }
 
-export interface CloudBindingInitResult {
-  binding_id: string;
-  portal_login_url: string;
+export interface ConsoleLoginStartResult {
+  console_login_id: string;
+  passport_login_url: string;
 }
 
-export interface CloudBindingExchangeResult {
-  binding_id: string;
-  cloud_session_token: string;
-  fingerprint: string;
-  install_id: string;
-}
-
-export interface CloudBindingSessionStatus {
-  bound: boolean;
-  binding_id?: string | null;
+export interface ConsoleLoginFinishResult {
+  console_login_id: string;
+  logged_in: boolean;
   account_name?: string | null;
   updated_at?: string | null;
 }
 
-export interface CloudSyncNowResult {
-  success: boolean;
-  synced_at?: string | null;
-  detail?: string | null;
+export interface ConsoleLoginSessionStatus {
+  logged_in: boolean;
+  console_login_id?: string | null;
+  account_name?: string | null;
+  updated_at?: string | null;
 }
 
 export const authApi = {
@@ -80,37 +74,32 @@ export const authApi = {
     return response.data;
   },
 
-  initCloudBinding: async (returnTo: string): Promise<CloudBindingInitResult> => {
-    const response = await client.get('/api/auth/cloud/login', {
+  startConsoleLogin: async (returnTo: string): Promise<ConsoleLoginStartResult> => {
+    const response = await client.get('/api/auth/console-login/start', {
       params: { return_to: returnTo },
     });
     return response.data;
   },
 
-  exchangeCloudBinding: async (
-    bindingId: string,
+  finishConsoleLogin: async (
+    consoleLoginId: string,
+    state?: string,
     passportUid?: string,
-  ): Promise<CloudBindingExchangeResult> => {
-    const response = await client.get('/api/auth/cloud/return', {
-      params: {
-        binding_id: bindingId,
-        ...(passportUid ? { passport_uid: passportUid } : {}),
-      },
+  ): Promise<ConsoleLoginFinishResult> => {
+    const response = await client.post('/api/auth/console-login/finish', {
+      console_login_id: consoleLoginId,
+      ...(state ? { state } : {}),
+      ...(passportUid ? { passport_uid: passportUid } : {}),
     });
     return response.data;
   },
 
-  cloudBindingStatus: async (): Promise<CloudBindingSessionStatus> => {
-    const response = await client.get('/api/auth/cloud/session');
+  consoleLoginSession: async (): Promise<ConsoleLoginSessionStatus> => {
+    const response = await client.get('/api/auth/console-login/session');
     return response.data;
   },
 
-  unbindCloudAccount: async (): Promise<void> => {
-    await client.post('/api/auth/cloud/unbind');
-  },
-
-  syncCloudProfileNow: async (): Promise<CloudSyncNowResult> => {
-    const response = await client.post('/api/auth/cloud/sync-now');
-    return response.data;
+  logoutConsoleLogin: async (): Promise<void> => {
+    await client.post('/api/auth/console-login/logout');
   },
 };

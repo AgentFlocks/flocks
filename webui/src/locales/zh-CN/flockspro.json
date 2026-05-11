@@ -9,17 +9,16 @@
     "submitting": "提交中..."
   },
   "errors": {
-    "fetchBindingStatus": "获取登录状态失败",
-    "startBinding": "发起云账号登录失败",
-    "exchangeBinding": "云登录回调处理失败",
-    "unbindBinding": "退出登录失败",
-    "syncNow": "测试连通失败",
+    "fetchConsoleLoginStatus": "获取登录状态失败",
+    "startConsoleLogin": "发起云账号登录失败",
+    "finishConsoleLogin": "云登录回调处理失败",
+    "logoutConsoleLogin": "退出登录失败",
     "fetchRequests": "获取升级申请失败",
     "createRequest": "创建升级申请失败",
     "refreshRequest": "刷新申请状态失败",
     "cancelRequest": "撤回申请失败"
   },
-  "binding": {
+  "consoleLogin": {
     "title": "云账号登录",
     "description": "在本地发起登录，跳转云端登录，完成后回跳本地确认。",
     "accountLabel": "云账户：",
@@ -28,17 +27,14 @@
     "unbound": "未登录",
     "unknownAccount": "未知账号",
     "missingAccountHint": "当前会话未携带云账号名，请退出登录后重新登录。",
-    "bindAction": "云账号登录",
-    "unbindAction": "退出登录",
-    "syncNowAction": "测试连通",
-    "syncNowLoading": "测试中...",
-    "syncNowSuccess": "连通成功"
+    "loginAction": "云账号登录",
+    "logoutAction": "退出登录"
   },
   "upgrade": {
     "title": "升级为Flocks Pro",
     "description": "",
     "applyAction": "申请升级",
-    "bindFirst": "请先完成云账号登录后再申请升级。",
+    "loginFirst": "请先完成云账号登录后再申请升级。",
     "pendingRequestExists": "当前已有升级申请在处理中，请刷新状态或撤回后再发起新申请。",
     "currentRequest": "当前申请",
     "status": "状态",
@@ -67,7 +63,7 @@
   },
   "callback": {
     "processing": "正在完成云账号登录，请稍候...",
-    "missingBindingId": "缺少 binding_id，无法完成登录。",
+    "missingConsoleLoginId": "缺少 console_login_id，无法完成登录。",
     "exchangeFailed": "登录回调处理失败",
     "failedTitle": "登录失败"
   },

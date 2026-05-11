@@ -65,7 +65,7 @@ log = Log.create(service="updater")
 
 
 @dataclass(frozen=True)
-class CloudManifestRelease:
+class ConsoleManifestRelease:
     version: str
     release_notes: str | None
     release_url: str | None
@@ -695,14 +695,14 @@ async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[st
     Resolve effective sources by runtime edition state.
 
     Flocks Pro mode is explicitly selected by the runtime edition. A bound
-    cloud account alone is still valid OSS state and must keep OSS sources.
+    console account alone is still valid OSS state and must keep OSS sources.
     """
     sources = list(configured_sources)
     edition = (os.getenv("FLOCKS_EDITION") or "").strip().lower()
 
     if edition == "flockspro":
-        # Pro edition is hard-locked to cloud manifest bundle channel.
-        return ["cloud-manifest"]
+        # Pro edition is hard-locked to console manifest bundle channel.
+        return ["console-manifest"]
 
     return sources
 
@@ -892,13 +892,13 @@ async def _fetch_gitlab_release(
     )
 
 
-async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
+async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
     """
-    Fetch latest Pro bundle manifest from cloud.
+    Fetch latest Pro bundle manifest from console.
     """
-    manifest_base = os.getenv("FLOCKS_MANIFEST_BASE_URL", "").rstrip("/")
+    manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
     if not manifest_base:
-        raise ValueError("FLOCKS_MANIFEST_BASE_URL 未配置，无法使用 cloud-manifest 源")
+        raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置，无法使用 console-manifest 源")
 
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
     url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
@@ -906,8 +906,8 @@ async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
     try:
         from flocks.storage.storage import Storage
 
-        session = await Storage.get("cloud:session", dict)
-        token = session.get("cloud_session_token") if isinstance(session, dict) else None
+        session = await Storage.get("console:session", dict)
+        token = session.get("console_session_token") if isinstance(session, dict) else None
         if token:
             headers["Authorization"] = f"Bearer {token}"
     except Exception:
@@ -921,7 +921,7 @@ async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
         raise ValueError("manifest 响应格式无效")
 
     if bool(data.get("frozen")):
-        raise ValueError("cloud manifest channel is frozen")
+        raise ValueError("console manifest channel is frozen")
     frozen_until_raw = str(data.get("frozen_until") or "").strip()
     if frozen_until_raw:
         text = frozen_until_raw[:-1] + "+00:00" if frozen_until_raw.endswith("Z") else frozen_until_raw
@@ -929,7 +929,7 @@ async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
         if frozen_until.tzinfo is None:
             frozen_until = frozen_until.replace(tzinfo=timezone.utc)
         if datetime.now(timezone.utc) < frozen_until:
-            raise ValueError("cloud manifest channel frozen_until not reached")
+            raise ValueError("console manifest channel frozen_until not reached")
 
     latest = str(data.get("compare_version") or data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
     if not latest:
@@ -944,7 +944,7 @@ async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
     if not bundle_url:
         raise ValueError("manifest 响应缺少 bundle_url")
     bundle_format = _archive_format_for_url(bundle_url, str(data.get("bundle_format") or data.get("archive_format") or ""))
-    return CloudManifestRelease(
+    return ConsoleManifestRelease(
         version=latest.lstrip("v"),
         release_notes=data.get("release_notes") or data.get("notes"),
         release_url=data.get("release_url") or bundle_url,
@@ -954,8 +954,8 @@ async def _fetch_cloud_manifest_release_info() -> CloudManifestRelease:
     )
 
 
-async def _fetch_cloud_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
-    info = await _fetch_cloud_manifest_release_info()
+async def _fetch_console_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
+    info = await _fetch_console_manifest_release_info()
     if info.bundle_format == "zip":
         return info.version, info.release_notes, info.release_url, info.bundle_url, None
     return info.version, info.release_notes, info.release_url, None, info.bundle_url
@@ -981,8 +981,8 @@ async def _fetch_release_from_source(
         return await _fetch_gitee_release(gitee_repo or repo, gitee_token)
     if source == "gitlab":
         return await _fetch_gitlab_release(repo, token, base_url)
-    if source == "cloud-manifest":
-        return await _fetch_cloud_manifest_release()
+    if source == "console-manifest":
+        return await _fetch_console_manifest_release()
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -1005,10 +1005,10 @@ def _archive_url_for_source(
         base = (base_url or "https://gitlab.com").rstrip("/")
         proj = repo.split("/")[-1]
         return f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
-    if source == "cloud-manifest":
-        manifest_base = os.getenv("FLOCKS_MANIFEST_BASE_URL", "").rstrip("/")
+    if source == "console-manifest":
+        manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
         if not manifest_base:
-            raise ValueError("FLOCKS_MANIFEST_BASE_URL 未配置")
+            raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置")
         raw_tag = tag if tag.startswith("v") else f"v{tag}"
         ext = "zip" if fmt == "zip" else "tar.gz"
         return f"{manifest_base}/v1/manifest/archive/{raw_tag}.{ext}"
@@ -2009,8 +2009,8 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
     bundle_sha256: str | None = None
     bundle_format: str | None = None
     try:
-        if profile.sources == ["cloud-manifest"]:
-            manifest_info = await _fetch_cloud_manifest_release_info()
+        if profile.sources == ["console-manifest"]:
+            manifest_info = await _fetch_console_manifest_release_info()
             tag = manifest_info.version
             notes = manifest_info.release_notes
             url = manifest_info.release_url
@@ -2095,33 +2095,33 @@ async def perform_update(
     current_version = get_current_version()
     handover_active = False
 
-    cloud_manifest_info: CloudManifestRelease | None = None
+    console_manifest_info: ConsoleManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
-    if profile.sources == ["cloud-manifest"]:
+    if profile.sources == ["console-manifest"]:
         if not (zipball_url or tarball_url):
             try:
-                cloud_manifest_info = await _fetch_cloud_manifest_release_info()
+                console_manifest_info = await _fetch_console_manifest_release_info()
             except Exception as exc:
-                log.error("updater.cloud_manifest.fetch_failed", {"error": str(exc)})
+                log.error("updater.console_manifest.fetch_failed", {"error": str(exc)})
                 yield UpdateProgress(
                     stage="error",
                     message="Failed to check the Pro bundle manifest. Please check your network connection.",
                     success=False,
                 )
                 return
-            if _parse_version(cloud_manifest_info.version) != _parse_version(latest_tag):
+            if _parse_version(console_manifest_info.version) != _parse_version(latest_tag):
                 yield UpdateProgress(
                     stage="error",
                     message="Requested Pro bundle version does not match the latest approved manifest.",
                     success=False,
                 )
                 return
-            if cloud_manifest_info.bundle_format == "zip":
-                zipball_url = cloud_manifest_info.bundle_url
+            if console_manifest_info.bundle_format == "zip":
+                zipball_url = console_manifest_info.bundle_url
             else:
-                tarball_url = cloud_manifest_info.bundle_url
-            bundle_sha256 = cloud_manifest_info.bundle_sha256
-            bundle_format = cloud_manifest_info.bundle_format
+                tarball_url = console_manifest_info.bundle_url
+            bundle_sha256 = console_manifest_info.bundle_sha256
+            bundle_format = console_manifest_info.bundle_format
         primary_bundle_url = zipball_url or tarball_url or ""
         fmt = _archive_format_for_url(primary_bundle_url, bundle_format)
 
@@ -2150,7 +2150,7 @@ async def perform_update(
             base_url=ucfg.base_url,
             gitee_repo=ucfg.gitee_repo,
         )
-        if profile.sources == ["cloud-manifest"]:
+        if profile.sources == ["console-manifest"]:
             await asyncio.to_thread(_verify_download_sha256, archive_path, bundle_sha256)
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)

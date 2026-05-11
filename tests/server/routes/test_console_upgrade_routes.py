@@ -21,14 +21,14 @@ def _mock_admin() -> AuthUser:
     )
 
 
-async def _set_bound_cloud_session() -> None:
+async def _set_bound_console_session() -> None:
     from flocks.storage.storage import Storage
 
     await Storage.set(
-        "cloud:session",
+        "console:session",
         {
-            "binding_id": "bind_ok",
-            "cloud_session_token": "token_abc",
+            "console_login_id": "login_ok",
+            "console_session_token": "token_abc",
             "fingerprint": "fp_1",
             "install_id": "inst_1",
             "passport_uid": "pass_1",
@@ -40,14 +40,14 @@ async def _set_bound_cloud_session() -> None:
 
 
 async def test_upgrade_request_lifecycle_local_storage(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_cloud_session()
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
 
     create_resp = await client.post(
-        "/api/cloud/upgrade-requests",
+        "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
             "license_type": "trial_30d",
@@ -66,52 +66,52 @@ async def test_upgrade_request_lifecycle_local_storage(client: AsyncClient, monk
     assert created["details"]["company"] == "acme"
     assert created["details"]["applicant_name"] == "alice"
 
-    list_resp = await client.get("/api/cloud/upgrade-requests")
+    list_resp = await client.get("/api/console/upgrade-requests")
     assert list_resp.status_code == status.HTTP_200_OK
     assert any(item["request_id"] == request_id for item in list_resp.json())
 
-    get_resp = await client.get(f"/api/cloud/upgrade-requests/{request_id}")
+    get_resp = await client.get(f"/api/console/upgrade-requests/{request_id}")
     assert get_resp.status_code == status.HTTP_200_OK
     assert get_resp.json()["request_id"] == request_id
 
-    refresh_resp = await client.post(f"/api/cloud/upgrade-requests/{request_id}/refresh")
+    refresh_resp = await client.post(f"/api/console/upgrade-requests/{request_id}/refresh")
     assert refresh_resp.status_code == status.HTTP_200_OK
     assert refresh_resp.json()["status"] == "pending"
 
-    cancel_resp = await client.post(f"/api/cloud/upgrade-requests/{request_id}/cancel")
+    cancel_resp = await client.post(f"/api/console/upgrade-requests/{request_id}/cancel")
     assert cancel_resp.status_code == status.HTTP_200_OK
     assert cancel_resp.json()["status"] == "cancelled"
 
 
 async def test_upgrade_request_missing_returns_404(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
 
-    get_resp = await client.get("/api/cloud/upgrade-requests/not_found")
+    get_resp = await client.get("/api/console/upgrade-requests/not_found")
     assert get_resp.status_code == status.HTTP_404_NOT_FOUND
 
-    refresh_resp = await client.post("/api/cloud/upgrade-requests/not_found/refresh")
+    refresh_resp = await client.post("/api/console/upgrade-requests/not_found/refresh")
     assert refresh_resp.status_code == status.HTTP_404_NOT_FOUND
 
-    cancel_resp = await client.post("/api/cloud/upgrade-requests/not_found/cancel")
+    cancel_resp = await client.post("/api/console/upgrade-requests/not_found/cancel")
     assert cancel_resp.status_code == status.HTTP_404_NOT_FOUND
 
 
-async def test_create_upgrade_request_requires_cloud_binding(
+async def test_create_upgrade_request_requires_console_login(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
     from flocks.storage.storage import Storage
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
-    await Storage.delete("cloud:session")
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await Storage.delete("console:session")
 
     resp = await client.post(
-        "/api/cloud/upgrade-requests",
+        "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
             "license_type": "trial_30d",
@@ -121,18 +121,18 @@ async def test_create_upgrade_request_requires_cloud_binding(
     )
 
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
-    assert "云账号未绑定" in resp.text
+    assert "云账号未登录" in resp.text
 
 
 async def test_create_upgrade_request_does_not_link_previous_request_when_omitted(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "http://act.local")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_cloud_session()
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
 
     class _FakeResponse:
         status_code = status.HTTP_200_OK
@@ -164,19 +164,19 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
             return False
 
         async def post(self, url, json=None, headers=None):
-            assert url == "http://act.local/v1/upgrade-requests"
+            assert url == "http://console.local/v1/upgrade-requests"
             assert "previous_request_id" not in json
-            assert json["binding_id"] == "bind_ok"
+            assert json["console_login_id"] == "login_ok"
             assert json["fingerprint"] == "fp_1"
             assert json["install_id"] == "inst_1"
             assert json["passport_uid"] == "pass_1"
             assert headers == {"Authorization": "Bearer token_abc"}
             return _FakeResponse()
 
-    monkeypatch.setattr(cloud_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
 
     resp = await client.post(
-        "/api/cloud/upgrade-requests",
+        "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
             "license_type": "trial_30d",
@@ -191,27 +191,27 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
     assert payload["previous_request_id"] is None
 
 
-async def test_create_upgrade_request_maps_cloud_failure_to_502(
+async def test_create_upgrade_request_maps_console_failure_to_502(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "http://act.local")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
-    await _set_bound_cloud_session()
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
 
     class _FakeResponse:
         status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-        text = '{"message":"act unavailable"}'
+        text = '{"message":"console unavailable"}'
 
         def json(self) -> dict:
-            return {"message": "act unavailable"}
+            return {"message": "console unavailable"}
 
         def raise_for_status(self) -> None:
-            request = httpx.Request("POST", "http://act.local/v1/upgrade-requests")
+            request = httpx.Request("POST", "http://console.local/v1/upgrade-requests")
             response = httpx.Response(self.status_code, request=request, json=self.json())
-            raise httpx.HTTPStatusError("cloud call failed", request=request, response=response)
+            raise httpx.HTTPStatusError("console call failed", request=request, response=response)
 
     class _FakeClient:
         async def __aenter__(self):
@@ -221,13 +221,13 @@ async def test_create_upgrade_request_maps_cloud_failure_to_502(
             return False
 
         async def post(self, url, json=None, headers=None):
-            assert url == "http://act.local/v1/upgrade-requests"
+            assert url == "http://console.local/v1/upgrade-requests"
             return _FakeResponse()
 
-    monkeypatch.setattr(cloud_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
 
     resp = await client.post(
-        "/api/cloud/upgrade-requests",
+        "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
             "license_type": "trial_30d",
@@ -237,22 +237,22 @@ async def test_create_upgrade_request_maps_cloud_failure_to_502(
     )
 
     assert resp.status_code == status.HTTP_502_BAD_GATEWAY
-    assert "act unavailable" in resp.text
+    assert "console unavailable" in resp.text
 
 
-async def test_cancel_approved_request_falls_back_to_local_cancel_when_cloud_rejects(
+async def test_cancel_approved_request_falls_back_to_local_cancel_when_console_rejects(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
     from flocks.storage.storage import Storage
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "http://act.local")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
 
     request_id = "req_approved_001"
     await Storage.set(
-        f"cloud:upgrade_request:{request_id}",
+        f"console:upgrade_request:{request_id}",
         {
             "request_id": request_id,
             "status": "approved",
@@ -278,9 +278,9 @@ async def test_cancel_approved_request_falls_back_to_local_cancel_when_cloud_rej
 
         def raise_for_status(self) -> None:
             if self.status_code >= 400:
-                request = httpx.Request("GET", "http://act.local/v1/upgrade-requests")
+                request = httpx.Request("GET", "http://console.local/v1/upgrade-requests")
                 response = httpx.Response(self.status_code, request=request, json=self._payload)
-                raise httpx.HTTPStatusError("cloud call failed", request=request, response=response)
+                raise httpx.HTTPStatusError("console call failed", request=request, response=response)
 
     class _FakeClient:
         async def __aenter__(self):
@@ -290,11 +290,11 @@ async def test_cancel_approved_request_falls_back_to_local_cancel_when_cloud_rej
             return False
 
         async def post(self, url):
-            assert url == f"http://act.local/v1/upgrade-requests/{request_id}/withdraw"
+            assert url == f"http://console.local/v1/upgrade-requests/{request_id}/withdraw"
             return _FakeResponse(status.HTTP_400_BAD_REQUEST, {"message": "cannot withdraw approved"})
 
         async def get(self, url):
-            assert url == f"http://act.local/v1/upgrade-requests/{request_id}"
+            assert url == f"http://console.local/v1/upgrade-requests/{request_id}"
             return _FakeResponse(
                 status.HTTP_200_OK,
                 {
@@ -305,9 +305,9 @@ async def test_cancel_approved_request_falls_back_to_local_cancel_when_cloud_rej
                 },
             )
 
-    monkeypatch.setattr(cloud_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
 
-    resp = await client.post(f"/api/cloud/upgrade-requests/{request_id}/cancel")
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/cancel")
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
     assert payload["status"] == "cancelled"
@@ -317,14 +317,14 @@ async def test_refresh_approved_request_schedules_auto_activate_install(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
     from flocks.storage.storage import Storage
 
-    monkeypatch.setenv("FLOCKS_ACT_BASE_URL", "")
-    monkeypatch.setattr(cloud_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
     request_id = "req_auto_001"
     await Storage.set(
-        f"cloud:upgrade_request:{request_id}",
+        f"console:upgrade_request:{request_id}",
         {
             "request_id": request_id,
             "status": "approved",
@@ -346,9 +346,9 @@ async def test_refresh_approved_request_schedules_auto_activate_install(
         scheduled.append(request_id_arg)
         record.setdefault("details", {})["auto_install_task_scheduled_at"] = "2026-05-08T08:01:00+00:00"
 
-    monkeypatch.setattr(cloud_routes, "_schedule_auto_activate_upgrade", _fake_schedule)
+    monkeypatch.setattr(console_routes, "_schedule_auto_activate_upgrade", _fake_schedule)
 
-    resp = await client.post(f"/api/cloud/upgrade-requests/{request_id}/refresh")
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/refresh")
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
     assert payload["status"] == "approved"
@@ -359,7 +359,7 @@ async def test_refresh_approved_request_schedules_auto_activate_install(
 async def test_auto_activate_reports_already_latest_install(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.server.routes import cloud_upgrade as cloud_routes
+    from flocks.server.routes import console_upgrade as console_routes
 
     reported: list[tuple[str, str | None]] = []
 
@@ -385,10 +385,10 @@ async def test_auto_activate_reports_already_latest_install(
     async def _noop(_record: dict):
         return None
 
-    monkeypatch.setattr(cloud_routes, "check_update", _fake_check_update)
-    monkeypatch.setattr(cloud_routes, "_maybe_activate_pro_license", _noop)
-    monkeypatch.setattr(cloud_routes, "_maybe_refresh_pro_license", _noop)
-    monkeypatch.setattr(cloud_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "check_update", _fake_check_update)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
 
     record = {
         "request_id": "req_auto_002",
@@ -399,7 +399,7 @@ async def test_auto_activate_reports_already_latest_install(
         "updated_at": "2026-05-08T08:00:00+00:00",
     }
 
-    payload = await cloud_routes._maybe_auto_activate_upgrade(record)
+    payload = await console_routes._maybe_auto_activate_upgrade(record)
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "already_latest"
     assert payload["details"]["auto_install_version"] == "2026.5.9"

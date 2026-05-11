@@ -5,26 +5,33 @@ import { useTranslation } from 'react-i18next';
 import { authApi } from '@/api/auth';
 import { extractErrorMessage } from '@/utils/error';
 
-export default function FlocksProUpgradeCallbackPage() {
+export default function FlocksproUpgradeCallbackPage() {
   const { t } = useTranslation('flockspro');
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const bindingId = searchParams.get('binding_id');
+    const consoleLoginId = searchParams.get('console_login_id');
+    const state = searchParams.get('state') ?? undefined;
     const passportUid = searchParams.get('passport_uid') ?? undefined;
-    if (!bindingId) {
-      setError(t('callback.missingBindingId'));
+    const loginStatus = searchParams.get('console_login_status');
+    const callbackMessage = searchParams.get('message') || searchParams.get('error_code');
+    if (loginStatus === 'error') {
+      setError(callbackMessage || t('callback.exchangeFailed'));
+      return;
+    }
+    if (!consoleLoginId) {
+      setError(t('callback.missingConsoleLoginId'));
       return;
     }
 
     let cancelled = false;
     const run = async () => {
       try {
-        await authApi.exchangeCloudBinding(bindingId, passportUid);
+        await authApi.finishConsoleLogin(consoleLoginId, state, passportUid);
         if (!cancelled) {
-          navigate('/flockspro-upgrade?bind=success', { replace: true });
+          navigate('/flockspro-upgrade?login=success', { replace: true });
         }
       } catch (err) {
         if (!cancelled) {

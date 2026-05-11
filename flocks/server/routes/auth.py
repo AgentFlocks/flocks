@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from flocks.auth.service import AuthService, TEMP_PASSWORD_TTL_HOURS
-from flocks.cloud.binding import CloudBindingService
+from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import (
     clear_session_cookie,
     require_admin,
@@ -133,29 +133,29 @@ class ResetOwnPasswordResponse(BaseModel):
     must_reset_password: bool
 
 
-class CloudBindingInitResponse(BaseModel):
-    binding_id: str
-    portal_login_url: str
+class ConsoleLoginStartResponse(BaseModel):
+    console_login_id: str
+    passport_login_url: str
 
 
-class CloudBindingExchangeResponse(BaseModel):
-    binding_id: str
-    cloud_session_token: str
-    fingerprint: str
-    install_id: str
+class ConsoleLoginFinishRequest(BaseModel):
+    console_login_id: str = Field(..., min_length=1)
+    state: str | None = None
+    passport_uid: str | None = None
 
 
-class CloudBindingSessionResponse(BaseModel):
-    bound: bool
-    binding_id: str | None = None
+class ConsoleLoginFinishResponse(BaseModel):
+    console_login_id: str
+    logged_in: bool
     account_name: str | None = None
     updated_at: str | None = None
 
 
-class CloudSyncNowResponse(BaseModel):
-    success: bool
-    synced_at: str | None = None
-    detail: str | None = None
+class ConsoleLoginSessionResponse(BaseModel):
+    logged_in: bool
+    console_login_id: str | None = None
+    account_name: str | None = None
+    updated_at: str | None = None
 
 
 @router.get("/bootstrap-status", response_model=BootstrapStatusResponse, summary="获取本地账号初始化状态")
@@ -214,12 +214,15 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
     return _to_me_response(user)
 
 
-@router.get("/cloud/login", response_model=CloudBindingInitResponse, summary="发起云账号绑定")
-async def cloud_login_init(request: Request, return_to: str | None = None) -> CloudBindingInitResponse:
+@router.get("/console-login/start", response_model=ConsoleLoginStartResponse, summary="发起 console 云账号登录")
+async def console_login_start(request: Request, return_to: str | None = None) -> ConsoleLoginStartResponse:
     require_admin(request)
-    resolved_return_to = return_to or "/auth/cloud/return"
-    result = await CloudBindingService.init_binding(return_to=resolved_return_to)
-    return CloudBindingInitResponse(**result)
+    resolved_return_to = return_to or "/flockspro-upgrade/callback"
+    try:
+        result = await ConsoleLoginService.start_console_login(return_to=resolved_return_to)
+        return ConsoleLoginStartResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/logout", summary="退出登录")
@@ -252,70 +255,58 @@ async def me(request: Request) -> MeResponse:
     return _to_me_response(full_user or user)
 
 
-@router.get("/cloud/return", response_model=CloudBindingExchangeResponse, summary="完成云账号绑定 exchange")
-async def cloud_login_return(
-    binding_id: str,
+@router.post("/console-login/finish", response_model=ConsoleLoginFinishResponse, summary="完成 console 云账号登录 exchange")
+async def console_login_finish(
+    payload: ConsoleLoginFinishRequest,
     request: Request,
-    passport_uid: str | None = None,
-) -> CloudBindingExchangeResponse:
+) -> ConsoleLoginFinishResponse:
     require_admin(request)
     try:
-        result = await CloudBindingService.exchange_binding(
-            binding_id=binding_id,
-            passport_uid=passport_uid,
+        result = await ConsoleLoginService.finish_console_login(
+            console_login_id=payload.console_login_id,
+            state=payload.state,
+            passport_uid=payload.passport_uid,
         )
-        return CloudBindingExchangeResponse(**result)
+        try:
+            await ConsoleLoginService.send_heartbeat()
+            await ConsoleLoginService.sync_node_profile(force=True, source="login")
+        except Exception:
+            # Login success must not depend on best-effort telemetry delivery.
+            pass
+        account_name = result.get("user_display") or result.get("user_email") or result.get("passport_uid")
+        return ConsoleLoginFinishResponse(
+            console_login_id=payload.console_login_id,
+            logged_in=True,
+            account_name=account_name,
+            updated_at=result.get("updated_at"),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@router.get("/cloud/session", response_model=CloudBindingSessionResponse, summary="查询本地云绑定状态")
-async def cloud_session_status(request: Request) -> CloudBindingSessionResponse:
+@router.get("/console-login/session", response_model=ConsoleLoginSessionResponse, summary="查询本地 console 登录状态")
+async def console_login_session(request: Request) -> ConsoleLoginSessionResponse:
     require_admin(request)
-    session = await CloudBindingService.get_bound_session()
+    session = await ConsoleLoginService.get_console_session()
     if not session:
-        return CloudBindingSessionResponse(bound=False)
+        return ConsoleLoginSessionResponse(logged_in=False)
     account_name = session.get("user_display") or session.get("user_email") or session.get("passport_uid")
     if not account_name:
-        # 严格二态：没有账号名时视为未绑定
-        return CloudBindingSessionResponse(bound=False)
-    return CloudBindingSessionResponse(
-        bound=True,
-        binding_id=session.get("binding_id"),
+        # 严格二态：没有账号名时视为未登录
+        return ConsoleLoginSessionResponse(logged_in=False)
+    return ConsoleLoginSessionResponse(
+        logged_in=True,
+        console_login_id=session.get("console_login_id"),
         account_name=account_name,
         updated_at=session.get("updated_at"),
     )
 
 
-@router.post("/cloud/unbind", summary="解除本地云绑定")
-async def cloud_session_unbind(request: Request) -> dict:
+@router.post("/console-login/logout", summary="退出 console 云账号登录")
+async def console_login_logout(request: Request) -> dict:
     require_admin(request)
-    await CloudBindingService.clear_bound_session()
+    await ConsoleLoginService.logout_console_session()
     return {"success": True}
-
-
-@router.post("/cloud/sync-now", response_model=CloudSyncNowResponse, summary="立即同步节点信息到云端")
-async def cloud_sync_now(request: Request) -> CloudSyncNowResponse:
-    require_admin(request)
-    try:
-        heartbeat_result = await CloudBindingService.send_heartbeat()
-        result = await CloudBindingService.sync_node_profile(force=True, source="manual")
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    synced_at = None
-    if isinstance(result, dict):
-        node = result.get("node")
-        if isinstance(node, dict):
-            synced_at = node.get("received_at") or node.get("sent_at")
-    if not synced_at and isinstance(heartbeat_result, dict):
-        hb_node = heartbeat_result.get("node")
-        if isinstance(hb_node, dict):
-            synced_at = hb_node.get("received_at") or hb_node.get("sent_at")
-    return CloudSyncNowResponse(
-        success=True,
-        synced_at=synced_at,
-        detail="ok",
-    )
 
 
 @router.post("/change-password", summary="修改当前用户密码")

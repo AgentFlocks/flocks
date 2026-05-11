@@ -1,6 +1,4 @@
-"""
-Cloud upgrade request orchestration routes (OSS-side).
-"""
+"""Console upgrade request orchestration routes (OSS-side)."""
 
 from __future__ import annotations
 
@@ -16,7 +14,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
-from flocks.cloud.binding import CloudBindingService
+from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_admin
 from flocks.storage.storage import Storage
 from flocks.updater import check_update, perform_update
@@ -26,11 +24,13 @@ _AUTO_UPGRADE_TASKS: set[asyncio.Task[None]] = set()
 _AUTO_UPGRADE_REQUEST_IDS: set[str] = set()
 
 
-def _activation_base_url() -> str:
-    # Keep parity with cloud binding: default to local ACT when env is absent.
-    if "FLOCKS_ACT_BASE_URL" in os.environ:
-        return os.getenv("FLOCKS_ACT_BASE_URL", "").strip().rstrip("/")
-    return "http://127.0.0.1:18000"
+def _console_base_url() -> str:
+    raw = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").strip().rstrip("/")
+    if not raw:
+        return ""
+    if raw.startswith(("http://", "https://")):
+        return raw
+    return f"https://{raw}"
 
 
 class UpgradeRequestCreate(BaseModel):
@@ -57,11 +57,11 @@ class UpgradeRequestStatus(BaseModel):
 
 
 def _request_key(request_id: str) -> str:
-    return f"cloud:upgrade_request:{request_id}"
+    return f"console:upgrade_request:{request_id}"
 
 
 async def _list_request_ids() -> list[str]:
-    ids = await Storage.get("cloud:upgrade_request_ids")
+    ids = await Storage.get("console:upgrade_request_ids")
     if not isinstance(ids, list):
         return []
     return [str(i) for i in ids]
@@ -71,7 +71,7 @@ async def _push_request_id(request_id: str) -> None:
     ids = await _list_request_ids()
     if request_id not in ids:
         ids.append(request_id)
-        await Storage.set("cloud:upgrade_request_ids", ids, "json")
+        await Storage.set("console:upgrade_request_ids", ids, "json")
 
 
 def _is_approved(record: dict[str, Any]) -> bool:
@@ -170,15 +170,15 @@ async def _report_pro_bundle_installation(
 ) -> None:
     details = record.setdefault("details", {})
     try:
-        cloud_session = await CloudBindingService.require_bound_session()
+        console_session = await ConsoleLoginService.require_console_session()
     except Exception as exc:
         details["install_receipt_error"] = str(exc)
         return
     marker = _read_pro_bundle_install_marker()
     payload = {
         "license_id": record.get("activate_key"),
-        "fingerprint": cloud_session.get("fingerprint"),
-        "install_id": cloud_session.get("install_id"),
+        "fingerprint": console_session.get("fingerprint"),
+        "install_id": console_session.get("install_id"),
         "installed_version": marker.get("installed_version") or details.get("auto_install_target") or details.get("auto_install_version") or "",
         "oss_version": marker.get("oss_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
@@ -187,13 +187,16 @@ async def _report_pro_bundle_installation(
         "error_message": error_message,
         "reported_at": datetime.now(UTC).isoformat(),
     }
-    act_base = _activation_base_url()
+    console_base = _console_base_url()
+    if not console_base:
+        details["install_receipt_error"] = "FLOCKS_CONSOLE_BASE_URL 未配置"
+        return
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
-                f"{act_base}/v1/pro-bundles/installations",
+                f"{console_base}/v1/pro-bundles/installations",
                 json=payload,
-                headers={"Authorization": f"Bearer {cloud_session['cloud_session_token']}"},
+                headers={"Authorization": f"Bearer {console_session['console_session_token']}"},
             )
             resp.raise_for_status()
             details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
@@ -248,8 +251,8 @@ def _schedule_auto_activate_upgrade(request_id: str, record: dict[str, Any]) -> 
     task.add_done_callback(_AUTO_UPGRADE_TASKS.discard)
 
 
-def _raise_cloud_service_error(exc: Exception) -> None:
-    detail = "云端升级服务调用失败，请稍后重试"
+def _raise_console_service_error(exc: Exception) -> None:
+    detail = "console 升级服务调用失败，请稍后重试"
     if isinstance(exc, httpx.HTTPStatusError):
         try:
             payload = exc.response.json()
@@ -265,7 +268,7 @@ def _raise_cloud_service_error(exc: Exception) -> None:
 async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request) -> UpgradeRequestStatus:
     admin_user = require_admin(request)
     try:
-        cloud_session = await CloudBindingService.require_bound_session()
+        console_session = await ConsoleLoginService.require_console_session()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
@@ -294,26 +297,26 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
         "updated_at": now,
     }
 
-    act_base = _activation_base_url()
-    if act_base:
-        cloud_payload = {
+    console_base = _console_base_url()
+    if console_base:
+        console_payload = {
             "node_id": str(admin_user.id),
-            "binding_id": cloud_session.get("binding_id"),
-            "fingerprint": cloud_session.get("fingerprint"),
-            "install_id": cloud_session.get("install_id"),
-            "passport_uid": cloud_session.get("passport_uid"),
+            "console_login_id": console_session.get("console_login_id"),
+            "fingerprint": console_session.get("fingerprint"),
+            "install_id": console_session.get("install_id"),
+            "passport_uid": console_session.get("passport_uid"),
             "company_name": details["company"],
             "contact_email": details["applicant_email"] or "",
             "form_data": details,
         }
-        headers = {"Authorization": f"Bearer {cloud_session['cloud_session_token']}"}
+        headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.post(f"{act_base}/v1/upgrade-requests", json=cloud_payload, headers=headers)
+                resp = await client.post(f"{console_base}/v1/upgrade-requests", json=console_payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            _raise_cloud_service_error(exc)
+            _raise_console_service_error(exc)
         else:
             record.update(
                 {
@@ -362,15 +365,15 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
 
-    act_base = _activation_base_url()
-    if act_base:
+    console_base = _console_base_url()
+    if console_base:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{act_base}/v1/upgrade-requests/{request_id}")
+                resp = await client.get(f"{console_base}/v1/upgrade-requests/{request_id}")
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            _raise_cloud_service_error(exc)
+            _raise_console_service_error(exc)
         else:
             raw.update(
                 {
@@ -399,22 +402,19 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
 
-    act_base = _activation_base_url()
-    if act_base:
+    console_base = _console_base_url()
+    if console_base:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 data: dict[str, Any] | None = None
-                resp = await client.post(f"{act_base}/v1/upgrade-requests/{request_id}/withdraw")
-                if resp.status_code == status.HTTP_404_NOT_FOUND:
-                    # Backward-compatible with older ACT endpoint naming.
-                    resp = await client.post(f"{act_base}/v1/upgrade-requests/{request_id}/cancel")
+                resp = await client.post(f"{console_base}/v1/upgrade-requests/{request_id}/withdraw")
                 if resp.status_code == status.HTTP_400_BAD_REQUEST:
-                    # Idempotent cancel UX: if cloud already changed state, sync latest instead of surfacing 400.
-                    latest_resp = await client.get(f"{act_base}/v1/upgrade-requests/{request_id}")
+                    # Idempotent cancel UX: if console already changed state, sync latest instead of surfacing 400.
+                    latest_resp = await client.get(f"{console_base}/v1/upgrade-requests/{request_id}")
                     if latest_resp.status_code == status.HTTP_200_OK:
                         latest_data = latest_resp.json()
                         latest_status = str(latest_data.get("status", "")).strip().lower()
-                        # Cloud may reject withdraw for approved requests.
+                        # Console may reject withdraw for approved requests.
                         # Keep OSS UX actionable: treat this as a local cancel so user can re-apply.
                         if str(raw.get("status", "")).strip().lower() == "approved" and latest_status == "approved":
                             latest_data = {**latest_data, "status": "cancelled"}
@@ -424,13 +424,13 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
                     else:
                         latest_resp.raise_for_status()
                 elif resp.status_code == status.HTTP_404_NOT_FOUND:
-                    # Cloud may have lost this request (e.g. in-memory reset). Keep local UX consistent.
+                    # Console may have lost this request (e.g. in-memory reset). Keep local UX consistent.
                     data = {"status": "cancelled"}
                 else:
                     resp.raise_for_status()
                     data = resp.json()
         except httpx.HTTPError as exc:
-            _raise_cloud_service_error(exc)
+            _raise_console_service_error(exc)
         else:
             raw.update(
                 {
