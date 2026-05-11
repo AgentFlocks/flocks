@@ -4,8 +4,10 @@ Storage module for persistent data management
 Provides SQLite-based storage similar to Flocks's Storage namespace
 """
 
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Type, TypeVar
+import sqlite3
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type, TypeVar
 import json
 import aiosqlite
 from datetime import datetime
@@ -43,6 +45,9 @@ class Storage:
     _db_path: Optional[Path] = None
     _initialized = False
     _extension_ddls: List[str] = []
+    _sqlite_timeout_s = 5.0
+    _sqlite_busy_timeout_ms = 5000
+    _sqlite_journal_mode = "WAL"
 
     @classmethod
     def _invalidate_runtime_caches(cls) -> None:
@@ -70,6 +75,48 @@ class Storage:
             return cls._db_path
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
+
+    @classmethod
+    async def configure_connection(
+        cls, conn: aiosqlite.Connection
+    ) -> aiosqlite.Connection:
+        """Apply the runtime SQLite contract to an async connection."""
+        await conn.execute(f"PRAGMA journal_mode={cls._sqlite_journal_mode}")
+        await conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
+        await conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    @classmethod
+    def configure_sync_connection(cls, conn: sqlite3.Connection) -> sqlite3.Connection:
+        """Apply the runtime SQLite contract to a sync connection."""
+        conn.execute(f"PRAGMA journal_mode={cls._sqlite_journal_mode}")
+        conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    @classmethod
+    @asynccontextmanager
+    async def connect(
+        cls, db_path: Optional[Path] = None
+    ) -> AsyncIterator[aiosqlite.Connection]:
+        """Open a configured async SQLite connection for the active storage DB."""
+        target = Path(db_path) if db_path is not None else cls.get_db_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = await aiosqlite.connect(target, timeout=cls._sqlite_timeout_s)
+        try:
+            await cls.configure_connection(conn)
+            yield conn
+        finally:
+            await conn.close()
+
+    @classmethod
+    def connect_sync(cls, db_path: Optional[Path] = None) -> sqlite3.Connection:
+        """Open a configured sync SQLite connection for the active storage DB."""
+        target = Path(db_path) if db_path is not None else cls.get_db_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(target, timeout=cls._sqlite_timeout_s)
+        conn.row_factory = sqlite3.Row
+        return cls.configure_sync_connection(conn)
 
     @classmethod
     def register_ddl(cls, ddl: str) -> None:
@@ -124,7 +171,7 @@ class Storage:
         cls._invalidate_runtime_caches()
         
         # Create tables
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS storage (
                     key TEXT PRIMARY KEY,
@@ -150,8 +197,9 @@ class Storage:
         # Run extension DDLs registered before init
         for ddl in cls._extension_ddls:
             try:
-                async with aiosqlite.connect(cls._db_path) as db:
+                async with cls.connect(cls._db_path) as db:
                     await db.executescript(ddl)
+                    await db.commit()
             except Exception as e:
                 cls._log.warn("storage.extension_ddl.failed", {"error": str(e)})
 
@@ -166,7 +214,7 @@ class Storage:
         (credentials, model settings, default models, custom providers)
         is stored in flocks.json / .secret.json.
         """
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             await db.executescript("""
                 -- Usage records (dynamic data — the only model-management table in SQLite)
                 CREATE TABLE IF NOT EXISTS usage_records (
@@ -249,7 +297,7 @@ class Storage:
         from datetime import UTC
         now = datetime.now(UTC).isoformat()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
                 VALUES (?, ?, ?, 
@@ -274,7 +322,7 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             async with db.execute(
                 "SELECT value, type FROM storage WHERE key = ?", (key,)
             ) as cursor:
@@ -303,7 +351,7 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
             await db.commit()
             deleted = cursor.rowcount > 0
@@ -326,7 +374,7 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             if prefix:
                 query = "SELECT key FROM storage WHERE key LIKE ?"
                 params = (f"{prefix}%",)
@@ -360,7 +408,7 @@ class Storage:
         """
         await cls._ensure_init()
 
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             if prefix:
                 query = "SELECT key, value FROM storage WHERE key LIKE ?"
                 params = (f"{prefix}%",)
@@ -393,7 +441,7 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             async with db.execute(
                 "SELECT 1 FROM storage WHERE key = ?", (key,)
             ) as cursor:
@@ -414,7 +462,7 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with aiosqlite.connect(cls._db_path) as db:
+        async with cls.connect(cls._db_path) as db:
             if prefix:
                 query = "DELETE FROM storage WHERE key LIKE ?"
                 params = (f"{prefix}%",)

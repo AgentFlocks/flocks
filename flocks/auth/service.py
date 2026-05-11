@@ -82,7 +82,7 @@ class AuthService:
         db_path = Storage.get_db_path()
         if cls._initialized and cls._initialized_db_path == str(db_path) and db_path.exists():
             return
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS users (
@@ -162,7 +162,7 @@ class AuthService:
             return True
         await cls.init()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute("SELECT COUNT(1) FROM users") as cursor:
                 row = await cursor.fetchone()
                 result = bool(row and row[0] > 0)
@@ -211,7 +211,7 @@ class AuthService:
         now = _iso_now()
         password_hash = cls._hash_password(password)
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute(
                 """
                 INSERT INTO users (
@@ -239,7 +239,7 @@ class AuthService:
     async def get_user_by_id(cls, user_id: str) -> Optional[LocalUser]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password,
@@ -266,7 +266,7 @@ class AuthService:
     async def get_user_by_username(cls, username: str) -> Optional[Tuple[LocalUser, str, Optional[str]]]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password, created_at, updated_at, last_login_at,
@@ -295,7 +295,7 @@ class AuthService:
         await cls.init()
         db_path = Storage.get_db_path()
         users: List[LocalUser] = []
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT id, username, role, status, must_reset_password, created_at, updated_at, last_login_at
@@ -326,7 +326,7 @@ class AuthService:
         now = _iso_now()
         expires_at = (_utc_now() + timedelta(days=cls._session_ttl_days)).isoformat()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute(
                 """
                 INSERT INTO user_sessions(session_id, user_id, expires_at, created_at, updated_at)
@@ -341,7 +341,7 @@ class AuthService:
     async def get_user_by_session_id(cls, session_id: str) -> Optional[LocalUser]:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             async with db.execute(
                 """
                 SELECT u.id, u.username, u.role, u.status, u.must_reset_password, u.created_at, u.updated_at, u.last_login_at,
@@ -377,7 +377,7 @@ class AuthService:
     async def revoke_session(cls, session_id: str) -> None:
         await cls.init()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute("DELETE FROM user_sessions WHERE session_id = ?", (session_id,))
             await db.commit()
 
@@ -407,7 +407,7 @@ class AuthService:
         session_id = await cls._create_session(user.id)
         now = _iso_now()
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             await db.execute("UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?", (now, now, user.id))
             await db.commit()
 
@@ -453,7 +453,7 @@ class AuthService:
         now = _iso_now()
         pwd_hash = cls._hash_password(new_password)
         db_path = Storage.get_db_path()
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             cursor = await db.execute(
                 """
                 UPDATE users
