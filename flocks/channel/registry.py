@@ -80,10 +80,12 @@ class ChannelRegistry:
         from flocks.channel.builtin.feishu.channel import FeishuChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
         from flocks.channel.builtin.wecom.channel import WeComChannel
+        from flocks.channel.builtin.weixin.channel import WeixinChannel
         self.register(FeishuChannel())
         self.register(WeComChannel())
         self.register(TelegramChannel())
         self.register(DingTalkChannel())
+        self.register(WeixinChannel())
 
     def _register_plugin_extension_point(self) -> None:
         from flocks.plugin import PluginLoader, ExtensionPoint

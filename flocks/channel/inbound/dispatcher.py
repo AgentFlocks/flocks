@@ -959,6 +959,11 @@ class InboundDispatcher:
         model: Optional[dict] = None,
         agent: Optional[str] = None,
     ) -> None:
+        import mimetypes
+        import os
+        from pathlib import Path
+        from urllib.parse import unquote, urlparse
+
         from flocks.session.message import FilePart, Message, MessageRole
 
         create_kwargs: dict = dict(
@@ -980,29 +985,70 @@ class InboundDispatcher:
 
         message = await Message.create(**create_kwargs)
 
-        if msg.channel_id != "feishu" or not msg.media_url or channel_config is None:
+        if not msg.media_url:
             return
 
         try:
-            from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
+            parsed = urlparse(msg.media_url)
+            scheme = parsed.scheme.lower()
 
-            raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
-            media = await download_inbound_media(msg, raw_cfg)
-            if not media:
-                return
+            if msg.channel_id == "feishu" and channel_config is not None:
+                # Feishu: media is still on the remote server, download first.
+                from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
 
-            await Message.store_part(
-                session_id,
-                message.id,
-                FilePart(
-                    sessionID=session_id,
-                    messageID=message.id,
-                    mime=media.mime,
-                    filename=media.filename,
-                    url=media.url,
-                    source=media.source,
-                ),
-            )
+                raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
+                media = await download_inbound_media(msg, raw_cfg)
+                if not media:
+                    return
+
+                await Message.store_part(
+                    session_id,
+                    message.id,
+                    FilePart(
+                        sessionID=session_id,
+                        messageID=message.id,
+                        mime=media.mime,
+                        filename=media.filename,
+                        url=media.url,
+                        source=media.source,
+                    ),
+                )
+
+            elif scheme in ("", "file"):
+                # Local file already downloaded by the channel plugin (e.g. weixin).
+                # file:// URIs may have URL-encoded paths (e.g. Chinese filenames).
+                local_path = unquote(parsed.path) if scheme == "file" else msg.media_url
+                if not os.path.isfile(local_path):
+                    log.warning("dispatcher.inbound_media_missing", {
+                        "channel_id": msg.channel_id,
+                        "path": local_path,
+                    })
+                    return
+                filename = Path(local_path).name
+                mime = (
+                    msg.media_mime
+                    or mimetypes.guess_type(local_path)[0]
+                    or "application/octet-stream"
+                )
+                file_uri = Path(local_path).resolve().as_uri()
+                await Message.store_part(
+                    session_id,
+                    message.id,
+                    FilePart(
+                        sessionID=session_id,
+                        messageID=message.id,
+                        mime=mime,
+                        filename=filename,
+                        url=file_uri,
+                        source=None,
+                    ),
+                )
+                log.info("dispatcher.inbound_media_attached", {
+                    "channel_id": msg.channel_id,
+                    "filename": filename,
+                    "mime": mime,
+                })
+
         except Exception as e:
             log.warning("dispatcher.inbound_media_download_failed", {
                 "channel_id": msg.channel_id,

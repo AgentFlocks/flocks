@@ -301,6 +301,52 @@ async def restart_all_channels():
 
 
 # ---------------------------------------------------------------------------
+# Weixin QR login
+# ---------------------------------------------------------------------------
+
+class WeixinQrStartRequest(BaseModel):
+    baseUrl: Optional[str] = None
+
+
+@router.post("/weixin/qr-login/start")
+async def weixin_qr_login_start(req: WeixinQrStartRequest):
+    """Request a fresh iLink Bot QR code for WeChat account login.
+
+    No credentials needed — this is the pre-authentication step.
+    Returns ``{qrcode_value, qrcode_url}`` for the frontend to render.
+    """
+    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+    from flocks.channel.builtin.weixin.qr_login import start_qr_login
+
+    base_url = (req.baseUrl or "").strip() or ILINK_BASE_URL
+    try:
+        result = await start_qr_login(base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.start_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/weixin/qr-login/status")
+async def weixin_qr_login_status(qrcode: str, baseUrl: Optional[str] = None):
+    """Poll the QR code scan status once.
+
+    Returns ``{status}`` where status ∈ waiting | scaned | expired | confirmed.
+    On ``confirmed`` also returns ``{account_id, token}``.
+    """
+    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+    from flocks.channel.builtin.weixin.qr_login import poll_qr_status
+
+    base_url = (baseUrl or "").strip() or ILINK_BASE_URL
+    try:
+        result = await poll_qr_status(qrcode_value=qrcode, base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.poll_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Telegram pairing
 # ---------------------------------------------------------------------------
 
