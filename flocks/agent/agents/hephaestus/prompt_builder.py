@@ -44,6 +44,7 @@ def build_hephaestus_prompt(
     use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
+        build_agent_selection_table,
         build_key_triggers_section,
         build_tool_selection_table,
         build_explore_section,
@@ -56,7 +57,8 @@ def build_hephaestus_prompt(
     )
 
     key_triggers = build_key_triggers_section(available_agents, available_skills)
-    tool_selection = build_tool_selection_table(available_agents, available_tools, available_skills)
+    tool_selection = build_tool_selection_table([], available_tools, available_skills)
+    agent_selection = build_agent_selection_table(available_agents)
     explore_section = build_explore_section(available_agents)
     librarian_section = build_librarian_section(available_agents)
     category_skills_guide = build_category_skills_delegation_guide(available_categories, available_skills)
@@ -184,6 +186,8 @@ Agent: *runs gh pr list, gh pr view, searches recent commits*
 
 __TOOL_SELECTION__
 
+__AGENT_SELECTION__
+
 __EXPLORE_SECTION__
 
 __LIBRARIAN_SECTION__
@@ -235,6 +239,7 @@ Before final response:
     prompt = template
     prompt = prompt.replace("__KEY_TRIGGERS__", key_triggers)
     prompt = prompt.replace("__TOOL_SELECTION__", tool_selection)
+    prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__EXPLORE_SECTION__", explore_section)
     prompt = prompt.replace("__LIBRARIAN_SECTION__", librarian_section)
     prompt = prompt.replace("__CATEGORY_SKILLS_GUIDE__", category_skills_guide)

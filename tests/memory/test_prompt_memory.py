@@ -50,19 +50,22 @@ async def test_prompt_memory():
         print(f"❌ Test failed: {e}")
         return False
     
-    # Test 3: Test build_system_prompt without memory
-    print("\n[3/4] Testing build_system_prompt without memory...")
+    # Test 3: Test runtime system prompt builder without memory bootstrap
+    print("\n[3/4] Testing build_system_prompts without memory bootstrap...")
     try:
-        prompt = await SessionPrompt.build_system_prompt(
+        prompt_parts = await SessionPrompt.build_system_prompts(
+            session_id="test",
+            session_directory=None,
             agent_name="test_agent",
-            include_environment=False,
-            include_custom=False,
-            include_memory=False,
+            agent_prompt="agent prompt",
+            provider_id="test-provider",
+            model_id="test-model",
         )
+        prompt = "\n\n".join(prompt_parts)
         
         print(f"   Prompt length: {len(prompt)} chars")
         assert len(prompt) > 0, "Should generate prompt"
-        assert "test_agent" in prompt, "Should include agent name"
+        assert "agent prompt" in prompt, "Should include agent prompt"
         
         print("✅ System prompt generation working")
     except Exception as e:
@@ -71,32 +74,34 @@ async def test_prompt_memory():
         traceback.print_exc()
         return False
     
-    # Test 4: Test build_system_prompt with memory (disabled)
-    print("\n[4/4] Testing build_system_prompt with memory (disabled)...")
+    # Test 4: Test runtime system prompt builder with disabled memory bootstrap injection
+    print("\n[4/4] Testing build_system_prompts with memory bootstrap disabled...")
     try:
-        import tempfile
-        with tempfile.TemporaryDirectory() as tmpdir:
-            memory = SessionMemory(
-                session_id="test",
-                project_id="proj",
-                workspace_dir=tmpdir,
-                enabled=False,
-            )
-            
-            prompt = await SessionPrompt.build_system_prompt(
-                agent_name="test_agent",
-                include_environment=False,
-                include_custom=False,
-                include_memory=True,
-                session_memory=memory,
-                user_message="test query",
-            )
-            
-            print(f"   Prompt length: {len(prompt)} chars")
-            assert len(prompt) > 0, "Should generate prompt"
-            assert "Relevant Memory" not in prompt, "Should not include memory section when disabled"
-            
-            print("✅ Memory integration working correctly")
+        prompt_parts = await SessionPrompt.build_system_prompts(
+            session_id="test",
+            session_directory=None,
+            agent_name="test_agent",
+            agent_prompt="agent prompt",
+            provider_id="test-provider",
+            model_id="test-model",
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": {
+                    "path": "MEMORY.md",
+                    "content": "remembered context",
+                    "inject": False,
+                },
+            },
+            prompt_tool_names=("read",),
+        )
+        prompt = "\n\n".join(prompt_parts)
+
+        print(f"   Prompt length: {len(prompt)} chars")
+        assert len(prompt) > 0, "Should generate prompt"
+        assert "Relevant Memory" not in prompt, "Should not include memory section when disabled"
+        assert "remembered context" not in prompt, "Should not inject disabled memory snapshot"
+
+        print("✅ Memory integration working correctly")
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
@@ -109,16 +114,18 @@ async def test_prompt_memory():
     
     print("\n📋 Prompt Memory Integration Ready:")
     print("   ✅ build_memory_context() method")
-    print("   ✅ build_system_prompt() with memory support")
-    print("   ✅ Automatic memory retrieval")
+    print("   ✅ build_system_prompts() runtime prompt builder")
+    print("   ✅ Memory bootstrap injection control")
     print("   ✅ Graceful disabled handling")
     
     print("\n🎯 Usage Example:")
-    print("   memory = await Session.get_memory(project_id, session_id)")
-    print("   prompt = await SessionPrompt.build_system_prompt(")
-    print("       include_memory=True,")
-    print("       session_memory=memory,")
-    print("       user_message='How do I use transformers?'")
+    print("   prompt_parts = await SessionPrompt.build_system_prompts(")
+    print("       session_id=session.id,")
+    print("       session_directory=session.directory,")
+    print("       agent_name=agent.name,")
+    print("       agent_prompt=agent.prompt,")
+    print("       provider_id=provider_id,")
+    print("       model_id=model_id,")
     print("   )")
     
     return True

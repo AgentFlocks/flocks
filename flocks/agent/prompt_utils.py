@@ -105,40 +105,44 @@ def build_key_triggers_section(
 
 
 def build_tool_selection_table(
-    agents: List[AvailableAgent],
+    _agents: List[AvailableAgent],
     tools: Optional[List[AvailableTool]] = None,
     _skills: Optional[List[AvailableSkill]] = None,
 ) -> str:
     tools = tools or []
-    rows: List[str] = ["### Tool & Agent Selection:"]
+    rows: List[str] = ["### Available Tools:"]
 
     if tools:
         tools_block = _format_tools_for_prompt(tools)
         if tools_block:
-            rows += [
-                "",
-                "**Available Tools**:",
-                tools_block,
-            ]
+            rows += ["", tools_block]
+    return "\n".join(rows)
 
+
+def build_agent_selection_table(agents: List[AvailableAgent]) -> str:
     cost_order = {"FREE": 0, "CHEAP": 1, "EXPENSIVE": 2}
     sorted_agents = [a for a in agents if a.metadata.category != "utility"]
     sorted_agents.sort(key=lambda a: cost_order.get(a.metadata.cost, 99))
 
+    rows: List[str] = ["### Available Agents:"]
     if sorted_agents:
         rows += [
             "",
-            "**Agents** (delegate when task is complex or specialised):",
-            "",
-            "| Agent | Cost | When to Use |",
-            "|-------|------|-------------|",
+            "| Agent | Cost | When to Use | Trigger Signals |",
+            "|-------|------|-------------|-----------------|",
         ]
         for agent in sorted_agents:
             short_desc = agent.description.split(".")[0] or agent.description
-            rows.append(f"| `{agent.name}` | {agent.metadata.cost} | {short_desc} |")
+            trigger_text = ", ".join(t.trigger for t in (agent.metadata.triggers or [])[:2])
+            if not trigger_text and agent.metadata.use_when:
+                trigger_text = ", ".join(agent.metadata.use_when[:2])
+            trigger_text = trigger_text or "-"
+            rows.append(
+                f"| `{agent.name}` | {agent.metadata.cost} | {short_desc} | {trigger_text} |"
+            )
 
     rows.append("")
-    rows.append("**Default flow**: explore/librarian (background) + tools → oracle (if required)")
+    rows.append("**Default flow**: direct tools first → `explore` / `librarian` for research → `oracle` if required")
     return "\n".join(rows)
 
 

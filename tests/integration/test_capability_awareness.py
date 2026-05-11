@@ -14,8 +14,9 @@ tests/integration/test_capability_awareness.py
    - build_workflows_section() 能把它渲染成 prompt 片段
    - inject_dynamic_prompts() 将 AvailableWorkflow 传递给 prompt builder
 
-3. Rex prompt 包含 workflow 段落
-   - Rex agent 加载后，其 prompt 包含 "Available Workflows" 字样（前提：存在工作流）
+3. Rex prompt 保留 agent 调度上下文，但不再内嵌完整 tools/skills/workflows 目录
+   - Rex agent 加载后，其 prompt 包含常见 subagent / specialist 信息
+   - Rex agent prompt 不包含 "Available Workflows" 这类完整目录段落
 
 4. /skills slash command 端到端（真实 Skill 扫描）
    - run_slash_command_tool("skills") 成功返回技能列表，不报错
@@ -257,15 +258,15 @@ class TestWorkflowInjectionPipeline:
 
 
 # ===========================================================================
-# 3. Rex prompt 包含 workflow 段落（存在工作流时）
+# 3. Rex prompt 保留 agent 调度上下文，但移除完整目录段落
 # ===========================================================================
 
 @pytest.mark.integration
-class TestRexPromptWorkflowAwareness:
+class TestRexPromptAwareness:
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_tools_section(self):
-        """Rex prompt 必须包含工具信息（基础能力感知）。"""
+        """Rex prompt 仍应是非空且包含基础调度说明。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         assert rex is not None
@@ -286,20 +287,46 @@ class TestRexPromptWorkflowAwareness:
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_skills_section(self):
-        """Rex prompt 必须包含 skills 相关信息。"""
+        """Rex prompt 不再内嵌完整 skills 目录。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         prompt = (rex.prompt or "").lower()
-        assert "skill" in prompt
+        assert "category + skills delegation system" not in prompt
 
     @pytest.mark.asyncio
-    async def test_rex_prompt_has_workflow_placeholder_or_section(self):
-        """Rex prompt 应包含 workflow 相关内容（已注入或有占位结构）。"""
+    async def test_rex_prompt_does_not_embed_full_workflow_section(self):
+        """Rex prompt 不再内嵌 workflow 目录段落。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         prompt = (rex.prompt or "").lower()
-        # Either the section was injected or the 'run_workflow' tool is mentioned
-        assert "workflow" in prompt or "run_workflow" in prompt
+        assert "### available workflows" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_does_not_embed_full_tools_table(self):
+        """Rex prompt 不再内嵌完整工具目录表。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Available Tools:" not in prompt
+        assert "Tool & Agent Selection" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_does_not_include_codebase_assessment_phase(self):
+        """Rex prompt 不再包含独立的 Codebase Assessment 阶段。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "## Phase 1 - Codebase Assessment" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_merges_agent_selection_and_delegation(self):
+        """Rex prompt 使用单一 agent 路由表，不再单独保留 Delegation Table。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Available Agents:" in prompt
+        assert "Trigger Signals" in prompt
+        assert "### Delegation Table:" not in prompt
 
     @pytest.mark.asyncio
     async def test_rex_prompt_prefers_direct_ioc_lookup_before_delegation(self):

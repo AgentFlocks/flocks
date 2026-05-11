@@ -17,7 +17,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from flocks.session.prompt import SessionPrompt, SystemPrompt, PromptTemplate
+from flocks.session.prompt import (
+    PROMPT_DEFAULT,
+    PromptTemplate,
+    SessionPrompt,
+    SystemPrompt,
+)
 from flocks.session import prompt_strings
 
 
@@ -219,18 +224,26 @@ class TestSystemPromptProvider:
     def test_anthropic_model_returns_list(self):
         result = SystemPrompt.provider("claude-3-5-sonnet-20241022")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_gemini_model_returns_list(self):
         result = SystemPrompt.provider("gemini-1.5-pro")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_gpt_model_returns_list(self):
         result = SystemPrompt.provider("gpt-4o")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_unknown_model_returns_list(self):
         result = SystemPrompt.provider("totally-unknown-model")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_none_model_returns_list(self):
         # provider() may raise on None; just verify it returns a list or handle gracefully
@@ -242,21 +255,39 @@ class TestSystemPromptProvider:
 
 
 class TestPromptToolInstructions:
-    def test_windows_includes_shell_rules(self):
+    def test_windows_bash_guidance_mentions_powershell(self):
         with patch.object(prompt_strings.platform, "system", return_value="Windows"):
-            instructions = prompt_strings._build_tool_instructions()
+            guidance = prompt_strings._build_bash_tool_guidance()
 
-        assert "do not assume GNU bash features" in instructions
-        assert "cat > file <<'EOF'" in instructions
-        assert "PowerShell-compatible syntax or Python" in instructions
+        assert "Windows machine" in guidance
+        assert "must follow PowerShell syntax" in guidance
+        assert 'Path(path).read_text(encoding="utf-8-sig")' in guidance
 
-    def test_non_windows_keeps_default_strategy(self):
+    def test_non_windows_bash_guidance_stays_generic(self):
         with patch.object(prompt_strings.platform, "system", return_value="Darwin"):
-            instructions = prompt_strings._build_tool_instructions()
+            guidance = prompt_strings._build_bash_tool_guidance()
 
-        assert "do not assume GNU bash features" not in instructions
-        assert "PowerShell-compatible syntax or Python" not in instructions
-        assert "must explicitly specify encoding" in instructions
+        assert "Bash Tool Guidance" in guidance
+        assert "Windows machine" not in guidance
+        assert "must follow PowerShell syntax" not in guidance
+
+    def test_tool_instructions_are_platform_agnostic(self):
+        with patch.object(prompt_strings.platform, "system", return_value="Windows"):
+            windows_instructions = prompt_strings._build_tool_instructions()
+        with patch.object(prompt_strings.platform, "system", return_value="Darwin"):
+            darwin_instructions = prompt_strings._build_tool_instructions()
+
+        assert windows_instructions == darwin_instructions
+        assert "PowerShell" not in windows_instructions
+        assert "must explicitly specify encoding" not in windows_instructions
+
+    def test_tool_instructions_do_not_hardcode_tool_name_mapping(self):
+        instructions = prompt_strings._build_tool_instructions()
+
+        assert "callable schema" in instructions
+        assert "Read files: use the 'read' tool" not in instructions
+        assert "Run commands: use the 'bash' tool" not in instructions
+        assert "Search code: use the 'grep' tool" not in instructions
 
 
 # ---------------------------------------------------------------------------

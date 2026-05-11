@@ -1,8 +1,7 @@
 """
 Rex agent dynamic prompt builder.
 
-Builds the complete Rex system prompt including available agent delegation
-tables, tool selection guides, and category/skill delegation instructions.
+Builds Rex's stable orchestration policy plus agent-selection context.
 Called by agent_factory.inject_dynamic_prompts() after all agents are loaded.
 """
 
@@ -28,18 +27,6 @@ def inject(
     workflows: Optional[List["AvailableWorkflow"]] = None,
 ) -> None:
     """Build and inject Rex's dynamic system prompt."""
-    from flocks.agent.prompt_utils import (
-        build_key_triggers_section,
-        build_tool_selection_table,
-        build_explore_section,
-        build_librarian_section,
-        build_category_skills_delegation_guide,
-        build_delegation_table,
-        build_oracle_section,
-        build_hard_blocks_section,
-        build_anti_patterns_section,
-    )
-
     agent_info.prompt = build_dynamic_rex_prompt(
         available_agents=available_agents,
         available_tools=tools,
@@ -59,32 +46,28 @@ def build_dynamic_rex_prompt(
     use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
+        build_agent_selection_table,
         build_key_triggers_section,
-        build_tool_selection_table,
         build_explore_section,
         build_librarian_section,
-        build_category_skills_delegation_guide,
-        build_delegation_table,
         build_oracle_section,
         build_hard_blocks_section,
         build_anti_patterns_section,
-        build_workflows_section,
     )
 
+    _ = available_tools, available_categories, available_workflows
+
     key_triggers = build_key_triggers_section(available_agents, available_skills)
+    agent_selection = build_agent_selection_table(available_agents)
     security_priority = _build_security_priority_section(available_agents)
     im_send_section = _build_im_send_section()
-    tool_selection = build_tool_selection_table(available_agents, available_tools, available_skills)
     explore_section = build_explore_section(available_agents)
     librarian_section = build_librarian_section(available_agents)
-    category_skills_guide = build_category_skills_delegation_guide(available_categories, available_skills)
-    delegation_table = build_delegation_table(available_agents)
     oracle_section = build_oracle_section(available_agents)
     hard_blocks = build_hard_blocks_section()
     anti_patterns = build_anti_patterns_section()
     slash_commands_section = _build_slash_commands_section()
     task_management_section = _task_management_section(use_task_system)
-    workflows_section = build_workflows_section(available_workflows or [])
     todo_hook_note = (
         "YOUR TASK CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TASK CONTINUATION])"
         if use_task_system
@@ -146,6 +129,8 @@ __IM_SEND_SECTION__
 - Do I have any implicit assumptions that might affect the outcome?
 - Is the search scope clear?
 
+__AGENT_SELECTION__
+
 **Direct Tool Check (MANDATORY before delegating):**
 1. Is this a simple, single-step request that I can complete with direct tools?
 2. Is there a clear tool path now, or a short `tool_search` -> tool-call path, without needing specialist judgment?
@@ -154,10 +139,10 @@ __IM_SEND_SECTION__
 
 **Delegation Check (MANDATORY before acting directly):**
 1. Is there a specialized agent that perfectly matches this request?
-2. If not, is there a `delegate_task` category best describes this task? (visual-engineering, ultrabrain, quick etc.) What skills are available to equip the agent with?
-  - If delegating by `category=...`, you MUST evaluate relevant skills and pass them via `load_skills=[...]`.
+2. If not, should I use `delegate_task(category=...)` for a generic execution path, or continue with direct tools?
+  - If delegating by `category=...`, load only skills that are clearly relevant to the task.
   - If delegating by `subagent_type=...`, `load_skills` may be omitted unless a specific skill is clearly needed.
-  - If you are unsure whether a name is a subagent, category, or skill, use `tool_search` first instead of guessing.
+  - If you are unsure whether something is a subagent, category, or tool, use `tool_search` first instead of guessing.
 3. Does this request require specialist judgment, multi-step investigation, attribution, correlation, batching, or a structured expert report?
 
 **Default Bias: Direct execution for super simple and single-step tasks. Delegate when specialization clearly improves quality or efficiency.**
@@ -196,34 +181,7 @@ When the user only mentions an image **by file path or remote URL** without an a
 
 ---
 
-## Phase 1 - Codebase Assessment (for Open-ended tasks)
-
-Before following existing patterns, assess whether they're worth following.
-
-### Quick Assessment:
-1. Check config files: linter, formatter, type config
-2. Sample 2-3 similar files for consistency
-3. Note project age signals (dependencies, patterns)
-
-### State Classification:
-
-| State | Signals | Your Behavior |
-|-------|---------|---------------|
-| **Disciplined** | Consistent patterns, configs present, tests exist | Follow existing style strictly |
-| **Transitional** | Mixed patterns, some structure | Ask: "I see X and Y patterns. Which to follow?" |
-| **Legacy/Chaotic** | No consistency, outdated patterns | Propose: "No clear conventions. I suggest [X]. OK?" |
-| **Greenfield** | New/empty project | Apply modern best practices |
-
-IMPORTANT: If codebase appears undisciplined, verify before assuming:
-- Different patterns may serve different purposes (intentional)
-- Migration might be in progress
-- You might be looking at the wrong reference files
-
----
-
-## Phase 2A - Exploration & Research
-
-__TOOL_SELECTION__
+## Phase 1 - Exploration & Research
 
 __EXPLORE_SECTION__
 
@@ -266,28 +224,22 @@ STOP searching when:
 
 ---
 
-## Phase 2B - Implementation
+## Phase 2 - Implementation
 
 ### Pre-Implementation:
 1. If task has 2+ steps -> Create todo list IMMEDIATELY, IN SUPER DETAIL. No announcements-just create it.
 2. Mark current task `in_progress` before starting
 3. Mark `completed` as soon as done (don't batch) - OBSESSIVELY TRACK YOUR WORK USING TODO TOOLS
 
-__CATEGORY_SKILLS_GUIDE__
-
-__DELEGATION_TABLE__
-
-### Delegation Prompt Structure (MANDATORY - ALL 6 sections):
+### Delegation Prompt Structure (MANDATORY - ALL 4 sections):
 
 When delegating, your prompt MUST include:
 
 ```
 1. TASK: Atomic, specific goal (one action per delegation)
-2. EXPECTED OUTCOME: Concrete deliverables with success criteria
-3. REQUIRED TOOLS: Explicit tool whitelist (prevents tool sprawl)
-4. MUST DO: Exhaustive requirements - leave NOTHING implicit
-5. MUST NOT DO: Forbidden actions - anticipate and block rogue behavior
-6. CONTEXT: File paths, existing patterns, constraints
+2. OUTPUT: Concrete deliverables with success criteria
+3. CONSTRAINTS: Must-do / must-not-do requirements that matter for correctness
+4. CONTEXT: File paths, existing patterns, constraints
 ```
 
 AFTER THE WORK YOU DELEGATED SEEMS DONE, ALWAYS VERIFY THE RESULTS AS FOLLOWING:
@@ -409,8 +361,6 @@ If verification fails:
 
 __ORACLE_SECTION__
 
-__AVAILABLE_WORKFLOWS__
-
 __TASK_MANAGEMENT_SECTION__
 
 <Tone_and_Style>
@@ -473,15 +423,12 @@ __SLASH_COMMANDS__
 
     prompt = template
     prompt = prompt.replace("__KEY_TRIGGERS__", key_triggers)
+    prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__SECURITY_PRIORITY__", security_priority)
     prompt = prompt.replace("__IM_SEND_SECTION__", im_send_section)
-    prompt = prompt.replace("__TOOL_SELECTION__", tool_selection)
     prompt = prompt.replace("__EXPLORE_SECTION__", explore_section)
     prompt = prompt.replace("__LIBRARIAN_SECTION__", librarian_section)
-    prompt = prompt.replace("__CATEGORY_SKILLS_GUIDE__", category_skills_guide)
-    prompt = prompt.replace("__DELEGATION_TABLE__", delegation_table)
     prompt = prompt.replace("__ORACLE_SECTION__", oracle_section)
-    prompt = prompt.replace("__AVAILABLE_WORKFLOWS__", workflows_section)
     prompt = prompt.replace("__HARD_BLOCKS__", hard_blocks)
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
     prompt = prompt.replace("__SLASH_COMMANDS__", slash_commands_section)

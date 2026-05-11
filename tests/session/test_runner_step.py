@@ -22,6 +22,7 @@ from flocks.session.runner import (
     StepResult,
     ToolCall,
 )
+from flocks.session.prompt import SessionPrompt
 from flocks.session.session import SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
 
@@ -50,6 +51,13 @@ def _make_agent(name="rex", tools=None):
 def _make_runner(session_id="ses_runner_test"):
     session = _make_session(session_id)
     return SessionRunner(session=session)
+
+
+def _make_callable_schema_result(*tool_names):
+    return SimpleNamespace(
+        tool_infos=[SimpleNamespace(name=name) for name in tool_names],
+        metadata={},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -453,26 +461,76 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
-        env_mock = AsyncMock(return_value=["env prompt"])
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
         sandbox_mock = AsyncMock(return_value="sandbox prompt")
         channel_mock = AsyncMock(return_value="channel prompt")
 
-        with patch("flocks.session.runner.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.runner.SystemPrompt.environment", env_mock), \
-             patch("flocks.session.runner.SystemPrompt.custom", custom_mock), \
-             patch.object(SessionRunner, "_build_sandbox_prompt", sandbox_mock), \
-             patch.object(SessionRunner, "_build_channel_context_prompt", channel_mock), \
-             patch.object(SessionRunner, "_get_tool_instructions", return_value="tool instructions"), \
-             patch.object(SessionRunner, "_build_tool_catalog_prompt", return_value="tool catalog"):
-            prompts1 = await runner1._build_system_prompts(agent)
-            prompts2 = await runner2._build_system_prompts(agent)
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
+             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner1.provider_id,
+                model_id=runner1.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "tool catalog",
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner2.provider_id,
+                model_id=runner2.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "tool catalog",
+            )
 
         assert prompts1 == prompts2
-        env_mock.assert_awaited_once()
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
         sandbox_mock.assert_awaited_once()
         channel_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_orders_stable_prefix_before_runtime_tail(self):
+        session = _make_session("ses_prompts_order")
+        runner = SessionRunner(session=session)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+            )
+
+        assert prompts.index("agent prompt") < prompts.index("env prompt")
+        assert prompts.index("custom prompt") < prompts.index("runtime prompt")
+        assert prompts[-1] == "runtime prompt"
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_tool_revision_changes(self):
@@ -482,30 +540,257 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt v1"
 
-        env_mock = AsyncMock(return_value=["env prompt"])
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
         sandbox_mock = AsyncMock(return_value="sandbox prompt")
         channel_mock = AsyncMock(return_value="channel prompt")
 
-        with patch("flocks.session.runner.ToolRegistry.revision", side_effect=[1, 2]), \
-             patch("flocks.session.runner.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.runner.SystemPrompt.environment", env_mock), \
-             patch("flocks.session.runner.SystemPrompt.custom", custom_mock), \
-             patch.object(SessionRunner, "_build_sandbox_prompt", sandbox_mock), \
-             patch.object(SessionRunner, "_build_channel_context_prompt", channel_mock), \
-             patch.object(SessionRunner, "_get_tool_instructions", return_value="tool instructions"), \
-             patch.object(SessionRunner, "_build_tool_catalog_prompt", side_effect=["tool catalog v1", "tool catalog v2"]):
-            prompts1 = await runner._build_system_prompts(agent)
+        catalog_prompts = iter(["tool catalog v1", "tool catalog v2"])
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
+             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: next(catalog_prompts),
+            )
             agent.prompt = "agent prompt v2"
-            prompts2 = await runner._build_system_prompts(agent)
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=2,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: next(catalog_prompts),
+            )
 
         assert prompts1 != prompts2
         assert "agent prompt v1" in prompts1
         assert "agent prompt v2" in prompts2
-        assert env_mock.await_count == 2
-        assert custom_mock.await_count == 2
-        assert sandbox_mock.await_count == 2
-        assert channel_mock.await_count == 2
+        assert "tool catalog v1" in prompts1
+        assert "tool catalog v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+        sandbox_mock.assert_awaited_once()
+        channel_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_agent_prompt_changes(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_agent_prompt")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt v1"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
+             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+            )
+            agent.prompt = "agent prompt v2"
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+            )
+
+        assert prompts1 != prompts2
+        assert "agent prompt v1" in prompts1
+        assert "agent prompt v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_includes_memory_guidance_when_memory_tools_loaded(self):
+        session = _make_session("ses_prompts_memory_guidance")
+        runner = SessionRunner(
+            session=session,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": {
+                    "path": "MEMORY.md",
+                    "content": "remembered context",
+                    "inject": True,
+                },
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("memory_search", "read"),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+            )
+
+        assert "memory guidance" in "\n\n".join(prompts)
+        assert "## MEMORY.md\n\nremembered context" in prompts
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_includes_bash_guidance_when_bash_loaded_on_windows(self):
+        session = _make_session("ses_prompts_bash_guidance")
+        runner = SessionRunner(session=session)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])), \
+             patch("flocks.session.prompt_strings.platform.system", return_value="Windows"):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("bash", "read"),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "## Bash Tool Guidance" in combined
+        assert "must follow PowerShell syntax" in combined
+        assert "explicit PowerShell commands" in combined
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):
+        session = _make_session("ses_prompts_no_memory_guidance")
+        runner = SessionRunner(
+            session=session,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": {
+                    "path": "MEMORY.md",
+                    "content": "remembered context",
+                    "inject": True,
+                },
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+            )
+
+        assert "memory guidance" not in "\n\n".join(prompts)
+        assert "## MEMORY.md\n\nremembered context" in prompts
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_prompt_tool_names_change(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_tool_names")
+        runner = SessionRunner(
+            session=session,
+            static_cache=shared_cache,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": None,
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
+             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+            prompts_with_memory = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("memory_search", "read"),
+                tool_revision=1,
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+                static_cache=shared_cache,
+            )
+            prompts_without_memory = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+                static_cache=shared_cache,
+            )
+
+        assert prompts_with_memory != prompts_without_memory
+        assert "memory guidance" in "\n\n".join(prompts_with_memory)
+        assert "memory guidance" not in "\n\n".join(prompts_without_memory)
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
 
     def test_build_tool_catalog_prompt_for_rex(self):
         runner = _make_runner()
@@ -663,16 +948,32 @@ class TestMiniMaxTextToolMode:
         )
         assert runner._should_use_text_tool_call_mode() is False
 
-    def test_tool_instructions_switch_to_minimax_xml(self):
+    @pytest.mark.asyncio
+    async def test_system_prompts_switch_tool_guidance_to_minimax_xml(self):
         session = _make_session("ses_minimax_prompt")
         runner = SessionRunner(
             session=session,
             provider_id="custom-tb-inner",
             model_id="minimax:MiniMax-M2.5",
         )
-        instructions = runner._get_tool_instructions()
-        assert "<minimax:tool_call>" in instructions
-        assert "native API tool-calling" in instructions
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])), \
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name="rex",
+                agent_prompt=None,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                use_text_tool_call_mode=runner._should_use_text_tool_call_mode(),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "<minimax:tool_call>" in combined
+        assert "native API tool-calling" in combined
 
     def test_build_text_tool_call_catalog_prompt(self):
         session = _make_session("ses_minimax_catalog")
@@ -708,6 +1009,50 @@ class TestMiniMaxTextToolMode:
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_uses_structured_anthropic_system_blocks(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_anthropic_system_blocks"),
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+    )
+    message = SimpleNamespace(id="msg_user", role="user", content="hello")
+
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hello"))
+
+    chat_messages = await runner._to_chat_messages(
+        [message],
+        ["provider prompt", "agent prompt", "context prompt", "runtime prompt"],
+    )
+
+    assert chat_messages[0].role == "system"
+    assert isinstance(chat_messages[0].content, list)
+    assert chat_messages[0].content[1]["cache_control"] == {"type": "ephemeral"}
+    assert chat_messages[0].content[-1]["text"] == "runtime prompt"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_keeps_joined_system_prompt_for_openai(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_openai_system_blocks"),
+        provider_id="openai",
+        model_id="gpt-5",
+    )
+    message = SimpleNamespace(id="msg_user", role="user", content="hello")
+
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hello"))
+
+    chat_messages = await runner._to_chat_messages(
+        [message],
+        ["provider prompt", "agent prompt"],
+    )
+
+    assert chat_messages[0].role == "system"
+    assert chat_messages[0].content == "provider prompt\n\nagent prompt"
+
+
+@pytest.mark.asyncio
 async def test_process_step_creates_assistant_message_with_provider_and_model(monkeypatch):
     runner = _make_runner("ses_runner_provider_model")
     runner.callbacks = RunnerCallbacks(
@@ -736,7 +1081,8 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -778,7 +1124,8 @@ async def test_process_step_records_usage_after_success(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,
@@ -830,7 +1177,8 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
-    monkeypatch.setattr(runner, "_build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_get_prompt_tool_names", AsyncMock(return_value=()))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         runner,

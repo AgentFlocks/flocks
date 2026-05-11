@@ -23,7 +23,7 @@ MEMORY_ALT_FILENAME = "memory.md"
 # Default instructions for agent (similar to OpenClaw's AGENTS.md)
 # Uses global storage paths for Flocks
 MEMORY_INSTRUCTIONS = """
-## Memory System
+## Memory System Guidance
 
 You have access to a persistent memory system for continuity across sessions.
 Memory is stored in a global location and accessible across all your sessions.

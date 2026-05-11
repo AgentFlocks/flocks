@@ -4,6 +4,7 @@ from flocks.agent.agent import AgentInfo
 from flocks.agent.registry import Agent
 from flocks.provider.provider import ChatMessage, Provider
 from flocks.session.message import Message, MessageRole, ToolPart, ToolStateCompleted
+from flocks.session.prompt import SessionPrompt
 from flocks.session.runner import SessionRunner, StepResult
 from flocks.session.session import Session
 from flocks.utils.id import Identifier
@@ -76,7 +77,12 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     sentinel_tools = [{"type": "function", "function": {"name": "write", "description": "", "parameters": {}}}]
     captured = {}
 
-    async def fake_build_system_prompts(self, agent):  # noqa: ANN001
+    async def fake_get_prompt_tool_names(self, agent):  # noqa: ANN001
+        del self, agent
+        return ()
+
+    async def fake_build_system_prompts(*args, **kwargs):  # noqa: ANN002, ANN003
+        del args, kwargs
         return []
 
     async def fake_build_callable_tool_schema(self, agent, messages=None):  # noqa: ANN001
@@ -93,7 +99,8 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     monkeypatch.setattr(Provider, "get", lambda _provider_id: DummyProvider())
     monkeypatch.setattr(Provider, "apply_config", fake_apply_config)
     monkeypatch.setattr(Agent, "get", fake_agent_get)
-    monkeypatch.setattr(SessionRunner, "_build_system_prompts", fake_build_system_prompts)
+    monkeypatch.setattr(SessionRunner, "_get_prompt_tool_names", fake_get_prompt_tool_names)
+    monkeypatch.setattr(SessionPrompt, "build_system_prompts", fake_build_system_prompts)
     monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", fake_build_callable_tool_schema)
     monkeypatch.setattr(SessionRunner, "_to_chat_messages", fake_to_chat_messages)
     monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)

@@ -12,17 +12,16 @@ Implements session/prompt.ts SessionPrompt namespace pattern.
 import asyncio
 import json
 import os
-import sys
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Awaitable, Set, Tuple
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message, MessageInfo, MessageRole
-from flocks.session.prompt import SystemPrompt, SessionPrompt
+from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.lifecycle.retry import SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
@@ -222,6 +221,15 @@ class SessionRunner:
             event_publish_callback=self.callbacks.event_publish_callback,
         )
         return result.tool_infos, dict(result.metadata)
+
+    async def _get_prompt_tool_names(self, agent: AgentInfo) -> Tuple[str, ...]:
+        """Resolve callable tool names used to gate system prompt guidance."""
+        result = await list_session_callable_tool_infos(
+            session_id=self.session.id,
+            declared_tool_names=getattr(agent, "tools", None),
+            step=self._step,
+        )
+        return tuple(sorted(tool_info.name for tool_info in result.tool_infos))
 
     async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
         if not self.callbacks.event_publish_callback:
@@ -808,7 +816,30 @@ class SessionRunner:
             return StepResult(action="stop", error=error)
         
         # Build prompts and tools
-        system_prompts = await self._build_system_prompts(agent)
+        prompt_tool_names = await self._get_prompt_tool_names(agent)
+
+        async def sandbox_prompt_factory() -> Optional[str]:
+            return await self._build_sandbox_prompt(agent)
+
+        async def channel_context_prompt_factory() -> Optional[str]:
+            return await self._build_channel_context_prompt()
+
+        system_prompts = await SessionPrompt.build_system_prompts(
+            session_id=self.session.id,
+            session_directory=self.session.directory,
+            agent_name=agent.name,
+            agent_prompt=getattr(agent, "prompt", None),
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            prompt_tool_names=prompt_tool_names,
+            tool_revision=ToolRegistry.revision(),
+            memory_bootstrap_data=self._memory_bootstrap_data,
+            static_cache=self._static_cache,
+            sandbox_prompt_factory=sandbox_prompt_factory,
+            channel_context_prompt_factory=channel_context_prompt_factory,
+            tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
+            use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
+        )
         tools = await self._build_callable_tool_schema(agent, messages)
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
@@ -1263,89 +1294,6 @@ class SessionRunner:
                 "error": str(exc),
             })
     
-    async def _build_system_prompts(self, agent: AgentInfo) -> List[str]:
-        """Build system prompts."""
-        tool_revision = ToolRegistry.revision()
-        cache_key = (
-            f"system_prompts:{self.session.id}:{agent.name}:{self.provider_id}:{self.model_id}:{tool_revision}"
-        )
-        cached = self._static_cache.get(cache_key)
-        if cached is not None:
-            return list(cached)
-
-        prompts = []
-        
-        # Provider-specific base prompt (from anthropic.txt, gemini.txt, etc.)
-        provider_prompts = SystemPrompt.provider(self.model_id)
-        prompts.extend(provider_prompts)
-        
-        # Memory bootstrap context (matching OpenClaw's injection)
-        if self._memory_bootstrap_data:
-            # Add memory instructions
-            instructions = self._memory_bootstrap_data.get("instructions", "")
-            if instructions:
-                prompts.append(instructions)
-            
-            # Inject main MEMORY.md content
-            main_memory = self._memory_bootstrap_data.get("main_memory")
-            if main_memory and main_memory.get("inject"):
-                memory_content = main_memory.get("content", "")
-                if memory_content:
-                    prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
-            
-            # Note: daily files are NOT injected, agent reads them per instructions
-            log.debug("runner.memory_injected", {
-                "session_id": self.session.id,
-                "has_main": main_memory is not None,
-            })
-        
-        # Environment info
-        env_prompts = await SystemPrompt.environment(
-            directory=self.session.directory,
-            vcs="git" if self.session.directory else None,
-        )
-        prompts.extend(env_prompts)
-        
-        # Custom instructions
-        custom_prompts = await SystemPrompt.custom(directory=self.session.directory)
-        prompts.extend(custom_prompts)
-        
-        # Agent-specific prompt (if any)
-        if agent.prompt:
-            prompts.append(agent.prompt)
-
-        # Sandbox runtime context for better tool/path awareness
-        sandbox_prompt = await self._build_sandbox_prompt(agent)
-        if sandbox_prompt:
-            prompts.append(sandbox_prompt)
-        
-        # Channel context: inject the IM channel and session info when this
-        # session originates from an IM channel (Feishu / WeCom / DingTalk).
-        channel_ctx_prompt = await self._build_channel_context_prompt()
-        if channel_ctx_prompt:
-            prompts.append(channel_ctx_prompt)
-
-        # Tool instructions
-        prompts.append(self._get_tool_instructions())
-
-        tool_catalog_prompt = self._build_tool_catalog_prompt(agent)
-        if tool_catalog_prompt:
-            prompts.append(tool_catalog_prompt)
-
-        # Debug: optionally print system prompt during execution
-        if os.getenv("FLOCKS_PRINT_SYSTEM_PROMPT", "").lower() in ("1", "true", "yes"):
-            header = (
-                f"\n=== system_prompt session={self.session.id} "
-                f"agent={agent.name} model={self.provider_id}/{self.model_id} ==="
-            )
-            print(header, file=sys.stderr)
-            for idx, prompt in enumerate(prompts):
-                print(f"\n--- prompt[{idx}] ---\n{prompt}\n", file=sys.stderr)
-            print("=== end system_prompt ===\n", file=sys.stderr)
-        
-        self._static_cache[cache_key] = list(prompts)
-        return list(prompts)
-
     async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
         try:
@@ -1423,27 +1371,6 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.channel_context_prompt.error", {"error": str(e)})
             return None
-
-    def _get_tool_instructions(self) -> str:
-        from flocks.session.prompt_strings import PROMPT_TOOL_INSTRUCTIONS
-        if self._should_use_text_tool_call_mode():
-            return (
-                "You have access to tools, but for this model you MUST call them using "
-                "MiniMax XML embedded in text instead of native API tool-calling.\n\n"
-                "Required format:\n"
-                "<minimax:tool_call>\n"
-                "<invoke name=\"tool_name\">\n"
-                "<parameter name=\"param_name\">json_or_string_value</parameter>\n"
-                "</invoke>\n"
-                "</minimax:tool_call>\n\n"
-                "Rules:\n"
-                "- Emit exactly one tool call block when you need a tool.\n"
-                "- Use valid tool names only.\n"
-                "- Parameter values must be valid JSON scalars/objects/arrays when appropriate.\n"
-                "- After tool results are returned, continue the task instead of repeating the same call.\n"
-                "- Do not use native API tool-calling for this model.\n"
-            )
-        return PROMPT_TOOL_INSTRUCTIONS
 
     def _list_catalog_tool_infos(self, agent: AgentInfo) -> List[Any]:
         tool_infos: List[Any] = []
@@ -1667,6 +1594,35 @@ class SessionRunner:
             pass
         return 128_000
 
+    def _build_system_message_content(
+        self,
+        system_prompts: List[str],
+    ) -> str | list[dict[str, Any]]:
+        """Format system prompts for the active provider.
+
+        Anthropic supports structured system blocks, which lets us place a
+        conservative cache breakpoint before the dynamic runtime tail.
+        """
+        prompt_parts = [prompt for prompt in system_prompts if prompt and prompt.strip()]
+        if not prompt_parts:
+            return ""
+
+        provider_lower = (self.provider_id or "").lower()
+        if "anthropic" not in provider_lower:
+            return "\n\n".join(prompt_parts)
+
+        cache_break_index = max(0, len(prompt_parts) - 3)
+        blocks: list[dict[str, Any]] = []
+        for index, prompt in enumerate(prompt_parts):
+            block: dict[str, Any] = {
+                "type": "text",
+                "text": prompt,
+            }
+            if index == cache_break_index:
+                block["cache_control"] = {"type": "ephemeral"}
+            blocks.append(block)
+        return blocks
+
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
@@ -1702,7 +1658,7 @@ class SessionRunner:
         if system_prompts:
             chat_messages.append(ChatMessage(
                 role="system",
-                content="\n\n".join(system_prompts),
+                content=self._build_system_message_content(system_prompts),
             ))
         
         # Convert each message with parts
