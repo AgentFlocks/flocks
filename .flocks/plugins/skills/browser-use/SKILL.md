@@ -68,11 +68,7 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 说明当前环境不适合 `CDP 直连`。此时要：
 
 1. 明确告诉用户是哪一项不满足，提示需要做什么操作才能达到要求
-2. 切换到 `agent-browser` 模式
-3. 立即阅读：
-   - `references/agent-browser.md`
-
-不要继续尝试 CDP。
+2. 提示用户切换到 `agent-browser` 模式
 
 ## 执行规则
 
