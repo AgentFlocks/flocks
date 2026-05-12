@@ -32,6 +32,7 @@ from flocks.tool import (
     ToolCategory,
     ParameterType,
 )
+from flocks.tool.code import bash as bash_module
 
 
 # =============================================================================
@@ -363,7 +364,37 @@ class TestEditTool:
 
 
 class TestBashTool:
-    """Test the bash tool"""
+    """Test the bash tool."""
+
+    def test_registered_description_references_dedicated_tools(self):
+        tool = ToolRegistry.get("bash")
+
+        assert tool is not None
+        description = tool.info.description
+        assert "Read file contents -> `read`" in description
+        assert "Write a new file -> `write`" in description
+        assert "Edit an existing file -> `edit`" in description
+        assert "Search file names or directories -> `glob`" in description
+        assert "Search file contents -> `grep`" in description
+        assert "Navigate symbols or code structure -> `lsp`" in description
+        assert "`glob`/`file_search`" in description
+
+    def test_get_description_windows_mentions_powershell_guidance(self, monkeypatch):
+        monkeypatch.setattr(bash_module.sys, "platform", "win32")
+
+        description = bash_module.get_description("/workspace")
+
+        assert "prefers `pwsh` or `powershell`" in description
+        assert "PowerShell syntax rather than GNU bash syntax" in description
+        assert 'Path(path).read_text(encoding="utf-8-sig")' in description
+
+    def test_get_description_non_windows_omits_windows_guidance(self, monkeypatch):
+        monkeypatch.setattr(bash_module.sys, "platform", "linux")
+
+        description = bash_module.get_description("/workspace")
+
+        assert "PowerShell syntax rather than GNU bash syntax" not in description
+        assert 'Path(path).read_text(encoding="utf-8-sig")' not in description
     
     @pytest.mark.asyncio
     async def test_bash_simple_command(self, tool_context):

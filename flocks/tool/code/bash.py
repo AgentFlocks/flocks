@@ -42,39 +42,55 @@ DEFAULT_PATH = os.environ.get(
 
 def get_description(directory: str) -> str:
     """Get tool description with directory placeholder replaced"""
-    return f"""Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+    platform_guidance = _build_platform_shell_guidance()
+    return f"""Execute shell commands in a persistent shell session with optional timeout.
 
-All commands run in {directory} by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
+All commands run in {directory} by default. Use the `workdir` parameter if you need a different directory. Avoid `cd <directory> && <command>` patterns and set `workdir` instead.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+Use this tool for terminal work such as git, uv/pip/npm, docker, builds, tests, servers, scripts, process inspection, system status, networking commands, and shell pipelines or compound commands.
 
-Before executing the command, please follow these steps:
+Do not use this tool when a dedicated tool is a better fit:
+- Read file contents -> `read`
+- Write a new file -> `write`
+- Edit an existing file -> `edit`
+- Search file names or directories -> `glob`
+- Search file contents -> `grep`
+- Navigate symbols or code structure -> `lsp`
 
-1. Directory Verification:
-   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location
-   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
-
-2. Command Execution:
-   - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
-   - Examples of proper quoting:
-     - mkdir "/Users/name/My Documents" (correct)
-     - mkdir /Users/name/My Documents (incorrect - will fail)
-     - python "/path/with spaces/script.py" (correct)
-     - python /path/with spaces/script.py (incorrect - will fail)
-   - After ensuring proper quoting, execute the command.
-   - Capture the output of the command.
+Before executing commands:
+1. If the command will create files or directories, verify the target location.
+2. Always quote file paths that contain spaces with double quotes.
+   - `mkdir "/Users/name/My Documents"` (correct)
+   - `mkdir /Users/name/My Documents` (incorrect)
+   - `python "/path/with spaces/script.py"` (correct)
+   - `python /path/with spaces/script.py` (incorrect)
 
 Usage notes:
-  - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
-  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-  - If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
-  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands. Instead, use the dedicated tools: Glob, Grep, Read, Edit, Write.
-  - When issuing multiple commands:
-    - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message.
-    - If the commands depend on each other, use a single Bash call with '&&' to chain them together.
-    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-  - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter to change directories instead."""
+- The `command` argument is required.
+- You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
+- It is very helpful to write a clear, concise `description` in 5-10 words.
+- If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
+- Prefer dedicated tools instead of shell equivalents: use `glob`/`file_search` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
+- If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
+- If commands depend on each other, use a single bash tool call with `&&` to chain them together.
+- Use `;` only when you want sequential commands and do not care if earlier ones fail.
+{platform_guidance}"""
+
+
+def _build_platform_shell_guidance() -> str:
+    """Return platform-specific guidance for the bash tool description."""
+    if sys.platform != "win32":
+        return ""
+
+    return """
+
+Windows usage:
+- On Windows this tool prefers `pwsh` or `powershell`; if neither is available it falls back to `cmd`.
+- Write commands in PowerShell syntax rather than GNU bash syntax.
+- Avoid bash-only constructs such as heredocs, `cat > file <<'EOF'`, `export NAME=value`, and Unix-only path expansion.
+- For multi-step logic, prefer explicit PowerShell commands or a short `python -c` snippet over shell-specific tricks.
+- When Python reads text files on Windows, always pass `encoding=...`; prefer `Path(path).read_text(encoding="utf-8-sig")`.
+"""
 
 
 def _build_error_message(

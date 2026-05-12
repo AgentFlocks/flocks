@@ -28,7 +28,6 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
-BASH_GUIDANCE_TOOL_NAMES = frozenset({"bash"})
 MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory_get", "memory_search", "memory_write"})
 
 SystemPromptCache = Dict[str, Any]
@@ -815,16 +814,6 @@ class SessionPrompt:
         )
 
     @classmethod
-    def _build_bash_guidance_prompt(
-        cls,
-        prompt_tool_names: Iterable[str],
-    ) -> Optional[str]:
-        """Build bash-specific guidance only when the tool is callable."""
-        if not (set(prompt_tool_names) & BASH_GUIDANCE_TOOL_NAMES):
-            return None
-        return prompt_strings._build_bash_tool_guidance()
-
-    @classmethod
     def _build_memory_guidance_prompt(
         cls,
         prompt_tool_names: Iterable[str],
@@ -978,16 +967,6 @@ class SessionPrompt:
                 builder=lambda: cls._build_tool_guidance_prompt(
                     use_text_tool_call_mode=use_text_tool_call_mode,
                 ),
-            ),
-            cls._build_cached_prompt_block(
-                static_cache=static_cache,
-                name="bash_guidance",
-                cache_scope="toolset",
-                digest_inputs={
-                    "tool_names": normalized_tool_names,
-                    "platform": platform.system().lower(),
-                },
-                builder=lambda: cls._build_bash_guidance_prompt(normalized_tool_names) or "",
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

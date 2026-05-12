@@ -9,8 +9,6 @@ Previously defined in flocks.agent.prompts.base; moved here because they
 belong to session management, not to the agent orchestration layer.
 """
 
-import platform
-
 # =============================================================================
 # Compaction prompt
 # =============================================================================
@@ -221,28 +219,6 @@ Response must include:
 - Recommendations for what should be done next
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."""
-
-def _build_bash_tool_guidance() -> str:
-    """Build tool-aware guidance for the bash tool."""
-    guidance = (
-        "### Bash Tool Guidance\n\n"
-        "Use the `bash` tool for terminal operations only. Prefer the tool's `workdir` parameter "
-        "instead of emitting shell directory changes, and prefer dedicated file tools for reading, "
-        "writing, editing, and searching."
-    )
-    if platform.system().lower() != "windows":
-        return guidance
-
-    return (
-        f"{guidance}\n\n"
-        "You are running on a Windows machine. When using the `bash` tool, you must follow "
-        "PowerShell syntax rather than GNU bash syntax. Avoid bash-only constructs such as heredocs, "
-        "`cat > file <<'EOF'`, `export NAME=value`, and Unix-only path expansion. For multi-step logic, "
-        "prefer a short `python -c` snippet or explicit PowerShell commands over shell-specific tricks. "
-        "When Python reads text files on Windows, always pass `encoding=...`; prefer "
-        "`Path(path).read_text(encoding=\"utf-8-sig\")`."
-    )
-
 
 def _build_tool_instructions() -> str:
     return """

@@ -539,7 +539,6 @@ class TestBuildSystemPrompts:
 
         with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
              patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"), \
-             patch.object(SessionPrompt, "_build_bash_guidance_prompt", return_value="bash guidance"), \
              patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
@@ -560,7 +559,6 @@ class TestBuildSystemPrompts:
         assert prompts == [
             "provider prompt",
             "tool protocol",
-            "bash guidance",
             "agent prompt",
             "memory guidance",
             "## MEMORY.md\n\nremembered context",
@@ -718,8 +716,8 @@ class TestBuildSystemPrompts:
         assert prompts.index("memory guidance") < prompts.index("## MEMORY.md\n\nremembered context")
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_includes_bash_guidance_when_bash_loaded_on_windows(self):
-        session = _make_session("ses_prompts_bash_guidance")
+    async def test_build_system_prompts_does_not_add_bash_guidance_prompt_when_bash_loaded(self):
+        session = _make_session("ses_prompts_no_bash_guidance")
         runner = SessionRunner(session=session)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
@@ -727,8 +725,7 @@ class TestBuildSystemPrompts:
         with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])), \
-             patch("flocks.session.prompt_strings.platform.system", return_value="Windows"):
+             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -740,9 +737,8 @@ class TestBuildSystemPrompts:
             )
 
         combined = "\n\n".join(prompts)
-        assert "## Bash Tool Guidance" in combined
-        assert "must follow PowerShell syntax" in combined
-        assert "explicit PowerShell commands" in combined
+        assert "## Bash Tool Guidance" not in combined
+        assert "PowerShell syntax" not in combined
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):

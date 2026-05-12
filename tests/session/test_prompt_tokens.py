@@ -255,31 +255,12 @@ class TestSystemPromptProvider:
 
 
 class TestPromptToolInstructions:
-    def test_windows_bash_guidance_mentions_powershell(self):
-        with patch.object(prompt_strings.platform, "system", return_value="Windows"):
-            guidance = prompt_strings._build_bash_tool_guidance()
-
-        assert "Windows machine" in guidance
-        assert "must follow PowerShell syntax" in guidance
-        assert 'Path(path).read_text(encoding="utf-8-sig")' in guidance
-
-    def test_non_windows_bash_guidance_stays_generic(self):
-        with patch.object(prompt_strings.platform, "system", return_value="Darwin"):
-            guidance = prompt_strings._build_bash_tool_guidance()
-
-        assert "Bash Tool Guidance" in guidance
-        assert "Windows machine" not in guidance
-        assert "must follow PowerShell syntax" not in guidance
-
     def test_tool_instructions_are_platform_agnostic(self):
-        with patch.object(prompt_strings.platform, "system", return_value="Windows"):
-            windows_instructions = prompt_strings._build_tool_instructions()
-        with patch.object(prompt_strings.platform, "system", return_value="Darwin"):
-            darwin_instructions = prompt_strings._build_tool_instructions()
+        instructions = prompt_strings._build_tool_instructions()
 
-        assert windows_instructions == darwin_instructions
-        assert "PowerShell" not in windows_instructions
-        assert "must explicitly specify encoding" not in windows_instructions
+        assert "PowerShell" not in instructions
+        assert "must explicitly specify encoding" not in instructions
+        assert "Bash Tool Guidance" not in instructions
 
     def test_tool_instructions_do_not_hardcode_tool_name_mapping(self):
         instructions = prompt_strings._build_tool_instructions()
