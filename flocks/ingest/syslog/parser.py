@@ -12,6 +12,14 @@ _RFC3164_REST_RE = re.compile(
     r"^([A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})\s+(\S+)\s*(.*)$",
     re.DOTALL,
 )
+# Non-standard but common: <PRI>ISO_TS HOSTNAME APP[PID]: msg  (no RFC5424 version)
+_ISO3164_REST_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)?)"  # ISO timestamp
+    r"\s+(\S+)"                                                           # hostname
+    r"\s+(\S+?)\s*:\s*"                                                   # app_name/tag:
+    r"([\s\S]*)$",                                                        # message
+    re.DOTALL,
+)
 
 
 def _pri_parts(pri: int) -> tuple[int, int]:
@@ -84,11 +92,16 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     if format_hint == "rfc5424":
         return _parse_rfc5424(rest, raw=text, facility=facility, severity=severity)
 
-    # auto: RFC5424 if second token is a digit version
+    # auto: RFC5424 if second token is a single digit version number
     if rest and rest[0].isdigit():
         first_space = rest.find(" ")
         if first_space > 0 and rest[:first_space].isdigit():
             return _parse_rfc5424(rest, raw=text, facility=facility, severity=severity)
+        # Non-standard: <PRI>ISO_TS HOSTNAME APP[PID]: msg (no version number)
+        if first_space > 0 and "T" in rest[:first_space]:
+            m_iso = _ISO3164_REST_RE.match(rest)
+            if m_iso:
+                return _parse_iso3164(m_iso, raw=text, facility=facility, severity=severity)
 
     return _parse_rfc3164(rest, raw=text, facility=facility, severity=severity)
 
@@ -150,6 +163,26 @@ def _parse_rfc5424(
         "app_name": app_name if app_name != "-" else "",
         "message": msg,
         "format": "rfc5424",
+    }
+
+
+def _parse_iso3164(
+    m: "re.Match[str]",
+    *,
+    raw: str,
+    facility: int,
+    severity: int,
+) -> Dict[str, Any]:
+    """Handle non-standard <PRI>ISO_TS HOSTNAME APP[PID]: msg (no RFC5424 version)."""
+    return {
+        "raw": raw,
+        "facility": facility,
+        "severity": severity,
+        "timestamp": _normalize_ts(m.group(1)),
+        "hostname": m.group(2),
+        "app_name": m.group(3),
+        "message": m.group(4).strip(),
+        "format": "iso3164",
     }
 
 
