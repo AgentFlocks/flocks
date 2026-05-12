@@ -271,6 +271,10 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 ![企业微信官方交流群二维码](assets/community-wecom-qr.png)
 
-## 6. 开源协议
+## 6. 参与贡献
+
+开发环境、代码规范、测试要求和 Pull Request 流程请参考 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)。
+
+## 7. 开源协议
 
 Apache License 2.0

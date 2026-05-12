@@ -306,6 +306,10 @@ Scan the QR code with **WeChat** to join our official discussion group.
 
 ![WeCom official community QR code](assets/community-wecom-qr.png)
 
-## 6. License
+## 6. Contributing
+
+See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development setup, coding standards, testing expectations, and Pull Request guidelines.
+
+## 7. License
 
 Apache License 2.0
