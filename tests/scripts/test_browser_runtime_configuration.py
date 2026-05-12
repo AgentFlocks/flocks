@@ -87,11 +87,9 @@ def test_inno_setup_points_to_packaging_bootstrap() -> None:
     assert "scripts\\bootstrap-windows.ps1" not in iss
 
 
-def test_inno_shortcuts_point_to_user_local_bin_wrapper() -> None:
-    """Start-menu and desktop shortcuts must match the CLI wrapper location that
-    `scripts/install.ps1` writes, so `flocks start` triggered from the shortcut
-    and from a freshly opened terminal are strictly equivalent across all
-    install flows (source, one-liner, bundled installer)."""
+def test_inno_shortcuts_point_to_elevated_launcher() -> None:
+    """Installer-created launch shortcuts should route through the elevated
+    launcher so clicking them triggers UAC before running the shared wrapper."""
     iss = (PACKAGING_WINDOWS_DIR / "flocks-setup.iss").read_text(encoding="utf-8")
 
     icons_section_idx = iss.find("[Icons]")
@@ -99,7 +97,8 @@ def test_inno_shortcuts_point_to_user_local_bin_wrapper() -> None:
     assert icons_section_idx != -1 and run_section_idx != -1
     icons_block = iss[icons_section_idx:run_section_idx]
 
-    expected_target = "{%USERPROFILE}\\.local\\bin\\flocks.cmd"
+    expected_target = 'Filename: "powershell.exe"'
+    expected_script = 'start-flocks-elevated.ps1'
     start_menu_lines = [
         line
         for line in icons_block.splitlines()
@@ -108,14 +107,27 @@ def test_inno_shortcuts_point_to_user_local_bin_wrapper() -> None:
     assert start_menu_lines, "expected Start Flocks + desktop shortcut entries"
     for line in start_menu_lines:
         assert expected_target in line, (
-            f"shortcut must target the shared wrapper path; got: {line}"
+            f"shortcut must target PowerShell launcher; got: {line}"
         )
-        assert 'Parameters: "start"' in line
+        assert expected_script in line
+        assert "-WindowStyle Hidden" in line
 
-    # Guard against accidentally re-introducing a shortcut to {app}\bin, which
-    # would point to a non-existent file because install.ps1 writes the wrapper
-    # under %USERPROFILE%\.local\bin.
-    assert "{app}\\bin\\flocks.cmd" not in icons_block
+    # Guard against accidentally re-introducing direct shortcut launches that
+    # bypass the UAC prompt.
+    assert "{%USERPROFILE}\\.local\\bin\\flocks.cmd" not in icons_block
+
+
+def test_windows_elevated_launcher_runs_shared_wrapper_as_admin() -> None:
+    """The elevation helper should re-use the shared CLI wrapper and request
+    Administrator rights via Start-Process."""
+    script = (PACKAGING_WINDOWS_DIR / "start-flocks-elevated.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert 'Join-Path $HOME ".local\\bin\\flocks.cmd"' in script
+    assert "Start-Process" in script
+    assert "-Verb RunAs" in script
+    assert "`\"$wrapperPath`\" start" in script
 
 
 def test_inno_finish_page_reminds_user_to_reopen_terminal() -> None:

@@ -49,13 +49,14 @@ Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_INSTALL
 Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_REPO_ROOT"; ValueData: "{app}\flocks"; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Environment"; ValueType: string; ValueName: "FLOCKS_NODE_HOME"; ValueData: "{app}\tools\node"; Flags: uninsdeletevalue
 
-; Shortcuts intentionally target the same wrapper path that `scripts\install.ps1`
-; writes, so the Start menu / desktop icon and `flocks start` typed in a new
-; terminal are strictly equivalent across all install flows.
+; Installer-created launch shortcuts intentionally go through a tiny elevation
+; helper first, then invoke the same `%USERPROFILE%\.local\bin\flocks.cmd`
+; wrapper that `scripts\install.ps1` writes. This keeps the app entrypoint
+; consistent while letting Windows prompt for UAC on shortcut launches.
 [Icons]
-Name: "{autoprograms}\{#MyAppName}\Start Flocks"; Filename: "{%USERPROFILE}\.local\bin\flocks.cmd"; Parameters: "start"; WorkingDir: "{%USERPROFILE}"
+Name: "{autoprograms}\{#MyAppName}\Start Flocks"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\flocks\packaging\windows\start-flocks-elevated.ps1"""; WorkingDir: "{%USERPROFILE}"
 Name: "{autoprograms}\{#MyAppName}\Flocks repository"; Filename: "{app}\flocks"; WorkingDir: "{app}\flocks"
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{%USERPROFILE}\.local\bin\flocks.cmd"; Parameters: "start"; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
+Name: "{userdesktop}\{#MyAppName}"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\flocks\packaging\windows\start-flocks-elevated.ps1"""; WorkingDir: "{%USERPROFILE}"; Tasks: desktopicon
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\flocks\packaging\windows\bootstrap-windows.ps1"" -InstallRoot ""{app}"""; StatusMsg: "Setting up Python and JavaScript dependencies..."; Flags: runascurrentuser waituntilterminated
