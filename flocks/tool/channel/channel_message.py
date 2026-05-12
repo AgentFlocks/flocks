@@ -39,10 +39,17 @@ def _normalize_channel_type(channel_type: str | None) -> str | None:
 
 
 def _get_api_token() -> str | None:
-    """Read the server API token from the secret manager (non-async, best-effort)."""
+    """Read the server API token from the secret manager (non-async, best-effort).
+
+    Reuses ``API_TOKEN_SECRET_ID`` from ``flocks.server.auth`` so that the
+    secret id stays in lockstep with what the server-side auth middleware
+    expects; if those drift apart the request will silently start failing
+    with 401.
+    """
     try:
         from flocks.security import get_secret_manager
-        token = get_secret_manager().get("server_api_token")
+        from flocks.server.auth import API_TOKEN_SECRET_ID
+        token = get_secret_manager().get(API_TOKEN_SECRET_ID)
         return token.strip() if token and token.strip() else None
     except Exception:
         return None
@@ -92,8 +99,12 @@ async def _http_session_send(
                         f"ids: {body.get('message_ids', [])}"
                     ),
                 )
-            # 401 without a token means the server requires auth but none is configured;
-            # fall back to the in-process path so the tool still works.
+            # 401 + we had no token to present: either the secret is unset
+            # or this process can't read it. Either way, the in-process
+            # path bypasses HTTP auth and can still deliver the message,
+            # so we fall back instead of surfacing an error.
+            # (If we DID send a token and it was rejected, fall through
+            # and report the server's detail so misconfiguration is visible.)
             if resp.status_code == 401 and not api_token:
                 return None
             return ToolResult(
