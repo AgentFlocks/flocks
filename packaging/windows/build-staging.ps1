@@ -157,11 +157,35 @@ function Get-OrDownloadFileFromCandidates {
     throw "Failed to download $Label"
 }
 
+function Expand-TarGzArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $tarExe = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if (-not $tarExe) {
+        throw "tar.exe is required to extract $ArchivePath"
+    }
+
+    Remove-PathWithRetry -Path $DestinationPath
+    New-Item -ItemType Directory -Path $DestinationPath -Force | Out-Null
+
+    & $tarExe.Source -xzf $ArchivePath -C $DestinationPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "tar.exe failed to extract $ArchivePath with exit code $LASTEXITCODE"
+    }
+    $global:LASTEXITCODE = 0
+}
+
 Write-Host "[build-staging] RepoRoot: $RepoRoot"
 Write-Host "[build-staging] OutputDir: $OutputDir"
 
 $manifest = Read-Manifest -Path $ManifestPath
 $uvVersion = $manifest.uv.version
+$pythonVersion = $manifest.python.version
+$pythonStandaloneRelease = $manifest.python.python_build_standalone_release
+$pythonArchiveName = $manifest.python.windows_archive_name
 $nodeVersion = $manifest.nodejs.version
 $nodeSuffix = $manifest.nodejs.windows_zip_suffix
 $cacheRoot = Resolve-CacheRoot -RepoRoot $RepoRoot -CacheRootOverride $CacheRoot
@@ -170,11 +194,13 @@ Write-Host "[build-staging] CacheRoot: $cacheRoot"
 Ensure-EmptyDir -Path $OutputDir
 
 $toolsUv = Join-Path $OutputDir "tools\uv"
+$toolsPython = Join-Path $OutputDir "tools\python"
 $toolsNode = Join-Path $OutputDir "tools\node"
 $toolsChrome = Join-Path $OutputDir "tools\chrome"
 $flocksDest = Join-Path $OutputDir "flocks"
 
 New-Item -ItemType Directory -Path $toolsUv -Force | Out-Null
+New-Item -ItemType Directory -Path $toolsPython -Force | Out-Null
 New-Item -ItemType Directory -Path $toolsNode -Force | Out-Null
 New-Item -ItemType Directory -Path $toolsChrome -Force | Out-Null
 
@@ -184,6 +210,38 @@ $uvUrl = "https://github.com/astral-sh/uv/releases/download/$uvVersion/$uvZipNam
 $uvZip = Join-Path $cacheRoot "downloads\uv-$uvVersion-$uvZipName"
 Get-OrDownloadFile -Url $uvUrl -CachePath $uvZip -Label "uv $uvVersion"
 Expand-Archive -Path $uvZip -DestinationPath $toolsUv -Force
+
+# Python runtime (python-build-standalone install-only archive)
+$pythonArchiveNameEscaped = [Uri]::EscapeDataString($pythonArchiveName)
+$pythonMirrorBase = $env:FLOCKS_PYTHON_STANDALONE_MIRROR_BASE_URL
+$pythonUrls = @()
+if (-not [string]::IsNullOrWhiteSpace($pythonMirrorBase)) {
+    $mirrorBase = $pythonMirrorBase.TrimEnd('/')
+    $pythonUrls += "$mirrorBase/$pythonStandaloneRelease/$pythonArchiveNameEscaped"
+    Write-Host "[build-staging] Added python-build-standalone mirror candidate from FLOCKS_PYTHON_STANDALONE_MIRROR_BASE_URL"
+}
+$pythonUrls += "https://github.com/astral-sh/python-build-standalone/releases/download/$pythonStandaloneRelease/$pythonArchiveNameEscaped"
+$pythonArchive = Join-Path $cacheRoot "downloads\python-$pythonVersion-$pythonStandaloneRelease-$pythonArchiveName"
+Get-OrDownloadFileFromCandidates -Urls $pythonUrls -CachePath $pythonArchive -Label "Python $pythonVersion"
+
+$pythonExtract = Join-Path $env:TEMP "python-extract-$pythonVersion-$pythonStandaloneRelease"
+Expand-TarGzArchive -ArchivePath $pythonArchive -DestinationPath $pythonExtract
+$pythonExe = Get-ChildItem -Path $pythonExtract -Recurse -Filter "python.exe" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.DirectoryName -notmatch '\\DLLs($|\\)' } |
+    Select-Object -First 1
+if (-not $pythonExe) {
+    throw "python.exe not found after extracting bundled Python runtime"
+}
+$pythonSource = $pythonExe.Directory.FullName
+robocopy $pythonSource $toolsPython /E /NFL /NDL /NJH /NJS /nc /ns /np | Out-Null
+if ($LASTEXITCODE -ge 8) {
+    throw "robocopy failed while copying bundled Python with exit code $LASTEXITCODE"
+}
+$global:LASTEXITCODE = 0
+Remove-PathWithRetry -Path $pythonExtract
+if (-not (Test-Path (Join-Path $toolsPython "python.exe"))) {
+    throw "Bundled Python runtime missing python.exe under tools\python after extraction"
+}
 
 # Node.js official zip (portable)
 $nodeZipName = "node-v$nodeVersion-$nodeSuffix.zip"

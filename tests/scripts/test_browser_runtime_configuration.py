@@ -68,15 +68,31 @@ def test_powershell_bootstrap_wires_bundled_toolchain() -> None:
     """packaging/windows/bootstrap-windows.ps1 is the single place that bridges the bundled layout to install.ps1."""
     script = (PACKAGING_WINDOWS_DIR / "bootstrap-windows.ps1").read_text(encoding="utf-8-sig")
 
+    assert "Add-ProcessPathEntryIfMissing" in script
     assert "Resolve-ChromeExecutablePath" in script
     assert "FLOCKS_SKIP_ADMIN_CHECK" in script
     assert "FLOCKS_BROWSER_EXECUTABLE_OVERRIDE" in script
+    assert "FLOCKS_BUNDLED_PYTHON" in script
+    assert "UV_PYTHON" in script
+    assert "UV_PYTHON_DOWNLOADS" in script
+    assert "UV_NO_MANAGED_PYTHON" in script
     assert "tools\\uv" in script
+    assert "tools\\python" in script
     assert "tools\\node" in script
     assert "tools\\chrome" in script
     assert ".flocks\\browser" in script
     assert "mklink /J" in script
     assert 'scripts\\install_zh.ps1' in script
+
+
+def test_build_staging_bundles_python_runtime() -> None:
+    script = (PACKAGING_WINDOWS_DIR / "build-staging.ps1").read_text(encoding="utf-8-sig")
+
+    assert "tools\\python" in script
+    assert "python-build-standalone" in script
+    assert "python.exe" in script
+    assert "tar.exe" in script
+    assert "FLOCKS_PYTHON_STANDALONE_MIRROR_BASE_URL" in script
 
 
 def test_inno_setup_points_to_packaging_bootstrap() -> None:
