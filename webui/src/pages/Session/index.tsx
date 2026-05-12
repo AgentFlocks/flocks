@@ -99,13 +99,6 @@ export default function SessionPage() {
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
 
-  // Auto select first session
-  useEffect(() => {
-    if (!selectedSessionId && sessions.length > 0) {
-      setSelectedSessionId(sessions[0].id);
-    }
-  }, [sessions, selectedSessionId]);
-
   // Close agent dropdown on outside click
   useEffect(() => {
     if (!showAgentOptions) return;
@@ -617,7 +610,7 @@ export default function SessionPage() {
         <SessionChat
           key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
-          live
+          live={Boolean(selectedSessionId)}
           display={{ compact: false, showActions: true, showTimestamp: false }}
           agentName={selectedAgent}
           className="flex-1 min-h-0"

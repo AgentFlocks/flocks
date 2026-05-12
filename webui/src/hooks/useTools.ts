@@ -6,17 +6,19 @@ export function useTools() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const lastRefreshRef = useRef(0);
+  const initializedRef = useRef(false);
 
   const fetchTools = useCallback(async (showLoading = false) => {
     try {
-      if (showLoading) setLoading(true);
+      if (showLoading && !initializedRef.current) setLoading(true);
       setError(null);
       const response = await toolAPI.list();
       setTools(Array.isArray(response.data) ? response.data : []);
     } catch (err: any) {
       setError(err.message || 'Failed to fetch tools');
     } finally {
-      if (showLoading) setLoading(false);
+      if (showLoading && !initializedRef.current) setLoading(false);
+      initializedRef.current = true;
     }
   }, []);
 
@@ -31,18 +33,34 @@ export function useTools() {
   }, [fetchTools]);
 
   useEffect(() => {
+    let cancelled = false;
+
     const init = async () => {
-      try { await toolAPI.refresh(); } catch { /* ignore */ }
-      lastRefreshRef.current = Date.now();
       await fetchTools(true);
+      if (cancelled) return;
+
+      try {
+        await toolAPI.refresh();
+        if (cancelled) return;
+        lastRefreshRef.current = Date.now();
+        await fetchTools(false);
+      } catch {
+        /* ignore */
+      }
     };
-    init();
+
+    void init();
 
     const onVisible = () => {
-      if (document.visibilityState === 'visible') refreshAndFetch();
+      if (document.visibilityState === 'visible') {
+        void refreshAndFetch();
+      }
     };
     document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [fetchTools, refreshAndFetch]);
 
   return {

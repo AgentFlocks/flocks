@@ -3,6 +3,7 @@ Tool routes - API endpoints for tool management and execution
 """
 
 import asyncio
+import time
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -439,6 +440,7 @@ async def list_tools(
         List of tool information
     """
     # Initialize registry if needed
+    started_at = time.perf_counter()
     ToolRegistry.init()
     
     # Parse category filter
@@ -458,7 +460,13 @@ async def list_tools(
     # Apply source filter if specified
     if source:
         result = [t for t in result if t.source == source]
-    
+
+    log.info("tools.list.complete", {
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        "count": len(result),
+        "category": category,
+        "source": source,
+    })
     return result
 
 
@@ -764,6 +772,7 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
 
     This is the batch counterpart to the single-tool ``/{name}/reload`` endpoint.
     """
+    started_at = time.perf_counter()
     ToolRegistry.init()
 
     errors: list[str] = []
@@ -783,7 +792,11 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
         errors.append(f"plugin: {e}")
 
     tool_count = len(ToolRegistry.all_tool_ids())
-    log.info("tools.refresh.done", {"tool_count": tool_count, "errors": len(errors)})
+    log.info("tools.refresh.done", {
+        "tool_count": tool_count,
+        "errors": len(errors),
+        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    })
 
     if errors:
         return RefreshResponse(

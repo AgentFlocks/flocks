@@ -5,10 +5,12 @@ Main HTTP API server for AI-Native SecOps Platform
 """
 
 import asyncio
+import inspect
 import os
 import time
+from types import SimpleNamespace
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,6 +45,60 @@ except Exception as e:
 
 
 # Lifespan context manager for startup/shutdown
+async def _maybe_await(result: Any) -> Any:
+    """Await values that are awaitable and return plain values unchanged."""
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def _run_startup_phase(
+    log,
+    phase: str,
+    fn: Callable[[], Any],
+) -> Any:
+    """Execute one startup phase and emit structured timing logs."""
+    started_at = time.perf_counter()
+    try:
+        result = await _maybe_await(fn())
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        log.warning("server.startup.phase", {
+            "phase": phase,
+            "status": "failed",
+            "duration_ms": duration_ms,
+            "error": str(exc),
+        })
+        raise
+
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    log.info("server.startup.phase", {
+        "phase": phase,
+        "status": "completed",
+        "duration_ms": duration_ms,
+    })
+    return result
+
+
+def _schedule_startup_phase(
+    app: FastAPI,
+    log,
+    phase: str,
+    fn: Callable[[], Any],
+) -> None:
+    """Run a non-critical startup phase in the background after app is ready."""
+
+    async def _runner() -> None:
+        try:
+            await _run_startup_phase(log, phase, fn)
+        except Exception:
+            # _run_startup_phase already logged the failure.
+            return
+
+    task = asyncio.create_task(_runner(), name=f"startup:{phase}")
+    app.state.startup_background_tasks.append(task)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle application lifecycle"""
@@ -51,13 +107,21 @@ async def lifespan(app: FastAPI):
         await Log.init(print=False, dev=False, level=LogLevel.INFO)
 
     log = Log.create(service="server")
+    if not hasattr(app, "state") or app.state is None:
+        app.state = SimpleNamespace()
+    app.state.startup_background_tasks = []
+    startup_started_at = time.perf_counter()
 
     # Startup
     log.info("server.startup", {"version": "0.2.0"})
     try:
         from flocks.updater.updater import cleanup_replaced_files
 
-        await asyncio.to_thread(cleanup_replaced_files)
+        await _run_startup_phase(
+            log,
+            "updater.cleanup_leftovers",
+            lambda: asyncio.to_thread(cleanup_replaced_files),
+        )
         log.info("updater.leftovers.cleaned")
     except Exception as e:
         log.warning("updater.leftovers.cleanup_failed", {"error": str(e)})
@@ -65,13 +129,21 @@ async def lifespan(app: FastAPI):
     try:
         from flocks.updater.updater import _get_repo_root, _refresh_global_cli_entry
 
-        await asyncio.to_thread(_refresh_global_cli_entry, _get_repo_root())
+        await _run_startup_phase(
+            log,
+            "cli.refresh_global_entry",
+            lambda: asyncio.to_thread(_refresh_global_cli_entry, _get_repo_root()),
+        )
         log.info("cli.global_entry.refreshed")
     except Exception as e:
         log.warning("cli.global_entry.refresh_failed", {"error": str(e)})
 
     try:
-        init_observability()
+        await _run_startup_phase(
+            log,
+            "observability.init",
+            init_observability,
+        )
         log.info("observability.initialized")
     except Exception as e:
         log.warning("observability.init_failed", {"error": str(e)})
@@ -79,7 +151,11 @@ async def lifespan(app: FastAPI):
     # Ensure config files exist (copy from examples if needed)
     try:
         from flocks.config.config_writer import ensure_config_files
-        ensure_config_files()
+        await _run_startup_phase(
+            log,
+            "config.ensure_files",
+            ensure_config_files,
+        )
         log.info("config.files.checked")
     except Exception as e:
         log.warning("config.files.check_failed", {"error": str(e)})
@@ -89,7 +165,11 @@ async def lifespan(app: FastAPI):
     # ``<service_id>_v<version>`` once the plugin declares a version.
     try:
         from flocks.config.api_versioning import migrate_api_services
-        actions = migrate_api_services()
+        actions = await _run_startup_phase(
+            log,
+            "config.migrate_api_services",
+            migrate_api_services,
+        )
         copied = [k for k, v in actions.items() if v == "copied"]
         if copied:
             log.info("config.api_services.migrated", {"copied": copied})
@@ -97,31 +177,42 @@ async def lifespan(app: FastAPI):
         log.warning("config.api_services.migrate_failed", {"error": str(e)})
     
     # Initialize storage
-    await Storage.init()
+    await _run_startup_phase(log, "storage.init", Storage.init)
     log.info("storage.initialized")
 
     # Initialize local auth/account tables
-    await AuthService.init()
+    await _run_startup_phase(log, "auth.init", AuthService.init)
     log.info("auth.initialized")
 
     # Best-effort migration: old sessions default to admin ownership.
     # The migration itself is idempotent (guarded by a persisted marker),
     # but we still skip loading users when the marker is already set
     # to avoid unnecessary DB + session scans on every startup.
-    try:
+    async def _migrate_legacy_sessions_to_admin() -> None:
         marker = await Storage.get("auth:migration:legacy_session_owner_to_admin", dict)
-        if not (marker and marker.get("done")):
-            if await AuthService.has_users():
-                users = await AuthService.list_users()
-                admin = next((u for u in users if u.role == "admin"), None)
-                if admin:
-                    await AuthService.migrate_legacy_sessions_to_admin(admin.id)
-    except Exception as e:
-        log.warning("auth.legacy_sessions.migration_failed", {"error": str(e)})
+        if marker and marker.get("done"):
+            return
+        if not await AuthService.has_users():
+            return
+        users = await AuthService.list_users()
+        admin = next((u for u in users if u.role == "admin"), None)
+        if admin:
+            await AuthService.migrate_legacy_sessions_to_admin(admin.id)
+
+    _schedule_startup_phase(
+        app,
+        log,
+        "auth.migrate_legacy_session_owner",
+        _migrate_legacy_sessions_to_admin,
+    )
     
     # Setup question handler for real user interaction
     from flocks.tool.question_handler import setup_api_question_handler
-    setup_api_question_handler()
+    await _run_startup_phase(
+        log,
+        "question_handler.setup",
+        setup_api_question_handler,
+    )
     log.info("question_handler.initialized")
     
     # Register built-in hooks if memory is enabled
@@ -129,7 +220,11 @@ async def lifespan(app: FastAPI):
         config = await Config.get()
         if config.memory.enabled:
             from flocks.hooks.builtin import register_builtin_hooks
-            register_builtin_hooks()
+            await _run_startup_phase(
+                log,
+                "hooks.register_builtin",
+                register_builtin_hooks,
+            )
             log.info("hooks.registered")
     except Exception as e:
         # Hook registration failure should not stop server startup
@@ -138,25 +233,47 @@ async def lifespan(app: FastAPI):
     # Migrate env-var credentials to .secret.json (idempotent)
     try:
         from flocks.provider.credential import migrate_env_credentials
-        migrated = migrate_env_credentials()
-        if migrated > 0:
-            log.info("credential.env_migration.done", {"migrated": migrated})
+
+        def _migrate_env_credentials_phase() -> None:
+            migrated = migrate_env_credentials()
+            if migrated > 0:
+                log.info("credential.env_migration.done", {"migrated": migrated})
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "credential.migrate_env_credentials",
+            _migrate_env_credentials_phase,
+        )
     except Exception as e:
         log.warning("credential.env_migration.failed", {"error": str(e)})
 
     # Sync new catalog models into flocks.json for existing providers (idempotent)
     try:
         from flocks.provider.model_catalog import sync_catalog_models_to_config
-        synced = sync_catalog_models_to_config()
-        if synced > 0:
-            log.info("catalog.model_sync.done", {"models_added": synced})
+
+        def _sync_catalog_models_phase() -> None:
+            synced = sync_catalog_models_to_config()
+            if synced > 0:
+                log.info("catalog.model_sync.done", {"models_added": synced})
+
+        _schedule_startup_phase(
+            app,
+            log,
+            "catalog.sync_models_to_config",
+            _sync_catalog_models_phase,
+        )
     except Exception as e:
         log.warning("catalog.model_sync.failed", {"error": str(e)})
 
     # Load custom providers from flocks.json into runtime
     try:
         from flocks.server.routes.custom_provider import load_custom_providers_on_startup
-        await load_custom_providers_on_startup()
+        await _run_startup_phase(
+            log,
+            "custom_providers.load",
+            load_custom_providers_on_startup,
+        )
         log.info("custom_providers.loaded")
     except Exception as e:
         log.warning("custom_providers.load.failed", {"error": str(e)})
@@ -165,23 +282,31 @@ async def lifespan(app: FastAPI):
     # after a service restart, without requiring manual UI reconnection.
     try:
         from flocks.mcp import MCP
-        await MCP.init()
-        log.info("mcp.initialized")
+
+        _schedule_startup_phase(app, log, "mcp.init", MCP.init)
     except Exception as e:
         log.warning("mcp.init_failed", {"error": str(e)})
 
     # Sync workflows from .flocks/workflow/ filesystem into Storage
     try:
         from flocks.server.routes.workflow import sync_workflows_from_filesystem
-        imported = await sync_workflows_from_filesystem()
-        log.info("workflow.sync.done", {"imported": imported})
+
+        async def _sync_workflows_phase() -> None:
+            imported = await sync_workflows_from_filesystem()
+            log.info("workflow.sync.done", {"imported": imported})
+
+        _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
         log.warning("workflow.sync.failed", {"error": str(e)})
 
     # Start Task Center (scheduler + queue executor)
     try:
         from flocks.task.manager import TaskManager
-        await TaskManager.start()
+        await _run_startup_phase(
+            log,
+            "task_manager.start",
+            TaskManager.start,
+        )
         log.info("task_manager.started")
     except Exception as e:
         from flocks.task.manager import TaskManager
@@ -191,53 +316,90 @@ async def lifespan(app: FastAPI):
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
     try:
         from flocks.task.plugin import seed_tasks_from_plugin
-        seeded = await seed_tasks_from_plugin()
-        if seeded:
-            log.info("task.plugin.seeded", {"count": seeded})
+
+        async def _seed_tasks_phase() -> None:
+            seeded = await seed_tasks_from_plugin()
+            if seeded:
+                log.info("task.plugin.seeded", {"count": seeded})
+
+        _schedule_startup_phase(app, log, "task.seed_plugin_specs", _seed_tasks_phase)
     except Exception as e:
         log.warning("task.plugin.seed_failed", {"error": str(e)})
 
     # Start Skill file watcher (auto-invalidate cache on SKILL.md changes)
     try:
         from flocks.skill.skill import Skill
-        Skill.start_watcher()
-        log.info("skill.watcher.initialized")
+
+        def _start_skill_watcher() -> None:
+            Skill.start_watcher()
+            log.info("skill.watcher.initialized")
+
+        _schedule_startup_phase(app, log, "skill.watcher.start", _start_skill_watcher)
     except Exception as e:
         log.warning("skill.watcher.init_failed", {"error": str(e)})
 
     # Start Agent file watcher (auto-invalidate cache on plugin agent changes)
     try:
         from flocks.agent.registry import Agent
-        Agent.start_watcher()
-        log.info("agent.watcher.initialized")
+
+        def _start_agent_watcher() -> None:
+            Agent.start_watcher()
+            log.info("agent.watcher.initialized")
+
+        _schedule_startup_phase(app, log, "agent.watcher.start", _start_agent_watcher)
     except Exception as e:
         log.warning("agent.watcher.init_failed", {"error": str(e)})
 
     # Start Tool file watcher (auto-reload plugin tools on file changes)
     try:
         from flocks.tool.registry import ToolRegistry
-        ToolRegistry.start_watcher()
-        log.info("tool.watcher.initialized")
+
+        def _start_tool_watcher() -> None:
+            ToolRegistry.start_watcher()
+            log.info("tool.watcher.initialized")
+
+        _schedule_startup_phase(app, log, "tool.watcher.start", _start_tool_watcher)
     except Exception as e:
         log.warning("tool.watcher.init_failed", {"error": str(e)})
 
     # Start Channel Gateway (connect enabled IM channels)
     try:
         from flocks.channel.gateway.manager import default_manager
-        await default_manager.start_all()
-        log.info("channel.gateway.started")
+
+        async def _start_channel_gateway() -> None:
+            await default_manager.start_all()
+            log.info("channel.gateway.started")
+
+        _schedule_startup_phase(app, log, "channel.gateway.start", _start_channel_gateway)
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
     try:
         from flocks.updater.updater import recover_upgrade_state
 
-        await asyncio.to_thread(recover_upgrade_state)
+        await _run_startup_phase(
+            log,
+            "updater.recover_upgrade_state",
+            lambda: asyncio.to_thread(recover_upgrade_state),
+        )
         log.info("updater.recovery.checked")
     except Exception as e:
         log.warning("updater.recovery.failed", {"error": str(e)})
 
+    blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
+    log.info("server.startup.ready", {
+        "blocking_duration_ms": blocking_startup_ms,
+        "background_tasks": len(app.state.startup_background_tasks),
+    })
+
     yield
+
+    background_tasks = list(getattr(app.state, "startup_background_tasks", []))
+    for task in background_tasks:
+        if not task.done():
+            task.cancel()
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
     # --- Graceful shutdown: notify SSE clients FIRST ---
     try:

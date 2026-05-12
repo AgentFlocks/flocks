@@ -364,6 +364,17 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     return list(by_id.values())
 
 
+async def sync_workflows_from_filesystem() -> int:
+    """Best-effort startup sync for filesystem-backed workflows.
+
+    The filesystem is the source of truth for workflow definitions. Startup only
+    needs to migrate any legacy Storage-only records to disk and report how many
+    workflows are currently discoverable from the configured workflow roots.
+    """
+    await _migrate_storage_to_filesystem()
+    return len(_list_workflows_from_fs())
+
+
 async def _migrate_storage_to_filesystem() -> None:
     """One-time migration: move Storage-only workflow definitions to the filesystem.
 
