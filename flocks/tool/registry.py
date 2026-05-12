@@ -1206,11 +1206,16 @@ class ToolRegistry:
                 except ImportError as e:
                     log.warn("builtin_tools.import_failed", {"module": f"{package}.{mod_name}", "error": str(e)})
 
-        # Mark every tool registered during this call as native=True.
+        # Mark every tool registered during this call as native=True, except
+        # for built-in modules that should remain non-native by policy.
         # This is done in bulk here so individual @register_function call
         # sites don't need to pass native=True, and user plugin files using
         # the same decorator won't be misclassified.
+        builtin_native_exceptions = {"lsp"}
         for name in set(cls._tools.keys()) - before:
+            if name in builtin_native_exceptions:
+                cls._tools[name].info.native = False
+                continue
             cls._tools[name].info.native = True
 
         # Sample tools for testing (only register if not already registered)

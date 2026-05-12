@@ -61,6 +61,7 @@ Parameters:
     name="lsp",
     description=DESCRIPTION,
     category=ToolCategory.CODE,
+    native=False,
     parameters=[
         ToolParameter(
             name="operation",

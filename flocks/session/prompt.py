@@ -938,11 +938,11 @@ class SessionPrompt:
     ) -> List[str]:
         """Build the runtime system prompt blocks for a session turn.
 
-        The ordering mirrors Hermes' layered assembly style: stable identity
-        first, then session-scoped snapshots and runtime context, then tool
-        protocol/catalog guidance. Cache mechanics are intentionally kept out
-        of the block construction below so this method reads as an ordered list
-        of prompt layers.
+        Stable identity and execution guidance come first, followed by
+        session/workspace context, with runtime-only metadata kept at the
+        prompt tail. Cache mechanics are intentionally kept out of the block
+        construction below so this method reads as an ordered list of prompt
+        layers.
         """
         normalized_tool_names = tuple(sorted(prompt_tool_names))
         vcs = "git" if session_directory else None
@@ -981,16 +981,6 @@ class SessionPrompt:
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
-                name="tool_catalog_awareness",
-                cache_scope="catalog",
-                digest_inputs={
-                    "agent_name": agent_name,
-                    "tool_revision": tool_revision,
-                },
-                builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
-            ),
-            cls._build_cached_prompt_block(
-                static_cache=static_cache,
                 name="bash_guidance",
                 cache_scope="toolset",
                 digest_inputs={
@@ -998,6 +988,13 @@ class SessionPrompt:
                     "platform": platform.system().lower(),
                 },
                 builder=lambda: cls._build_bash_guidance_prompt(normalized_tool_names) or "",
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_identity",
+                cache_scope="agent",
+                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(agent_prompt),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
@@ -1011,17 +1008,20 @@ class SessionPrompt:
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
-                name="agent_identity",
-                cache_scope="agent",
-                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
-                builder=lambda: cls._normalize_prompt_text(agent_prompt),
-            ),
-            cls._build_cached_prompt_block(
-                static_cache=static_cache,
                 name="memory_snapshot",
                 cache_scope="session",
                 digest_inputs={"session_id": session_id, "snapshot": memory_snapshot},
                 builder=lambda: memory_snapshot,
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="tool_catalog_awareness",
+                cache_scope="catalog",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "tool_revision": tool_revision,
+                },
+                builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

@@ -526,8 +526,20 @@ class TestBuildSystemPrompts:
         runner = SessionRunner(session=session)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
+        memory_bootstrap_data = {
+            "instructions": "memory guidance",
+            "main_memory": {
+                "path": "MEMORY.md",
+                "content": "remembered context",
+                "inject": True,
+            },
+        }
+        sandbox_mock = AsyncMock(return_value="sandbox prompt")
+        channel_mock = AsyncMock(return_value="channel prompt")
 
         with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"), \
+             patch.object(SessionPrompt, "_build_bash_guidance_prompt", return_value="bash guidance"), \
              patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
              patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
@@ -538,12 +550,27 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("read",),
+                prompt_tool_names=("bash", "memory_search", "read"),
+                memory_bootstrap_data=memory_bootstrap_data,
+                tool_catalog_prompt_factory=lambda: "tool catalog",
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
             )
 
-        assert prompts.index("agent prompt") < prompts.index("env prompt")
-        assert prompts.index("custom prompt") < prompts.index("runtime prompt")
-        assert prompts[-1] == "runtime prompt"
+        assert prompts == [
+            "provider prompt",
+            "tool protocol",
+            "bash guidance",
+            "agent prompt",
+            "memory guidance",
+            "## MEMORY.md\n\nremembered context",
+            "tool catalog",
+            "env prompt",
+            "custom prompt",
+            "sandbox prompt",
+            "channel prompt",
+            "runtime prompt",
+        ]
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_tool_revision_changes(self):
@@ -687,8 +714,8 @@ class TestBuildSystemPrompts:
 
         assert "memory guidance" in "\n\n".join(prompts)
         assert "## MEMORY.md\n\nremembered context" in prompts
-        assert prompts.index("memory guidance") < prompts.index("agent prompt")
-        assert prompts.index("agent prompt") < prompts.index("## MEMORY.md\n\nremembered context")
+        assert prompts.index("agent prompt") < prompts.index("memory guidance")
+        assert prompts.index("memory guidance") < prompts.index("## MEMORY.md\n\nremembered context")
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_includes_bash_guidance_when_bash_loaded_on_windows(self):
