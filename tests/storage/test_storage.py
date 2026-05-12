@@ -2,9 +2,13 @@
 Tests for storage module
 """
 
+from contextlib import asynccontextmanager
+import sqlite3
 import pytest
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from pydantic import BaseModel
 
 from flocks.storage.storage import Storage
@@ -108,3 +112,58 @@ async def test_storage_clear(storage):
     
     keys = await storage.list_keys()
     assert len(keys) == 0
+
+
+@pytest.mark.asyncio
+async def test_storage_set_retries_on_sqlite_busy():
+    """`Storage.set()` should retry transient SQLite lock contention."""
+    execute_calls = {"count": 0}
+
+    class FakeConnection:
+        async def execute(self, *_args, **_kwargs):
+            execute_calls["count"] += 1
+            if execute_calls["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return SimpleNamespace(rowcount=1)
+
+        async def commit(self):
+            return None
+
+        async def close(self):
+            return None
+
+    @asynccontextmanager
+    async def _fake_connect(_db_path=None):
+        yield FakeConnection()
+
+    with patch.object(Storage, "_ensure_init", AsyncMock()), \
+         patch.object(Storage, "connect", side_effect=_fake_connect), \
+         patch.object(Storage, "_db_path", Path("/tmp/test-storage.db")):
+        await Storage.set("busy:key", {"value": 1}, "test")
+
+    assert execute_calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_storage_set_does_not_swallow_non_busy_sqlite_errors():
+    """Unexpected SQLite errors should still surface to callers."""
+
+    class FakeConnection:
+        async def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("near \"INSERT\": syntax error")
+
+        async def commit(self):
+            return None
+
+        async def close(self):
+            return None
+
+    @asynccontextmanager
+    async def _fake_connect(_db_path=None):
+        yield FakeConnection()
+
+    with patch.object(Storage, "_ensure_init", AsyncMock()), \
+         patch.object(Storage, "connect", side_effect=_fake_connect), \
+         patch.object(Storage, "_db_path", Path("/tmp/test-storage.db")):
+        with pytest.raises(sqlite3.OperationalError, match="syntax error"):
+            await Storage.set("bad:key", {"value": 1}, "test")

@@ -115,3 +115,115 @@ class TestTaskModelPinning:
         launch_input = manager.launch.await_args.args[0]
         assert launch_input.model is None
         assert launch_input.model_pinned is False
+
+    @pytest.mark.asyncio
+    async def test_task_tool_sync_continue_returns_session_loop_error(self):
+        parent_session = SimpleNamespace(
+            id="ses-parent",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+            model_pinned=False,
+        )
+        child_session = SimpleNamespace(
+            id="ses-child",
+            agent="explore",
+        )
+
+        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                 action="error",
+                 error="subagent crashed",
+                 last_message=None,
+             ))):
+            result = await task_tool(
+                _make_ctx(),
+                description="continue explore",
+                prompt="Continue the task",
+                subagent_type="explore",
+                session_id="ses-child",
+            )
+
+        assert result.success is False
+        assert result.metadata["sessionId"] == "ses-child"
+        assert "subagent crashed" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_task_tool_sync_continue_fails_when_last_message_missing(self):
+        parent_session = SimpleNamespace(
+            id="ses-parent",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+            model_pinned=False,
+        )
+        child_session = SimpleNamespace(
+            id="ses-child",
+            agent="explore",
+        )
+
+        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                 action="stop",
+                 error=None,
+                 last_message=None,
+             ))):
+            result = await task_tool(
+                _make_ctx(),
+                description="continue explore",
+                prompt="Continue the task",
+                subagent_type="explore",
+                session_id="ses-child",
+            )
+
+        assert result.success is False
+        assert result.metadata["sessionId"] == "ses-child"
+        assert "without producing a final assistant message" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_task_tool_sync_continue_fails_when_last_message_has_no_text(self):
+        parent_session = SimpleNamespace(
+            id="ses-parent",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+            model_pinned=False,
+        )
+        child_session = SimpleNamespace(
+            id="ses-child",
+            agent="explore",
+        )
+        last_message = SimpleNamespace(
+            id="msg-last",
+            sessionID="ses-child",
+            finish="stop",
+            error=None,
+        )
+
+        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                 action="stop",
+                 error=None,
+                 last_message=last_message,
+             ))), \
+             patch("flocks.tool.subagent_result.Message.get_text_content", AsyncMock(return_value="")):
+            result = await task_tool(
+                _make_ctx(),
+                description="continue explore",
+                prompt="Continue the task",
+                subagent_type="explore",
+                session_id="ses-child",
+            )
+
+        assert result.success is False
+        assert result.metadata["sessionId"] == "ses-child"
+        assert "without text output" in (result.error or "")

@@ -22,6 +22,7 @@ from flocks.task.background import get_background_manager, LaunchInput, ResumeIn
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
+from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
 
@@ -284,12 +285,13 @@ async def task_tool(
             session.id,
             callbacks=_LoopCbs(event_publish_callback=ctx.event_publish_callback),
         )
-        output_text = ""
-        if result.last_message:
-            output_text = await Message.get_text_content(result.last_message)
-        output = f"{output_text}\n\n<task_metadata>\nsession_id: {session.id}\n</task_metadata>"
         ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": session.id}})
-        return ToolResult(success=True, output=output, title=description, metadata={"sessionId": session.id})
+        return await format_sync_subagent_result(
+            description=description,
+            session_id=session.id,
+            loop_result=result,
+            metadata={"sessionId": session.id},
+        )
 
     # --- Background launch (new session) ---
     if run_in_background:
@@ -361,12 +363,18 @@ async def task_tool(
                 event_publish_callback=ctx.event_publish_callback,
             ),
         )
-        output_text = ""
-        if result.last_message:
-            output_text = await Message.get_text_content(result.last_message)
-        output = f"{output_text}\n\n<task_metadata>\nsession_id: {created.id}\n</task_metadata>"
-        ctx.metadata({"title": description, "metadata": forwarder.final_metadata})
-        return ToolResult(success=True, output=output, title=description, metadata=forwarder.final_metadata)
+        tool_result = await format_sync_subagent_result(
+            description=description,
+            session_id=created.id,
+            loop_result=result,
+            metadata=forwarder.final_metadata,
+        )
+        result_status = "running" if tool_result.success else "error"
+        ctx.metadata({
+            "title": description,
+            "metadata": {**forwarder.final_metadata, "status": result_status},
+        })
+        return tool_result
 
     except Exception as e:
         log.error("task.execute.error", {"error": str(e)})

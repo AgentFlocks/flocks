@@ -4,10 +4,12 @@ Storage module for persistent data management
 Provides SQLite-based storage similar to Flocks's Storage namespace
 """
 
+import asyncio
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sqlite3
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 import json
 import aiosqlite
 from datetime import datetime
@@ -48,6 +50,8 @@ class Storage:
     _sqlite_timeout_s = 5.0
     _sqlite_busy_timeout_ms = 5000
     _sqlite_journal_mode = "WAL"
+    _sqlite_write_retry_attempts = 6
+    _sqlite_write_retry_base_delay_s = 0.05
 
     @classmethod
     def _invalidate_runtime_caches(cls) -> None:
@@ -93,6 +97,57 @@ class Storage:
         conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @classmethod
+    def _is_sqlite_busy_error(cls, exc: Exception) -> bool:
+        """Return whether *exc* is a retryable SQLite busy/locked write error."""
+        text = str(exc or "").lower()
+        if not text:
+            return False
+        return any(
+            token in text
+            for token in (
+                "database is locked",
+                "database table is locked",
+                "database schema is locked",
+                "database is busy",
+                "database table is busy",
+            )
+        )
+
+    @classmethod
+    async def _run_write_with_retry(
+        cls,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        action: str,
+        target: Optional[str] = None,
+    ) -> Any:
+        """Run a write operation with bounded retries for SQLite lock contention."""
+        attempts = max(int(cls._sqlite_write_retry_attempts), 1)
+        delay_s = max(float(cls._sqlite_write_retry_base_delay_s), 0.0)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except Exception as exc:
+                if not cls._is_sqlite_busy_error(exc) or attempt >= attempts:
+                    raise
+                last_exc = exc
+                sleep_s = delay_s * (2 ** (attempt - 1))
+                cls._log.warn("storage.sqlite_write_retry", {
+                    "action": action,
+                    "target": target,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "sleep_s": round(sleep_s, 3),
+                    "error": str(exc),
+                })
+                await asyncio.sleep(sleep_s)
+
+        assert last_exc is not None
+        raise last_exc
 
     @classmethod
     @asynccontextmanager
@@ -297,14 +352,17 @@ class Storage:
         from datetime import UTC
         now = datetime.now(UTC).isoformat()
         
-        async with cls.connect(cls._db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
-                VALUES (?, ?, ?, 
-                    COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
-                    ?)
-            """, (key, serialized, value_type, key, now, now))
-            await db.commit()
+        async def _write() -> None:
+            async with cls.connect(cls._db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                    VALUES (?, ?, ?, 
+                        COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
+                        ?)
+                """, (key, serialized, value_type, key, now, now))
+                await db.commit()
+
+        await cls._run_write_with_retry(_write, action="set", target=key)
         
         cls._log.debug("storage.set", {"key": key, "type": value_type})
     
@@ -351,10 +409,13 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with cls.connect(cls._db_path) as db:
-            cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
-            await db.commit()
-            deleted = cursor.rowcount > 0
+        async def _delete() -> bool:
+            async with cls.connect(cls._db_path) as db:
+                cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
+                await db.commit()
+                return cursor.rowcount > 0
+
+        deleted = await cls._run_write_with_retry(_delete, action="delete", target=key)
         
         if deleted:
             cls._log.debug("storage.delete", {"key": key})
@@ -462,17 +523,24 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with cls.connect(cls._db_path) as db:
-            if prefix:
-                query = "DELETE FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "DELETE FROM storage"
-                params = ()
-            
-            cursor = await db.execute(query, params)
-            await db.commit()
-            deleted = cursor.rowcount
+        async def _clear() -> int:
+            async with cls.connect(cls._db_path) as db:
+                if prefix:
+                    query = "DELETE FROM storage WHERE key LIKE ?"
+                    params = (f"{prefix}%",)
+                else:
+                    query = "DELETE FROM storage"
+                    params = ()
+
+                cursor = await db.execute(query, params)
+                await db.commit()
+                return cursor.rowcount
+
+        deleted = await cls._run_write_with_retry(
+            _clear,
+            action="clear",
+            target=prefix or "<all>",
+        )
         
         cls._log.info("storage.clear", {"prefix": prefix, "deleted": deleted})
         cls._invalidate_runtime_caches()
