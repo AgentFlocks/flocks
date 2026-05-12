@@ -1,7 +1,11 @@
+import asyncio
+from contextlib import asynccontextmanager
+from types import MethodType
 from unittest.mock import AsyncMock
 
 import pytest
 
+import flocks.mcp.client as mcp_client_module
 from flocks.mcp.client import McpClient
 
 
@@ -117,3 +121,58 @@ class TestMcpClientTransportSelection:
         await client.connect()
 
         fake_owner.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connect_local_closes_stderr_file_on_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        class _FakeTempFile:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> bool:
+                self.close()
+                return False
+
+            def seek(self, _offset: int) -> None:
+                return None
+
+            def read(self, _size: int = -1) -> str:
+                return "stdio stderr"
+
+            def close(self) -> None:
+                self.closed = True
+
+        fake_stderr = _FakeTempFile()
+        client = McpClient(
+            name="demo",
+            server_type="stdio",
+            command=["python", "-m", "demo"],
+        )
+
+        @asynccontextmanager
+        async def broken_stdio(self, _server_params, stderr_file):
+            assert stderr_file is fake_stderr
+            raise RuntimeError("spawn failed")
+            yield
+
+        monkeypatch.setattr(
+            mcp_client_module.tempfile,
+            "TemporaryFile",
+            lambda mode="w+": fake_stderr,
+        )
+        monkeypatch.setattr(
+            client,
+            "_create_stdio_streams",
+            MethodType(broken_stdio, client),
+        )
+
+        startup_future = asyncio.get_running_loop().create_future()
+        with pytest.raises(RuntimeError, match="Stdio connection failed"):
+            await client._connect_local(startup_future)
+
+        assert fake_stderr.closed is True

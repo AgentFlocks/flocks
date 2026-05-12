@@ -401,7 +401,8 @@ async def lifespan(app: FastAPI):
     if background_tasks:
         await asyncio.gather(*background_tasks, return_exceptions=True)
 
-    # --- Graceful shutdown: notify SSE clients FIRST ---
+    # Notify SSE clients before stopping sessions, MCP transports, and other
+    # long-lived runtime services so browser listeners see the shutdown event.
     try:
         from flocks.server.routes.event import EventBroadcaster
         broadcaster = EventBroadcaster.get()

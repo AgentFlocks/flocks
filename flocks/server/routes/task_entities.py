@@ -6,6 +6,7 @@ from typing import List, Optional, Type
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 
 
@@ -148,8 +149,7 @@ async def get_task_system_notice():
 
     started_at = time.perf_counter()
     notice = await TaskManager.get_task_page_notice()
-    log.info("task.notice.complete", {
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    log_route_timing(log, "task.notice.complete", started_at=started_at, extra={
         "has_notice": bool(notice),
     })
     return notice
@@ -161,8 +161,7 @@ async def task_dashboard():
 
     started_at = time.perf_counter()
     payload = await TaskManager.dashboard()
-    log.info("task.dashboard.complete", {
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    log_route_timing(log, "task.dashboard.complete", started_at=started_at, extra={
         "running": payload.get("running"),
         "queued": payload.get("queued"),
         "scheduled_active": payload.get("scheduled_active"),
@@ -176,8 +175,7 @@ async def task_queue_status():
 
     started_at = time.perf_counter()
     payload = await TaskManager.queue_status()
-    log.info("task.queue_status.complete", {
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    log_route_timing(log, "task.queue_status.complete", started_at=started_at, extra={
         "queued": payload.get("queued"),
         "running": payload.get("running"),
         "paused": payload.get("paused"),

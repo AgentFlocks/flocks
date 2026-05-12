@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.auth.context import get_current_auth_user
+from flocks.server.routes._timing import log_route_timing
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
@@ -237,8 +238,7 @@ async def list_sessions(
             break
     
     response = [_session_to_response(s) for s in filtered]
-    log.info("session.list.complete", {
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
         "limit": limit,

@@ -115,7 +115,6 @@ class McpClient:
         
         self.session: Optional[ClientSession] = None
         self._streams = None
-        self._streams_context = None
         self._connected = False
         self._transport_type: Optional[str] = None
         self._command_queue: asyncio.Queue[_ClientCommand] | None = None
@@ -182,7 +181,6 @@ class McpClient:
             self._connected = False
             self.session = None
             self._streams = None
-            self._streams_context = None
             self._transport_type = None
             await self._fail_pending_commands(RuntimeError(f"Client not connected: {self.name}"))
 
@@ -224,7 +222,6 @@ class McpClient:
         """Reset local state after disconnects or failed startups."""
         self.session = None
         self._streams = None
-        self._streams_context = None
         self._connected = False
         self._transport_type = None
         self._command_queue = None
@@ -368,7 +365,6 @@ class McpClient:
     ) -> None:
         """Run one remote transport from startup until disconnect."""
         async with transport_factory(full_url, headers) as streams:
-            self._streams_context = transport_name
             self._streams = streams
             await self._run_connected_session(transport_name, streams, startup_future)
 
@@ -594,37 +590,36 @@ class McpClient:
             "args": args,
         })
 
-        stderr_file = tempfile.TemporaryFile(mode="w+")
-        try:
-            async with self._create_stdio_streams(server_params, stderr_file) as streams:
-                self._streams_context = "stdio"
-                self._streams = streams
-                await self._run_connected_session("stdio", streams, startup_future)
-        except asyncio.TimeoutError as exc:
-            stderr_output = self._read_stderr(stderr_file)
-            log.error("mcp.client.timeout", {
-                "server": self.name,
-                "transport": "stdio",
-                "stderr": stderr_output,
-            })
-            detail = f"Connection timeout (stdio): {self.name}"
-            if stderr_output:
-                detail += f"\nServer stderr:\n{stderr_output}"
-            raise RuntimeError(detail) from exc
-        except Exception as exc:
-            stderr_output = self._read_stderr(stderr_file)
-            root_cause = _extract_root_cause(exc)
-            log.error("mcp.client.stdio_failed", {
-                "server": self.name,
-                "error": root_cause,
-                "stderr": stderr_output,
-            })
-            detail = f"Stdio connection failed: {self.name}: {root_cause}"
-            if stderr_output:
-                detail += f"\nServer stderr:\n{stderr_output}"
-            raise RuntimeError(detail)
-        finally:
-            stderr_file.close()
+        # Keep stderr capture lifetime explicit: the file must outlive the stdio
+        # transport context, but should close immediately once the attempt ends.
+        with tempfile.TemporaryFile(mode="w+") as stderr_file:
+            try:
+                async with self._create_stdio_streams(server_params, stderr_file) as streams:
+                    self._streams = streams
+                    await self._run_connected_session("stdio", streams, startup_future)
+            except asyncio.TimeoutError as exc:
+                stderr_output = self._read_stderr(stderr_file)
+                log.error("mcp.client.timeout", {
+                    "server": self.name,
+                    "transport": "stdio",
+                    "stderr": stderr_output,
+                })
+                detail = f"Connection timeout (stdio): {self.name}"
+                if stderr_output:
+                    detail += f"\nServer stderr:\n{stderr_output}"
+                raise RuntimeError(detail) from exc
+            except Exception as exc:
+                stderr_output = self._read_stderr(stderr_file)
+                root_cause = _extract_root_cause(exc)
+                log.error("mcp.client.stdio_failed", {
+                    "server": self.name,
+                    "error": root_cause,
+                    "stderr": stderr_output,
+                })
+                detail = f"Stdio connection failed: {self.name}: {root_cause}"
+                if stderr_output:
+                    detail += f"\nServer stderr:\n{stderr_output}"
+                raise RuntimeError(detail)
     
     async def disconnect(self) -> None:
         """Disconnect from server"""

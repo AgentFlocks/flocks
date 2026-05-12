@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from flocks.server.auth import require_admin
+from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
 from flocks.permission.next import DeniedError, PermissionNext
@@ -461,8 +462,7 @@ async def list_tools(
     if source:
         result = [t for t in result if t.source == source]
 
-    log.info("tools.list.complete", {
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
+    log_route_timing(log, "tools.list.complete", started_at=started_at, extra={
         "count": len(result),
         "category": category,
         "source": source,
@@ -792,10 +792,9 @@ async def refresh_tools(_admin: object = Depends(require_admin)):
         errors.append(f"plugin: {e}")
 
     tool_count = len(ToolRegistry.all_tool_ids())
-    log.info("tools.refresh.done", {
+    log_route_timing(log, "tools.refresh.done", started_at=started_at, extra={
         "tool_count": tool_count,
         "errors": len(errors),
-        "duration_ms": int((time.perf_counter() - started_at) * 1000),
     })
 
     if errors:
