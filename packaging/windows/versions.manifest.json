@@ -3,6 +3,11 @@
   "uv": {
     "version": "0.9.15"
   },
+  "python": {
+    "version": "3.12.12",
+    "python_build_standalone_release": "20251202",
+    "windows_archive_name": "cpython-3.12.12+20251202-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+  },
   "nodejs": {
     "version": "24.14.0",
     "windows_zip_suffix": "win-x64"
