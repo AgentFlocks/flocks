@@ -182,9 +182,10 @@ class TestTaskModelPinning:
                 session_id="ses-child",
             )
 
-        assert result.success is False
+        assert result.success is True
         assert result.metadata["sessionId"] == "ses-child"
-        assert "without producing a final assistant message" in (result.error or "")
+        assert result.metadata["emptyOutput"] is True
+        assert "without producing a final assistant message" in (result.output or "")
 
     @pytest.mark.asyncio
     async def test_task_tool_sync_continue_fails_when_last_message_has_no_text(self):
@@ -224,6 +225,7 @@ class TestTaskModelPinning:
                 session_id="ses-child",
             )
 
-        assert result.success is False
+        assert result.success is True
         assert result.metadata["sessionId"] == "ses-child"
-        assert "without text output" in (result.error or "")
+        assert result.metadata["emptyOutput"] is True
+        assert "without text output" in (result.output or "")

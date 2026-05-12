@@ -49,10 +49,13 @@ async def format_sync_subagent_result(
     last_message = getattr(loop_result, "last_message", None)
     if not last_message:
         return ToolResult(
-            success=False,
-            error="Sub-agent completed without producing a final assistant message",
+            success=True,
+            output=(
+                "Sub-agent completed without producing a final assistant message.\n\n"
+                f"{_task_metadata_block(session_id)}"
+            ),
             title=description,
-            metadata=final_metadata,
+            metadata={**final_metadata, "emptyOutput": True},
         )
 
     output_text = await Message.get_text_content(last_message)
@@ -76,8 +79,8 @@ async def format_sync_subagent_result(
     finish_reason = getattr(last_message, "finish", None)
     suffix = f" (finish={finish_reason})" if finish_reason else ""
     return ToolResult(
-        success=False,
-        error=f"Sub-agent completed without text output{suffix}",
+        success=True,
+        output=f"Sub-agent completed without text output{suffix}.\n\n{_task_metadata_block(session_id)}",
         title=description,
-        metadata=final_metadata,
+        metadata={**final_metadata, "emptyOutput": True},
     )

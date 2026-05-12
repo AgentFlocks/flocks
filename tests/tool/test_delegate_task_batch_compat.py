@@ -112,9 +112,10 @@ class TestDelegateTaskTolerance:
                 prompt="Continue investigating",
             )
 
-        assert result.success is False
+        assert result.success is True
         assert result.metadata["sessionId"] == "ses-child"
-        assert "without producing a final assistant message" in (result.error or "")
+        assert result.metadata["emptyOutput"] is True
+        assert "without producing a final assistant message" in (result.output or "")
 
 
 class TestBatchCompatibility:
