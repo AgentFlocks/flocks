@@ -51,6 +51,29 @@ class TestMcpClientTransportSelection:
         assert calls == ["local"]
 
     @pytest.mark.asyncio
+    async def test_timeout_none_defaults_to_safe_float(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        observed: list[float] = []
+
+        async def fake_remote(startup_future):
+            observed.append(client.timeout)
+            startup_future.set_result(None)
+
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+            timeout=None,
+        )
+        monkeypatch.setattr(client, "_connect_remote", fake_remote)
+
+        await client.connect()
+
+        assert observed == [30.0]
+
+    @pytest.mark.asyncio
     async def test_unknown_type_raises_value_error(self):
         client = McpClient(
             name="demo",

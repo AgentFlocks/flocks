@@ -48,6 +48,15 @@ def _extract_root_cause(exc: BaseException) -> str:
     return str(exc)
 
 
+def _normalize_timeout(timeout: object) -> float:
+    """Normalize optional timeout inputs to a positive float."""
+    try:
+        value = float(timeout)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 30.0
+    return value if value > 0 else 30.0
+
+
 @dataclass(slots=True)
 class _ClientCommand:
     """A serialized request executed by the MCP owner task."""
@@ -102,7 +111,7 @@ class McpClient:
         self.env = env
         self.auth_config = auth_config
         self.transport = transport
-        self.timeout = timeout
+        self.timeout = _normalize_timeout(timeout)
         
         self.session: Optional[ClientSession] = None
         self._streams = None
