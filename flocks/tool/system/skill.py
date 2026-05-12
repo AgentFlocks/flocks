@@ -253,6 +253,7 @@ async def get_skill(name: str) -> dict | None:
     name="skill",
     description="Load a skill to get detailed instructions for a specific task. Available skills are listed in the description.",
     category=ToolCategory.SYSTEM,
+    native=True,
     parameters=[
         ToolParameter(
             name="name",

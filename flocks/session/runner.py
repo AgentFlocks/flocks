@@ -44,7 +44,11 @@ from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.hooks.pipeline import HookPipeline
-from flocks.tool.catalog import get_tool_catalog_metadata, list_tool_catalog_infos
+from flocks.tool.catalog import (
+    get_always_load_tool_names,
+    get_tool_catalog_metadata,
+    list_tool_catalog_infos,
+)
 from flocks.tool.registry import ToolRegistry, ToolResult
 from flocks.utils.langfuse import generation_scope, trace_scope
 from flocks.session.utils.file_extractor import (
@@ -1419,9 +1423,6 @@ class SessionRunner:
                 tool_infos.append(tool_info)
                 continue
 
-            if not isinstance(getattr(agent, "tools", None), (list, tuple, set)):
-                tool_infos.append(tool_info)
-                continue
             metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
             if not agent_declares_tool(agent, tool_info.name) and not metadata.always_load:
                 continue
@@ -1431,8 +1432,22 @@ class SessionRunner:
 
     def _build_tool_catalog_prompt(self, agent: AgentInfo) -> Optional[str]:
         from flocks.tool.system.slash_command import format_tools_catalog_summary
+        from flocks.agent.toolset import get_all_enabled_builtin_tool_names
+
+        is_rex = getattr(agent, "name", "") == "rex"
+        if not is_rex:
+            return None
 
         catalog_tools = self._list_catalog_tool_infos(agent)
+        excluded_tool_names = (
+            set(get_all_enabled_builtin_tool_names())
+            | get_always_load_tool_names()
+        )
+        catalog_tools = [
+            tool_info
+            for tool_info in catalog_tools
+            if tool_info.name not in excluded_tool_names
+        ]
         if not catalog_tools:
             return None
 
@@ -1444,25 +1459,12 @@ class SessionRunner:
         if not catalog_summary:
             return None
 
-        is_rex = getattr(agent, "name", "") == "rex"
-        if is_rex:
-            rules = (
-                "You can see the full tool catalog for awareness. "
-                "This catalog is reference-only and does not define parameter names. "
-                "Only tools exposed in the current callable schema may be called directly. "
-                "If a tool appears in the catalog but is not exposed this turn, use `tool_search` first. "
-                "Use the current callable schema as the sole source of truth for parameters. "
-                "Do not invent parameters for tools that are not currently exposed."
-            )
-        else:
-            rules = (
-                "You can see a tool catalog derived from your configured callable tool set. "
-                "This catalog is reference-only and does not define parameter names. "
-                "Only tools exposed in the current callable schema may be called directly. "
-                "Use the current callable schema as the sole source of truth for parameters. "
-                "Do not infer argument names from the catalog. "
-                "Do not invent parameters for tools that are not currently exposed."
-            )
+        rules = (
+            "The following deferred tools are available via `tool_search`. "
+            "Their schemas are NOT loaded - calling them directly will fail "
+            "with `InputValidationError`. Use `tool_search` with query "
+            "`select:<name>[,<name>...]` to load tool schemas before calling them:"
+        )
 
         return (
             "## Tool Catalog Awareness\n\n"

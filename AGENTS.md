@@ -14,25 +14,6 @@
 | LLM 中间推理落盘（workflow 节点内） | `~/.flocks/workspace/outputs/<today>/artifacts/` |
 | 临时调试/草稿文件 | `/tmp/` |
 
-### 代码示例（workflow 节点 / Python 脚本）
-
-```python
-import os, datetime
-from flocks.workspace.manager import WorkspaceManager
-
-# 在执行时动态取当日日期，不依赖 session 启动时的注入值
-ws = WorkspaceManager.get_instance()
-output_dir = str(ws.get_workspace_dir() / 'outputs' / datetime.date.today().isoformat())
-os.makedirs(output_dir, exist_ok=True)
-
-# 写报告
-tool.run('write', filePath=os.path.join(output_dir, 'final_report.md'), content=report)
-# 写 LLM 中间输出
-artifacts_dir = os.path.join(output_dir, 'artifacts')
-os.makedirs(artifacts_dir, exist_ok=True)
-tool.run('write', filePath=os.path.join(artifacts_dir, 'payload_analysis.md'), content=llm_output)
-```
-
 ### 何时可以使用其他路径
 
 - 用户在 prompt 中**明确指定**了输出路径（优先尊重用户指定）
@@ -169,4 +150,4 @@ Rex has a dedicated `flocks_skills` tool for managing agent skills.
 
 ## Important
 - 涉及 `tdp`、`onesec`、`skyeye`、`qingteng` 的任务时，必须先读取并遵循对应的 skill。
-- 对上述系统，禁止绕过对应 skill 直接调用相关 tools；也不要直接使用 `agent-browser`。
+- 对上述系统，禁止绕过对应 skill 直接调用相关 tools；也不要直接使用 `browser`。

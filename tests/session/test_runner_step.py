@@ -687,6 +687,8 @@ class TestBuildSystemPrompts:
 
         assert "memory guidance" in "\n\n".join(prompts)
         assert "## MEMORY.md\n\nremembered context" in prompts
+        assert prompts.index("memory guidance") < prompts.index("agent prompt")
+        assert prompts.index("agent prompt") < prompts.index("## MEMORY.md\n\nremembered context")
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_includes_bash_guidance_when_bash_loaded_on_windows(self):
@@ -813,49 +815,71 @@ class TestBuildSystemPrompts:
         with patch(
             "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
             return_value=[ToolInfo(
-                name="read",
-                description="Read file contents",
-                category=ToolCategory.FILE,
-                native=True,
+                name="plugin_memory",
+                description="Access project memory",
+                category=ToolCategory.CUSTOM,
+                native=False,
                 enabled=True,
             )],
         ), patch(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            return_value=["read", "bash"],
+        ), patch(
+            "flocks.session.runner.get_always_load_tool_names",
+            return_value={"question", "tool_search"},
+        ), patch(
             "flocks.tool.system.slash_command.format_tools_catalog_summary",
-            return_value="Available Tools (grouped by category):\n\n**file**\n- read: Read file contents",
+            return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
         ):
             prompt = runner._build_tool_catalog_prompt(agent)
 
         assert prompt is not None
         assert "Tool Catalog Awareness" in prompt
         assert "tool_search" in prompt
-        assert "full tool catalog" in prompt
-        assert "reference-only" in prompt
-        assert "sole source of truth for parameters" in prompt
-        assert "- read: Read file contents" in prompt
+        assert "InputValidationError" in prompt
+        assert "select:<name>[,<name>...]" in prompt
+        assert "- plugin_memory: Access project memory" in prompt
 
-    def test_build_tool_catalog_prompt_for_subagent_uses_filtered_catalog(self):
+    def test_build_tool_catalog_prompt_for_subagent_returns_none(self):
         runner = _make_runner()
         agent = _make_agent(name="plan")
         agent.mode = "subagent"
 
+        prompt = runner._build_tool_catalog_prompt(agent)
+
+        assert prompt is None
+
+    def test_build_tool_catalog_prompt_for_rex_excludes_builtin_and_always_load_tools(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        agent.mode = "primary"
+        catalog_tools = [
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="plugin_memory", description="Access project memory", category=ToolCategory.CUSTOM, native=False, enabled=True),
+        ]
+
         with patch(
             "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
-            return_value=[ToolInfo(
-                name="read",
-                description="Read file contents",
-                category=ToolCategory.FILE,
-                native=True,
-                enabled=True,
-            )],
+            return_value=catalog_tools,
+        ), patch(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            return_value=["bash", "read"],
+        ), patch(
+            "flocks.session.runner.get_always_load_tool_names",
+            return_value={"question", "tool_search"},
         ), patch(
             "flocks.tool.system.slash_command.format_tools_catalog_summary",
-            return_value="Available Tools (grouped by category):\n\n**file**\n- read: Read file contents",
-        ):
+            side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
+        ) as formatter_mock:
             prompt = runner._build_tool_catalog_prompt(agent)
 
         assert prompt is not None
-        assert "derived from your configured callable tool set" in prompt
-        assert "use `tool_search` first" not in prompt
+        assert "plugin_memory" in prompt
+        assert "bash" not in prompt
+        assert "question" not in prompt
+        formatter_tools = formatter_mock.call_args.kwargs["tools"]
+        assert [tool.name for tool in formatter_tools] == ["plugin_memory"]
 
     def test_list_catalog_tool_infos_returns_full_catalog_for_rex(self):
         runner = _make_runner()
@@ -899,6 +923,39 @@ class TestBuildSystemPrompts:
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["read"]
+
+    def test_list_catalog_tool_infos_keeps_always_load_tools_for_subagent(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan")
+        agent.mode = "subagent"
+        agent.tools = ["read"]
+        tool_infos = [
+            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+        ]
+
+        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["read", "question", "tool_search"]
+
+    def test_list_catalog_tool_infos_does_not_fall_back_to_full_catalog_when_tools_missing(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan", tools=None)
+        agent.mode = "subagent"
+        tool_infos = [
+            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+        ]
+
+        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["question", "tool_search"]
 
 
 class TestMiniMaxTextToolMode:

@@ -93,7 +93,7 @@ You specialize in cybersecurity operations including:
 - Other security operations tasks
 Best practices for security operations:
 
-Your work primarily covers threat detection and analysis, incident response, vulnerability assessment, security automation, malware and forensic analysis, and compliance or hardening reviews.
+Your work primarily covers threat detection and analysis, incident response, vulnerability assessment, security automation, malware and forensic analysis, and compliance or hardening reviews. Using tools to solve tasks is a core part of your capabilities.
 
 Apply these principles consistently:
 - Preserve evidence with timestamps, file paths, line numbers, and relevant context.
@@ -972,19 +972,22 @@ class SessionPrompt:
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
-                name="agent_identity",
-                cache_scope="agent",
-                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
-                builder=lambda: cls._normalize_prompt_text(agent_prompt),
-            ),
-            cls._build_cached_prompt_block(
-                static_cache=static_cache,
                 name="tool_protocol",
                 cache_scope="provider",
                 digest_inputs={"use_text_tool_call_mode": use_text_tool_call_mode},
                 builder=lambda: cls._build_tool_guidance_prompt(
                     use_text_tool_call_mode=use_text_tool_call_mode,
                 ),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="tool_catalog_awareness",
+                cache_scope="catalog",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "tool_revision": tool_revision,
+                },
+                builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
@@ -1005,6 +1008,13 @@ class SessionPrompt:
                     "instructions": memory_guidance or "",
                 },
                 builder=lambda: memory_guidance or "",
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_identity",
+                cache_scope="agent",
+                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(agent_prompt),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
@@ -1036,18 +1046,6 @@ class SessionPrompt:
             builder=build_custom_context,
         )
         blocks.append(custom_block)
-
-        tool_catalog_block = cls._build_cached_prompt_block(
-            static_cache=static_cache,
-            name="tool_catalog_awareness",
-            cache_scope="catalog",
-            digest_inputs={
-                "agent_name": agent_name,
-                "tool_revision": tool_revision,
-            },
-            builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
-        )
-        blocks.append(tool_catalog_block)
 
         if sandbox_prompt_factory:
             blocks.append(await cls._build_cached_async_prompt_block(

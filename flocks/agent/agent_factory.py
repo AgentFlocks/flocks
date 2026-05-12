@@ -6,7 +6,9 @@ prompt.md or marks agents for dynamic prompt injection via prompt_builder.py.
 Resolves each agent to a concrete ``tools`` list. If legacy ``permission`` is
 present, it is expanded against the current tool registry for compatibility.
 If neither ``tools`` nor ``permission`` is declared, the static tool list stays
-empty and runtime exposure falls back to always-load tools only.
+empty and runtime exposure falls back to always-load tools only. ``rex`` is the
+special case: an explicitly empty ``tools: []`` expands to all enabled built-in
+tools so the primary orchestrator keeps broad native capabilities by default.
 
 Extension point:
   Built-in agents:         flocks/agent/agents/<name>/          native=True
@@ -85,6 +87,8 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     Permission is generated from the ``tools`` list in agent.yaml.
     If ``tools`` is absent, the agent keeps an empty static tool list and only
     runtime always-load tools remain available until the session expands them.
+    ``rex`` is the exception: an explicit ``tools: []`` expands to all enabled
+    built-in tools.
 
     Args:
         agent_dir: Path to the agent folder.
@@ -133,7 +137,11 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     # ── Tools / legacy permission compatibility ─────────────────────────────
     tools_list_raw: Optional[List[str]] = raw.get("tools")
     perm_raw = raw.get("permission")
-    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
+    tools_list, legacy_permission = resolve_agent_initial_tools(
+        tools_list_raw,
+        perm_raw,
+        agent_name=name,
+    )
 
     # ── Model ────────────────────────────────────────────────────────────────
     model_raw = raw.get("model")
@@ -342,7 +350,11 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
     # Tools: prefer new tools list; fall back to old permission dict
     tools_list_raw: Optional[List[str]] = raw.get("tools")
     perm_raw = raw.get("permission")
-    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
+    tools_list, legacy_permission = resolve_agent_initial_tools(
+        tools_list_raw,
+        perm_raw,
+        agent_name=name,
+    )
 
     desc_cn = raw.get("description_cn")
     if desc_cn is None and isinstance(raw.get("descriptionCn"), str):

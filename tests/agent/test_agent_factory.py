@@ -191,6 +191,21 @@ class TestLoadAgent:
         assert agent is not None
         assert agent.tools == []
 
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: rex
+            tools: []
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.tools == ["read", "bash", "tool_search"]
+
     def test_loads_model(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
             name: model_agent
@@ -508,6 +523,17 @@ class TestYamlToAgentInfo:
         yaml_path = self._make_yaml_path(tmp_path)
         agent = yaml_to_agent_info({"name": "no_tools"}, yaml_path)
         assert agent.tools == []
+
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        yaml_path = self._make_yaml_path(tmp_path)
+
+        agent = yaml_to_agent_info({"name": "rex", "tools": []}, yaml_path)
+
+        assert agent.tools == ["read", "bash", "tool_search"]
 
     def test_model_parsed(self, tmp_path):
         yaml_path = self._make_yaml_path(tmp_path)

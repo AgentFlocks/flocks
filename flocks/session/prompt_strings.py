@@ -248,13 +248,13 @@ def _build_tool_instructions() -> str:
     return """
 ## Tool Calling Rules
 
-You have access to tools to help accomplish tasks. Use the callable schema exposed for this turn as the authoritative source for available tool names and parameters.
+You have access to tools to help accomplish tasks.
 
 IMPORTANT RULES:
 - NEVER call the same tool multiple times with identical parameters in a single response
 - Do not repeat tool calls just to explain what you're doing - call the tool once and explain after
 - Never guess parameter names from semantics. If uncertain, use `tool_search` first, then read the callable schema for that tool and copy parameter names EXACTLY (including case)..
-- For all tools, treat schema as strict: unknown parameter names will fail.
+- For all tools, treat schema as strict: unknown parameter names will fail, empty parameter values will fail.
 
 CRITICAL - TOOL CALLING FORMAT:
 - ALWAYS invoke tools using the native API tool-calling mechanism ONLY

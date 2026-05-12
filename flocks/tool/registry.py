@@ -1190,8 +1190,8 @@ class ToolRegistry:
             ("flocks.tool.task", ["task", "task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, skill, batch, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill", "batch", "session_manage", "slash_command", "tool_search"]),
+            # system/ — background tasks, questions, model config, memory, skill, MCP management, batch, session management, slash commands
+            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill", "flocks_mcp", "batch", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove)
             ("flocks.tool.skill", ["flocks_skills"]),
             # channel/ — IM platform messaging
