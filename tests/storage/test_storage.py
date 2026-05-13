@@ -2,9 +2,13 @@
 Tests for storage module
 """
 
+from contextlib import asynccontextmanager
+import sqlite3
 import pytest
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from pydantic import BaseModel
 
 from flocks.storage.storage import Storage
@@ -108,3 +112,111 @@ async def test_storage_clear(storage):
     
     keys = await storage.list_keys()
     assert len(keys) == 0
+
+
+@pytest.mark.asyncio
+async def test_storage_set_retries_on_sqlite_busy():
+    """`Storage.set()` should retry transient SQLite lock contention."""
+    execute_calls = {"count": 0}
+
+    class FakeConnection:
+        async def execute(self, *_args, **_kwargs):
+            execute_calls["count"] += 1
+            if execute_calls["count"] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return SimpleNamespace(rowcount=1)
+
+        async def commit(self):
+            return None
+
+        async def close(self):
+            return None
+
+    @asynccontextmanager
+    async def _fake_connect(_db_path=None):
+        yield FakeConnection()
+
+    with patch.object(Storage, "_ensure_init", AsyncMock()), \
+         patch.object(Storage, "connect", side_effect=_fake_connect), \
+         patch.object(Storage, "_db_path", Path("/tmp/test-storage.db")):
+        await Storage.set("busy:key", {"value": 1}, "test")
+
+    assert execute_calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_storage_set_does_not_swallow_non_busy_sqlite_errors():
+    """Unexpected SQLite errors should still surface to callers."""
+
+    class FakeConnection:
+        async def execute(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("near \"INSERT\": syntax error")
+
+        async def commit(self):
+            return None
+
+        async def close(self):
+            return None
+
+    @asynccontextmanager
+    async def _fake_connect(_db_path=None):
+        yield FakeConnection()
+
+    with patch.object(Storage, "_ensure_init", AsyncMock()), \
+         patch.object(Storage, "connect", side_effect=_fake_connect), \
+         patch.object(Storage, "_db_path", Path("/tmp/test-storage.db")):
+        with pytest.raises(sqlite3.OperationalError, match="syntax error"):
+            await Storage.set("bad:key", {"value": 1}, "test")
+
+
+def test_is_sqlite_busy_error_checks_sqlite_error_code():
+    """Busy/locked sqlite error codes should be recognized without message matching."""
+    exc = sqlite3.OperationalError("custom wrapper text")
+    exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    assert Storage._is_sqlite_busy_error(exc) is True
+
+
+def test_is_sqlite_busy_error_ignores_non_sqlite_custom_exceptions():
+    """Non-sqlite exceptions should not be retried based on message substring alone."""
+
+    class FakeError(Exception):
+        pass
+
+    exc = FakeError("database is locked")
+    assert Storage._is_sqlite_busy_error(exc) is False
+
+
+@pytest.mark.asyncio
+async def test_storage_init_retries_when_create_table_hits_sqlite_busy(tmp_path):
+    """Initialization should retry table creation on transient SQLite lock errors."""
+    db_path = tmp_path / "retry-init.db"
+    original_connect = Storage.connect
+    call_count = {"count": 0}
+
+    @asynccontextmanager
+    async def _flaky_connect(target_db_path=None):
+        target = Path(target_db_path) if target_db_path is not None else Storage.get_db_path()
+        if call_count["count"] == 0:
+            call_count["count"] += 1
+
+            class BusyConnection:
+                async def execute(self, *_args, **_kwargs):
+                    raise sqlite3.OperationalError("database is locked")
+
+                async def close(self):
+                    return None
+
+            yield BusyConnection()
+            return
+
+        async with original_connect(target) as real_conn:
+            yield real_conn
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "connect", side_effect=_flaky_connect):
+        await Storage.init(db_path)
+
+    assert call_count["count"] == 1
+    assert db_path.exists()
