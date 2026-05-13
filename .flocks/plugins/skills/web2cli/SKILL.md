@@ -8,14 +8,6 @@ required: browser-use
 
 > 正式开始前，先明确需要操作的网站或tab
 
-## 使用的资源
-
-- 默认注入脚本：`scripts/inject-hook-base.js`
-- CLI 生成器：`.flocks/plugins/skills/web2cli/scripts/generate-cli.py`
-- 支持两种模式：
-  - `MODE=agent-browser`
-  - `MODE=cdp-direct`
-
 ## 模式选择
 
 ### `agent-browser`
@@ -40,15 +32,14 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 
 ## 输出目录约定
 
-捕获产生的文件统一落到 `~/.flocks/workspace/outputs/<today>/web2cli/<name>/`。
+捕获产生的文件统一落到 `~/.flocks/workspace/outputs/web2cli/<name>/`。
 
 开始前先准备目录：
 
 ```bash
 MODE="${MODE:-cdp-direct}"
 CAPTURE_NAME="<name>"
-TODAY="$(date +%F)"
-CAPTURE_ROOT="$HOME/.flocks/workspace/outputs/$TODAY/web2cli/$CAPTURE_NAME"
+CAPTURE_ROOT="$HOME/.flocks/workspace/outputs/web2cli/$CAPTURE_NAME"
 WEB2CLI_SKILL=".flocks/plugins/skills/web2cli"
 mkdir -p "$CAPTURE_ROOT/captures"
 ```
@@ -307,7 +298,7 @@ if target_id:
 )
 ```
 
-将 cookie 和 localStorage 保存为后续 CLI 调用的认证输入。`flocks browser state save` 会输出更接近标准 `storageState` 的交换格式：cookies 放在顶层，origin 级 localStorage 放在 `origins[]`。保存时会尽量覆盖当前站点下的多子域 cookie，适合知乎这类依赖跨子域登录态的 CLI。认证文件包含敏感值，只能写入 `$CAPTURE_ROOT` 这类工作区输出目录，不要写入代码仓库。
+将 cookie 和 localStorage 保存为后续 CLI 调用的认证输入。
 
 ### 7. 分析捕获的 web API
 
@@ -421,13 +412,16 @@ else:
 
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
 
+### 11. 迭代与 skill 沉淀
 
-### 11. summary
+将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
 
-总结当前 生成 的CLI 工具有哪些能力，然后可提示用户下一步操作：
-- 精简或修正CLI
-- 进一步丰富 CLI 工具，重新开始 web2cli标准流程
-- 保存为对应的 skill 方便后续操作（进入此操作后，需要阅读references）
+### 12. summary
+
+总结当前生成的 CLI 工具有哪些能力，然后可提示用户下一步操作：
+
+- 精简或修正 CLI
+- 若仍需扩展能力或沉淀为 skill，回到步骤 11
 
 ## 故障处理
 
@@ -455,10 +449,10 @@ else:
 5. 修改sameOriginOnly 参数
 6. 以上方法都不可行时，按照Hook 注入报错的原则，自定义hook.js
 
-### 认证失效
+### CLI认证失效
 
-- `agent-browser`：重新登录后再次执行保存状态命令。
-- `cdp-direct`：重新登录后再次执行保存认证状态。
+- 登录状态有效：利用已有知识和查找公开资料尝试解决。
+- 登录状态失效：重新登录后再次执行保存状态命令。
 
 ## Reference
 - references/cli-in-skill.md 将生成的 CLI 集成到 skill 中使用
