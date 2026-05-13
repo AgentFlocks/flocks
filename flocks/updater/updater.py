@@ -23,6 +23,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -59,7 +60,7 @@ _PRESERVE_NAMES: set[str] = {
     "node_modules",
     "logs",
     ".env",
-    "flocks.json",
+    ".git",
     "__pycache__",
 }
 
@@ -86,7 +87,7 @@ class UpdateMirrorProfile:
 
 @dataclass(frozen=True)
 class _FrontendNpmCandidate:
-    """A single npm launcher candidate for staged frontend rebuilds."""
+    """A single npm launcher candidate for frontend rebuilds."""
 
     npm: str
     env: dict[str, str] | None
@@ -386,12 +387,150 @@ def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[s
     )
 
 
-def _reset_staged_frontend_workspace(staged_webui_dir: Path) -> None:
+def _reset_frontend_workspace(webui_dir: Path) -> None:
     """Remove transient frontend build artifacts before retrying another npm candidate."""
     for name in ("node_modules", "dist"):
-        target = staged_webui_dir / name
+        target = webui_dir / name
         if target.exists():
             _safe_remove(target)
+
+
+async def _build_frontend_workspace(
+    webui_dir: Path,
+    *,
+    npm_registry: str | None = None,
+) -> str | None:
+    """Install dependencies and build the frontend in the active install tree."""
+    npm_candidates = _resolve_frontend_npm_candidates(npm_registry=npm_registry)
+    if not npm_candidates:
+        log.warning(
+            "updater.frontend.npm_not_found",
+            {
+                "hint": ("Cannot build frontend during restart because npm was not found"),
+            },
+        )
+        return "Frontend dependency install failed: npm was not found."
+
+    install_label = "npm install"
+    final_frontend_error: str | None = None
+
+    for index, candidate in enumerate(npm_candidates):
+        attempt_source = candidate.source
+        is_last_attempt = index == len(npm_candidates) - 1
+        install_cmd = [candidate.npm, "install"]
+        try:
+            code, _, err = await _run_async(
+                install_cmd,
+                cwd=webui_dir,
+                timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                env=candidate.env,
+            )
+        except subprocess.TimeoutExpired:
+            final_frontend_error = (
+                "Frontend dependency install timed out after "
+                f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
+            )
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        if code != 0:
+            final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        try:
+            code, _, err = await _run_async(
+                [candidate.npm, "run", "build"],
+                cwd=webui_dir,
+                timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
+                env=candidate.env,
+            )
+        except subprocess.TimeoutExpired:
+            final_frontend_error = (
+                f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
+            )
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        if code != 0:
+            final_frontend_error = f"Frontend build failed: {err}"
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        final_frontend_error = None
+        break
+
+    if final_frontend_error is not None:
+        return final_frontend_error
+
+    dist_index = webui_dir / "dist" / "index.html"
+    if not dist_index.exists():
+        return "Frontend build output is missing after npm run build."
+
+    return None
+
+
+async def build_updated_frontend(
+    *,
+    locale: str | None = None,
+    region: str | None = None,
+) -> None:
+    """Build the active install tree frontend after a non-restarting update."""
+    ucfg = await _get_updater_config()
+    profile = _resolve_update_mirror_profile(
+        ucfg.sources,
+        region=region,
+        locale=locale,
+    )
+    install_root = _get_repo_root()
+    webui_dir = install_root / "webui"
+    if not webui_dir.is_dir() or not (webui_dir / "package.json").exists():
+        return
+
+    frontend_error = await _build_frontend_workspace(
+        webui_dir,
+        npm_registry=profile.npm_registry,
+    )
+    if frontend_error is not None:
+        raise RuntimeError(frontend_error)
+
+
+async def _await_ignoring_cancellation(awaitable):
+    """Finish a post-handover critical step even if the SSE client disconnects."""
+    task = asyncio.create_task(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            log.warning("updater.restart.critical_step_cancelled_ignored")
 
 
 def _dependency_sync_timeout_seconds() -> int:
@@ -1071,21 +1210,19 @@ def _backup_current_version(
     """
     Compress the current install directory into ~/.flocks/version/ .
     Returns the backup path on success, None on failure.
-    Heavy directories (.venv, node_modules, ...) are excluded.
+    Preserved runtime/user directories are excluded.
     """
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     backup_name = f"flocks-{current_version}-{ts}"
     backup_path = _BACKUP_DIR / f"{backup_name}.tar.gz"
 
-    exclude = {".venv", "node_modules", "__pycache__", ".git", "logs"}
-
     def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
         parts = info.name.split("/")
         for index, part in enumerate(parts):
-            if part in exclude:
+            if part in _PRESERVE_NAMES:
                 return None
-            if part == "dist" and parts[max(index - 1, 0)] != "webui":
+            if part == "dist":
                 return None
         return info
 
@@ -1738,44 +1875,40 @@ def _replace_install_dir(
 _VERSION_MARKER_PATH = _BACKUP_DIR / ".current_version"
 
 
+def _read_version_marker() -> str:
+    """Read the persisted installed version marker."""
+    try:
+        if _VERSION_MARKER_PATH.is_file():
+            return _VERSION_MARKER_PATH.read_text(encoding="utf-8").strip().lstrip("v")
+    except Exception:
+        pass
+    return ""
+
+
+def _read_pyproject_version() -> str:
+    """Read the source version from the repository pyproject.toml."""
+    try:
+        pyproject_path = _get_repo_root() / "pyproject.toml"
+        if not pyproject_path.is_file():
+            return ""
+        payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        version = str(payload.get("project", {}).get("version", "")).strip()
+        return version.lstrip("v")
+    except Exception:
+        pass
+    return ""
+
+
 def get_current_version() -> str:
     """
     Return the running version.
-    Priority:
-      1. Version marker at ~/.flocks/version/.current_version — always
-         accurate after a download-based upgrade since local git tags
-         are no longer updated.
-      2. git describe --tags (works when installed from a git checkout).
-         If found, also persist it to the marker for future lookups.
-      3. importlib.metadata / pyproject.toml via flocks.__version__.
+    Compare the persisted marker at ~/.flocks/version/.current_version
+    with the source version in pyproject.toml and return the higher one.
     """
-    try:
-        if _VERSION_MARKER_PATH.is_file():
-            ver = _VERSION_MARKER_PATH.read_text(encoding="utf-8").strip()
-            if ver:
-                return ver.lstrip("v")
-    except Exception:
-        pass
-
-    try:
-        result = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            cwd=_get_repo_root(),
-            capture_output=True,
-            text=False,
-            timeout=3,
-        )
-        stdout = _clean_process_output(result.stdout)
-        if result.returncode == 0 and stdout:
-            ver = stdout.lstrip("v")
-            _write_version_marker(ver)
-            return ver
-    except Exception:
-        pass
-
-    from flocks import __version__
-
-    return __version__
+    return _pick_best_tag([
+        _read_version_marker(),
+        _read_pyproject_version(),
+    ])
 
 
 def _write_version_marker(version: str) -> None:
@@ -1998,126 +2131,13 @@ async def perform_update(
         return
 
     # ------------------------------------------------------------------ #
-    # Step 3 – prepare staged frontend
+    # Step 3 – determine whether frontend handover is needed
     # ------------------------------------------------------------------ #
     staged_webui_dir = content_root / "webui"
-    if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
-        npm_candidates = _resolve_frontend_npm_candidates(npm_registry=profile.npm_registry)
-        if npm_candidates:
-            install_subcommand = "ci" if (staged_webui_dir / "package-lock.json").exists() else "install"
-            install_label = f"npm {install_subcommand}"
-            final_frontend_error: str | None = None
-
-            for index, candidate in enumerate(npm_candidates):
-                attempt_source = candidate.source
-                is_last_attempt = index == len(npm_candidates) - 1
-
-                yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
-                install_cmd = [candidate.npm, install_subcommand]
-                try:
-                    code, _, err = await _run_async(
-                        install_cmd,
-                        cwd=staged_webui_dir,
-                        timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
-                        env=candidate.env,
-                    )
-                except subprocess.TimeoutExpired:
-                    final_frontend_error = (
-                        "Frontend dependency install timed out after "
-                        f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
-                    )
-                    if is_last_attempt:
-                        break
-                    _reset_staged_frontend_workspace(staged_webui_dir)
-                    _record_update_journal(
-                        "WARN "
-                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
-                        f"npm/node after {attempt_source} attempt."
-                    )
-                    continue
-                if code != 0:
-                    final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
-                    if is_last_attempt:
-                        break
-                    _reset_staged_frontend_workspace(staged_webui_dir)
-                    _record_update_journal(
-                        "WARN "
-                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
-                        f"npm/node after {attempt_source} attempt."
-                    )
-                    continue
-
-                yield UpdateProgress(stage="building", message="Building frontend...")
-                try:
-                    code, _, err = await _run_async(
-                        [candidate.npm, "run", "build"],
-                        cwd=staged_webui_dir,
-                        timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
-                        env=candidate.env,
-                    )
-                except subprocess.TimeoutExpired:
-                    final_frontend_error = (
-                        f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
-                    )
-                    if is_last_attempt:
-                        break
-                    _reset_staged_frontend_workspace(staged_webui_dir)
-                    _record_update_journal(
-                        "WARN "
-                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
-                        f"npm/node after {attempt_source} attempt."
-                    )
-                    continue
-                if code != 0:
-                    final_frontend_error = f"Frontend build failed: {err}"
-                    if is_last_attempt:
-                        break
-                    _reset_staged_frontend_workspace(staged_webui_dir)
-                    _record_update_journal(
-                        "WARN "
-                        f"{final_frontend_error} Cleaned staged frontend workspace and retrying with fallback "
-                        f"npm/node after {attempt_source} attempt."
-                    )
-                    continue
-
-                final_frontend_error = None
-                break
-
-            if final_frontend_error is not None:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                _record_update_journal(f"ERROR {final_frontend_error}")
-                yield UpdateProgress(
-                    stage="error",
-                    message=final_frontend_error,
-                    success=False,
-                )
-                return
-        else:
-            log.warning(
-                "updater.frontend.npm_not_found",
-                {
-                    "hint": ("Cannot prebuild frontend during upgrade because npm was not found"),
-                },
-            )
-        dist_index = staged_webui_dir / "dist" / "index.html"
-        if not dist_index.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            _fe_miss = "Frontend build output is missing; upgrade aborted before cutover."
-            _record_update_journal(f"ERROR {_fe_miss}")
-            yield UpdateProgress(
-                stage="error",
-                message=_fe_miss,
-                success=False,
-            )
-            return
-
-    # ------------------------------------------------------------------ #
-    # Step 4 – determine whether frontend handover is needed
-    # ------------------------------------------------------------------ #
     needs_handover = staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists()
 
     # ------------------------------------------------------------------ #
-    # Step 5 – replace install tree
+    # Step 4 – replace install tree
     # (Frontend proxy is still alive so the SSE stream keeps flowing.)
     # ------------------------------------------------------------------ #
     yield UpdateProgress(
@@ -2128,6 +2148,9 @@ async def perform_update(
     async def _restore_after_apply_failure() -> None:
         nonlocal handover_active
         if backup_path is None:
+            if handover_active:
+                await asyncio.to_thread(rollback_upgrade_handover)
+                handover_active = False
             return
         if handover_active:
             await asyncio.to_thread(
@@ -2184,7 +2207,7 @@ async def perform_update(
             return
 
     # ------------------------------------------------------------------ #
-    # Step 6 – sync dependencies
+    # Step 5 – sync dependencies
     # ------------------------------------------------------------------ #
     yield UpdateProgress(stage="syncing", message="Syncing dependencies...")
 
@@ -2315,14 +2338,14 @@ async def perform_update(
         log.warning("updater.refresh_cli.failed", {"error": str(exc)})
 
     # ------------------------------------------------------------------ #
-    # Step 7 – restart in-place (skipped when restart=False, e.g. CLI)
+    # Step 6 – restart in-place (skipped when restart=False, e.g. CLI)
     # Send the "restarting" event while the proxy is still alive, then
-    # perform the handover (kill frontend + start temp page) right
-    # before os.execv so the SSE stream is not broken prematurely.
+    # perform the handover, rebuild the frontend in the active install tree,
+    # and finally restart the service.
     #
-    # CRITICAL: handover + execv run SYNCHRONOUSLY (no await) so that
-    # CancelledError from client disconnect cannot interrupt between
-    # killing the Vite proxy and calling os.execv.
+    # CRITICAL: once handover starts we ignore client-disconnect cancellation
+    # until the build/restart sequence finishes, so the temporary upgrade page
+    # is not left behind half-way through cutover.
     # ------------------------------------------------------------------ #
     if not restart:
         yield UpdateProgress(
@@ -2372,6 +2395,41 @@ async def perform_update(
             handover_active = True
         except Exception as exc:
             log.error("updater.handover.failed", {"error": str(exc)})
+            await _restore_after_apply_failure()
+            yield UpdateProgress(
+                stage="error",
+                message=f"Failed to prepare WebUI handover: {exc}",
+                success=False,
+            )
+            return
+
+    install_webui_dir = install_root / "webui"
+    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+        if not handover_active:
+            frontend_error = "Refusing to rebuild frontend before WebUI handover completes."
+            _record_update_journal(f"ERROR {frontend_error}")
+            await _restore_after_apply_failure()
+            yield UpdateProgress(
+                stage="error",
+                message=frontend_error,
+                success=False,
+            )
+            return
+        frontend_error = await _await_ignoring_cancellation(
+            _build_frontend_workspace(
+                install_webui_dir,
+                npm_registry=profile.npm_registry,
+            )
+        )
+        if frontend_error is not None:
+            _record_update_journal(f"ERROR {frontend_error}")
+            await _await_ignoring_cancellation(_restore_after_apply_failure())
+            yield UpdateProgress(
+                stage="error",
+                message=frontend_error,
+                success=False,
+            )
+            return
 
     if sys.platform == "win32":
         log.info("updater.restart.spawn", {"argv": restart_argv})
@@ -2647,7 +2705,7 @@ def _resolve_system_npm_executable() -> str | None:
 
 
 def _resolve_frontend_npm_candidates(*, npm_registry: str | None = None) -> list[_FrontendNpmCandidate]:
-    """Resolve npm candidates for staged frontend rebuilds."""
+    """Resolve npm candidates for frontend rebuilds."""
     candidates: list[_FrontendNpmCandidate] = []
 
     bundled = _resolve_bundled_npm_executable()

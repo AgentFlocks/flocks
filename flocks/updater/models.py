@@ -12,7 +12,6 @@ UpdateStage = Literal[
     "backing_up",
     "applying",
     "syncing",
-    "building",
     "restarting",
     "done",
     "error",
