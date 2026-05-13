@@ -27,6 +27,7 @@ from flocks.session.session_loop import SessionLoop
 from flocks.agent.registry import is_delegatable
 from flocks.skill.skill import Skill
 from flocks.config.config import Config
+from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.delegate_task")
@@ -336,26 +337,13 @@ async def delegate_task_tool(
                 event_publish_callback=ctx.event_publish_callback,
             ),
         )
-        if result.action == "error":
-            error_detail = result.error or "Sub-agent execution failed"
-            log.error("delegate_task.continue_error", {
-                "session_id": session.id,
-                "error": error_detail,
-            })
-            return ToolResult(
-                success=False,
-                error=f"Sub-agent failed: {error_detail}",
-                title=description,
-                metadata={"sessionId": session.id},
-            )
-        output_text = ""
-        if result.last_message:
-            output_text = await Message.get_text_content(result.last_message)
-        output = (
-            f"{output_text}\n\n<task_metadata>\nsession_id: {session.id}\n</task_metadata>"
-        )
         ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": session.id}})
-        return ToolResult(success=True, output=output, title=description, metadata={"sessionId": session.id})
+        return await format_sync_subagent_result(
+            description=description,
+            session_id=session.id,
+            loop_result=result,
+            metadata={"sessionId": session.id},
+        )
 
     if category:
         agent_to_use = "rex-junior"
@@ -462,28 +450,12 @@ async def delegate_task_tool(
             event_publish_callback=ctx.event_publish_callback,
         ),
     )
-
-    if result.action == "error":
-        error_detail = result.error or "Sub-agent execution failed"
-        log.error("delegate_task.subagent_error", {
-            "session_id": created.id,
-            "agent": agent_to_use,
-            "category": category,
-            "error": error_detail,
-        })
-        ctx.metadata({"title": description, "metadata": {**forwarder.final_metadata, "status": "error"}})
-        return ToolResult(
-            success=False,
-            error=f"Sub-agent failed: {error_detail}",
-            title=description,
-            metadata=forwarder.final_metadata,
-        )
-
-    output_text = ""
-    if result.last_message:
-        output_text = await Message.get_text_content(result.last_message)
-    output = (
-        f"{output_text}\n\n<task_metadata>\nsession_id: {created.id}\n</task_metadata>"
+    tool_result = await format_sync_subagent_result(
+        description=description,
+        session_id=created.id,
+        loop_result=result,
+        metadata=forwarder.final_metadata,
     )
-    ctx.metadata({"title": description, "metadata": forwarder.final_metadata})
-    return ToolResult(success=True, output=output, title=description, metadata=forwarder.final_metadata)
+    result_status = "running" if tool_result.success else "error"
+    ctx.metadata({"title": description, "metadata": {**forwarder.final_metadata, "status": result_status}})
+    return tool_result

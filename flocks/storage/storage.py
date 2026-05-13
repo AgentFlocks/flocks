@@ -4,10 +4,12 @@ Storage module for persistent data management
 Provides SQLite-based storage similar to Flocks's Storage namespace
 """
 
+import asyncio
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sqlite3
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
 import json
 import aiosqlite
 from datetime import datetime
@@ -48,6 +50,8 @@ class Storage:
     _sqlite_timeout_s = 5.0
     _sqlite_busy_timeout_ms = 5000
     _sqlite_journal_mode = "WAL"
+    _sqlite_write_retry_attempts = 6
+    _sqlite_write_retry_base_delay_s = 0.05
 
     @classmethod
     def _invalidate_runtime_caches(cls) -> None:
@@ -93,6 +97,93 @@ class Storage:
         conn.execute(f"PRAGMA busy_timeout={cls._sqlite_busy_timeout_ms}")
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    @classmethod
+    def _is_sqlite_busy_error(cls, exc: Exception) -> bool:
+        """Return whether *exc* is a retryable SQLite busy/locked write error."""
+        busy_codes = {
+            code
+            for code in (
+                getattr(sqlite3, "SQLITE_BUSY", None),
+                getattr(sqlite3, "SQLITE_LOCKED", None),
+            )
+            if code is not None
+        }
+        seen: set[int] = set()
+        queue: List[BaseException] = [exc]
+
+        while queue:
+            current = queue.pop(0)
+            if current is None:
+                continue
+            ident = id(current)
+            if ident in seen:
+                continue
+            seen.add(ident)
+
+            error_code = getattr(current, "sqlite_errorcode", None)
+            if error_code in busy_codes:
+                return True
+
+            module_name = getattr(type(current), "__module__", "")
+            is_sqlite_error = isinstance(current, sqlite3.Error) or module_name.startswith("sqlite3")
+            is_aiosqlite_error = module_name.startswith("aiosqlite")
+            if is_sqlite_error or is_aiosqlite_error:
+                text = str(current).lower()
+                if any(
+                    token in text
+                    for token in (
+                        "database is locked",
+                        "database table is locked",
+                        "database schema is locked",
+                        "database is busy",
+                        "database table is busy",
+                    )
+                ):
+                    return True
+
+            cause = getattr(current, "__cause__", None)
+            context = getattr(current, "__context__", None)
+            if cause is not None:
+                queue.append(cause)
+            if context is not None:
+                queue.append(context)
+
+        return False
+
+    @classmethod
+    async def _run_write_with_retry(
+        cls,
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        action: str,
+        target: Optional[str] = None,
+    ) -> Any:
+        """Run a write operation with bounded retries for SQLite lock contention."""
+        attempts = max(int(cls._sqlite_write_retry_attempts), 1)
+        delay_s = max(float(cls._sqlite_write_retry_base_delay_s), 0.0)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return await operation()
+            except Exception as exc:
+                if not cls._is_sqlite_busy_error(exc) or attempt >= attempts:
+                    raise
+                last_exc = exc
+                sleep_s = delay_s * (2 ** (attempt - 1))
+                cls._log.warn("storage.sqlite_write_retry", {
+                    "action": action,
+                    "target": target,
+                    "attempt": attempt,
+                    "max_attempts": attempts,
+                    "sleep_s": round(sleep_s, 3),
+                    "error": str(exc),
+                })
+                await asyncio.sleep(sleep_s)
+
+        assert last_exc is not None
+        raise last_exc
 
     @classmethod
     @asynccontextmanager
@@ -170,18 +261,24 @@ class Storage:
         cls._db_path.parent.mkdir(parents=True, exist_ok=True)
         cls._invalidate_runtime_caches()
         
-        # Create tables
-        async with cls.connect(cls._db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS storage (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            await db.commit()
+        async def _create_storage_table() -> None:
+            async with cls.connect(cls._db_path) as db:
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS storage (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                await db.commit()
+
+        await cls._run_write_with_retry(
+            _create_storage_table,
+            action="init.create_storage_table",
+            target=str(cls._db_path),
+        )
         
         # Initialize vector storage tables (for memory system)
         try:
@@ -197,9 +294,16 @@ class Storage:
         # Run extension DDLs registered before init
         for ddl in cls._extension_ddls:
             try:
-                async with cls.connect(cls._db_path) as db:
-                    await db.executescript(ddl)
-                    await db.commit()
+                async def _run_extension_ddl() -> None:
+                    async with cls.connect(cls._db_path) as db:
+                        await db.executescript(ddl)
+                        await db.commit()
+
+                await cls._run_write_with_retry(
+                    _run_extension_ddl,
+                    action="init.extension_ddl",
+                    target=str(cls._db_path),
+                )
             except Exception as e:
                 cls._log.warn("storage.extension_ddl.failed", {"error": str(e)})
 
@@ -214,62 +318,69 @@ class Storage:
         (credentials, model settings, default models, custom providers)
         is stored in flocks.json / .secret.json.
         """
-        async with cls.connect(cls._db_path) as db:
-            await db.executescript("""
-                -- Usage records (dynamic data — the only model-management table in SQLite)
-                CREATE TABLE IF NOT EXISTS usage_records (
-                    id TEXT PRIMARY KEY,
-                    provider_id TEXT NOT NULL,
-                    model_id TEXT NOT NULL,
-                    credential_id TEXT,
-                    session_id TEXT,
-                    message_id TEXT,
-                    input_tokens INTEGER NOT NULL DEFAULT 0,
-                    output_tokens INTEGER NOT NULL DEFAULT 0,
-                    cached_tokens INTEGER NOT NULL DEFAULT 0,
-                    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-                    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
-                    total_tokens INTEGER NOT NULL DEFAULT 0,
-                    input_cost REAL NOT NULL DEFAULT 0,
-                    output_cost REAL NOT NULL DEFAULT 0,
-                    total_cost REAL NOT NULL DEFAULT 0,
-                    currency TEXT NOT NULL DEFAULT 'USD',
-                    latency_ms INTEGER,
-                    source TEXT NOT NULL DEFAULT 'live',
-                    created_at TEXT NOT NULL,
-                    backfilled_at TEXT
-                );
-            """)
+        async def _create_tables() -> None:
+            async with cls.connect(cls._db_path) as db:
+                await db.executescript("""
+                    -- Usage records (dynamic data — the only model-management table in SQLite)
+                    CREATE TABLE IF NOT EXISTS usage_records (
+                        id TEXT PRIMARY KEY,
+                        provider_id TEXT NOT NULL,
+                        model_id TEXT NOT NULL,
+                        credential_id TEXT,
+                        session_id TEXT,
+                        message_id TEXT,
+                        input_tokens INTEGER NOT NULL DEFAULT 0,
+                        output_tokens INTEGER NOT NULL DEFAULT 0,
+                        cached_tokens INTEGER NOT NULL DEFAULT 0,
+                        cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                        total_tokens INTEGER NOT NULL DEFAULT 0,
+                        input_cost REAL NOT NULL DEFAULT 0,
+                        output_cost REAL NOT NULL DEFAULT 0,
+                        total_cost REAL NOT NULL DEFAULT 0,
+                        currency TEXT NOT NULL DEFAULT 'USD',
+                        latency_ms INTEGER,
+                        source TEXT NOT NULL DEFAULT 'live',
+                        created_at TEXT NOT NULL,
+                        backfilled_at TEXT
+                    );
+                """)
 
-            async with db.execute("PRAGMA table_info(usage_records)") as cursor:
-                existing_columns = {row[1] for row in await cursor.fetchall()}
+                async with db.execute("PRAGMA table_info(usage_records)") as cursor:
+                    existing_columns = {row[1] for row in await cursor.fetchall()}
 
-            schema_additions = [
-                ("message_id", "ALTER TABLE usage_records ADD COLUMN message_id TEXT"),
-                ("cache_write_tokens", "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
-                ("source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT 'live'"),
-                ("backfilled_at", "ALTER TABLE usage_records ADD COLUMN backfilled_at TEXT"),
-            ]
-            for column_name, statement in schema_additions:
-                if column_name in existing_columns:
-                    continue
-                await db.execute(statement)
+                schema_additions = [
+                    ("message_id", "ALTER TABLE usage_records ADD COLUMN message_id TEXT"),
+                    ("cache_write_tokens", "ALTER TABLE usage_records ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0"),
+                    ("source", "ALTER TABLE usage_records ADD COLUMN source TEXT NOT NULL DEFAULT 'live'"),
+                    ("backfilled_at", "ALTER TABLE usage_records ADD COLUMN backfilled_at TEXT"),
+                ]
+                for column_name, statement in schema_additions:
+                    if column_name in existing_columns:
+                        continue
+                    await db.execute(statement)
 
-            index_statements = [
-                "CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records(provider_id, model_id)",
-                "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)",
-                "CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at)",
-                "CREATE INDEX IF NOT EXISTS idx_usage_message ON usage_records(session_id, message_id)",
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_unique_message ON usage_records(session_id, message_id) WHERE message_id IS NOT NULL",
-            ]
-            for stmt in index_statements:
-                try:
-                    await db.execute(stmt)
-                except Exception:
-                    pass  # Index already exists
+                index_statements = [
+                    "CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records(provider_id, model_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_usage_session ON usage_records(session_id)",
+                    "CREATE INDEX IF NOT EXISTS idx_usage_time ON usage_records(created_at)",
+                    "CREATE INDEX IF NOT EXISTS idx_usage_message ON usage_records(session_id, message_id)",
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_unique_message ON usage_records(session_id, message_id) WHERE message_id IS NOT NULL",
+                ]
+                for stmt in index_statements:
+                    try:
+                        await db.execute(stmt)
+                    except Exception:
+                        pass  # Index already exists
 
-            await db.commit()
-            cls._log.info("storage.model_management_tables_ready")
+                await db.commit()
+
+        await cls._run_write_with_retry(
+            _create_tables,
+            action="init.model_management_tables",
+            target=str(cls._db_path),
+        )
+        cls._log.info("storage.model_management_tables_ready")
     
     @classmethod
     async def _ensure_init(cls) -> None:
@@ -297,14 +408,17 @@ class Storage:
         from datetime import UTC
         now = datetime.now(UTC).isoformat()
         
-        async with cls.connect(cls._db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
-                VALUES (?, ?, ?, 
-                    COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
-                    ?)
-            """, (key, serialized, value_type, key, now, now))
-            await db.commit()
+        async def _write() -> None:
+            async with cls.connect(cls._db_path) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                    VALUES (?, ?, ?, 
+                        COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
+                        ?)
+                """, (key, serialized, value_type, key, now, now))
+                await db.commit()
+
+        await cls._run_write_with_retry(_write, action="set", target=key)
         
         cls._log.debug("storage.set", {"key": key, "type": value_type})
     
@@ -351,10 +465,13 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with cls.connect(cls._db_path) as db:
-            cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
-            await db.commit()
-            deleted = cursor.rowcount > 0
+        async def _delete() -> bool:
+            async with cls.connect(cls._db_path) as db:
+                cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
+                await db.commit()
+                return cursor.rowcount > 0
+
+        deleted = await cls._run_write_with_retry(_delete, action="delete", target=key)
         
         if deleted:
             cls._log.debug("storage.delete", {"key": key})
@@ -462,17 +579,24 @@ class Storage:
         """
         await cls._ensure_init()
         
-        async with cls.connect(cls._db_path) as db:
-            if prefix:
-                query = "DELETE FROM storage WHERE key LIKE ?"
-                params = (f"{prefix}%",)
-            else:
-                query = "DELETE FROM storage"
-                params = ()
-            
-            cursor = await db.execute(query, params)
-            await db.commit()
-            deleted = cursor.rowcount
+        async def _clear() -> int:
+            async with cls.connect(cls._db_path) as db:
+                if prefix:
+                    query = "DELETE FROM storage WHERE key LIKE ?"
+                    params = (f"{prefix}%",)
+                else:
+                    query = "DELETE FROM storage"
+                    params = ()
+
+                cursor = await db.execute(query, params)
+                await db.commit()
+                return cursor.rowcount
+
+        deleted = await cls._run_write_with_retry(
+            _clear,
+            action="clear",
+            target=prefix or "<all>",
+        )
         
         cls._log.info("storage.clear", {"prefix": prefix, "deleted": deleted})
         cls._invalidate_runtime_caches()

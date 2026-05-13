@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import json as _json
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeoutError
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any, Dict, List, Optional
 
 from flocks.tool import ToolContext, ToolRegistry, ToolResult
 from flocks.workflow.errors import NodeExecutionError
+from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
 from flocks.workflow.tools_spec import ToolSpec
 
 # Tools that must not be exposed inside workflow (avoid circular invocation).
@@ -18,7 +18,7 @@ WORKFLOW_TOOL_BLOCKLIST = frozenset({"run_workflow"})
 class FlocksToolAdapter:
     """Adapts flocks async ToolRegistry to workflow sync tool.run(name, **kwargs).
 
-    - run(name, **kwargs): sync, runs asyncio.run(ToolRegistry.execute(...))
+    - run(name, **kwargs): sync, executes via the shared workflow async loop
     - list(): all tool ids (auto-discovered from flocks), excluding blocklist
     - get(name): stub impl for code_gen signature extraction
     - get_spec(name): ToolSpec for code_gen
@@ -28,45 +28,21 @@ class FlocksToolAdapter:
     def __init__(self, tool_context: Optional[ToolContext] = None):
         ToolRegistry.init()
         self._ctx = tool_context
-        # Executor used only when adapter is invoked from a thread
-        # that already has a running asyncio event loop (common when workflow
-        # is called from an async tool handler). In that case we cannot
-        # run a nested loop in the same thread, so we offload tool execution
-        # to a worker thread which uses asyncio.run().
-        self._executor: Optional[ThreadPoolExecutor] = None
 
     def _blocked(self, name: str) -> bool:
         return (name or "").strip() in WORKFLOW_TOOL_BLOCKLIST
-
-    def _ensure_executor(self) -> ThreadPoolExecutor:
-        if self._executor is None:
-            # Low concurrency: workflow python nodes call tools sequentially.
-            self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="wf-tool")
-        return self._executor
 
     def _execute_tool_async(self, name: str, ctx: ToolContext, kwargs: Dict[str, Any]) -> ToolResult:
         """
         Execute an async tool from a sync context safely.
 
-        - If no event loop is running in the current thread: run directly via asyncio.run().
-        - If an event loop *is* running: offload to a worker thread to avoid
-          'Cannot run the event loop while another loop is running'.
+        All workflow-triggered tool calls are routed through the shared
+        workflow async runtime instead of creating an ephemeral event loop
+        per parallel node. This keeps loop-bound provider / HTTP resources
+        attached to a stable loop and avoids cross-loop Future errors under
+        sibling-node concurrency.
         """
-        try:
-            asyncio.get_running_loop()
-            in_running_loop = True
-        except RuntimeError:
-            in_running_loop = False
-
-        if not in_running_loop:
-            # Safe in a pure sync thread.
-            return asyncio.run(ToolRegistry.execute(name, ctx=ctx, **kwargs))
-
-        # We are in a thread with a running event loop, but we must block synchronously.
-        # The only safe option is to run the tool coroutine in another thread.
-        ex = self._ensure_executor()
-        fut = ex.submit(lambda: asyncio.run(ToolRegistry.execute(name, ctx=ctx, **kwargs)))
-        return fut.result()
+        return _run_sync_on_shared_loop(ToolRegistry.execute(name, ctx=ctx, **kwargs))
 
     def run(self, name: str, /, **kwargs: Any) -> Any:
         name = (name or "").strip()
