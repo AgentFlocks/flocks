@@ -11,10 +11,12 @@ import importlib.util
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 import webbrowser
+import warnings
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +33,10 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
+MISSING_PORT_OWNER_TOOLS_WARNING = (
+    "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
+    "可尝试安装：apt/yum install lsof -y"
+)
 
 
 class ServiceError(RuntimeError):
@@ -772,14 +778,35 @@ def backend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None)
     """Return True if the tracked backend process is running."""
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.backend_pid)
-    return runtime_record_is_running(read_runtime_record(current.backend_pid)) or bool(port_owner_pids(config.backend_port))
+    return runtime_record_is_running(read_runtime_record(current.backend_pid)) or port_is_in_use(config.backend_port)
 
 
 def frontend_is_running(config: ServiceConfig, paths: RuntimePaths | None = None) -> bool:
     """Return True if the tracked frontend process is running."""
     current = paths or runtime_paths()
     cleanup_stale_pid_file(current.frontend_pid)
-    return runtime_record_is_running(read_runtime_record(current.frontend_pid)) or bool(port_owner_pids(config.frontend_port))
+    return runtime_record_is_running(read_runtime_record(current.frontend_pid)) or port_is_in_use(config.frontend_port)
+
+
+def _port_owner_lookup_available() -> bool:
+    """Return True when the current platform can resolve listener pids."""
+    return sys.platform == "win32" or bool(which("lsof") or which("fuser"))
+
+
+def _bind_port_available(port: int) -> bool:
+    """Return True when the TCP port can be bound locally."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _warn_missing_port_owner_tools() -> None:
+    """Warn when pid-based port inspection is unavailable."""
+    warnings.warn(MISSING_PORT_OWNER_TOOLS_WARNING, RuntimeWarning, stacklevel=2)
 
 
 def port_owner_pids(port: int) -> list[int]:
@@ -808,7 +835,18 @@ def port_owner_pids(port: int) -> list[int]:
         pids = [int(value) for value in values if value.isdigit()]
         return sorted(dict.fromkeys(pids))
 
-    raise ServiceError("未检测到 lsof 或 fuser，无法检查端口占用。")
+    _warn_missing_port_owner_tools()
+    return []
+
+
+def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
+    """Return True when the TCP port is already occupied."""
+    current_listeners = list(listeners) if listeners is not None else port_owner_pids(port)
+    if current_listeners:
+        return True
+    if _port_owner_lookup_available():
+        return False
+    return not _bind_port_available(port)
 
 
 def _is_reachable_response(response: httpx.Response) -> bool:
@@ -868,6 +906,11 @@ def start_backend(config: ServiceConfig, console) -> None:
         raise ServiceError(
             f"后端端口 {config.backend_port} 已被占用 (PID: {_join_pids(listeners)})，"
             "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
+        )
+    if port_is_in_use(config.backend_port, listeners):
+        raise ServiceError(
+            f"后端端口 {config.backend_port} 已被占用，但当前环境无法识别占用 PID；"
+            "请先安装 lsof 或手动清理残留进程。"
         )
 
     if runtime_record is not None and runtime_record_is_running(runtime_record):
@@ -965,6 +1008,11 @@ def start_frontend(config: ServiceConfig, console) -> None:
                 f"WebUI 端口 {config.frontend_port} 已被占用 (PID: {_join_pids(listeners)})，"
                 "与当前运行时记录不一致，请先执行 `flocks stop` 或手动清理残留进程。"
             )
+    elif port_is_in_use(config.frontend_port, listeners):
+        raise ServiceError(
+            f"WebUI 端口 {config.frontend_port} 已被占用，但当前环境无法识别占用 PID；"
+            "请先安装 lsof 或手动清理残留进程。"
+        )
 
     if runtime_record is not None and runtime_record_is_running(runtime_record):
         raise ServiceError(
@@ -1039,7 +1087,7 @@ def _tracked_processes_stopped(
 ) -> bool:
     """Return True when the tracked service no longer has running processes."""
     listeners = port_owner_pids(port)
-    if listeners:
+    if port_is_in_use(port, listeners):
         return False
     if runtime_record_is_running(record):
         return False
@@ -1104,6 +1152,11 @@ def stop_one(port: int, pid_file: Path, name: str, console) -> None:
 
     group_running = process_group_is_running(runtime_record.pgid if runtime_record else None)
     if not target_pids and not group_running:
+        if port_is_in_use(port, listeners):
+            raise ServiceError(
+                f"{name} 端口 {port} 已被占用，但当前环境无法识别占用 PID；"
+                "请先安装 lsof 或手动处理该进程。"
+            )
         pid_file.unlink(missing_ok=True)
         console.print(f"[flocks] {name} 未运行。")
         return
@@ -1308,12 +1361,16 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
     frontend_pid = frontend_record.pid if frontend_record else None
     backend_listeners = port_owner_pids(backend_port)
     frontend_listeners = port_owner_pids(frontend_port)
+    backend_in_use = port_is_in_use(backend_port, backend_listeners)
+    frontend_in_use = port_is_in_use(frontend_port, frontend_listeners)
 
     lines: list[str] = []
     if backend_listeners:
         lines.append(
             f"[flocks] 后端运行中: PID={_join_pids(backend_listeners)} URL=http://{backend_host}:{backend_port}"
         )
+    elif backend_in_use:
+        lines.append(f"[flocks] 后端运行中: PID=unknown URL=http://{backend_host}:{backend_port}")
     elif pid_is_running(backend_pid):
         lines.append(f"[flocks] 后端主进程仍在运行，但端口 {backend_port} 未监听: PID={backend_pid}")
     elif process_group_is_running(backend_record.pgid if backend_record else None):
@@ -1329,6 +1386,8 @@ def build_status_lines(paths: RuntimePaths | None = None) -> list[str]:
         lines.append(
             f"[flocks] WebUI 运行中: PID={_join_pids(frontend_listeners)} URL=http://{frontend_host}:{frontend_port}"
         )
+    elif frontend_in_use:
+        lines.append(f"[flocks] WebUI 运行中: PID=unknown URL=http://{frontend_host}:{frontend_port}")
     elif pid_is_running(frontend_pid):
         lines.append(f"[flocks] WebUI 主进程仍在运行，但端口 {frontend_port} 未监听: PID={frontend_pid}")
     elif process_group_is_running(frontend_record.pgid if frontend_record else None):
