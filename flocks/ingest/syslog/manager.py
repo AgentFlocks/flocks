@@ -31,6 +31,65 @@ _MAX_QUEUE_SIZE = 1000
 # under busy event-loops; anything >5s would make the HTTP save endpoint feel
 # hung when the user makes a typo.
 _BIND_WAIT_TIMEOUT_S = 3.0
+# Minimum interval between two ``syslog.queue_full_dropped`` warnings; a
+# sustained queue overflow is aggregated into a single warning per window.
+_DROP_LOG_WINDOW_S = 1.0
+
+
+class _DropWarningThrottle:
+    """Aggregate per-workflow ``QueueFull`` drops into windowed warnings.
+
+    The listener's ``on_msg`` callback runs synchronously from the UDP
+    protocol layer; without throttling, each dropped datagram emits its own
+    log record, which (a) drowns out the surrounding logs and (b) can make
+    the very logging itself a bottleneck.  This helper keeps a small running
+    tally and emits at most one warning per ``window_s`` seconds, plus an
+    explicit ``flush`` for the trailing count when the flood stops.
+    """
+
+    def __init__(
+        self,
+        workflow_id: str,
+        queue: asyncio.Queue,
+        window_s: float = _DROP_LOG_WINDOW_S,
+    ) -> None:
+        self._workflow_id = workflow_id
+        self._queue = queue
+        self._window_s = float(window_s)
+        self._count: int = 0
+        self._last_log: float = 0.0
+
+    @property
+    def count(self) -> int:
+        """Current un-flushed drop count (useful for tests)."""
+        return self._count
+
+    def record_drop(self) -> None:
+        """Account for one dropped datagram; emit if the window elapsed."""
+        self._count += 1
+        if time.monotonic() - self._last_log >= self._window_s:
+            self._flush(trigger="threshold")
+
+    def maybe_flush(self) -> None:
+        """Emit a warning if the trailing count has waited long enough."""
+        if self._count > 0 and time.monotonic() - self._last_log >= self._window_s:
+            self._flush(trigger="flush")
+
+    def flush_remaining(self, trigger: str = "shutdown") -> None:
+        """Emit any leftover count regardless of window; used on shutdown."""
+        if self._count > 0:
+            self._flush(trigger=trigger)
+
+    def _flush(self, *, trigger: str) -> None:
+        log.warning("syslog.queue_full_dropped", {
+            "workflow_id": self._workflow_id,
+            "queue_size": self._queue.qsize(),
+            "queue_capacity": self._queue.maxsize,
+            "dropped_in_window": int(self._count),
+            "trigger": trigger,
+        })
+        self._count = 0
+        self._last_log = time.monotonic()
 
 
 class SyslogManager:
@@ -100,7 +159,11 @@ class SyslogManager:
 
             {"state": "binding|listening|failed|stopped", "error": "..." | None,
              "host": "...", "port": 5140, "protocol": "udp|tcp",
-             "queueSize": 12, "queueCapacity": 200, "workerCount": 8}
+             "queueSize": 12, "queueCapacity": <queue.maxsize>,
+             "workerCount": <_MAX_CONCURRENT_EXECUTIONS>}
+
+        ``queueCapacity`` always mirrors the runtime ``asyncio.Queue.maxsize``
+        of the active listener (currently ``_MAX_QUEUE_SIZE``).
         """
         status = dict(self._listener_status.get(workflow_id) or {"state": "stopped"})
         q = self._queues.get(workflow_id)
@@ -251,10 +314,10 @@ class SyslogManager:
         protocol = str(config.get("protocol") or "udp").lower()
         format_hint = str(config.get("format") or "auto")
 
-        # Throttle drop-warnings so a sustained syslog flood does not turn into
-        # a log flood of its own.  We aggregate the dropped count and emit at
-        # most one warning per second per workflow.
-        drop_state: Dict[str, float] = {"count": 0, "last_log": 0.0}
+        # Aggregate per-window drop warnings so a sustained queue overflow
+        # does not turn into its own log flood.  The trailing count is
+        # flushed by a 1-second polling task plus a shutdown best-effort.
+        throttle = _DropWarningThrottle(workflow_id, queue)
 
         # NOTE: keep this callback synchronous so the UDP protocol layer can
         # invoke it inline from datagram_received() without creating an
@@ -263,17 +326,17 @@ class SyslogManager:
             try:
                 queue.put_nowait(parsed)
             except asyncio.QueueFull:
-                drop_state["count"] += 1
-                now = time.monotonic()
-                if now - drop_state["last_log"] >= 1.0:
-                    log.warning("syslog.queue_full_dropped", {
-                        "workflow_id": workflow_id,
-                        "queue_size": queue.qsize(),
-                        "queue_capacity": queue.maxsize,
-                        "dropped_in_window": int(drop_state["count"]),
-                    })
-                    drop_state["count"] = 0
-                    drop_state["last_log"] = now
+                throttle.record_drop()
+
+        async def _periodic_drop_flush() -> None:
+            """Flush leftover drop count when the flood stops."""
+            while not abort.is_set():
+                try:
+                    await asyncio.wait_for(abort.wait(), timeout=_DROP_LOG_WINDOW_S)
+                    return  # abort signalled
+                except asyncio.TimeoutError:
+                    pass
+                throttle.maybe_flush()
 
         async def _bind_and_serve() -> None:
             """Bind the socket synchronously then mark the listener ready.
@@ -290,6 +353,7 @@ class SyslogManager:
             # runs on the next event-loop tick — by which point the bind has
             # either succeeded or raised.
             mark_task = asyncio.create_task(_mark_ready_after_bind())
+            flush_task = asyncio.create_task(_periodic_drop_flush())
             try:
                 if protocol == "tcp":
                     await run_tcp_syslog_server(host, port, format_hint, on_msg, abort_event=abort)
@@ -298,6 +362,11 @@ class SyslogManager:
             finally:
                 if not mark_task.done():
                     mark_task.cancel()
+                if not flush_task.done():
+                    flush_task.cancel()
+                # Best-effort: emit any leftover drop count on shutdown so a
+                # tail of dropped messages isn't silently lost.
+                throttle.flush_remaining()
 
         async def _mark_ready_after_bind() -> None:
             # Give the bind one event-loop tick to complete (or raise) so we

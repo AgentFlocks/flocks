@@ -101,7 +101,11 @@ def _load_config_data() -> Dict[str, Any]:
     with _config_cache_lock:
         _config_cache = result
         _config_cache_ts = time.monotonic()
-    return result
+        # Return a shallow copy on this cold path too, mirroring the hit
+        # path above.  Without it the very first caller would receive the
+        # exact ``_config_cache`` dict and a top-level mutation on their
+        # "snapshot" would leak into every subsequent cached read.
+        return dict(_config_cache)
 
 
 def _resolve_workflow_runtime_preference(tool_context: Optional[Any]) -> Literal["sandbox", "host"]:
