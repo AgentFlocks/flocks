@@ -159,6 +159,18 @@ export interface SyslogConfig {
   updatedAt?: number;
 }
 
+/** Runtime state of the syslog listener (independent from saved config). */
+export interface SyslogListenerStatus {
+  state: 'binding' | 'listening' | 'failed' | 'stopped';
+  error?: string | null;
+  host?: string;
+  port?: number;
+  protocol?: string;
+  queueSize?: number;
+  queueCapacity?: number;
+  workerCount?: number;
+}
+
 export const workflowAPI = {
   list: (params?: { category?: string; status?: string; excludeId?: string }) =>
     client.get<Workflow[]>('/api/workflow', { params }),
@@ -259,10 +271,16 @@ export const workflowAPI = {
     format?: string;
     inputKey?: string;
   }) =>
-    client.post<{ ok: boolean }>(`/api/workflow/${id}/syslog-config`, config),
+    client.post<{ ok: boolean; listener?: SyslogListenerStatus }>(
+      `/api/workflow/${id}/syslog-config`,
+      config,
+    ),
 
   getSyslogConfig: (id: string) =>
     client.get<SyslogConfig | null>(`/api/workflow/${id}/syslog-config`),
+
+  getSyslogStatus: (id: string) =>
+    client.get<SyslogListenerStatus>(`/api/workflow/${id}/syslog-status`),
 
   runNode: (id: string, data: { nodeId: string; inputs?: Record<string, any> }) =>
     client.post<WorkflowNodeExecution>(`/api/workflow/${id}/run-node`, { node_id: data.nodeId, inputs: data.inputs ?? {} }),

@@ -1597,7 +1597,12 @@ async def get_kafka_config(workflow_id: str):
 async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
     """
     Save syslog listener configuration for a workflow.
-    When enabled, starts UDP/TCP listener and passes parsed messages to workflow inputs.
+
+    When ``enabled`` is true, this also (re)starts the UDP/TCP listener and
+    blocks until the underlying socket has either bound successfully or the
+    bind has failed (e.g. ``EADDRINUSE``, invalid host).  Bind failures are
+    surfaced as ``409 Conflict`` so the UI can show an actionable error
+    instead of falsely claiming "Listening".
     """
     try:
         if not _read_workflow_from_fs(workflow_id):
@@ -1617,8 +1622,15 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
 
         from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
 
-        await _syslog_default_manager.restart_workflow(workflow_id)
-        return {"ok": True}
+        status = await _syslog_default_manager.restart_workflow(workflow_id)
+        state = (status or {}).get("state")
+        if req.enabled and state == "failed":
+            err = (status or {}).get("error") or "listener_bind_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Syslog listener failed to bind: {err}",
+            )
+        return {"ok": True, "listener": status}
     except HTTPException:
         raise
     except Exception as e:
@@ -1635,6 +1647,25 @@ async def get_syslog_config(workflow_id: str):
     except Exception as e:
         log.error("workflow.syslog_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-status")
+async def get_syslog_status(workflow_id: str):
+    """Return the *runtime* status of the syslog listener for a workflow.
+
+    This reflects the actual bind state (binding/listening/failed/stopped) and
+    queue depth, so the UI can show whether a saved-but-not-yet-bound listener
+    is actually running.  The persisted config (``/syslog-config``) only
+    captures *intent*, which is why the UI must consult this endpoint to
+    truthfully render "Listening".
+    """
+    try:
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        return _syslog_default_manager.get_listener_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.syslog_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog status: {str(e)}")
 
 
 # =============================================================================

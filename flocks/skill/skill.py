@@ -447,6 +447,20 @@ class Skill:
             cls._watcher = None
 
 
+def _skill_event_should_reload(event: object) -> bool:
+    """Return True if a watchdog event affects a ``SKILL.md`` file.
+
+    Atomic-save flows rename a temp file onto the real ``SKILL.md``; we have
+    to consult both ``src_path`` and ``dest_path`` so the watcher reloads on
+    those renames as well.
+    """
+    for attr in ("src_path", "dest_path"):
+        path = getattr(event, attr, "") or ""
+        if path.endswith("SKILL.md"):
+            return True
+    return False
+
+
 class SkillFileWatcher:
     """
     Watches skill directories for SKILL.md changes and auto-invalidates
@@ -494,8 +508,7 @@ class SkillFileWatcher:
                     return
                 if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
                     return
-                src = getattr(event, "src_path", "") or ""
-                if src.endswith("SKILL.md"):
+                if _skill_event_should_reload(event):
                     watcher._schedule_clear()
 
         handler = _Handler()

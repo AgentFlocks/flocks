@@ -1495,6 +1495,42 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 
+def _tool_event_should_reload(event: object) -> bool:
+    """Return True if a watchdog filesystem event should trigger a plugin reload.
+
+    Atomic-save editors (vim, VS Code "useAtomicSave", many GUI tools, …)
+    persist edits by writing a sibling temp file then ``rename`` ing it onto
+    the real target.  watchdog surfaces this as a ``moved`` event whose
+    ``src_path`` is the throwaway temp filename and whose ``dest_path`` is the
+    real ``tool.yaml`` / ``*.py``.  Filtering only by ``src_path`` (the
+    pre-fix behaviour) misses the real edit entirely, so we have to inspect
+    both endpoints.
+
+    Exposed at module scope so it can be unit-tested without spinning up
+    ``watchdog.observers.Observer`` against a temp directory.
+    """
+    candidate_paths: List[str] = []
+    src = getattr(event, "src_path", "") or ""
+    if src:
+        candidate_paths.append(src)
+    dest = getattr(event, "dest_path", "") or ""
+    if dest:
+        candidate_paths.append(dest)
+    if not candidate_paths:
+        return False
+
+    for path in candidate_paths:
+        if not (path.endswith(".yaml") or path.endswith(".py")):
+            continue
+        fname = os.path.basename(path)
+        # Ignore Python bytecode / temp / hidden files that get touched
+        # during normal imports but never carry plugin definitions.
+        if fname.startswith(".") or fname.startswith("_") or "/__pycache__/" in path:
+            continue
+        return True
+    return False
+
+
 class ToolFileWatcher:
     """Watch plugin tool directories and auto-reload plugin tools on change.
 
@@ -1560,13 +1596,7 @@ class ToolFileWatcher:
                     return
                 if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
                     return
-                src = getattr(event, "src_path", "") or ""
-                if not (src.endswith(".yaml") or src.endswith(".py")):
-                    return
-                # Ignore Python bytecode / temp / hidden files that get touched
-                # during normal imports but never carry plugin definitions.
-                fname = os.path.basename(src)
-                if fname.startswith(".") or fname.startswith("_") or "/__pycache__/" in src:
+                if not _tool_event_should_reload(event):
                     return
                 watcher._schedule_refresh()
 

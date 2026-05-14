@@ -8,6 +8,7 @@ import {
   workflowAPI,
   Workflow,
   WorkflowService,
+  SyslogListenerStatus,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
@@ -316,15 +317,51 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
   const [port, setPort] = useState('5140');
   const [format, setFormat] = useState('auto');
   const [inputKey, setInputKey] = useState('syslog_message');
+  // Runtime listener state (independent from saved config) — only this should
+  // drive the "Listening" indicator, otherwise a bind failure leaves the UI
+  // falsely showing the listener as active.
+  const [listener, setListener] = useState<SyslogListenerStatus | null>(null);
+  const [saveError, setSaveError] = useState<string>('');
 
-  // 摘要行：已启用时在折叠标题旁显示
-  const summaryBadge = enabled && !expanded ? (
-    <span className="text-xs text-green-600 font-normal">
-      {protocol.toUpperCase()} {host}:{port} · {t('detail.run.syslogActive')}
-    </span>
-  ) : (
-    <span className="text-xs text-gray-400 font-normal">{t('detail.run.syslogExperimental')}</span>
-  );
+  const refreshStatus = useCallback(async () => {
+    try {
+      const res = await workflowAPI.getSyslogStatus(workflowId);
+      setListener(res.data);
+    } catch {
+      // ignore — older backend / transient failure: UI will show "unknown"
+    }
+  }, [workflowId]);
+
+  const isListening = listener?.state === 'listening';
+  const isBinding = listener?.state === 'binding';
+  const isFailed = listener?.state === 'failed';
+
+  // 摘要行：仅当后端真正报告 listening 时才显示绿色 active
+  let summaryBadge: React.ReactNode;
+  if (isListening) {
+    summaryBadge = (
+      <span className="text-xs text-green-600 font-normal">
+        {(listener?.protocol || protocol).toUpperCase()} {listener?.host || host}:{listener?.port ?? port}
+        {' · '}{t('detail.run.syslogActive')}
+      </span>
+    );
+  } else if (enabled && isBinding) {
+    summaryBadge = (
+      <span className="text-xs text-amber-600 font-normal">
+        {protocol.toUpperCase()} {host}:{port} · binding…
+      </span>
+    );
+  } else if (enabled && isFailed) {
+    summaryBadge = (
+      <span className="text-xs text-red-600 font-normal">
+        {protocol.toUpperCase()} {host}:{port} · {listener?.error || 'failed'}
+      </span>
+    );
+  } else {
+    summaryBadge = (
+      <span className="text-xs text-gray-400 font-normal">{t('detail.run.syslogExperimental')}</span>
+    );
+  }
 
   useEffect(() => {
     workflowAPI.getSyslogConfig(workflowId).then(res => {
@@ -337,13 +374,25 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
         setInputKey(res.data.inputKey || 'syslog_message');
       }
     }).catch(() => {});
-  }, [workflowId]);
+    refreshStatus();
+  }, [workflowId, refreshStatus]);
+
+  // While "binding" we poll briefly so the UI converges on the real state
+  // without forcing the user to refresh.
+  useEffect(() => {
+    if (!isBinding) return;
+    const handle = window.setInterval(() => {
+      refreshStatus();
+    }, 1500);
+    return () => window.clearInterval(handle);
+  }, [isBinding, refreshStatus]);
 
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
+    setSaveError('');
     try {
-      await workflowAPI.saveSyslogConfig(workflowId, {
+      const res = await workflowAPI.saveSyslogConfig(workflowId, {
         enabled,
         protocol,
         host,
@@ -351,10 +400,16 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
         format,
         inputKey,
       });
+      if (res.data?.listener) {
+        setListener(res.data.listener);
+      } else {
+        refreshStatus();
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // ignore
+    } catch (err: unknown) {
+      setSaveError(extractErrorMessage(err, t('detail.run.savingConfig')));
+      refreshStatus();
     } finally {
       setSaving(false);
     }
@@ -439,6 +494,25 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
             ) : null}
             {saving ? t('detail.run.savingConfig') : saved ? t('detail.run.savedConfig') : t('detail.run.saveConfig')}
           </button>
+          {saveError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span className="flex-1">{saveError}</span>
+            </div>
+          )}
+          {enabled && isFailed && !saveError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span className="flex-1">
+                Listener failed to bind: {listener?.error || 'unknown error'}
+              </span>
+            </div>
+          )}
+          {enabled && isListening && typeof listener?.queueSize === 'number' && (
+            <p className="text-xs text-gray-500 text-center">
+              queue {listener.queueSize}/{listener.queueCapacity ?? '?'} · workers {listener.workerCount ?? '?'}
+            </p>
+          )}
           <p className="text-xs text-gray-400 text-center">{t('detail.run.syslogHint')}</p>
         </div>
       )}
