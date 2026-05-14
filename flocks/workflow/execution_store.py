@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
@@ -13,6 +13,86 @@ from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult
 
 log = Log.create(service="workflow.execution_store")
+
+# Keys whose values are expected to be large alert/event lists that have
+# already been persisted elsewhere (typically JSONL on disk).  When writing
+# the execution record to SQLite we replace them with a ``_<key>_count``
+# integer to keep row sizes bounded.  Callers may extend or override this
+# set via the ``keys`` argument of the compact helpers below.
+DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
+    {
+        "enriched_alerts",
+        "unique_alerts",
+        "raw_alerts",
+        "normalized_alerts",
+        "filtered_alerts",
+    }
+)
+
+# Lists smaller than this many items are passed through verbatim.  The cap
+# protects against accidentally stripping small metadata lists that happen
+# to share a name with a known large-list key.
+DEFAULT_COMPACT_SIZE_THRESHOLD: int = 100
+
+
+def compact_outputs_for_storage(
+    outputs: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> Dict[str, Any]:
+    """Return a copy of *outputs* with large alert lists replaced by counts.
+
+    Only list values whose key is in *keys* AND whose length exceeds
+    *size_threshold* are compacted; everything else is passed through.
+    This prevents megabytes of alert data from being serialised into the
+    ``workflow_execution`` SQLite row on every invocation, while still
+    keeping small lists (e.g. error details, short configuration arrays)
+    fully inspectable in the execution-history UI.
+    """
+    if not isinstance(outputs, dict):
+        return {}
+    key_set = frozenset(keys)
+    compacted: Dict[str, Any] = {}
+    for k, v in outputs.items():
+        if (
+            k in key_set
+            and isinstance(v, list)
+            and len(v) > size_threshold
+        ):
+            compacted[f"_{k}_count"] = len(v)
+        else:
+            compacted[k] = v
+    return compacted
+
+
+def compact_history_for_storage(
+    history: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> List[Any]:
+    """Strip large alert lists from step outputs in workflow history.
+
+    Returns an empty list when *history* is falsy.  Non-dict step entries
+    (defensive: shouldn't happen with normal ``StepResult`` dumps) are
+    passed through unchanged so the caller sees no surprising drops.
+    """
+    if not history:
+        return []
+    result: List[Any] = []
+    for step in history:
+        if not isinstance(step, dict):
+            result.append(step)
+            continue
+        step_copy = dict(step)
+        raw_outputs = step_copy.get("outputs")
+        if isinstance(raw_outputs, dict):
+            step_copy["outputs"] = compact_outputs_for_storage(
+                raw_outputs, keys=keys, size_threshold=size_threshold
+            )
+        result.append(step_copy)
+    return result
 
 # Maximum number of execution history records retained per workflow.
 # Older records are pruned automatically to prevent a syslog flood from bloating Storage.
