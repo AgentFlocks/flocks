@@ -411,37 +411,48 @@ async def _build_frontend_workspace(
         )
         return "Frontend dependency install failed: npm was not found."
 
-    install_label = "npm install"
+    has_package_lock = (webui_dir / "package-lock.json").exists()
+    install_subcommands = ["install"]
+    if has_package_lock:
+        install_subcommands.append("ci")
     final_frontend_error: str | None = None
 
     for index, candidate in enumerate(npm_candidates):
         attempt_source = candidate.source
         is_last_attempt = index == len(npm_candidates) - 1
-        install_cmd = [candidate.npm, "install"]
-        try:
-            code, _, err = await _run_async(
-                install_cmd,
-                cwd=webui_dir,
-                timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
-                env=candidate.env,
-            )
-        except subprocess.TimeoutExpired:
-            final_frontend_error = (
-                "Frontend dependency install timed out after "
-                f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
-            )
-            if is_last_attempt:
-                break
-            _reset_frontend_workspace(webui_dir)
-            _record_update_journal(
-                "WARN "
-                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
-                f"npm/node after {attempt_source} attempt."
-            )
-            continue
+        install_succeeded = False
+        for install_attempt_index, install_subcommand in enumerate(install_subcommands):
+            install_label = f"npm {install_subcommand}"
+            install_cmd = [candidate.npm, install_subcommand]
+            try:
+                code, _, err = await _run_async(
+                    install_cmd,
+                    cwd=webui_dir,
+                    timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                    env=candidate.env,
+                )
+            except subprocess.TimeoutExpired:
+                final_frontend_error = (
+                    "Frontend dependency install timed out after "
+                    f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
+                )
+            else:
+                if code == 0:
+                    install_succeeded = True
+                    final_frontend_error = None
+                    break
+                final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
 
-        if code != 0:
-            final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
+            has_same_candidate_fallback = install_attempt_index < len(install_subcommands) - 1
+            if has_same_candidate_fallback:
+                next_install_label = f"npm {install_subcommands[install_attempt_index + 1]}"
+                _record_update_journal(
+                    "WARN "
+                    f"{final_frontend_error} Retrying {next_install_label} "
+                    f"with the same npm/node after {attempt_source} {install_label} attempt."
+                )
+
+        if not install_succeeded:
             if is_last_attempt:
                 break
             _reset_frontend_workspace(webui_dir)

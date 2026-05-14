@@ -1994,7 +1994,81 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
 
 
 @pytest.mark.asyncio
-async def test_perform_update_retries_windows_frontend_with_full_timeout_after_bundled_install_timeout(
+async def test_build_frontend_workspace_retries_npm_ci_before_switching_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    (webui_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    bundled_npm = str(tmp_path / "bundled-npm")
+    system_npm = str(tmp_path / "system-npm")
+    run_calls: list[tuple[list[str], dict[str, str] | None]] = []
+    journal_entries: list[str] = []
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append((list(cmd), env))
+        if cmd == [bundled_npm, "install"]:
+            partial_modules = webui_dir / "node_modules" / "@esbuild"
+            partial_modules.mkdir(parents=True, exist_ok=True)
+            return 1, "", "install failed"
+        if cmd == [bundled_npm, "ci"]:
+            assert (webui_dir / "node_modules").exists()
+            return 0, "", ""
+        if cmd == [bundled_npm, "run", "build"]:
+            dist_dir = webui_dir / "dist"
+            dist_dir.mkdir(exist_ok=True)
+            (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            return 0, "", ""
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        updater,
+        "_resolve_frontend_npm_candidates",
+        lambda *, npm_registry=None: [
+            updater._FrontendNpmCandidate(
+                npm=bundled_npm,
+                env={"npm_config_registry": npm_registry} if npm_registry else None,
+                source="bundled",
+            ),
+            updater._FrontendNpmCandidate(
+                npm=system_npm,
+                env=None,
+                source="system",
+            ),
+        ],
+    )
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_record_update_journal", journal_entries.append)
+
+    frontend_error = await updater._build_frontend_workspace(
+        webui_dir,
+        npm_registry="https://registry.npmmirror.com/",
+    )
+
+    assert frontend_error is None
+    assert [call[0] for call in run_calls] == [
+        [bundled_npm, "install"],
+        [bundled_npm, "ci"],
+        [bundled_npm, "run", "build"],
+    ]
+    assert all(
+        call[1] == {"npm_config_registry": "https://registry.npmmirror.com/"}
+        for call in run_calls
+    )
+    assert journal_entries == [
+        (
+            "WARN Frontend dependency install failed (npm install): install failed "
+            "Retrying npm ci with the same npm/node "
+            "after bundled npm install attempt."
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_retries_windows_frontend_with_full_timeout_after_bundled_install_and_ci_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2039,6 +2113,9 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
             bundled_modules = install_webui / "node_modules" / "@esbuild"
             bundled_modules.mkdir(parents=True, exist_ok=True)
             (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        if cmd == [str(bundled_npm), "ci"]:
+            assert (install_webui / "node_modules").exists()
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
         if cmd == [system_npm, "install"]:
             assert not (install_webui / "node_modules").exists()
@@ -2096,10 +2173,11 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     ]
     assert [call[0] for call in frontend_calls] == [
         [str(bundled_npm), "install"],
+        [str(bundled_npm), "ci"],
         [system_npm, "install"],
         [system_npm, "run", "build"],
     ]
-    assert [call[1] for call in frontend_calls] == [300, 300, 300]
+    assert [call[1] for call in frontend_calls] == [300, 300, 300, 300]
 
 
 @pytest.mark.asyncio
@@ -2624,18 +2702,20 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
         lambda *_args, **_kwargs: events.append("replace")
         or shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
     )
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
     monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
 
     progresses = [step async for step in updater.perform_update("2026.4.1")]
 
     assert progresses[-1].stage == "error"
-    assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm install."
+    assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm ci."
     assert events == [
         "replace",
         "/usr/bin/uv sync",
         "handover",
         "/usr/bin/npm install",
+        "/usr/bin/npm ci",
         "rollback",
     ]
 

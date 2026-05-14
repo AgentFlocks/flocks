@@ -18,6 +18,12 @@ async def _noop_log_init(**_: object) -> None:
     return None
 
 
+def test_updater_package_exports_build_updated_frontend() -> None:
+    from flocks.updater import updater as updater_module
+
+    assert updater_pkg.build_updated_frontend is updater_module.build_updated_frontend
+
+
 def test_update_cli_accepts_force_option(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)

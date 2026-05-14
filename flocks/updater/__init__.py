@@ -9,6 +9,7 @@ and replaces source files — no git binary required at runtime.
 from flocks.updater.deploy import DeployMode, detect_deploy_mode
 from flocks.updater.models import VersionInfo, UpdateProgress, UpdateStage
 from flocks.updater.updater import (
+    build_updated_frontend,
     check_update,
     get_current_version,
     get_latest_release,
@@ -21,6 +22,7 @@ __all__ = [
     "VersionInfo",
     "UpdateProgress",
     "UpdateStage",
+    "build_updated_frontend",
     "check_update",
     "get_current_version",
     "get_latest_release",
