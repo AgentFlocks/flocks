@@ -264,6 +264,12 @@ describe('SessionPage session actions menu', () => {
     expect(global.confirm).toHaveBeenCalledWith('confirmDelete');
   });
 
+  it('does not auto-select the first session on initial load', () => {
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
   it('syncs selected session when query param changes after mount', async () => {
     const user = userEvent.setup();
 
@@ -294,9 +300,7 @@ describe('SessionPage session actions menu', () => {
       </MemoryRouter>,
     );
 
-    await waitFor(() => {
-      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
-    });
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
 
     await user.click(screen.getByRole('button', { name: 'go-session-2' }));
 

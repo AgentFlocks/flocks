@@ -218,7 +218,7 @@ class Provider:
                 ("github-copilot", "flocks.provider.sdk.github_copilot", "GitHubCopilotProvider"),
                 ("github-copilot-enterprise", "flocks.provider.sdk.github_copilot", "GitHubCopilotEnterpriseProvider"),
                 ("vercel", "flocks.provider.sdk.vercel", "VercelProvider"),
-                ("opencode", "flocks.provider.sdk.opencode", "FlocksCompatProvider"),
+                ("opencode", "flocks.provider.sdk.opencode", "OpenCodeProvider"),
                 ("sap-ai-core", "flocks.provider.sdk.sap_ai_core", "SAPAICoreProvider"),
                 ("cloudflare-ai-gateway", "flocks.provider.sdk.cloudflare_gateway", "CloudflareGatewayProvider"),
                 # Added in Batch 7 - Final providers

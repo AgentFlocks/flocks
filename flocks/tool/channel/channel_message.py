@@ -38,6 +38,23 @@ def _normalize_channel_type(channel_type: str | None) -> str | None:
     return lower
 
 
+def _get_api_token() -> str | None:
+    """Read the server API token from the secret manager (non-async, best-effort).
+
+    Reuses ``API_TOKEN_SECRET_ID`` from ``flocks.server.auth`` so that the
+    secret id stays in lockstep with what the server-side auth middleware
+    expects; if those drift apart the request will silently start failing
+    with 401.
+    """
+    try:
+        from flocks.security import get_secret_manager
+        from flocks.server.auth import API_TOKEN_SECRET_ID
+        token = get_secret_manager().get(API_TOKEN_SECRET_ID)
+        return token.strip() if token and token.strip() else None
+    except Exception:
+        return None
+
+
 async def _http_session_send(
     port: int,
     session_id: str,
@@ -60,10 +77,16 @@ async def _http_session_send(
         if media_url:
             payload["media_url"] = media_url
 
+        headers: dict[str, str] = {}
+        api_token = _get_api_token()
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"http://localhost:{port}/api/channel/session-send",
                 json=payload,
+                headers=headers,
                 timeout=10.0,
             )
             body = resp.json()
@@ -76,6 +99,14 @@ async def _http_session_send(
                         f"ids: {body.get('message_ids', [])}"
                     ),
                 )
+            # 401 + we had no token to present: either the secret is unset
+            # or this process can't read it. Either way, the in-process
+            # path bypasses HTTP auth and can still deliver the message,
+            # so we fall back instead of surfacing an error.
+            # (If we DID send a token and it was rejected, fall through
+            # and report the server's detail so misconfiguration is visible.)
+            if resp.status_code == 401 and not api_token:
+                return None
             return ToolResult(
                 success=False,
                 error=f"Send failed (HTTP {resp.status_code}): {body.get('detail', body)}",

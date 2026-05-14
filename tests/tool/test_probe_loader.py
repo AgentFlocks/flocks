@@ -233,6 +233,13 @@ class TestConnectivityParsing:
         assert spec.tool == "ngtip_query"
         assert not hasattr(spec, "success_when")
 
+    def test_onesec_manifest_uses_threat_connectivity_probe(self):
+        spec = get_connectivity_spec("onesec_api_v2_8_2")
+
+        assert spec is not None
+        assert spec.tool == "onesec_threat"
+        assert spec.params == {"action": "threat_query_bd_version"}
+
 
 class TestFixtureParsing:
     def setup_method(self):

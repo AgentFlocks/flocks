@@ -1,13 +1,17 @@
 """Execution-centric task scheduler/execution routes."""
 
 from enum import Enum
+import time
 from typing import List, Optional, Type
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
+from flocks.server.routes._timing import log_route_timing
+from flocks.utils.log import Log
 
 
 router = APIRouter()
+log = Log.create(service="task-routes")
 
 
 class SchedulerCreateRequest(BaseModel):
@@ -143,21 +147,40 @@ def _parse_task_type(task_type: str) -> str:
 async def get_task_system_notice():
     from flocks.task.manager import TaskManager
 
-    return await TaskManager.get_task_page_notice()
+    started_at = time.perf_counter()
+    notice = await TaskManager.get_task_page_notice()
+    log_route_timing(log, "task.notice.complete", started_at=started_at, extra={
+        "has_notice": bool(notice),
+    })
+    return notice
 
 
 @router.get("/task-system/dashboard")
 async def task_dashboard():
     from flocks.task.manager import TaskManager
 
-    return await TaskManager.dashboard()
+    started_at = time.perf_counter()
+    payload = await TaskManager.dashboard()
+    log_route_timing(log, "task.dashboard.complete", started_at=started_at, extra={
+        "running": payload.get("running"),
+        "queued": payload.get("queued"),
+        "scheduled_active": payload.get("scheduled_active"),
+    })
+    return payload
 
 
 @router.get("/task-system/queue/status")
 async def task_queue_status():
     from flocks.task.manager import TaskManager
 
-    return await TaskManager.queue_status()
+    started_at = time.perf_counter()
+    payload = await TaskManager.queue_status()
+    log_route_timing(log, "task.queue_status.complete", started_at=started_at, extra={
+        "queued": payload.get("queued"),
+        "running": payload.get("running"),
+        "paused": payload.get("paused"),
+    })
+    return payload
 
 
 @router.post("/task-system/queue/pause")

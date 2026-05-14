@@ -2,13 +2,85 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import Any, Dict, Optional
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
+from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult
+
+log = Log.create(service="workflow.execution_store")
+
+# Maximum number of execution history records retained per workflow.
+# Older records are pruned automatically to prevent a syslog flood from bloating Storage.
+_MAX_EXECUTION_HISTORY_PER_WORKFLOW = 500
+# Trim is an O(N) scan over all workflow_execution rows; only run it every Nth
+# call per workflow to amortise the cost under high syslog throughput.
+_TRIM_CHECK_INTERVAL = 50
+_trim_counters: Dict[str, int] = {}
+
+# Per-workflow lock to serialize read-modify-write of stats. Concurrent
+# executions of the same workflow (e.g. syslog-triggered runs with
+# semaphore=8) would otherwise race on ``Storage.read → mutate → write``
+# and silently lose counter increments.
+_stats_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_stats_lock(workflow_id: str) -> asyncio.Lock:
+    lock = _stats_locks.get(workflow_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _stats_locks[workflow_id] = lock
+    return lock
+
+
+def _workflow_stats_key(workflow_id: str) -> str:
+    return f"workflow/{workflow_id}/stats"
+
+
+_DEFAULT_STATS: Dict[str, Any] = {
+    "callCount": 0,
+    "successCount": 0,
+    "errorCount": 0,
+    "totalRuntime": 0.0,
+    "avgRuntime": 0.0,
+    "thumbsUp": 0,
+    "thumbsDown": 0,
+}
+
+
+async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
+    """Increment workflow call/success/error counters and update avgRuntime.
+
+    Serialised per workflow to keep concurrent updates from clobbering each
+    other (read → mutate → write race).
+    """
+    lock = _get_stats_lock(workflow_id)
+    async with lock:
+        try:
+            key = _workflow_stats_key(workflow_id)
+            try:
+                stats: Dict[str, Any] = await Storage.read(key) or dict(_DEFAULT_STATS)
+            except Exception:
+                stats = dict(_DEFAULT_STATS)
+            stats["callCount"] = stats.get("callCount", 0) + 1
+            if success:
+                stats["successCount"] = stats.get("successCount", 0) + 1
+            else:
+                stats["errorCount"] = stats.get("errorCount", 0) + 1
+            total = stats.get("totalRuntime", 0.0) + duration
+            stats["totalRuntime"] = total
+            call_count = stats["callCount"]
+            stats["avgRuntime"] = (total / call_count) if call_count > 0 else 0.0
+            await Storage.write(key, stats)
+        except Exception as exc:
+            log.warning("workflow.stats.update_failed", {
+                "workflow_id": workflow_id,
+                "error": str(exc),
+            })
 
 
 def workflow_execution_key(exec_id: str) -> str:
@@ -98,13 +170,84 @@ async def record_execution_result(
     exec_id: str,
     exec_data: Dict[str, Any],
 ) -> None:
-    """Persist the final execution record and audit trail."""
+    """Persist the final execution record, audit trail, and workflow stats."""
     await Storage.write(workflow_execution_key(exec_id), exec_data)
+
+    # Update call/success/error counters so all trigger paths (HTTP, syslog, etc.)
+    # are reflected in the UI stats panel.
+    status = exec_data.get("status", "error")
+    success = status == "success"
+    duration = exec_data.get("duration")
+    if not isinstance(duration, (int, float)):
+        started_at = exec_data.get("startedAt", 0)
+        finished_at = exec_data.get("finishedAt", int(time.time() * 1000))
+        duration = max(0.0, (finished_at - started_at) / 1000.0)
+    await _update_workflow_stats(workflow_id, success, float(duration))
+
+    # Recorder writes to its own SQLite tables and can be slow under load.
+    # Run it as a background task so the syslog/HTTP dispatcher can release the
+    # concurrency slot immediately instead of waiting on session-history I/O.
     try:
-        await Recorder.record_workflow_execution(
-            exec_id=exec_id,
-            workflow_id=workflow_id,
-            run_result=exec_data,
-        )
+        async def _record_audit() -> None:
+            try:
+                await Recorder.record_workflow_execution(
+                    exec_id=exec_id,
+                    workflow_id=workflow_id,
+                    run_result=exec_data,
+                )
+            except Exception as exc:
+                log.debug("workflow.audit.record_failed", {
+                    "exec_id": exec_id,
+                    "error": str(exc),
+                })
+
+        asyncio.create_task(_record_audit(), name=f"audit-{exec_id}")
+    except RuntimeError:
+        # No running loop (e.g. unit tests) — best-effort sync fallback.
+        try:
+            await Recorder.record_workflow_execution(
+                exec_id=exec_id,
+                workflow_id=workflow_id,
+                run_result=exec_data,
+            )
+        except Exception:
+            pass
+
+    # Prune old execution records when the per-workflow limit is exceeded.
+    # Throttled by a per-workflow counter to amortise the O(N) storage scan.
+    try:
+        counter = _trim_counters.get(workflow_id, 0) + 1
+        _trim_counters[workflow_id] = counter
+        if counter >= _TRIM_CHECK_INTERVAL:
+            _trim_counters[workflow_id] = 0
+            # Run trim in the background as well; it scans all execution rows
+            # and we don't want to delay the caller.
+            try:
+                asyncio.create_task(
+                    _trim_execution_history(workflow_id),
+                    name=f"trim-{workflow_id}",
+                )
+            except RuntimeError:
+                await _trim_execution_history(workflow_id)
     except Exception:
         pass
+
+
+async def _trim_execution_history(workflow_id: str) -> None:
+    """Delete the oldest execution records once the per-workflow cap is exceeded."""
+    all_entries = await Storage.list_entries("workflow_execution/")
+    wf_entries = [
+        (key, data)
+        for key, data in all_entries
+        if isinstance(data, dict) and data.get("workflowId") == workflow_id
+    ]
+    if len(wf_entries) <= _MAX_EXECUTION_HISTORY_PER_WORKFLOW:
+        return
+    # Sort ascending by startedAt and remove the oldest excess records
+    wf_entries.sort(key=lambda kd: kd[1].get("startedAt", 0))
+    excess = len(wf_entries) - _MAX_EXECUTION_HISTORY_PER_WORKFLOW
+    for key, _ in wf_entries[:excess]:
+        try:
+            await Storage.remove(key)
+        except Exception:
+            pass

@@ -44,6 +44,7 @@ from flocks.workflow.fs_store import (
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
 )
+from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.workflow.execution_store import (
     create_execution_record,
     normalize_execution_status as _normalize_execution_status,
@@ -364,6 +365,17 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     return list(by_id.values())
 
 
+async def sync_workflows_from_filesystem() -> int:
+    """Best-effort startup sync for filesystem-backed workflows.
+
+    The filesystem is the source of truth for workflow definitions. Startup only
+    needs to migrate any legacy Storage-only records to disk and report how many
+    workflows are currently discoverable from the configured workflow roots.
+    """
+    await _migrate_storage_to_filesystem()
+    return len(_list_workflows_from_fs())
+
+
 async def _migrate_storage_to_filesystem() -> None:
     """One-time migration: move Storage-only workflow definitions to the filesystem.
 
@@ -433,6 +445,10 @@ def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
 
 
+def _syslog_config_key(workflow_id: str) -> str:
+    return f"{WORKFLOW_SYSLOG_CONFIG_PREFIX}{workflow_id}"
+
+
 async def _run_workflow_execution_task(
     *,
     workflow_id: str,
@@ -449,10 +465,24 @@ async def _run_workflow_execution_task(
     loop = asyncio.get_running_loop()
 
     def _write_progress(update_fields: Dict[str, Any]) -> None:
+        # Called from the workflow-engine worker thread on every step
+        # start/complete.  Step events for a single execution are issued
+        # serially by the engine, so no extra lock is needed beyond the
+        # caller's invariant — but we must still tolerate transient
+        # ``Storage.read`` failures (e.g. SQLite contention) without
+        # corrupting ``current`` with a non-dict result.
         try:
-            current = asyncio.run_coroutine_threadsafe(Storage.read(exec_key), loop).result(timeout=5)
+            current = asyncio.run_coroutine_threadsafe(
+                Storage.read(exec_key), loop
+            ).result(timeout=5)
+            if not isinstance(current, dict):
+                # Execution record was trimmed mid-run or never persisted;
+                # rebuild a minimal payload so the write still goes through.
+                current = {"id": exec_id, "workflowId": workflow_id}
             current.update(update_fields)
-            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, current), loop).result(timeout=5)
+            asyncio.run_coroutine_threadsafe(
+                Storage.write(exec_key, current), loop
+            ).result(timeout=5)
         except Exception as exc:
             log.warning("workflow.step_progress.write_failed", {
                 "exec_id": exec_id,
@@ -494,6 +524,11 @@ async def _run_workflow_execution_task(
 
         duration = time.time() - start_time
         current_data = await Storage.read(exec_key)
+        if not isinstance(current_data, dict):
+            # Defensive: the execution record could be missing if it was
+            # trimmed/cleaned up mid-run.  Rebuild a baseline so the final
+            # status write still succeeds rather than blowing up.
+            current_data = {"id": exec_id, "workflowId": workflow_id}
         status_value, error_message = _resolve_execution_outcome(result)
         current_data.update({
             "outputResults": result.outputs,
@@ -508,11 +543,6 @@ async def _run_workflow_execution_task(
             "currentStepIndex": result.steps,
         })
 
-        if status_value == "success":
-            await _update_workflow_stats(workflow_id, True, duration)
-        elif status_value in {"error", "timeout"}:
-            await _update_workflow_stats(workflow_id, False, duration)
-
         await _record_execution_result(workflow_id, exec_id, current_data)
         log.info("workflow.executed", {
             "id": workflow_id,
@@ -523,6 +553,8 @@ async def _run_workflow_execution_task(
     except Exception as exc:
         duration = time.time() - start_time
         current_data = await Storage.read(exec_key)
+        if not isinstance(current_data, dict):
+            current_data = {"id": exec_id, "workflowId": workflow_id}
         current_data.update({
             "status": "cancelled" if cancel_event.is_set() else "error",
             "finishedAt": int(time.time() * 1000),
@@ -531,8 +563,6 @@ async def _run_workflow_execution_task(
             "executionLog": list(step_history),
             "currentPhase": "cancelled" if cancel_event.is_set() else "error",
         })
-        if current_data["status"] == "error":
-            await _update_workflow_stats(workflow_id, False, duration)
         await _record_execution_result(workflow_id, exec_id, current_data)
         log.error("workflow.execute.error", {
             "id": workflow_id,
@@ -571,18 +601,6 @@ async def _get_workflow_stats(workflow_id: str) -> Dict[str, Any]:
         return _compute_avg_runtime(data)
     except Exception:
         return dict(_DEFAULT_STATS)
-
-
-async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
-    """Update workflow statistics"""
-    stats = await _get_workflow_stats(workflow_id)
-    stats["callCount"] += 1
-    if success:
-        stats["successCount"] += 1
-    else:
-        stats["errorCount"] += 1
-    stats["totalRuntime"] += duration
-    await Storage.write(_workflow_stats_key(workflow_id), stats)
 
 
 # =============================================================================
@@ -797,6 +815,17 @@ async def delete_workflow(workflow_id: str):
         except Exception:
             pass
 
+        try:
+            from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+            await _syslog_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(_syslog_config_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+
         log.info("workflow.deleted", {"id": workflow_id})
         await publish_event("workflow.deleted", {"id": workflow_id})
         return None
@@ -847,13 +876,21 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
                 exec_id=exec_id,
                 cancel_event=cancel_event,
                 tool_context=tool_context,
-            )
+            ),
+            name=f"workflow-run-{exec_id}",
         )
         _active_workflow_executions[exec_id] = ActiveWorkflowExecution(
             workflow_id=workflow_id,
             task=task,
             cancel_event=cancel_event,
         )
+        # Guarantee cleanup of the registry entry even when the task is
+        # cancelled or fails before reaching its own ``finally`` block (e.g.
+        # if the event loop is shutting down).  This prevents the ``Active*``
+        # map from growing forever when tasks are abandoned.
+        def _cleanup_active(_t: asyncio.Task, _eid: str = exec_id) -> None:
+            _active_workflow_executions.pop(_eid, None)
+        task.add_done_callback(_cleanup_active)
 
         log.info("workflow.execution.started", {
             "id": workflow_id,
@@ -1012,21 +1049,55 @@ async def workflow_center_stop(workflow_id: str):
 
 @router.post("/workflow-center/{workflow_id}/invoke")
 async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequest):
-    """Proxy invoke request to active published workflow service."""
+    """Proxy invoke request to active published workflow service.
+
+    Also records execution stats (callCount / successCount / errorCount) so
+    that the UI invocation counter is updated for every published-service call,
+    not just agent-driven /run calls.
+    """
+    started = time.time()
+    exec_data = await create_execution_record(
+        workflow_id,
+        input_params=req.inputs or {},
+    )
+    exec_id = str(exec_data["id"])
     try:
-        return await invoke_published_workflow(
+        result = await invoke_published_workflow(
             workflow_id,
             inputs=req.inputs,
             timeout_s=req.timeout_s,
             request_id=req.request_id,
         )
-    except WorkflowNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except WorkflowNotPublishedError as e:
+        duration = time.time() - started
+        raw_status = result.get("status", "SUCCEEDED") if isinstance(result, dict) else "SUCCEEDED"
+        status_value = _normalize_execution_status(raw_status)
+        success = status_value == "success"
+        exec_data.update({
+            "outputResults": result.get("outputs", {}) if isinstance(result, dict) else {},
+            "status": status_value,
+            "finishedAt": int(time.time() * 1000),
+            "duration": duration,
+            "currentPhase": status_value,
+        })
+        await _record_execution_result(workflow_id, exec_id, exec_data)
+        return result
+    except (WorkflowNotFoundError, WorkflowNotPublishedError) as e:
+        duration = time.time() - started
+        exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
+                          "duration": duration, "errorMessage": str(e)})
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
+        duration = time.time() - started
+        exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
+                          "duration": duration, "errorMessage": str(e)})
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        duration = time.time() - started
+        exec_data.update({"status": "error", "finishedAt": int(time.time() * 1000),
+                          "duration": duration, "errorMessage": str(e)})
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         log.error("workflow.center.invoke.error", {"workflow_id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to invoke workflow service: {str(e)}")
 
@@ -1071,29 +1142,31 @@ async def get_workflow_history(
 ):
     """
     Get workflow execution history
-    
+
     Returns list of recent executions for this workflow.
     """
     try:
         if not _read_workflow_from_fs(workflow_id):
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        all_exec_keys = await Storage.list("workflow_execution/")
+        # 单次查询批量读取所有 execution 记录，避免 N 次单独 read 导致超长耗时
+        all_entries = await Storage.list_entries("workflow_execution/")
         executions = []
-        
-        for key in all_exec_keys:
+        for _key, exec_data in all_entries:
             try:
-                exec_data = await Storage.read(key)
-                if exec_data.get("workflowId") == workflow_id:
-                    executions.append(WorkflowExecutionResponse(**exec_data))
+                if not isinstance(exec_data, dict):
+                    continue
+                if exec_data.get("workflowId") != workflow_id:
+                    continue
+                executions.append(WorkflowExecutionResponse(**exec_data))
             except Exception as e:
-                log.warning("workflow.history.skip", {"key": key, "error": str(e)})
+                log.warning("workflow.history.skip", {"key": _key, "error": str(e)})
                 continue
-        
+
         # Sort by start time (newest first) and limit
         executions.sort(key=lambda e: e.startedAt, reverse=True)
         executions = executions[:limit]
-        
+
         log.info("workflow.history", {"id": workflow_id, "count": len(executions)})
         return executions
     except HTTPException:
@@ -1333,6 +1406,19 @@ class KafkaConfigRequest(BaseModel):
     outputTopic: Optional[str] = None
 
 
+class SyslogConfigRequest(BaseModel):
+    """Per-workflow syslog listener configuration (experimental)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = False
+    protocol: str = "udp"
+    host: str = "0.0.0.0"
+    port: int = 5140
+    msg_format: str = Field("auto", alias="format")
+    input_key: str = Field("syslog_message", alias="inputKey")
+
+
 @router.post("/workflow/{workflow_id}/publish")
 async def publish_workflow_as_api(workflow_id: str):
     """
@@ -1505,6 +1591,81 @@ async def get_kafka_config(workflow_id: str):
     except Exception as e:
         log.error("workflow.kafka_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get Kafka config: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/syslog-config")
+async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
+    """
+    Save syslog listener configuration for a workflow.
+
+    When ``enabled`` is true, this also (re)starts the UDP/TCP listener and
+    blocks until the underlying socket has either bound successfully or the
+    bind has failed (e.g. ``EADDRINUSE``, invalid host).  Bind failures are
+    surfaced as ``409 Conflict`` so the UI can show an actionable error
+    instead of falsely claiming "Listening".
+    """
+    try:
+        if not _read_workflow_from_fs(workflow_id):
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+        config = {
+            "workflowId": workflow_id,
+            "enabled": req.enabled,
+            "protocol": req.protocol,
+            "host": req.host,
+            "port": req.port,
+            "format": req.msg_format,
+            "inputKey": req.input_key,
+            "updatedAt": int(time.time() * 1000),
+        }
+        await Storage.write(_syslog_config_key(workflow_id), config)
+
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        status = await _syslog_default_manager.restart_workflow(workflow_id)
+        state = (status or {}).get("state")
+        if req.enabled and state == "failed":
+            err = (status or {}).get("error") or "listener_bind_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Syslog listener failed to bind: {err}",
+            )
+        return {"ok": True, "listener": status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.syslog_config.save.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to save syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-config")
+async def get_syslog_config(workflow_id: str):
+    """Get saved syslog configuration for a workflow."""
+    try:
+        config = await Storage.read(_syslog_config_key(workflow_id))
+        return config
+    except Exception as e:
+        log.error("workflow.syslog_config.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-status")
+async def get_syslog_status(workflow_id: str):
+    """Return the *runtime* status of the syslog listener for a workflow.
+
+    This reflects the actual bind state (binding/listening/failed/stopped) and
+    queue depth, so the UI can show whether a saved-but-not-yet-bound listener
+    is actually running.  The persisted config (``/syslog-config``) only
+    captures *intent*, which is why the UI must consult this endpoint to
+    truthfully render "Listening".
+    """
+    try:
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        return _syslog_default_manager.get_listener_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.syslog_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog status: {str(e)}")
 
 
 # =============================================================================

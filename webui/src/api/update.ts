@@ -4,7 +4,7 @@ import client from './client';
 // Types
 // ======================================================================
 
-export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'building' | 'restarting' | 'done' | 'error';
+export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'restarting' | 'done' | 'error';
 
 export type DeployMode = 'docker' | 'source';
 

@@ -521,7 +521,7 @@ export default function SessionChat({
 
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
-  const sseEnabled = live || isStreaming || !hideInput;
+  const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {

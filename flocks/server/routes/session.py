@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.auth.context import get_current_auth_user
+from flocks.server.routes._timing import log_route_timing
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
@@ -206,6 +207,7 @@ async def list_sessions(
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
 ) -> List[SessionResponse]:
     """List all sessions with optional filters"""
+    started_at = time.perf_counter()
     _current_user = require_user(request)
     all_sessions = await Session.list_all()
     
@@ -235,7 +237,15 @@ async def list_sessions(
         if limit is not None and len(filtered) >= limit:
             break
     
-    return [_session_to_response(s) for s in filtered]
+    response = [_session_to_response(s) for s in filtered]
+    log_route_timing(log, "session.list.complete", started_at=started_at, extra={
+        "count": len(response),
+        "roots": roots,
+        "limit": limit,
+        "search": bool(search),
+        "category": category,
+    })
+    return response
 
 
 @router.post(

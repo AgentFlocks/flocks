@@ -68,18 +68,29 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 说明当前环境不适合 `CDP 直连`。此时要：
 
 1. 明确告诉用户是哪一项不满足，提示需要做什么操作才能达到要求
-2. 切换到 `agent-browser` 模式
-3. 立即阅读：
-   - `references/agent-browser.md`
-
-不要继续尝试 CDP。
+2. 提示用户切换到 `agent-browser` 模式
 
 ## 执行规则
 
 1. 模式一旦确定，立即只读取对应的 reference。
 2. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
 
+## 产品经验Skill
+
+把特定产品页/网站的浏览器操作经验，沉淀到对应产品 skill，实现可复用。
+
+适合沉淀的经验包括：
+
+- 已确认某产品的稳定登录的方法
+- 更稳定的页面进入方式，例如“优先直接拼 URL，不走菜单”
+- 表格、筛选器、分页、弹窗、下载、详情展开等可靠操作路径
+- 某站点特有的等待条件、重渲染特征、虚拟列表/SPA 交互怪癖
+- 特定操作的成功经验，失败案例（特定操作失败 2 次以上，最终成功的经验）
+
+具体怎么沉淀到 产品skill，请阅读 `references/browser-experience-in-skill.md`。
+
 ## References
 
+- `references/browser-experience-in-skill.md`：如何把浏览器经验沉淀到产品 skill，以及推荐记录模板
 - `references/cdp-direct.md`：以 `flocks browser` 作为 CDP 直连入口的启动方式、API、页面探索策略、错误处理
 - `references/agent-browser.md`：agent-browser 的使用说明、错误处理等

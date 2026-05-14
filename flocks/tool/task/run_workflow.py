@@ -353,16 +353,39 @@ async def run_workflow_tool(
     workflow_source: Union[Dict[str, Any], Path]
     if isinstance(workflow, str):
         raw = workflow.strip()
-        # If it's a JSON string, try to parse it.
+        # Try to parse as JSON first (handles JSON-encoded dicts or strings).
+        parsed = None
         try:
-            workflow_source = json.loads(raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
+            pass
+
+        if isinstance(parsed, dict):
+            # Valid workflow JSON object.
+            workflow_source = parsed
+        elif isinstance(parsed, str):
+            # json.loads decoded a JSON-encoded string, e.g. the AI double-encoded the
+            # path: workflow='"/path/to/workflow.json"' → parsed='/path/to/workflow.json'.
+            # Use the decoded string (no surrounding quotes) as the file path.
+            p = Path(parsed).expanduser()
+            if p.exists() and p.is_file():
+                workflow_source = p
+            else:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Workflow file not found: {parsed!r}. "
+                        "Provide a valid workflow JSON file path or a workflow dict."
+                    )
+                )
+        elif parsed is None:
+            # json.loads raised JSONDecodeError — raw is not JSON.
+            # First try to resolve as a registered workflow ID, then fall back to file path.
             existing_workflow = read_workflow_from_fs(raw)
             if existing_workflow is not None:
                 workflow_source = existing_workflow["workflowJson"]
                 raw = existing_workflow["id"]
             else:
-            # Otherwise treat it as a file path.
                 p = Path(raw).expanduser()
                 if p.exists() and p.is_file():
                     workflow_source = p
@@ -374,6 +397,15 @@ async def run_workflow_tool(
                             "or a valid workflow JSON file path."
                         )
                     )
+        else:
+            # json.loads returned list / int / bool — not a valid workflow parameter.
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Invalid workflow parameter: expected a workflow dict or a file path string, "
+                    f"got JSON-decoded {type(parsed).__name__} ({parsed!r})."
+                )
+            )
     elif isinstance(workflow, dict):
         workflow_source = workflow
     else:
@@ -382,12 +414,25 @@ async def run_workflow_tool(
             error=f"workflow must be a dictionary or string, got {type(workflow).__name__}"
         )
     
+    # Sanity-check dict workflows: must have at least a `start` field so we
+    # surface a clear error instead of a confusing Pydantic validation message.
+    if isinstance(workflow_source, dict) and "start" not in workflow_source:
+        return ToolResult(
+            success=False,
+            error=(
+                "Invalid workflow definition: the `start` field is required. "
+                "Make sure you pass the workflow JSON (with `start`, `nodes`, `edges`) "
+                "as the `workflow` parameter, not the execution inputs."
+            )
+        )
+
     # Request permission (workflow execution can run arbitrary code)
     if isinstance(workflow_source, dict):
         workflow_name = workflow_source.get("name", "unnamed workflow")
         # Use id if available, otherwise use name or generate a fallback
         workflow_id = workflow_source.get("id") or workflow_source.get("name") or "unknown"
     else:
+        # workflow_source is a Path object here; Path.name gives the filename.
         workflow_name = workflow_source.name
         workflow_id = str(workflow_source)
 

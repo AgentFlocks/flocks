@@ -344,6 +344,23 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
 
 
+def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+
+    with pytest.warns(RuntimeWarning, match="apt/yum install lsof -y"):
+        assert service_manager.port_owner_pids(5173) == []
+
+
+def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: False)
+
+    with pytest.warns(RuntimeWarning, match="退回到 bind 检查"):
+        assert service_manager.port_is_in_use(5173) is True
+
+
 def test_wait_for_http_rejects_unreachable_responses(monkeypatch) -> None:
     responses = iter([
         httpx.Response(503, json={"detail": "not found"}),
@@ -1179,6 +1196,29 @@ def test_start_backend_raises_on_port_record_mismatch(monkeypatch, tmp_path: Pat
         service_manager.start_backend(service_manager.ServiceConfig(), DummyConsole())
 
 
+def test_start_backend_raises_when_port_in_use_without_pid_lookup(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: True)
+
+    with pytest.raises(service_manager.ServiceError, match="无法识别占用 PID"):
+        service_manager.start_backend(service_manager.ServiceConfig(), DummyConsole())
+
+
 def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:
     captured = {}
     log_path = tmp_path / "logs" / "backend.log"
@@ -1585,6 +1625,33 @@ def test_build_status_lines_uses_recorded_host(monkeypatch, tmp_path: Path) -> N
 
     assert "http://10.0.0.8:9000" in lines[0]
     assert "http://127.0.0.1:5174" in lines[1]
+
+
+def test_build_status_lines_uses_unknown_pid_when_bind_fallback_detects_listener(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: True)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: False)
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert "PID=unknown" in lines[0]
+    assert "PID=unknown" in lines[1]
 
 
 def test_service_lock_prevents_concurrent_operations(monkeypatch, tmp_path: Path) -> None:

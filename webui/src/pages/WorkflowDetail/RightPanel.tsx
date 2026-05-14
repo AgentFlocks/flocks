@@ -6,6 +6,7 @@ import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
 import ChatTab from './tabs/ChatTab';
 import RunTab from './tabs/RunTab';
+import IntegrationTab from './tabs/IntegrationTab';
 
 // ─────────────────────────────────────────────
 // Error boundary helpers
@@ -59,7 +60,7 @@ class TabErrorBoundary extends Component<
 // RightPanel
 // ─────────────────────────────────────────────
 
-type TabId = 'chat' | 'overview' | 'run';
+type TabId = 'chat' | 'overview' | 'run' | 'integration';
 
 interface RightPanelProps {
   workflow: Workflow;
@@ -107,9 +108,10 @@ export default function RightPanel({
   };
 
   const TABS: { id: TabId; label: string }[] = [
-    { id: 'overview', label: t('detail.rightPanel.tabOverview') },
-    { id: 'chat',     label: t('detail.rightPanel.tabChat') },
-    { id: 'run',      label: t('detail.rightPanel.tabRun') },
+    { id: 'overview',     label: t('detail.rightPanel.tabOverview') },
+    { id: 'chat',         label: t('detail.rightPanel.tabChat') },
+    { id: 'run',          label: t('detail.rightPanel.tabRun') },
+    { id: 'integration',  label: t('detail.rightPanel.tabIntegration') },
   ];
 
   return (
@@ -156,6 +158,11 @@ export default function RightPanel({
               onLatestExecutionChange={onLatestExecutionChange}
               onExecutionSettled={onExecutionSettled}
             />
+          </TabErrorBoundary>
+        )}
+        {activeTab === 'integration' && (
+          <TabErrorBoundary>
+            <IntegrationTab workflow={workflow} />
           </TabErrorBoundary>
         )}
       </div>

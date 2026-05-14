@@ -90,6 +90,33 @@ class TestDelegateTaskTolerance:
         }
         assert launch_input.model_pinned is False
 
+    @pytest.mark.asyncio
+    async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
+        session = SimpleNamespace(
+            id="ses-child",
+            agent="asset-survey",
+        )
+
+        with patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))), \
+             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=session)), \
+             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
+             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                 action="stop",
+                 error=None,
+                 last_message=None,
+             ))):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=_make_ctx(),
+                session_id="ses-child",
+                prompt="Continue investigating",
+            )
+
+        assert result.success is True
+        assert result.metadata["sessionId"] == "ses-child"
+        assert result.metadata["emptyOutput"] is True
+        assert "without producing a final assistant message" in (result.output or "")
+
 
 class TestBatchCompatibility:
     def test_batch_schema_allows_legacy_commands_alias(self):
