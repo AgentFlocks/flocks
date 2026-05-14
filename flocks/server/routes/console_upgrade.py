@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import os
 import json
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional, Literal
 from uuid import uuid4
@@ -84,6 +86,74 @@ def _is_pro_component_installed() -> bool:
     return importlib.util.find_spec("flockspro") is not None
 
 
+def _decode_jwt_payload_unverified(token: str) -> dict[str, Any]:
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, UTC)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _license_duration_seconds(record: dict[str, Any]) -> int | None:
+    details = record.setdefault("details", {})
+    payload = _decode_jwt_payload_unverified(str(record.get("activate_key") or details.get("activate_key") or ""))
+    duration_days = payload.get("duration_days") or details.get("license_duration_days")
+    if duration_days:
+        try:
+            return max(1, int(duration_days)) * 86400
+        except (TypeError, ValueError):
+            pass
+    issued_at = payload.get("iat") or payload.get("issued_at")
+    expires_at = payload.get("expires_at") or details.get("expires_at")
+    try:
+        if issued_at and expires_at:
+            return max(1, int(expires_at) - int(issued_at))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]:
+    details = record.setdefault("details", {})
+    marker = _read_pro_bundle_install_marker()
+    if marker:
+        details.setdefault("auto_install_version", marker.get("installed_version"))
+        details.setdefault("auto_install_pro_version", marker.get("flockspro_component_version"))
+        details.setdefault("flockspro_component_version", marker.get("flockspro_component_version"))
+        details.setdefault("auto_install_build_id", marker.get("build_id"))
+
+    activated_source = details.get("license_activated_at") or details.get("auto_install_completed_at")
+    if not activated_source and marker:
+        activated_source = marker.get("installed_at")
+    activated_at = _parse_dt(activated_source)
+    duration_seconds = _license_duration_seconds(record)
+    if activated_at and duration_seconds:
+        effective_expires_at = int((activated_at + timedelta(seconds=duration_seconds)).timestamp())
+        details["license_effective_expires_at"] = effective_expires_at
+        details["license_duration_days"] = max(1, round(duration_seconds / 86400))
+    return record
+
+
 async def _maybe_activate_pro_license(record: dict[str, Any]) -> None:
     activate_key = str(record.get("activate_key") or "").strip()
     if not activate_key:
@@ -99,8 +169,61 @@ async def _maybe_activate_pro_license(record: dict[str, Any]) -> None:
         if callable(activate_fn):
             activate_fn(activate_key)
             details["license_activated_at"] = datetime.now(UTC).isoformat()
+            details.pop("license_activate_error", None)
     except Exception as exc:
         details["license_activate_error"] = str(exc)
+        if not _is_pro_component_installed():
+            return
+        _fallback_write_pro_license_state(record, activate_key, str(exc))
+
+
+def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str, reason: str) -> None:
+    payload = _decode_jwt_payload_unverified(activate_key)
+    if not payload:
+        return
+    details = record.setdefault("details", {})
+    now = int(time.time())
+    duration_seconds = _license_duration_seconds(record)
+    if duration_seconds:
+        payload["expires_at"] = now + duration_seconds
+        details["license_effective_expires_at"] = payload["expires_at"]
+        details["license_duration_days"] = max(1, round(duration_seconds / 86400))
+    try:
+        from flockspro.license.cloud_checker import _machine_fingerprint, get_license_checker
+
+        checker = get_license_checker()
+        load_install_id = getattr(checker, "_load_or_create_install_id", None)
+        install_id = load_install_id() if callable(load_install_id) else str(record.get("install_id") or "")
+        fingerprint = _machine_fingerprint(install_id)
+    except Exception:
+        install_id = ""
+        fingerprint = ""
+
+    license_path = Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))) / "flockspro" / "license.json"
+    license_path.parent.mkdir(parents=True, exist_ok=True)
+    license_path.write_text(
+        json.dumps(
+            {
+                "license_id": payload.get("license_id"),
+                "key": activate_key,
+                "payload": payload,
+                "bound_fingerprint": fingerprint,
+                "activation_receipt": None,
+                "patches": [],
+                "activated_at": now,
+                "install_id": install_id,
+                "fingerprint": fingerprint,
+                "last_sync_at": now,
+                "max_observed_at": now,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    details["license_activated_at"] = datetime.now(UTC).isoformat()
+    details["license_activate_fallback_reason"] = reason
+    details.pop("license_activate_error", None)
 
 
 async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
@@ -137,11 +260,15 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
         if progress.stage == "error":
             raise ValueError(progress.message)
 
+    await _maybe_activate_pro_license(record)
+    await _maybe_refresh_pro_license(record)
     marker = _read_pro_bundle_install_marker()
     details["auto_install_result"] = "done" if final_stage == "done" else "unknown"
     details["auto_install_version"] = marker.get("installed_version")
+    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = final_message
+    _enrich_record_from_install_marker(record)
     await _report_pro_bundle_installation(record, install_result="success")
     return record
 
@@ -355,7 +482,7 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
     for request_id in reversed(await _list_request_ids()):
         raw = await Storage.get(_request_key(request_id))
         if raw:
-            result.append(UpgradeRequestStatus(**raw))
+            result.append(UpgradeRequestStatus(**_enrich_record_from_install_marker(raw)))
     return result
 
 
@@ -365,7 +492,7 @@ async def get_upgrade_request(request_id: str, request: Request) -> UpgradeReque
     raw = await Storage.get(_request_key(request_id))
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
-    return UpgradeRequestStatus(**raw)
+    return UpgradeRequestStatus(**_enrich_record_from_install_marker(raw))
 
 
 @router.post("/upgrade-requests/{request_id}/refresh", response_model=UpgradeRequestStatus)
@@ -399,6 +526,7 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
     else:
         raw["updated_at"] = datetime.now(UTC).isoformat()
 
+    _enrich_record_from_install_marker(raw)
     await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)
 
@@ -430,10 +558,14 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                     await _report_pro_bundle_installation(raw, install_result="failed", error_message=progress.message)
                 elif progress.stage in {"done", "restarting"}:
                     marker = _read_pro_bundle_install_marker()
+                    await _maybe_activate_pro_license(raw)
+                    await _maybe_refresh_pro_license(raw)
                     details["auto_install_result"] = "restarting" if progress.stage == "restarting" else "done"
                     details["auto_install_version"] = marker.get("installed_version")
+                    details["auto_install_pro_version"] = marker.get("flockspro_component_version")
                     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
                     details["auto_install_message"] = progress.message
+                    _enrich_record_from_install_marker(raw)
                     raw["status"] = "activated"
                     raw["updated_at"] = datetime.now(UTC).isoformat()
                     await Storage.set(_request_key(request_id), raw, "json")

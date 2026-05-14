@@ -26,6 +26,7 @@ import OnboardingModal, { isOnboardingDismissed } from '@/components/common/Onbo
 import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
 import NotificationModal from '@/components/common/NotificationModal';
 import { checkUpdate, type VersionInfo } from '@/api/update';
+import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
   ackNotification,
   getActiveNotifications,
@@ -38,6 +39,11 @@ import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+
+function formatProVersion(version?: string | null): string | null {
+  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  return normalized ? `pro-v${normalized}` : null;
+}
 
 function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
@@ -83,6 +89,7 @@ export default function Layout() {
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
   const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
+  const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -173,6 +180,7 @@ export default function Layout() {
     let cancelled = false;
     if (!user?.id || user.role !== 'admin') {
       setHasFlocksproCapability(false);
+      setFlocksproVersion(null);
       return () => {
         cancelled = true;
       };
@@ -186,6 +194,39 @@ export default function Layout() {
       .catch(() => {
         if (!cancelled) {
           setHasFlocksproCapability(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.id || user.role !== 'admin') {
+      setFlocksproVersion(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    void consoleUpgradeApi.listRequests()
+      .then((items) => {
+        if (cancelled) return;
+        const activated = items.find((item) => {
+          const status = (item.status || '').toLowerCase();
+          const installResult = (item.details?.auto_install_result || '').toLowerCase();
+          return status === 'activated' || ['done', 'already_latest', 'restarting'].includes(installResult);
+        });
+        const version = formatProVersion(
+          activated?.details?.auto_install_pro_version ||
+            activated?.details?.flockspro_component_version ||
+            activated?.details?.auto_install_version,
+        );
+        setFlocksproVersion(version);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFlocksproVersion(null);
         }
       });
     return () => {
@@ -349,6 +390,13 @@ export default function Layout() {
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
     matchPath('/sessions', location.pathname);
+  const productName = flocksproVersion ? 'Flocks Pro' : 'Flocks';
+  const displayVersion = flocksproVersion || (currentVersion ? `v${currentVersion}` : null);
+  const currentVersionLabel = flocksproVersion
+    ? t('currentProductVersionLabel', { version: flocksproVersion })
+    : currentVersion
+    ? t('currentVersionLabel', { version: currentVersion })
+    : productName;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -396,14 +444,14 @@ export default function Layout() {
             {collapsed ? (
               <div
                 className="w-8 h-8 rounded-lg border border-gray-200 bg-gray-50 flex items-center justify-center flex-shrink-0"
-                title="Flocks"
+                title={productName}
               >
                 <Sparkles className="w-4 h-4 text-gray-600" />
               </div>
             ) : (
               <>
                 <div className="flex items-center flex-1 min-w-0">
-                  <span className="text-xl font-bold text-gray-900 whitespace-nowrap">Flocks</span>
+                  <span className="text-xl font-bold text-gray-900 whitespace-nowrap">{productName}</span>
                 </div>
                 <button
                   onClick={() => setSidebarOpen(false)}
@@ -477,9 +525,7 @@ export default function Layout() {
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-amber-700">
-                      {currentVersion
-                        ? t('currentVersionLabel', { version: currentVersion })
-                        : 'Flocks'}
+                      {currentVersionLabel}
                     </div>
                     <div className="mt-0.5 text-xs font-medium text-amber-900">
                       AI Native SecOps Platform
@@ -492,7 +538,7 @@ export default function Layout() {
                   >
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs font-medium text-gray-500 group-hover:text-gray-700 transition-colors">
-                        Flocks {currentVersion ? `v${currentVersion}` : '...'}
+                        {productName} {displayVersion || '...'}
                       </span>
                     </div>
                     <div className="mt-0.5 text-xs text-gray-400">AI Native SecOps Platform</div>

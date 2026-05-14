@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowUpCircle, CheckCircle, Loader2, LogIn, X, XCircle } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, X, XCircle } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -29,6 +29,14 @@ interface FlocksproLicenseStatus {
   license_id?: string | null;
   status?: string | null;
   expires_at?: number | string | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  fingerprint?: string | null;
+  install_id?: string | null;
+  last_heartbeat_ok_at?: number | string | null;
+  active_patch_serial?: number | string | null;
+  has_patches?: boolean | null;
+  [key: string]: string | number | boolean | null | undefined;
 }
 
 const DEFAULT_FORM: UpgradeApplyFormState = {
@@ -67,6 +75,30 @@ function formatDateTimeValue(value?: string | number | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+function daysRemaining(value?: string | number | null): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    return null;
+  }
+  return Math.max(0, Math.ceil((d.getTime() - Date.now()) / 86400000));
+}
+
+function formatLicenseValue(key: string, value: string | number | boolean | null | undefined): string {
+  if (value === null || value === undefined || value === '') {
+    return '-';
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'true' : 'false';
+  }
+  if (key.endsWith('_at') || key.endsWith('At')) {
+    return formatDateTimeValue(value);
+  }
+  return String(value);
+}
+
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -86,6 +118,8 @@ export default function FlocksproUpgradePage() {
   const [upgradeError, setUpgradeError] = useState<string | null>(null);
   const [proUpgrading, setProUpgrading] = useState(false);
   const [proRestarting, setProRestarting] = useState(false);
+  const [refreshingInstalled, setRefreshingInstalled] = useState(false);
+  const [showLicenseDetails, setShowLicenseDetails] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
@@ -120,12 +154,77 @@ export default function FlocksproUpgradePage() {
     [requests],
   );
 
+  const proComponentVersion =
+    latestActivatedRequest?.details?.auto_install_pro_version ||
+    latestActivatedRequest?.details?.flockspro_component_version;
   const proVersion = formatProVersion(
-    currentVersion ||
+    proComponentVersion ||
       latestActivatedRequest?.details?.auto_install_version ||
-      latestActivatedRequest?.details?.auto_install_target,
+      latestActivatedRequest?.details?.auto_install_target ||
+      currentVersion,
   );
   const isProLoaded = licenseStatus?.activated === true;
+  const displayedLicenseStatus = latestActivatedRequest?.details?.license_status || licenseStatus?.status || '-';
+  const displayedExpiresAt = latestActivatedRequest?.details?.license_effective_expires_at ||
+    latestActivatedRequest?.details?.expires_at ||
+    licenseStatus?.expires_at;
+  const remainingDays = daysRemaining(displayedExpiresAt);
+  const licenseDetailRows = useMemo(() => {
+    if (!licenseStatus) {
+      return [];
+    }
+    const preferredOrder = [
+      'activated',
+      'active',
+      'license_id',
+      'status',
+      'expires_at',
+      'max_admins',
+      'max_members',
+      'fingerprint',
+      'install_id',
+      'last_heartbeat_ok_at',
+      'active_patch_serial',
+      'has_patches',
+    ];
+    const entries = Object.entries(licenseStatus)
+      .filter(([, value]) => value !== undefined)
+      .sort(([left], [right]) => {
+        const leftIndex = preferredOrder.indexOf(left);
+        const rightIndex = preferredOrder.indexOf(right);
+        if (leftIndex !== -1 || rightIndex !== -1) {
+          return (leftIndex === -1 ? preferredOrder.length : leftIndex) -
+            (rightIndex === -1 ? preferredOrder.length : rightIndex);
+        }
+        return left.localeCompare(right);
+      });
+    const rows = entries.map(([key, value]) => ({
+      key,
+      value: formatLicenseValue(key, value),
+    }));
+    if (latestActivatedRequest?.details?.license_effective_expires_at) {
+      rows.push({
+        key: 'effective_expires_at',
+        value: formatLicenseValue(
+          'effective_expires_at',
+          latestActivatedRequest.details.license_effective_expires_at,
+        ),
+      });
+    }
+    if (latestActivatedRequest?.details?.license_duration_days) {
+      rows.push({
+        key: 'duration_days',
+        value: String(latestActivatedRequest.details.license_duration_days),
+      });
+    }
+    if (remainingDays !== null) {
+      rows.push({
+        key: 'remaining_days',
+        value: String(remainingDays),
+      });
+    }
+    return rows;
+  }, [latestActivatedRequest, licenseStatus, remainingDays]);
 
   const refreshConsoleLoginStatus = useCallback(async () => {
     setConsoleLoginLoading(true);
@@ -322,6 +421,20 @@ export default function FlocksproUpgradePage() {
     }
   };
 
+  const refreshInstalledStatus = async () => {
+    setRefreshingInstalled(true);
+    setRequestError(null);
+    try {
+      await refreshRequests();
+      const status = await getFlocksproLicenseStatus();
+      setLicenseStatus(status);
+    } catch (err) {
+      setRequestError(extractErrorMessage(err, t('errors.refreshRequest')));
+    } finally {
+      setRefreshingInstalled(false);
+    }
+  };
+
   const cancelActiveRequest = async () => {
     if (!activeRequest) {
       return;
@@ -506,23 +619,34 @@ export default function FlocksproUpgradePage() {
               {isProLoaded ? t('upgrade.installedDescription') : t('upgrade.description')}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              if (!canOpenApplyDialog) {
-                return;
-              }
-              if (showRejectedFeedback && activeRequest) {
-                dismissRejectedRequest(activeRequest.request_id);
-              }
-              setApplyFormError(null);
-              setShowApplyDialog(true);
-            }}
-            disabled={!canOpenApplyDialog || isProLoaded}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
-          >
-            {t('upgrade.applyAction')}
-          </button>
+          {isProLoaded ? (
+            <button
+              type="button"
+              onClick={() => void refreshInstalledStatus()}
+              disabled={refreshingInstalled}
+              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              {refreshingInstalled ? t('upgrade.refreshing') : t('actions.refresh')}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                if (!canOpenApplyDialog) {
+                  return;
+                }
+                if (showRejectedFeedback && activeRequest) {
+                  dismissRejectedRequest(activeRequest.request_id);
+                }
+                setApplyFormError(null);
+                setShowApplyDialog(true);
+              }}
+              disabled={!canOpenApplyDialog}
+              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
+            >
+              {t('upgrade.applyAction')}
+            </button>
+          )}
         </div>
 
         {!canApplyUpgrade && (
@@ -537,19 +661,51 @@ export default function FlocksproUpgradePage() {
         )}
 
         {isProLoaded && (
-          <div className="grid gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 md:grid-cols-3">
-            <div>
-              <div className="text-xs text-emerald-700">{t('upgrade.installedVersion')}</div>
-              <div className="mt-1 font-semibold">{proVersion}</div>
+          <div className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+            <div className="grid gap-3 md:grid-cols-4">
+              <div>
+                <div className="text-xs text-emerald-700">{t('upgrade.installedVersion')}</div>
+                <div className="mt-1 font-semibold">{proVersion}</div>
+              </div>
+              <div>
+                <div className="text-xs text-emerald-700">{t('upgrade.licenseStatus')}</div>
+                <div className="mt-1 font-semibold">{displayedLicenseStatus}</div>
+              </div>
+              <div>
+                <div className="text-xs text-emerald-700">{t('upgrade.expiresAt')}</div>
+                <div className="mt-1 font-semibold">{formatDateTimeValue(displayedExpiresAt)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-emerald-700">{t('upgrade.remainingDays')}</div>
+                <div className="mt-1 font-semibold">
+                  {remainingDays === null ? '-' : t('upgrade.remainingDaysValue', { count: remainingDays })}
+                </div>
+              </div>
             </div>
-            <div>
-              <div className="text-xs text-emerald-700">{t('upgrade.licenseStatus')}</div>
-              <div className="mt-1 font-semibold">{licenseStatus?.status || '-'}</div>
-            </div>
-            <div>
-              <div className="text-xs text-emerald-700">{t('upgrade.expiresAt')}</div>
-              <div className="mt-1 font-semibold">{formatDateTimeValue(licenseStatus?.expires_at)}</div>
-            </div>
+            {licenseDetailRows.length > 0 && (
+              <div className="border-t border-emerald-200 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowLicenseDetails((prev) => !prev)}
+                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-900"
+                >
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 transition-transform ${showLicenseDetails ? 'rotate-180' : ''}`}
+                  />
+                  {showLicenseDetails ? t('upgrade.hideLicenseDetails') : t('upgrade.showLicenseDetails')}
+                </button>
+                {showLicenseDetails && (
+                  <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                    {licenseDetailRows.map((item) => (
+                      <div key={item.key} className="min-w-0 rounded border border-emerald-100 bg-white/60 px-3 py-2">
+                        <div className="text-xs text-emerald-700">{item.key}</div>
+                        <div className="mt-1 break-all font-medium text-emerald-950">{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

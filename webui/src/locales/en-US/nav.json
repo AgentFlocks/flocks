@@ -13,7 +13,7 @@
   "models": "Models",
   "channels": "Channels",
   "management": "Management",
-  "flocksproUpgrade": "Flocks Pro Upgrade",
+  "flocksproUpgrade": "Flocks Pro",
   "accountManagement": "Account",
   "auditLogs": "Audit Logs",
   "expandNav": "Expand navigation",
@@ -24,5 +24,6 @@
   "versionInfo": "Flocks version info",
   "updateAvailable": "Update available",
   "updateNow": "Upgrade now",
-  "currentVersionLabel": "Current v{{version}}"
+  "currentVersionLabel": "Current v{{version}}",
+  "currentProductVersionLabel": "Current {{version}}"
 }

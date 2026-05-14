@@ -14,6 +14,10 @@ export interface UpgradeRequestCreatePayload {
 export interface UpgradeRequestDetails {
   product?: string;
   license_type?: 'trial_30d' | 'poc' | 'commercial' | string;
+  license_status?: string | null;
+  expires_at?: number | string | null;
+  license_effective_expires_at?: number | string | null;
+  license_duration_days?: number | null;
   company?: string;
   applicant_name?: string;
   applicant_email?: string | null;
@@ -21,6 +25,8 @@ export interface UpgradeRequestDetails {
   notes?: string | null;
   auto_install_target?: string;
   auto_install_version?: string;
+  auto_install_pro_version?: string;
+  flockspro_component_version?: string;
   auto_install_result?: string;
   auto_install_completed_at?: string;
 }

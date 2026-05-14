@@ -13,7 +13,7 @@
   "models": "模型清单",
   "channels": "通道配置",
   "management": "管理",
-  "flocksproUpgrade": "Flocks Pro 升级",
+  "flocksproUpgrade": "Flocks Pro",
   "accountManagement": "账号管理",
   "auditLogs": "审计日志",
   "expandNav": "展开导航",
@@ -24,5 +24,6 @@
   "versionInfo": "Flocks 版本信息",
   "updateAvailable": "发现新版本",
   "updateNow": "立即升级",
-  "currentVersionLabel": "当前 v{{version}}"
+  "currentVersionLabel": "当前 v{{version}}",
+  "currentProductVersionLabel": "当前 {{version}}"
 }
