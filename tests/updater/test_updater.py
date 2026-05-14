@@ -12,6 +12,13 @@ from flocks.cli import service_manager
 from flocks.updater import updater
 
 
+def _write_pyproject_version(pyproject_path: Path, version: str) -> None:
+    pyproject_path.write_text(
+        '[project]\nname = "flocks"\nversion = "' + version + '"\n',
+        encoding="utf-8",
+    )
+
+
 def test_run_handles_none_process_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def fake_run(*args, **kwargs):
         return subprocess.CompletedProcess(args=args[0], returncode=0, stdout=None, stderr=None)
@@ -46,24 +53,50 @@ def test_run_replaces_invalid_windows_stderr_bytes(
     assert stderr == "failed�output"
 
 
-def test_get_current_version_replaces_invalid_git_bytes(
+def test_get_current_version_prefers_higher_marker_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater, "_VERSION_MARKER_PATH", tmp_path / ".current_version")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
+    _write_pyproject_version(tmp_path / "pyproject.toml", "v2026.4.1")
+    (tmp_path / ".current_version").write_text("2026.4.2\n", encoding="utf-8")
+
+    assert updater.get_current_version() == "2026.4.2"
+
+
+def test_get_current_version_prefers_higher_pyproject_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater, "_VERSION_MARKER_PATH", tmp_path / ".current_version")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
+    _write_pyproject_version(tmp_path / "pyproject.toml", "v2026.5.1")
+    (tmp_path / ".current_version").write_text("2026.4.1\n", encoding="utf-8")
+
+    assert updater.get_current_version() == "2026.5.1"
+
+
+def test_get_current_version_ignores_invalid_marker_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater, "_VERSION_MARKER_PATH", tmp_path / ".current_version")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
+    _write_pyproject_version(tmp_path / "pyproject.toml", "v2026.4.1")
+    (tmp_path / ".current_version").write_bytes(b"v2026.3.9\x93\n")
+
+    assert updater.get_current_version() == "2026.4.1"
+
+
+def test_get_current_version_returns_empty_when_no_marker_or_pyproject(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(updater, "_VERSION_MARKER_PATH", tmp_path / ".current_version")
     monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path)
 
-    def fake_run(*args, **kwargs):
-        return subprocess.CompletedProcess(
-            args=args[0],
-            returncode=0,
-            stdout=b"v2026.4.1\x93\n",
-            stderr=b"",
-        )
-
-    monkeypatch.setattr(updater.subprocess, "run", fake_run)
-
-    assert updater.get_current_version() == "2026.4.1�"
+    assert updater.get_current_version() == ""
 
 
 @pytest.mark.asyncio
@@ -1295,16 +1328,20 @@ def test_rollback_failed_update_clears_state_when_restore_and_frontend_both_fail
     assert updater._read_upgrade_state() is None
 
 
-def test_backup_current_version_preserves_webui_dist(
+def test_backup_current_version_excludes_all_dist_directories(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     install_root = tmp_path / "install"
     webui_dist = install_root / "webui" / "dist"
+    git_dir = install_root / ".git"
     other_dist = install_root / "dist"
     webui_dist.mkdir(parents=True)
+    git_dir.mkdir(parents=True)
     other_dist.mkdir(parents=True)
     (webui_dist / "index.html").write_text("<html>ok</html>", encoding="utf-8")
+    (git_dir / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
+    (install_root / "flocks.json").write_text('{"keep": true}', encoding="utf-8")
     (other_dist / "ignored.txt").write_text("nope", encoding="utf-8")
     backup_dir = tmp_path / "backups"
 
@@ -1315,8 +1352,48 @@ def test_backup_current_version_preserves_webui_dist(
     with tarfile.open(backup_path, "r:gz") as tar:
         names = tar.getnames()
 
-    assert "flocks/webui/dist/index.html" in names
+    assert "flocks/webui/dist/index.html" not in names
+    assert "flocks/flocks.json" in names
+    assert "flocks/.git/HEAD" not in names
     assert "flocks/dist/ignored.txt" not in names
+
+
+@pytest.mark.asyncio
+async def test_build_updated_frontend_uses_current_install_root_and_region_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    webui_dir = install_root / "webui"
+    webui_dir.mkdir(parents=True)
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            sources=["github", "gitee"],
+        )
+
+    async def fake_build_frontend_workspace(
+        webui_dir: Path,
+        *,
+        npm_registry: str | None = None,
+    ) -> str | None:
+        captured["webui_dir"] = webui_dir
+        captured["npm_registry"] = npm_registry
+        return None
+
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_build_frontend_workspace", fake_build_frontend_workspace)
+
+    await updater.build_updated_frontend(region="cn")
+
+    assert captured == {
+        "webui_dir": webui_dir,
+        "npm_registry": "https://registry.npmmirror.com/",
+    }
 
 
 def test_cleanup_old_backups_keeps_latest_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1386,18 +1463,22 @@ def test_replace_install_dir_copies_dot_flocks_plugins_from_source(
     (inst_plugins / "obsolete_plugin" / "gone.yaml").parent.mkdir(parents=True)
     (inst_plugins / "obsolete_plugin" / "gone.yaml").write_text("removed", encoding="utf-8")
 
+    (source_dir / "flocks.json").write_text('{"version": "new"}', encoding="utf-8")
     (install_root / "flocks.json").write_text('{"keep": true}', encoding="utf-8")
+    (install_root / ".git").mkdir()
+    (install_root / ".git" / "HEAD").write_text("ref: refs/heads/main", encoding="utf-8")
 
     updater._replace_install_dir(source_dir, install_root)
 
     assert (inst_plugins / "fofa" / "_provider.yaml").read_text(encoding="utf-8") == "version: new"
     assert (inst_plugins / "new_release_plugin" / "tool.yaml").read_text(encoding="utf-8") == "name: new"
     assert not (inst_plugins / "obsolete_plugin").exists()
-    assert (install_root / "flocks.json").read_text(encoding="utf-8") == '{"keep": true}'
+    assert (install_root / "flocks.json").read_text(encoding="utf-8") == '{"version": "new"}'
+    assert (install_root / ".git" / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main"
 
 
 @pytest.mark.asyncio
-async def test_perform_update_builds_staged_frontend_before_handover(
+async def test_perform_update_builds_current_frontend_after_handover(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1409,6 +1490,8 @@ async def test_perform_update_builds_staged_frontend_before_handover(
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
 
     events: list[str] = []
     async def fake_get_updater_config():
@@ -1443,7 +1526,7 @@ async def test_perform_update_builds_staged_frontend_before_handover(
         "_get_updater_config",
         fake_get_updater_config,
     )
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1458,7 +1541,8 @@ async def test_perform_update_builds_staged_frontend_before_handover(
     monkeypatch.setattr(
         updater,
         "_replace_install_dir",
-        lambda *_args, **_kwargs: events.append("replace"),
+        lambda *_args, **_kwargs: events.append("replace")
+        or shutil.copytree(staged_webui, install_root / "webui", dirs_exist_ok=True),
     )
     monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
     monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
@@ -1474,11 +1558,94 @@ async def test_perform_update_builds_staged_frontend_before_handover(
 
     assert progresses[-1].stage == "error"
     assert "Failed to restart service" in progresses[-1].message
-    assert events[:4] == ["npm-install", "npm-build", "replace", "uv-sync"]
+    assert events[:2] == ["replace", "uv-sync"]
     assert "marker:2026.4.1" in events
     assert "handover" in events
     assert events.index("handover") > events.index("uv-sync")
+    assert events.index("npm-install") > events.index("handover")
+    assert events.index("npm-build") > events.index("npm-install")
     assert "rollback_handover" in events
+
+
+@pytest.mark.asyncio
+async def test_perform_update_errors_when_handover_fails_before_frontend_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "flocks.zip"
+    archive_path.write_text("archive", encoding="utf-8")
+    staged_root = tmp_path / "staged"
+    staged_webui = staged_root / "webui"
+    staged_webui.mkdir(parents=True)
+    (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    (staged_webui / "dist").mkdir()
+    (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+
+    events: list[str] = []
+
+    async def fake_get_updater_config():
+        return SimpleNamespace(
+            archive_format="zip",
+            sources=["github"],
+            repo="AgentFlocks/Flocks",
+            token=None,
+            gitee_token=None,
+            backup_retain_count=3,
+            base_url=None,
+            gitee_repo=None,
+        )
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        if cmd[1] == "install":
+            events.append("npm-install")
+        elif cmd[:3] == ["/usr/bin/npm", "run", "build"]:
+            events.append("npm-build")
+        else:
+            events.append("uv-sync")
+        return 0, "", ""
+
+    async def fake_download_with_fallback(**_kwargs):
+        return archive_path
+
+    async def fake_sleep(_seconds) -> None:
+        return None
+
+    monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
+    monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
+    monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_extract_archive", lambda *_args, **_kwargs: staged_root)
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(
+        updater,
+        "_find_executable",
+        lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
+    )
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: events.append("replace")
+        or shutil.copytree(staged_webui, install_root / "webui", dirs_exist_ok=True),
+    )
+    monkeypatch.setattr(updater, "_write_version_marker", lambda version: events.append(f"marker:{version}"))
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda _root: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        updater,
+        "_prepare_upgrade_handover",
+        lambda _version: (_ for _ in ()).throw(RuntimeError("handover boom")),
+    )
+    monkeypatch.setattr(updater, "_restore_backup_if_possible", lambda *_args: events.append("restore"))
+
+    progresses = [step async for step in updater.perform_update("2026.4.1")]
+
+    assert progresses[-1].stage == "error"
+    assert progresses[-1].message == "Failed to prepare WebUI handover: handover boom"
+    assert events == ["replace", "uv-sync", "marker:2026.4.1", "restore"]
 
 
 @pytest.mark.asyncio
@@ -1547,14 +1714,6 @@ async def test_perform_update_uses_cn_mirror_profile_for_sources_and_dependency_
     assert progresses[-1].stage == "done"
     assert captured["sources"] == ["gitee", "github"]
     assert run_calls == [
-        (
-            ["/usr/bin/npm", "ci"],
-            {"npm_config_registry": "https://registry.npmmirror.com/"},
-        ),
-        (
-            ["/usr/bin/npm", "run", "build"],
-            {"npm_config_registry": "https://registry.npmmirror.com/"},
-        ),
         (
             ["/usr/bin/uv", "sync", "--default-index", "https://mirrors.aliyun.com/pypi/simple"],
             None,
@@ -1632,6 +1791,8 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     (staged_webui / "dist").mkdir()
     (staged_webui / "dist" / "index.html").write_text("<html></html>", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1664,7 +1825,7 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
         return None
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1673,22 +1834,33 @@ async def test_perform_update_prefers_bundled_npm_for_windows_frontend_rebuild(
     monkeypatch.setattr(updater, "_find_executable", lambda name: r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\uv\uv.exe" if name == "uv" else None)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
-    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: shutil.copytree(staged_webui, install_root / "webui", dirs_exist_ok=True),
+    )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
-
-    assert progresses[-1].stage == "done"
-    assert [call[0] for call in run_calls[:2]] == [
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
+            pass
+    frontend_calls = [
+        call for call in run_calls if call[0][0] == str(bundled_npm)
+    ]
+    assert [call[0] for call in frontend_calls] == [
         [str(bundled_npm), "install"],
         [str(bundled_npm), "run", "build"],
     ]
-    install_env = run_calls[0][1]
-    build_env = run_calls[1][1]
+    install_env = frontend_calls[0][1]
+    build_env = frontend_calls[1][1]
     assert install_env is not None
     assert build_env is not None
     assert install_env["npm_config_registry"] == "https://registry.npmmirror.com/"
@@ -1708,6 +1880,9 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     staged_webui = staged_root / "webui"
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    install_webui = install_root / "webui"
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1736,21 +1911,21 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         run_calls.append((list(cmd), timeout, env))
         if cmd == [str(bundled_npm), "install"]:
-            bundled_modules = staged_webui / "node_modules" / "@esbuild"
+            bundled_modules = install_webui / "node_modules" / "@esbuild"
             bundled_modules.mkdir(parents=True, exist_ok=True)
             (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
             return 0, "", ""
         if cmd == [str(bundled_npm), "run", "build"]:
-            stale_dist = staged_webui / "dist"
+            stale_dist = install_webui / "dist"
             stale_dist.mkdir(exist_ok=True)
             (stale_dist / "stale.txt").write_text("stale", encoding="utf-8")
             return 1, "", "bundled build failed"
         if cmd == [system_npm, "install"]:
-            assert not (staged_webui / "node_modules").exists()
-            assert not (staged_webui / "dist").exists()
+            assert not (install_webui / "node_modules").exists()
+            assert not (install_webui / "dist").exists()
             return 0, "", ""
         if cmd == [system_npm, "run", "build"]:
-            dist_dir = staged_webui / "dist"
+            dist_dir = install_webui / "dist"
             dist_dir.mkdir(exist_ok=True)
             (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
             return 0, "", ""
@@ -1769,7 +1944,7 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
         return None
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1778,16 +1953,24 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
     monkeypatch.setattr(updater, "_find_executable", fake_find)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
-    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
+    )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
-
-    assert progresses[-1].stage == "done"
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
+            pass
     frontend_calls = [
         call for call in run_calls if call[0][0] in {str(bundled_npm), system_npm}
     ]
@@ -1811,7 +1994,81 @@ async def test_perform_update_retries_windows_frontend_with_system_npm_after_bun
 
 
 @pytest.mark.asyncio
-async def test_perform_update_retries_windows_frontend_with_full_timeout_after_bundled_install_timeout(
+async def test_build_frontend_workspace_retries_npm_ci_before_switching_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    (webui_dir / "package-lock.json").write_text("{}", encoding="utf-8")
+
+    bundled_npm = str(tmp_path / "bundled-npm")
+    system_npm = str(tmp_path / "system-npm")
+    run_calls: list[tuple[list[str], dict[str, str] | None]] = []
+    journal_entries: list[str] = []
+
+    async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
+        run_calls.append((list(cmd), env))
+        if cmd == [bundled_npm, "install"]:
+            partial_modules = webui_dir / "node_modules" / "@esbuild"
+            partial_modules.mkdir(parents=True, exist_ok=True)
+            return 1, "", "install failed"
+        if cmd == [bundled_npm, "ci"]:
+            assert (webui_dir / "node_modules").exists()
+            return 0, "", ""
+        if cmd == [bundled_npm, "run", "build"]:
+            dist_dir = webui_dir / "dist"
+            dist_dir.mkdir(exist_ok=True)
+            (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
+            return 0, "", ""
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(
+        updater,
+        "_resolve_frontend_npm_candidates",
+        lambda *, npm_registry=None: [
+            updater._FrontendNpmCandidate(
+                npm=bundled_npm,
+                env={"npm_config_registry": npm_registry} if npm_registry else None,
+                source="bundled",
+            ),
+            updater._FrontendNpmCandidate(
+                npm=system_npm,
+                env=None,
+                source="system",
+            ),
+        ],
+    )
+    monkeypatch.setattr(updater, "_run_async", fake_run_async)
+    monkeypatch.setattr(updater, "_record_update_journal", journal_entries.append)
+
+    frontend_error = await updater._build_frontend_workspace(
+        webui_dir,
+        npm_registry="https://registry.npmmirror.com/",
+    )
+
+    assert frontend_error is None
+    assert [call[0] for call in run_calls] == [
+        [bundled_npm, "install"],
+        [bundled_npm, "ci"],
+        [bundled_npm, "run", "build"],
+    ]
+    assert all(
+        call[1] == {"npm_config_registry": "https://registry.npmmirror.com/"}
+        for call in run_calls
+    )
+    assert journal_entries == [
+        (
+            "WARN Frontend dependency install failed (npm install): install failed "
+            "Retrying npm ci with the same npm/node "
+            "after bundled npm install attempt."
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_update_retries_windows_frontend_with_full_timeout_after_bundled_install_and_ci_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -1822,6 +2079,9 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    install_webui = install_root / "webui"
 
     node_home = tmp_path / "tools" / "node"
     node_home.mkdir(parents=True)
@@ -1849,17 +2109,20 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
 
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         run_calls.append((list(cmd), timeout, env))
-        if cmd == [str(bundled_npm), "ci"]:
-            bundled_modules = staged_webui / "node_modules" / "@esbuild"
+        if cmd == [str(bundled_npm), "install"]:
+            bundled_modules = install_webui / "node_modules" / "@esbuild"
             bundled_modules.mkdir(parents=True, exist_ok=True)
             (bundled_modules / "bundled.txt").write_text("bundled", encoding="utf-8")
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
-        if cmd == [system_npm, "ci"]:
-            assert not (staged_webui / "node_modules").exists()
-            assert not (staged_webui / "dist").exists()
+        if cmd == [str(bundled_npm), "ci"]:
+            assert (install_webui / "node_modules").exists()
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
+        if cmd == [system_npm, "install"]:
+            assert not (install_webui / "node_modules").exists()
+            assert not (install_webui / "dist").exists()
             return 0, "", ""
         if cmd == [system_npm, "run", "build"]:
-            dist_dir = staged_webui / "dist"
+            dist_dir = install_webui / "dist"
             dist_dir.mkdir(exist_ok=True)
             (dist_dir / "index.html").write_text("<html></html>", encoding="utf-8")
             return 0, "", ""
@@ -1878,7 +2141,7 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
         return None
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -1887,25 +2150,34 @@ async def test_perform_update_retries_windows_frontend_with_full_timeout_after_b
     monkeypatch.setattr(updater, "_find_executable", fake_find)
     monkeypatch.setattr(updater, "_build_uv_sync_env", lambda: None)
     monkeypatch.setattr(updater, "_validate_windows_restart_runtime", fake_validate_windows_restart_runtime)
-    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
+    )
     monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
     monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: [r"C:\tool\python.exe", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *_args, **_kwargs: SimpleNamespace(pid=4321))
+    monkeypatch.setattr(updater.os, "_exit", lambda code: (_ for _ in ()).throw(SystemExit(code)))
     monkeypatch.setenv("FLOCKS_NODE_HOME", str(node_home))
     monkeypatch.delenv("FLOCKS_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
-    progresses = [step async for step in updater.perform_update("2026.4.1", restart=False, locale="zh-CN")]
-
-    assert progresses[-1].stage == "done"
+    with pytest.raises(SystemExit, match="0"):
+        async for _step in updater.perform_update("2026.4.1", locale="zh-CN"):
+            pass
     frontend_calls = [
         call for call in run_calls if call[0][0] in {str(bundled_npm), system_npm}
     ]
     assert [call[0] for call in frontend_calls] == [
+        [str(bundled_npm), "install"],
         [str(bundled_npm), "ci"],
-        [system_npm, "ci"],
+        [system_npm, "install"],
         [system_npm, "run", "build"],
     ]
-    assert [call[1] for call in frontend_calls] == [300, 300, 300]
+    assert [call[1] for call in frontend_calls] == [300, 300, 300, 300]
 
 
 @pytest.mark.asyncio
@@ -2285,7 +2557,7 @@ async def test_perform_update_rolls_back_when_replace_fails_on_windows_locked_fi
 
     assert progresses[-1].stage == "error"
     assert "WinError 5" in progresses[-1].message
-    assert events == ["npm-install", "npm-build", "restore"]
+    assert events == ["restore"]
     assert "handover" not in events
 
 
@@ -2363,8 +2635,6 @@ async def test_perform_update_retries_after_windows_file_lock_and_rolls_back_han
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "No module named uvicorn"
     assert events == [
-        "npm-install",
-        "npm-build",
         "replace-1",
         "handover",
         "replace-2",
@@ -2386,6 +2656,9 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
     (staged_webui / "package-lock.json").write_text("{}", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    install_webui = install_root / "webui"
 
     events: list[str] = []
 
@@ -2406,10 +2679,12 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
 
     async def fake_run_async(cmd, cwd=None, timeout=None, env=None):
         events.append(" ".join(cmd))
+        if "sync" in cmd:
+            return 0, "", ""
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout)
 
     monkeypatch.setattr(updater, "_get_updater_config", fake_get_updater_config)
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -2421,17 +2696,32 @@ async def test_perform_update_reports_frontend_dependency_install_timeout(
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
-    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: events.append("replace"))
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: events.append("replace")
+        or shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
+    )
+    monkeypatch.setattr(updater, "_write_version_marker", lambda _v: None)
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
 
     progresses = [step async for step in updater.perform_update("2026.4.1")]
 
     assert progresses[-1].stage == "error"
     assert progresses[-1].message == "Frontend dependency install timed out after 300s while running npm ci."
-    assert events == ["/usr/bin/npm ci"]
+    assert events == [
+        "replace",
+        "/usr/bin/uv sync",
+        "handover",
+        "/usr/bin/npm install",
+        "/usr/bin/npm ci",
+        "rollback",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_perform_update_does_not_handover_when_staged_frontend_build_fails(
+async def test_perform_update_rolls_back_handover_when_current_frontend_build_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -2441,6 +2731,9 @@ async def test_perform_update_does_not_handover_when_staged_frontend_build_fails
     staged_webui = staged_root / "webui"
     staged_webui.mkdir(parents=True)
     (staged_webui / "package.json").write_text("{}", encoding="utf-8")
+    install_root = tmp_path / "install-root"
+    install_root.mkdir()
+    install_webui = install_root / "webui"
 
     events: list[str] = []
     async def fake_get_updater_config():
@@ -2463,7 +2756,7 @@ async def test_perform_update_does_not_handover_when_staged_frontend_build_fails
         "_get_updater_config",
         fake_get_updater_config,
     )
-    monkeypatch.setattr(updater, "_get_repo_root", lambda: tmp_path / "install-root")
+    monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "get_current_version", lambda: "2026.3.31")
     monkeypatch.setattr(updater, "_download_with_fallback", fake_download_with_fallback)
     monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
@@ -2476,7 +2769,7 @@ async def test_perform_update_does_not_handover_when_staged_frontend_build_fails
         if cmd[1] == "install":
             events.append("npm-install")
             return 0, "", ""
-        events.append("unexpected")
+        events.append("uv-sync")
         return 0, "", ""
 
     monkeypatch.setattr(updater, "_run_async", fake_run_async)
@@ -2486,12 +2779,20 @@ async def test_perform_update_does_not_handover_when_staged_frontend_build_fails
         lambda name: "/usr/bin/npm" if name in {"npm", "npm.cmd"} else "/usr/bin/uv",
     )
     monkeypatch.setattr(updater, "_prepare_upgrade_handover", lambda _version: events.append("handover") or {})
-    monkeypatch.setattr(updater, "_replace_install_dir", lambda *_args, **_kwargs: events.append("replace"))
+    monkeypatch.setattr(
+        updater,
+        "_replace_install_dir",
+        lambda *_args, **_kwargs: events.append("replace")
+        or shutil.copytree(staged_webui, install_webui, dirs_exist_ok=True),
+    )
+    monkeypatch.setattr(updater, "_build_restart_argv", lambda install_root=None: ["/usr/bin/python3", "-m", "flocks.cli.main", "start"])
+    monkeypatch.setattr(updater, "_rollback_failed_update", lambda *_args: events.append("rollback"))
 
     progresses = [step async for step in updater.perform_update("2026.4.1")]
 
     assert progresses[-1].stage == "error"
-    assert events == ["npm-install", "npm-build"]
+    assert progresses[-1].message == "Frontend build failed: boom"
+    assert events == ["replace", "uv-sync", "handover", "npm-install", "npm-build", "rollback"]
 
 
 @pytest.mark.asyncio

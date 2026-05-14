@@ -272,7 +272,7 @@ def build_fts_query(raw: str) -> Optional[str]:
         return None
     
     # Quote and combine with AND
-    quoted = [f'"{t.replace("\"", "")}"' for t in tokens]
+    quoted = ['"' + t.replace('"', "") + '"' for t in tokens]
     return ' AND '.join(quoted)
 
 
