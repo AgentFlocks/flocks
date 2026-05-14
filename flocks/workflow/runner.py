@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +35,23 @@ _logger = logging.getLogger("flocks.workflow.runner")
 
 _SANDBOX_MODE_ON_VALUES = {"on", "all", "non-main"}
 
+# ---------------------------------------------------------------------------
+# Config cache – avoids spawning a new event-loop (and its self-pipe FDs) on
+# every workflow execution when run_workflow() is called from a thread pool
+# worker (e.g. via asyncio.to_thread()).  Each asyncio.run() call inside a
+# thread creates a _UnixSelectorEventLoop whose socketpair FDs are normally
+# closed, but under high concurrency (8+ syslog workers) the repeated
+# create/destroy cycle can exhaust the process fd limit before GC runs,
+# triggering [Errno 24] Too many open files and the cascade of
+# AttributeError: '_UnixSelectorEventLoop' has no attribute '_ssock'.
+# A 30-second TTL is a reasonable balance: config changes are uncommon,
+# and the short window means a reload never lags by more than 30 s.
+# ---------------------------------------------------------------------------
+_config_cache: Dict[str, Any] = {}
+_config_cache_ts: float = 0.0
+_config_cache_ttl: float = 30.0
+_config_cache_lock = threading.Lock()
+
 
 def _run_coro_sync(coro):
     """Run async coroutine from sync context safely."""
@@ -48,21 +67,41 @@ def _run_coro_sync(coro):
 
 
 def _load_config_data() -> Dict[str, Any]:
-    """Load merged config data, returning empty dict on failures."""
+    """Load merged config data with a short-lived TTL cache.
+
+    Calling ``asyncio.run()`` (via ``_run_coro_sync``) inside a thread-pool
+    worker creates a temporary event loop each time.  Under high-frequency
+    syslog loads the repeated creation / teardown of those loops can exhaust
+    the process file-descriptor limit.  The cache amortises that cost: the
+    coroutine is only executed once per ``_config_cache_ttl`` seconds.
+    """
+    global _config_cache, _config_cache_ts
+
+    now = time.monotonic()
+    with _config_cache_lock:
+        if now - _config_cache_ts < _config_cache_ttl and _config_cache:
+            return dict(_config_cache)
+
     try:
         cfg = _run_coro_sync(Config.get())
     except Exception as exc:
         _logger.debug("workflow runtime: failed to load config: %s", exc)
-        return {}
+        with _config_cache_lock:
+            return dict(_config_cache)
 
+    result: Dict[str, Any] = {}
     if hasattr(cfg, "model_dump"):
         try:
             dumped = cfg.model_dump(by_alias=True, exclude_none=True, mode="json")
             if isinstance(dumped, dict):
-                return dumped
+                result = dumped
         except Exception as exc:
             _logger.debug("workflow runtime: failed to dump config: %s", exc)
-    return {}
+
+    with _config_cache_lock:
+        _config_cache = result
+        _config_cache_ts = time.monotonic()
+    return result
 
 
 def _resolve_workflow_runtime_preference(tool_context: Optional[Any]) -> Literal["sandbox", "host"]:

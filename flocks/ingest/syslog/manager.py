@@ -23,8 +23,9 @@ log = Log.create(service="syslog.manager")
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
 _MAX_CONCURRENT_EXECUTIONS = 8
-# Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning
-_MAX_QUEUE_SIZE = 200
+# Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning.
+# Increased from 200 to 1000 to absorb larger inbound bursts before the worker pool catches up.
+_MAX_QUEUE_SIZE = 1000
 # Maximum time we wait for the listener to either bind successfully or fail
 # during ``restart_workflow``.  Any value <0.5s makes the call too aggressive
 # under busy event-loops; anything >5s would make the HTTP save endpoint feel
@@ -250,6 +251,11 @@ class SyslogManager:
         protocol = str(config.get("protocol") or "udp").lower()
         format_hint = str(config.get("format") or "auto")
 
+        # Throttle drop-warnings so a sustained syslog flood does not turn into
+        # a log flood of its own.  We aggregate the dropped count and emit at
+        # most one warning per second per workflow.
+        drop_state: Dict[str, float] = {"count": 0, "last_log": 0.0}
+
         # NOTE: keep this callback synchronous so the UDP protocol layer can
         # invoke it inline from datagram_received() without creating an
         # asyncio task per packet. That preserves the queue-based backpressure.
@@ -257,10 +263,17 @@ class SyslogManager:
             try:
                 queue.put_nowait(parsed)
             except asyncio.QueueFull:
-                log.warning("syslog.queue_full_dropped", {
-                    "workflow_id": workflow_id,
-                    "queue_size": queue.qsize(),
-                })
+                drop_state["count"] += 1
+                now = time.monotonic()
+                if now - drop_state["last_log"] >= 1.0:
+                    log.warning("syslog.queue_full_dropped", {
+                        "workflow_id": workflow_id,
+                        "queue_size": queue.qsize(),
+                        "queue_capacity": queue.maxsize,
+                        "dropped_in_window": int(drop_state["count"]),
+                    })
+                    drop_state["count"] = 0
+                    drop_state["last_log"] = now
 
         async def _bind_and_serve() -> None:
             """Bind the socket synchronously then mark the listener ready.
