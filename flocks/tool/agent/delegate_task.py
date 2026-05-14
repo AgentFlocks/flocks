@@ -115,7 +115,7 @@ async def _find_completed_delegate(
             for p in parts:
                 if not isinstance(p, ToolPart):
                     continue
-                if p.tool not in ("delegate_task", "call_omo_agent"):
+                if p.tool != "delegate_task":
                     continue
                 state = p.state
                 if getattr(state, "status", None) != "completed":

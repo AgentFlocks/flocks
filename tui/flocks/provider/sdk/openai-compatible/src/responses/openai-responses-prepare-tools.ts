@@ -4,7 +4,6 @@ import {
   UnsupportedFunctionalityError,
 } from "@ai-sdk/provider"
 import { codeInterpreterArgsSchema } from "./tool/code-interpreter"
-import { fileSearchArgsSchema } from "./tool/file-search"
 import { webSearchArgsSchema } from "./tool/web-search"
 import { webSearchPreviewArgsSchema } from "./tool/web-search-preview"
 import { imageGenerationArgsSchema } from "./tool/image-generation"
@@ -24,7 +23,6 @@ export function prepareResponsesTools({
     | "auto"
     | "none"
     | "required"
-    | { type: "file_search" }
     | { type: "web_search_preview" }
     | { type: "web_search" }
     | { type: "function"; name: string }
@@ -56,24 +54,6 @@ export function prepareResponsesTools({
         break
       case "provider-defined": {
         switch (tool.id) {
-          case "openai.file_search": {
-            const args = fileSearchArgsSchema.parse(tool.args)
-
-            openaiTools.push({
-              type: "file_search",
-              vector_store_ids: args.vectorStoreIds,
-              max_num_results: args.maxNumResults,
-              ranking_options: args.ranking
-                ? {
-                    ranker: args.ranking.ranker,
-                    score_threshold: args.ranking.scoreThreshold,
-                  }
-                : undefined,
-              filters: args.filters,
-            })
-
-            break
-          }
           case "openai.local_shell": {
             openaiTools.push({
               type: "local_shell",
@@ -159,7 +139,6 @@ export function prepareResponsesTools({
         tools: openaiTools,
         toolChoice:
           toolChoice.toolName === "code_interpreter" ||
-          toolChoice.toolName === "file_search" ||
           toolChoice.toolName === "image_generation" ||
           toolChoice.toolName === "web_search_preview" ||
           toolChoice.toolName === "web_search"

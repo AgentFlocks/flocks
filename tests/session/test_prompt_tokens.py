@@ -244,6 +244,8 @@ class TestSystemPromptProvider:
         assert isinstance(result, list)
         assert len(result) == 1
         assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "use the ls tool" not in result[0]
+        assert "use the glob tool to inspect the current directory" in result[0]
 
     def test_none_model_returns_list(self):
         # provider() may raise on None; just verify it returns a list or handle gracefully

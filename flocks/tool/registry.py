@@ -1202,13 +1202,13 @@ class ToolRegistry:
 
         _tool_groups = [
             # file/ — filesystem operations
-            ("flocks.tool.file", ["read", "write", "edit", "multiedit", "apply_patch", "glob", "list_tool", "file_search", "doc_parser"]),
+            ("flocks.tool.file", ["read", "write", "edit", "multiedit", "apply_patch", "glob", "doc_parser"]),
             # code/ — code analysis + terminal
-            ("flocks.tool.code", ["bash", "grep", "codesearch", "lsp_tool"]),
+            ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
             # web/ — internet access
             ("flocks.tool.web", ["webfetch", "websearch"]),
             # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task", "call_omo_agent"]),
+            ("flocks.tool.agent", ["delegate_task"]),
             # task/ — task/workflow
             ("flocks.tool.task", ["task", "task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
@@ -1242,24 +1242,6 @@ class ToolRegistry:
             cls._tools[name].info.native = True
 
         # Sample tools for testing (only register if not already registered)
-        if "echo" not in cls._tools:
-            @cls.register_function(
-                name="echo",
-                description="Echo back the input message",
-                category=ToolCategory.SYSTEM,
-                native=True,
-                parameters=[
-                    ToolParameter(
-                        name="message",
-                        type=ParameterType.STRING,
-                        description="Message to echo",
-                        required=True,
-                    )
-                ]
-            )
-            async def echo(ctx: ToolContext, message: str) -> ToolResult:
-                return ToolResult(success=True, output=message)
-
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",

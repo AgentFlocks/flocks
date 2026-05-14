@@ -27,7 +27,6 @@ ALWAYS_LOAD_TOOL_NAMES: Set[str] = {
 TOOL_TAGS: Dict[str, List[str]] = {
     "read": ["code-reading", "file-inspection"],
     "read_file": ["code-reading", "file-inspection"],
-    "list": ["file-navigation", "workspace"],
     "glob": ["file-search", "workspace"],
     "grep": ["code-search", "text-search"],
     "edit": ["code-editing", "refactor"],
@@ -38,7 +37,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "webfetch": ["web", "http-fetch"],
     "websearch": ["web", "research"],
     "delegate_task": ["agent", "delegation"],
-    "call_omo_agent": ["agent", "delegation"],
     "task": ["planning", "task-management"],
     "task_create": ["planning", "task-management"],
     "task_list": ["planning", "task-management"],

@@ -1,7 +1,7 @@
 /**
  * DelegateTaskCard — 子 Agent 委派卡片
  *
- * 当 ChatToolPart 检测到 delegate_task / call_omo_agent 工具时，
+ * 当 ChatToolPart 检测到 delegate_task 工具时，
  * 替代普通工具卡片，展示子 Agent 名称、任务描述、执行状态和结果摘要。
  */
 
@@ -15,7 +15,7 @@ import DelegateDetailSheet from './DelegateDetailSheet';
 // Helpers
 // ---------------------------------------------------------------------------
 
-const DELEGATE_TOOLS = new Set(['delegate_task', 'call_omo_agent', 'task']);
+const DELEGATE_TOOLS = new Set(['delegate_task', 'task']);
 
 export function isDelegateTool(toolName: string): boolean {
   return DELEGATE_TOOLS.has(toolName);

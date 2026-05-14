@@ -18,7 +18,6 @@ tags:
   - asset-survey
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
@@ -26,7 +25,6 @@ tools:
   - bash
   - todoread
   - todowrite
-  - file_search
   - websearch
   - webfetch
   - threatbook_mcp_hrti_query

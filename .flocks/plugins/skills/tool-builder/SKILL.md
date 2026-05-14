@@ -647,7 +647,7 @@ Tool created: {name}
 
 1. Output path is under `~/.flocks/plugins/tools/{type}/`
 2. **If the tool calls an external HTTP API → MUST be under `api/` (Mode A), NEVER `python/` (Mode B)**
-3. Tool name is `snake_case` and unique (no collision with builtins: read, write, edit, bash, grep, glob, todo, question, plan, task, websearch, webfetch, codesearch, skill, etc.)
+3. Tool name is `snake_case` and unique (no collision with builtins: read, write, edit, bash, grep, glob, todo, question, plan, task, websearch, webfetch, skill, etc.)
 4. Description follows "outcomes over operations" style
 5. Category is one of: `file`, `terminal`, `browser`, `code`, `search`, `system`, `custom`
 6. Parameters have clear descriptions

@@ -61,14 +61,12 @@ TOOL_STYLES: Dict[str, tuple] = {
     "write": ("Write", "green bold"),
     "glob": ("Glob", "cyan bold"),
     "grep": ("Grep", "cyan bold"),
-    "list": ("List", "cyan bold"),
     "read": ("Read", "magenta bold"),
     "websearch": ("Search", "dim bold"),
     "delegate_task": ("Delegate", "bright_magenta bold"),
-    "call_omo_agent": ("Delegate", "bright_magenta bold"),
 }
 
-DELEGATE_TOOLS = {"delegate_task", "call_omo_agent"}
+DELEGATE_TOOLS = {"delegate_task"}
 
 
 class CLISessionRunner:
@@ -700,7 +698,7 @@ class CLISessionRunner:
                 self.console.print(f"  [red]✗[/red] Failed")
     
     def _render_delegate_result(self, result: ToolResult) -> None:
-        """Render delegate_task / call_omo_agent result with a compact panel."""
+        """Render delegate_task result with a compact panel."""
         import re
         if result.success:
             output_text = str(result.output or "")

@@ -3,10 +3,10 @@ Test Tool System - Comprehensive test suite for all 25 tools
 
 Tests cover:
 - Tool registration and discovery
-- P0 Core tools (7): read, write, edit, bash, grep, glob, list
+- P0 Core tools (6): read, write, edit, bash, grep, glob
 - P1 tools (6): webfetch, todoread, todowrite, question, plan_enter, plan_exit
 - P2 tools (7): multiedit, task, batch, lsp, skill, background_output, background_cancel
-- P3 tools (3): websearch, codesearch, apply_patch
+- P3 tools (2): websearch, apply_patch
 - Permission system integration
 - Error handling
 """
@@ -122,21 +122,20 @@ class TestToolRegistry:
         """Test that registry initializes with built-in tools"""
         # Registry should be initialized when flocks.tool is imported
         tools = ToolRegistry.all_tool_ids()
-        # 25 tools total: 7 P0 + 6 P1 + 9 P2 + 3 P3
-        assert len(tools) >= 25, f"Expected at least 25 tools, got {len(tools)}: {tools}"
+        assert len(tools) >= 23, f"Expected at least 23 tools, got {len(tools)}: {tools}"
     
     def test_expected_tools_registered(self):
         """Test all expected tools are registered"""
         expected_tools = [
-            # P0 Core tools (7)
-            "read", "write", "edit", "bash", "grep", "glob", "list",
+            # P0 Core tools (6)
+            "read", "write", "edit", "bash", "grep", "glob",
             # P1 tools (6)
             "webfetch", "todoread", "todowrite", "question", "plan_enter", "plan_exit",
             # P2 tools (7)
             "multiedit", "task", "batch", "lsp", "skill",
             "background_output", "background_cancel",
-            # P3 tools (3)
-            "websearch", "codesearch", "apply_patch",
+            # P3 tools (2)
+            "websearch", "apply_patch",
         ]
         
         registered_tools = ToolRegistry.all_tool_ids()
@@ -377,7 +376,7 @@ class TestBashTool:
         assert "Search file names or directories -> `glob`" in description
         assert "Search file contents -> `grep`" in description
         assert "Navigate symbols or code structure -> `lsp`" in description
-        assert "`glob`/`file_search`" in description
+        assert "use `glob` instead of `find` or `ls`" in description
 
     def test_get_description_windows_mentions_powershell_guidance(self, monkeypatch):
         monkeypatch.setattr(bash_module.sys, "platform", "win32")
@@ -532,50 +531,6 @@ class TestGlobTool:
         
         assert result.success
         assert "No files found" in result.output
-
-
-class TestListTool:
-    """Test the list tool"""
-    
-    @pytest.mark.asyncio
-    async def test_list_directory(self, tool_context, temp_dir, test_files):
-        """Test listing directory contents"""
-        result = await ToolRegistry.execute(
-            "list",
-            ctx=tool_context,
-            path=temp_dir
-        )
-        
-        assert result.success
-        # Should list files
-        assert "test.txt" in result.output or "test.py" in result.output
-    
-    @pytest.mark.asyncio
-    async def test_list_nonexistent_directory(self, tool_context, temp_dir):
-        """Test listing nonexistent directory returns empty results"""
-        result = await ToolRegistry.execute(
-            "list",
-            ctx=tool_context,
-            path=os.path.join(temp_dir, "nonexistent")
-        )
-        
-        # The list tool may return success with empty results for nonexistent dirs
-        # or return failure - either is acceptable behavior
-        if result.success:
-            assert result.metadata.get("count", 0) == 0
-    
-    @pytest.mark.asyncio
-    async def test_list_with_subdirectories(self, tool_context, temp_dir, test_files):
-        """Test listing directory with subdirectories"""
-        result = await ToolRegistry.execute(
-            "list",
-            ctx=tool_context,
-            path=temp_dir
-        )
-        
-        assert result.success
-        # Should show the subdir
-        assert "subdir" in result.output or result.metadata.get("count", 0) > 0
 
 
 # =============================================================================
@@ -769,16 +724,6 @@ class TestWebSearchTool:
         assert tool is not None
 
 
-class TestCodeSearchTool:
-    """Test the codesearch tool"""
-    
-    @pytest.mark.asyncio
-    async def test_codesearch_exists(self):
-        """Test that codesearch tool is registered"""
-        tool = ToolRegistry.get("codesearch")
-        assert tool is not None
-
-
 class TestApplyPatchTool:
     """Test the apply_patch tool"""
     
@@ -802,26 +747,10 @@ class TestSampleTools:
         # Call init to register sample tools
         ToolRegistry.init()
         
-        # After init(), echo and get_time should be available
-        echo_tool = ToolRegistry.get("echo")
+        # After init(), get_time should be available
         time_tool = ToolRegistry.get("get_time")
         
-        assert echo_tool is not None, "echo tool should be registered after init()"
         assert time_tool is not None, "get_time tool should be registered after init()"
-    
-    @pytest.mark.asyncio
-    async def test_echo_tool_after_init(self, tool_context):
-        """Test the echo tool after init"""
-        ToolRegistry.init()
-        
-        result = await ToolRegistry.execute(
-            "echo",
-            ctx=tool_context,
-            message="Test message"
-        )
-        
-        assert result.success
-        assert result.output == "Test message"
     
     @pytest.mark.asyncio
     async def test_get_time_tool_after_init(self, tool_context):

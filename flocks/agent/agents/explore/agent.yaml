@@ -13,11 +13,9 @@ delegatable: true
 tools:
   - grep
   - glob
-  - list
   - bash
   - webfetch
   - websearch
-  - codesearch
   - read
 prompt_metadata:
   category: exploration

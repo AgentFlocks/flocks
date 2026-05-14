@@ -273,5 +273,6 @@ async def skill_tool(
     if tool:
         skills = await Skill.all()
         tool.info.description = build_description(skills)
+
     
     return await skill_tool_impl(ctx, name)

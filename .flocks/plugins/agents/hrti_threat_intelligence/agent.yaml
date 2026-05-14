@@ -18,7 +18,6 @@ tags:
   - threat-intelligence
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
@@ -30,7 +29,6 @@ tools:
   - threatbook_mcp_hrti_list_query
   - threatbook_mcp_hrti_query
   - threatbook_mcp_web_search
-  - file_search
   - websearch
   - webfetch
   - virustotal_ip_query

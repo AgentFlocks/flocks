@@ -37,7 +37,6 @@ class PermissionConfig(BaseModel):
     edit: Optional[PermissionRule] = None
     glob: Optional[PermissionRule] = None
     grep: Optional[PermissionRule] = None
-    list: Optional[PermissionRule] = None
     bash: Optional[PermissionRule] = None
     task: Optional[PermissionRule] = None
     external_directory: Optional[PermissionRule] = None
@@ -46,11 +45,9 @@ class PermissionConfig(BaseModel):
     question: Optional[PermissionAction] = None
     webfetch: Optional[PermissionAction] = None
     websearch: Optional[PermissionAction] = None
-    codesearch: Optional[PermissionAction] = None
     lsp: Optional[PermissionRule] = None
     doom_loop: Optional[PermissionAction] = None
     delegate_task: Optional[PermissionRule] = None
-    call_omo_agent: Optional[PermissionRule] = None
     background_output: Optional[PermissionRule] = None
     background_cancel: Optional[PermissionRule] = None
 

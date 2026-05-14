@@ -1342,7 +1342,6 @@ export type PermissionConfig =
       edit?: PermissionRuleConfig
       glob?: PermissionRuleConfig
       grep?: PermissionRuleConfig
-      list?: PermissionRuleConfig
       bash?: PermissionRuleConfig
       task?: PermissionRuleConfig
       external_directory?: PermissionRuleConfig
@@ -1351,7 +1350,6 @@ export type PermissionConfig =
       question?: PermissionActionConfig
       webfetch?: PermissionActionConfig
       websearch?: PermissionActionConfig
-      codesearch?: PermissionActionConfig
       lsp?: PermissionRuleConfig
       doom_loop?: PermissionActionConfig
       [key: string]: PermissionRuleConfig | Array<string> | PermissionActionConfig | undefined

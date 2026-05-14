@@ -9,10 +9,8 @@ color: "#FF4500"
 delegatable: true
 tools:
   - read
-  - list
   - glob
   - grep
-  - codesearch
   - bash
   - edit
   - multiedit

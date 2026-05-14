@@ -10,6 +10,12 @@ import { SplitBorder } from "../../component/border"
 import { useTextareaKeybindings } from "../../component/textarea-keybindings"
 import { useDialog } from "../../ui/dialog"
 import { Log } from "@/util/log"
+import {
+  buildSubmitAnswers,
+  getQuestionEnterAction,
+  setQuestionAnswer,
+  toggleQuestionAnswer,
+} from "./question-state"
 
 const log = Log.create({ service: "tui.question" })
 
@@ -21,6 +27,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
 
   const requestID = createMemo(() => props.request?.id)
   const questions = createMemo(() => props.request?.questions ?? [])
+  const questionCount = createMemo(() => questions().length)
   const single = createMemo(() => questions().length === 1 && questions()[0]?.multiple !== true)
   const tabs = createMemo(() => (single() ? 1 : questions().length + 1)) // questions + confirm tab (no confirm for single select)
   const [store, setStore] = createStore({
@@ -52,7 +59,7 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
 
   async function submit(trigger: string, providedAnswers?: QuestionAnswer[]) {
     const id = requestID()
-    const answers = providedAnswers ?? questions().map((_, i) => store.answers[i] ?? [])
+    const answers = buildSubmitAnswers(questionCount(), providedAnswers ?? store.answers)
     if (!id) {
       log.warn("question.submit.skipped.missing_request", {
         trigger,
@@ -125,27 +132,23 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
   }
 
   function pick(answer: string, custom: boolean = false) {
-    const answers = [...store.answers]
-    answers[store.tab] = [answer]
+    const answers = setQuestionAnswer(questionCount(), store.answers, store.tab, [answer])
     setStore("answers", answers)
     if (custom) {
       const inputs = [...store.custom]
       inputs[store.tab] = answer
       setStore("custom", inputs)
     }
-    if (single()) return
+    if (single()) {
+      void submit("single_pick", answers)
+      return
+    }
     setStore("tab", store.tab + 1)
     setStore("selected", 0)
   }
 
   function toggle(answer: string) {
-    const existing = store.answers[store.tab] ?? []
-    const next = [...existing]
-    const index = next.indexOf(answer)
-    if (index === -1) next.push(answer)
-    if (index !== -1) next.splice(index, 1)
-    const answers = [...store.answers]
-    answers[store.tab] = next
+    const answers = toggleQuestionAnswer(questionCount(), store.answers, store.tab, answer)
     setStore("answers", answers)
   }
 
@@ -306,6 +309,10 @@ export function QuestionPrompt(props: { request: QuestionRequest }) {
 
       if (isEnterKey(evt.name)) {
         evt.preventDefault()
+        if (getQuestionEnterAction(single()) === "select") {
+          selectOption()
+          return
+        }
         void submit("enter_on_question")
       }
 

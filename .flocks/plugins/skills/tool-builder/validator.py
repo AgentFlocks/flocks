@@ -65,11 +65,11 @@ VALID_PARAMETER_TYPES = {
 
 # Tool name collisions with built-ins or reserved words.
 RESERVED_TOOL_NAMES = {
-    "read", "write", "edit", "multiedit", "apply_patch", "glob", "list_tool",
-    "file_search", "doc_parser",
-    "bash", "grep", "codesearch", "lsp_tool",
+    "read", "write", "edit", "multiedit", "apply_patch", "glob",
+    "doc_parser",
+    "bash", "grep", "lsp_tool",
     "webfetch", "websearch",
-    "delegate_task", "call_omo_agent",
+    "delegate_task",
     "task", "task_center", "todo", "plan",
     "run_workflow", "run_workflow_node",
     "echo", "get_time",

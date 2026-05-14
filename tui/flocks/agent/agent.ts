@@ -84,7 +84,6 @@ export namespace Agent {
           defaults,
           PermissionNext.fromConfig({
             question: "allow",
-            call_omo_agent: "deny",
           }),
           user,
         ),
@@ -140,11 +139,9 @@ export namespace Agent {
             "*": "deny",
             grep: "allow",
             glob: "allow",
-            list: "allow",
             bash: "allow",
             webfetch: "allow",
             websearch: "allow",
-            codesearch: "allow",
             read: "allow",
             external_directory: {
               [Truncate.DIR]: "allow",

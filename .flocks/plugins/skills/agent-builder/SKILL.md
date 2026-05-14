@@ -140,7 +140,6 @@ tools:
   - read
   - grep
   - glob
-  - codesearch
 ```
 
 **Read-only + network** (e.g. documentation lookup, threat intelligence):
@@ -152,7 +151,6 @@ tools:
   - bash
   - websearch
   - webfetch
-  - codesearch
 ```
 
 **Full execution** (e.g. code generation, refactoring):

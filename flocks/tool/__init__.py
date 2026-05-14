@@ -10,7 +10,6 @@ Core Tools (P0):
 - bash: Execute shell commands
 - grep: Search file contents using regex
 - glob: Find files by pattern
-- list: List directory contents
 
 P1 Tools:
 - webfetch: Fetch web content
@@ -27,7 +26,6 @@ P2 Tools:
 
 P3 Tools:
 - websearch: Web search
-- codesearch: Code search
 - apply_patch: Patch application
 
 Usage:

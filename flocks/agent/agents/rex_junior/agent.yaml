@@ -8,7 +8,6 @@ delegatable: false
 # Explicit tool allowlist for the focused executor.
 tools:
   - read
-  - list
   - glob
   - grep
   - edit

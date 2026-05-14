@@ -521,7 +521,6 @@ export namespace Config {
           edit: PermissionRule.optional(),
           glob: PermissionRule.optional(),
           grep: PermissionRule.optional(),
-          list: PermissionRule.optional(),
           bash: PermissionRule.optional(),
           task: PermissionRule.optional(),
           external_directory: PermissionRule.optional(),
@@ -530,7 +529,6 @@ export namespace Config {
           question: PermissionAction.optional(),
           webfetch: PermissionAction.optional(),
           websearch: PermissionAction.optional(),
-          codesearch: PermissionAction.optional(),
           lsp: PermissionRule.optional(),
           doom_loop: PermissionAction.optional(),
         })

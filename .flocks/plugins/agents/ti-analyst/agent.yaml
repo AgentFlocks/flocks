@@ -19,7 +19,6 @@ tags:
   - ioc-analysis
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
@@ -42,6 +41,5 @@ tools:
   - virustotal_domain_query
   - virustotal_url_query
   - virustotal_file_query
-  - file_search
   - websearch
   - webfetch

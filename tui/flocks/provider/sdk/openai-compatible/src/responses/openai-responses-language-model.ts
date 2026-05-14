@@ -22,7 +22,6 @@ import { z } from "zod/v4"
 import type { OpenAIConfig } from "./openai-config"
 import { openaiFailedResponseHandler } from "./openai-error"
 import { codeInterpreterInputSchema, codeInterpreterOutputSchema } from "./tool/code-interpreter"
-import { fileSearchOutputSchema } from "./tool/file-search"
 import { imageGenerationOutputSchema } from "./tool/image-generation"
 import { convertToOpenAIResponsesInput } from "./convert-to-openai-responses-input"
 import { mapOpenAIResponseFinishReason } from "./map-openai-responses-finish-reason"
@@ -51,23 +50,6 @@ const webSearchCallItem = z.object({
         pattern: z.string(),
       }),
     ])
-    .nullish(),
-})
-
-const fileSearchCallItem = z.object({
-  type: z.literal("file_search_call"),
-  id: z.string(),
-  queries: z.array(z.string()),
-  results: z
-    .array(
-      z.object({
-        attributes: z.record(z.string(), z.unknown()),
-        file_id: z.string(),
-        filename: z.string(),
-        score: z.number(),
-        text: z.string(),
-      }),
-    )
     .nullish(),
 })
 
@@ -458,7 +440,6 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV2 {
                 ),
               }),
               webSearchCallItem,
-              fileSearchCallItem,
               codeInterpreterCallItem,
               imageGenerationCallItem,
               localShellCallItem,
@@ -676,34 +657,6 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV2 {
           break
         }
 
-        case "file_search_call": {
-          content.push({
-            type: "tool-call",
-            toolCallId: part.id,
-            toolName: "file_search",
-            input: "{}",
-            providerExecuted: true,
-          })
-
-          content.push({
-            type: "tool-result",
-            toolCallId: part.id,
-            toolName: "file_search",
-            result: {
-              queries: part.queries,
-              results:
-                part.results?.map((result) => ({
-                  attributes: result.attributes,
-                  fileId: result.file_id,
-                  filename: result.filename,
-                  score: result.score,
-                  text: result.text,
-                })) ?? null,
-            } satisfies z.infer<typeof fileSearchOutputSchema>,
-            providerExecuted: true,
-          })
-          break
-        }
 
         case "code_interpreter_call": {
           content.push({
@@ -910,14 +863,6 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV2 {
                   id: value.item.id,
                   delta: `{"containerId":"${value.item.container_id}","code":"`,
                 })
-              } else if (value.item.type === "file_search_call") {
-                controller.enqueue({
-                  type: "tool-call",
-                  toolCallId: value.item.id,
-                  toolName: "file_search",
-                  input: "{}",
-                  providerExecuted: true,
-                })
               } else if (value.item.type === "image_generation_call") {
                 controller.enqueue({
                   type: "tool-call",
@@ -1025,26 +970,6 @@ export class OpenAIResponsesLanguageModel implements LanguageModelV2 {
                     type: "computer_use_tool_result",
                     status: value.item.status || "completed",
                   },
-                  providerExecuted: true,
-                })
-              } else if (value.item.type === "file_search_call") {
-                ongoingToolCalls[value.output_index] = undefined
-
-                controller.enqueue({
-                  type: "tool-result",
-                  toolCallId: value.item.id,
-                  toolName: "file_search",
-                  result: {
-                    queries: value.item.queries,
-                    results:
-                      value.item.results?.map((result) => ({
-                        attributes: result.attributes,
-                        fileId: result.file_id,
-                        filename: result.filename,
-                        score: result.score,
-                        text: result.text,
-                      })) ?? null,
-                  } satisfies z.infer<typeof fileSearchOutputSchema>,
                   providerExecuted: true,
                 })
               } else if (value.item.type === "code_interpreter_call") {
@@ -1394,10 +1319,6 @@ const responseOutputItemAddedSchema = z.object({
       status: z.string(),
     }),
     z.object({
-      type: z.literal("file_search_call"),
-      id: z.string(),
-    }),
-    z.object({
       type: z.literal("image_generation_call"),
       id: z.string(),
     }),
@@ -1443,7 +1364,6 @@ const responseOutputItemDoneSchema = z.object({
     codeInterpreterCallItem,
     imageGenerationCallItem,
     webSearchCallItem,
-    fileSearchCallItem,
     localShellCallItem,
     z.object({
       type: z.literal("computer_call"),
@@ -1690,7 +1610,7 @@ function getResponsesModelConfig(modelId: string): ResponsesModelConfig {
 // TODO AI SDK 6: use optional here instead of nullish
 const openaiResponsesProviderOptionsSchema = z.object({
   include: z
-    .array(z.enum(["reasoning.encrypted_content", "file_search_call.results", "message.output_text.logprobs"]))
+    .array(z.enum(["reasoning.encrypted_content", "message.output_text.logprobs"]))
     .nullish(),
   instructions: z.string().nullish(),
 

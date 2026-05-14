@@ -20,7 +20,6 @@ import { type ToolDefinition } from "@flocks-ai/plugin"
 import z from "zod"
 import { Plugin } from "../plugin"
 import { WebSearchTool } from "./websearch"
-import { CodeSearchTool } from "./codesearch"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
 import { LspTool } from "./lsp"
@@ -107,7 +106,6 @@ export namespace ToolRegistry {
       TodoWriteTool,
       TodoReadTool,
       WebSearchTool,
-      CodeSearchTool,
       SkillTool,
       ApplyPatchTool,
       ...(Flag.FLOCKS_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
@@ -132,8 +130,8 @@ export namespace ToolRegistry {
     const result = await Promise.all(
       tools
         .filter((t) => {
-          // Enable websearch/codesearch for zen users OR via enable flag
-          if (t.id === "codesearch" || t.id === "websearch") {
+          // Enable websearch for zen users OR via enable flag
+          if (t.id === "websearch") {
             return model.providerID === "opencode" || Flag.FLOCKS_ENABLE_EXA
           }
 

@@ -70,7 +70,7 @@ Usage notes:
 - You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
 - It is very helpful to write a clear, concise `description` in 5-10 words.
 - If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
-- Prefer dedicated tools instead of shell equivalents: use `glob`/`file_search` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
+- Prefer dedicated tools instead of shell equivalents: use `glob` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
 - If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
 - If commands depend on each other, use a single bash tool call with `&&` to chain them together.
 - Use `;` only when you want sequential commands and do not care if earlier ones fail.

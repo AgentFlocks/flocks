@@ -210,9 +210,6 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
                   <Match when={props.request.permission === "grep"}>
                     <TextBody icon="✱" title={`Grep "` + (input().pattern ?? "") + `"`} />
                   </Match>
-                  <Match when={props.request.permission === "list"}>
-                    <TextBody icon="→" title={`List ` + normalizePath(input().path as string)} />
-                  </Match>
                   <Match when={props.request.permission === "bash"}>
                     <TextBody
                       icon="#"
@@ -232,9 +229,6 @@ export function PermissionPrompt(props: { request: PermissionRequest }) {
                   </Match>
                   <Match when={props.request.permission === "websearch"}>
                     <TextBody icon="◈" title={`Exa Web Search "` + (input().query ?? "") + `"`} />
-                  </Match>
-                  <Match when={props.request.permission === "codesearch"}>
-                    <TextBody icon="◇" title={`Exa Code Search "` + (input().query ?? "") + `"`} />
                   </Match>
                   <Match when={props.request.permission === "external_directory"}>
                     {(() => {

@@ -24,7 +24,6 @@ temperature: 0.3
 
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
@@ -44,7 +43,6 @@ tools:
   - virustotal_domain_query
   - virustotal_file_query
   - virustotal_url_query
-  - file_search
   - websearch
   - webfetch
 
