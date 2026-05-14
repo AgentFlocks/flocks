@@ -3,6 +3,13 @@ name: Publish core artifact to Console
 on:
   release:
     types: [published]
+  push:
+    branches:
+      - feat/auth_hook
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   publish-core-artifact:
@@ -11,16 +18,52 @@ jobs:
       - name: Publish OSS core artifact
         env:
           CONSOLE_API_BASE: ${{ secrets.FLOCKS_CONSOLE_API_BASE }}
-          CONSOLE_OPS_TOKEN: ${{ secrets.FLOCKS_CONSOLE_OPS_TOKEN }}
-          OSS_VERSION: ${{ github.event.release.tag_name }}
-          RELEASE_NOTES: ${{ github.event.release.body }}
-          RELEASE_ID: ${{ github.event.release.id }}
+          CONSOLE_OIDC_AUDIENCE: ${{ vars.FLOCKS_CONSOLE_OIDC_AUDIENCE }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NOTES_EVENT: ${{ github.event.release.body }}
+          RELEASE_ID_EVENT: ${{ github.event.release.id }}
         run: |
           if [ -z "${CONSOLE_API_BASE}" ]; then
             echo "FLOCKS_CONSOLE_API_BASE is required" >&2
             exit 1
           fi
-          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
+          AUDIENCE="${CONSOLE_OIDC_AUDIENCE:-flocks-console-ops}"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" ]; then
+            echo "GitHub OIDC runtime variables are missing" >&2
+            exit 1
+          fi
+          ID_TOKEN="$(curl -fsSL -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${AUDIENCE}" | jq -r '.value')"
+          if [ -z "${ID_TOKEN}" ] || [ "${ID_TOKEN}" = "null" ]; then
+            echo "Failed to acquire GitHub OIDC token" >&2
+            exit 1
+          fi
+          OPS_TOKEN="$(jq -n --arg id_token "${ID_TOKEN}" '{id_token:$id_token}' | \
+            curl -fsSL -X POST "${CONSOLE_API_BASE%/}/v1/ops/auth/github-oidc/exchange" \
+              -H "content-type: application/json" \
+              --data-binary @- | jq -r '.ops_token')"
+          if [ -z "${OPS_TOKEN}" ] || [ "${OPS_TOKEN}" = "null" ]; then
+            echo "Failed to exchange OIDC token for ops token" >&2
+            exit 1
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+            OSS_VERSION="${RELEASE_TAG}"
+            RELEASE_NOTES="${RELEASE_NOTES_EVENT}"
+            RELEASE_ID="${RELEASE_ID_EVENT}"
+            ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
+            TRIGGER_KIND="release"
+            DEV_ONLY="false"
+          else
+            SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+            OSS_VERSION="dev-feat-auth-hook-${SHORT_SHA}"
+            RELEASE_NOTES="dev push: ${GITHUB_REF_NAME}@${SHORT_SHA}"
+            RELEASE_ID="push-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/${GITHUB_SHA}.tar.gz"
+            TRIGGER_KIND="push"
+            DEV_ONLY="true"
+          fi
+
           TMP_ARCHIVE="$(mktemp)"
           curl -fSL "${ARCHIVE_URL}" -o "${TMP_ARCHIVE}"
           ARCHIVE_SHA256="$(shasum -a 256 "${TMP_ARCHIVE}" | awk '{print $1}')"
@@ -32,9 +75,37 @@ jobs:
             --arg source_repo "${{ github.repository }}" \
             --arg github_release_id "${RELEASE_ID}" \
             --arg published_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-            '{oss_version:$oss_version,archive_url:$archive_url,archive_sha256:$archive_sha256,release_notes:$release_notes,source_repo:$source_repo,github_release_id:$github_release_id,published_at:$published_at}' \
+            --arg trigger_kind "${TRIGGER_KIND}" \
+            --arg ref_name "${GITHUB_REF_NAME}" \
+            --arg commit_sha "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg actor "${GITHUB_ACTOR}" \
+            --arg workflow_ref "${GITHUB_WORKFLOW_REF}" \
+            --arg dev_only "${DEV_ONLY}" \
+            '{
+              oss_version:$oss_version,
+              archive_url:$archive_url,
+              archive_sha256:$archive_sha256,
+              release_notes:$release_notes,
+              source_repo:$source_repo,
+              github_release_id:$github_release_id,
+              published_at:$published_at,
+              metadata:{
+                schema_version:1,
+                artifact_type:"flocks-core",
+                trigger:$trigger_kind,
+                ref:$ref_name,
+                commit_sha:$commit_sha,
+                run_id:$run_id,
+                run_attempt:$run_attempt,
+                actor:$actor,
+                workflow_ref:$workflow_ref,
+                dev_only:($dev_only == "true")
+              }
+            }' \
             > core-artifact.json
           curl -fSL -X POST "${CONSOLE_API_BASE%/}/v1/ops/artifacts/flocks-core" \
-            -H "authorization: Bearer ${CONSOLE_OPS_TOKEN}" \
+            -H "authorization: Bearer ${OPS_TOKEN}" \
             -H "content-type: application/json" \
             --data-binary "@core-artifact.json"
