@@ -60,7 +60,11 @@ class McpServerManager:
         Servers that fail to connect will be retried in the background with exponential backoff.
         """
         if self._initialized:
-            log.warn("mcp.already_initialized")
+            # ``MCP.init`` is invoked from both the global server lifespan and
+            # the per-instance bootstrap on startup.  The guard above keeps the
+            # call idempotent, so this is informational only and should not
+            # surface as a warning in operational logs.
+            log.debug("mcp.already_initialized")
             return
         
         log.info("mcp.initializing")

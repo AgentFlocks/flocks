@@ -621,9 +621,18 @@ class AgentFileWatcher:
 
         watcher = self
 
+        # Only react to actual content-mutation events.  Without this guard the
+        # ``opened``/``closed``/``closed_no_write`` events that watchdog emits
+        # whenever any code (including the agent loader itself) reads
+        # ``agent.yaml`` / ``*.md`` would re-trigger cache invalidation on every
+        # access, causing a self-sustaining reload loop.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
         class _Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent) -> None:
                 if event.is_directory:
+                    return
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
                     return
                 src = getattr(event, "src_path", "") or ""
                 fname = os.path.basename(src)

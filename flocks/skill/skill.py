@@ -482,9 +482,17 @@ class SkillFileWatcher:
 
         watcher = self
 
+        # Only react to actual content-mutation events.  watchdog emits
+        # ``opened``/``closed``/``closed_no_write`` events whenever any code
+        # (including the skill loader itself) reads ``SKILL.md`` files, which
+        # would otherwise cause a self-sustaining cache-invalidation loop.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
         class _Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent):
                 if event.is_directory:
+                    return
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
                     return
                 src = getattr(event, "src_path", "") or ""
                 if src.endswith("SKILL.md"):

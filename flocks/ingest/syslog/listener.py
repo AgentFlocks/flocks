@@ -11,7 +11,12 @@ OnSyslogMessage = Callable[[dict], Union[None, Awaitable[None]]]
 
 
 class SyslogUDPProtocol(asyncio.DatagramProtocol):
-    """Receive syslog datagrams and invoke async callback with parsed dict."""
+    """Receive syslog datagrams and invoke async callback with parsed dict.
+
+    The *on_message* callback is expected to be non-blocking (e.g. a queue
+    put_nowait).  This protocol deliberately does NOT create unbounded asyncio
+    tasks on every datagram — the caller owns concurrency control.
+    """
 
     def __init__(
         self,
@@ -25,18 +30,23 @@ class SyslogUDPProtocol(asyncio.DatagramProtocol):
         text = data.decode("utf-8", errors="replace")
         parsed = parse_syslog(text, self._format_hint)
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        loop.create_task(self._safe_dispatch(parsed))
-
-    async def _safe_dispatch(self, parsed: dict) -> None:
-        try:
             res = self._on_message(parsed)
+            # If the callback returns a coroutine (legacy path), schedule it
+            # but only once — do NOT create_task without bound.
             if asyncio.iscoroutine(res):
-                await res
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return
+                loop.create_task(self._safe_await(res))
         except Exception:
-            # Logged by caller / manager
+            pass
+
+    @staticmethod
+    async def _safe_await(coro) -> None:  # noqa: ANN001
+        try:
+            await coro
+        except Exception:
             pass
 
 

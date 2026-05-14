@@ -447,10 +447,12 @@ class Storage:
         
         value_str, value_type = row
         
-        if model is not None:
+        if model is not None and hasattr(model, "model_validate_json"):
             return model.model_validate_json(value_str)
-        else:
-            return json.loads(value_str)
+        # Fall back to a plain JSON decode when no Pydantic model is supplied
+        # (or when callers accidentally pass a builtin container type such as
+        # ``dict``/``list``, which is not a Pydantic model).
+        return json.loads(value_str)
     
     @classmethod
     async def delete(cls, key: str) -> bool:
@@ -538,7 +540,7 @@ class Storage:
 
         entries: List[Tuple[str, T | Any]] = []
         for key, value_str in rows:
-            if model is not None:
+            if model is not None and hasattr(model, "model_validate_json"):
                 value = model.model_validate_json(value_str)
             else:
                 value = json.loads(value_str)

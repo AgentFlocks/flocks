@@ -21,6 +21,11 @@ from flocks.ingest.syslog.listener import run_tcp_syslog_server, run_udp_syslog_
 
 log = Log.create(service="syslog.manager")
 
+# Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
+_MAX_CONCURRENT_EXECUTIONS = 8
+# Maximum number of buffered syslog messages per workflow; excess messages are dropped with a warning
+_MAX_QUEUE_SIZE = 200
+
 
 class SyslogManager:
     """One async listener task per workflow id (when enabled)."""
@@ -28,6 +33,12 @@ class SyslogManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task] = {}
         self._abort_events: dict[str, asyncio.Event] = {}
+        # Per-workflow semaphore to cap concurrent executions
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
+        # Per-workflow bounded message queue for backpressure
+        self._queues: dict[str, asyncio.Queue] = {}
+        # Per-workflow queue consumer task
+        self._consumer_tasks: dict[str, asyncio.Task] = {}
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -69,6 +80,16 @@ class SyslogManager:
                 await task
             except asyncio.CancelledError:
                 pass
+        # Stop the queue consumer task
+        consumer = self._consumer_tasks.pop(workflow_id, None)
+        if consumer is not None and not consumer.done():
+            consumer.cancel()
+            try:
+                await consumer
+            except asyncio.CancelledError:
+                pass
+        self._semaphores.pop(workflow_id, None)
+        self._queues.pop(workflow_id, None)
 
     async def restart_workflow(self, workflow_id: str) -> None:
         await self.stop_workflow(workflow_id)
@@ -81,10 +102,35 @@ class SyslogManager:
         if not isinstance(data, dict) or not data.get("enabled"):
             return
 
+        # Load and cache the workflow JSON once; avoids a disk read per message
+        wf_data = read_workflow_from_fs(workflow_id)
+        if not wf_data:
+            log.warning("syslog.workflow_not_found_on_start", {"workflow_id": workflow_id})
+            return
+        workflow_json = wf_data.get("workflowJson")
+        if not workflow_json:
+            log.warning("syslog.workflow_json_missing_on_start", {"workflow_id": workflow_id})
+            return
+
+        # Set up concurrency control resources
+        self._semaphores[workflow_id] = asyncio.Semaphore(_MAX_CONCURRENT_EXECUTIONS)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
+        self._queues[workflow_id] = queue
+
         abort = asyncio.Event()
         self._abort_events[workflow_id] = abort
+
+        input_key = str(data.get("inputKey") or "syslog_message")
+
+        # Start the consumer that drains the queue and dispatches executions under the semaphore
+        consumer = asyncio.create_task(
+            self._queue_consumer(workflow_id, workflow_json, input_key, queue, abort),
+            name=f"syslog-consumer-{workflow_id}",
+        )
+        self._consumer_tasks[workflow_id] = consumer
+
         task = asyncio.create_task(
-            self._listener_loop(workflow_id, data, abort),
+            self._listener_loop(workflow_id, data, queue, abort),
             name=f"syslog-{workflow_id}",
         )
         self._tasks[workflow_id] = task
@@ -94,16 +140,25 @@ class SyslogManager:
         self,
         workflow_id: str,
         config: Dict[str, Any],
+        queue: asyncio.Queue,
         abort: asyncio.Event,
     ) -> None:
         host = str(config.get("host") or "0.0.0.0")
         port = int(config.get("port") or 5140)
         protocol = str(config.get("protocol") or "udp").lower()
         format_hint = str(config.get("format") or "auto")
-        input_key = str(config.get("inputKey") or "syslog_message")
 
-        async def on_msg(parsed: dict) -> None:
-            await self._trigger_workflow(workflow_id, parsed, input_key)
+        # NOTE: keep this callback synchronous so the UDP protocol layer can
+        # invoke it inline from datagram_received() without creating an
+        # asyncio task per packet. That preserves the queue-based backpressure.
+        def on_msg(parsed: dict) -> None:
+            try:
+                queue.put_nowait(parsed)
+            except asyncio.QueueFull:
+                log.warning("syslog.queue_full_dropped", {
+                    "workflow_id": workflow_id,
+                    "queue_size": queue.qsize(),
+                })
 
         try:
             if protocol == "tcp":
@@ -132,15 +187,57 @@ class SyslogManager:
         except Exception as exc:
             log.error("syslog.listener_error", {"workflow_id": workflow_id, "error": str(exc)})
 
-    async def _trigger_workflow(self, workflow_id: str, syslog_msg: dict, input_key: str) -> None:
-        data = read_workflow_from_fs(workflow_id)
-        if not data:
-            log.warning("syslog.workflow_not_found", {"workflow_id": workflow_id})
-            return
-        workflow_json = data.get("workflowJson")
-        if not workflow_json:
-            log.warning("syslog.workflow_json_missing", {"workflow_id": workflow_id})
-            return
+    async def _queue_consumer(
+        self,
+        workflow_id: str,
+        workflow_json: Any,
+        input_key: str,
+        queue: asyncio.Queue,
+        abort: asyncio.Event,
+    ) -> None:
+        """Drain the message queue and dispatch executions bounded by the semaphore."""
+        semaphore = self._semaphores[workflow_id]
+        pending: set[asyncio.Task] = set()
+
+        async def _dispatch(m: dict) -> None:
+            async with semaphore:
+                await self._trigger_workflow(workflow_id, workflow_json, m, input_key)
+
+        try:
+            while not abort.is_set():
+                try:
+                    # Poll with a short timeout so we can react to abort promptly
+                    msg = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+
+                t = asyncio.create_task(_dispatch(msg))
+                pending.add(t)
+                t.add_done_callback(pending.discard)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Best-effort drain: wait briefly for in-flight dispatches so their
+            # final Storage writes complete; cancel anything still stuck so we
+            # don't leak tasks on shutdown.
+            if pending:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True),
+                        timeout=5.0,
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    for t in list(pending):
+                        if not t.done():
+                            t.cancel()
+
+    async def _trigger_workflow(
+        self,
+        workflow_id: str,
+        workflow_json: Any,
+        syslog_msg: dict,
+        input_key: str,
+    ) -> None:
         inputs = {input_key: syslog_msg}
 
         exec_data = await create_execution_record(
