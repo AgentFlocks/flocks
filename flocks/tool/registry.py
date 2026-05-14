@@ -1095,8 +1095,21 @@ class ToolRegistry:
             for spec in items:
                 # YAML factory produces Tool instances directly
                 if isinstance(spec, Tool):
-                    if spec.info.name in cls._tools:
-                        log.warn("plugin.tool.duplicate", {"source": source, "name": spec.info.name})
+                    existing = cls._tools.get(spec.info.name)
+                    if existing is not None:
+                        # ``PluginLoader.load_all()`` is invoked by multiple
+                        # subsystems (ToolRegistry, Agent registry, etc.).  A
+                        # re-scan that re-encounters the same plugin file is
+                        # idempotent and should not produce a noisy warning;
+                        # only flag genuine name collisions from a different
+                        # source.
+                        existing_source = getattr(existing.info, "source", None)
+                        if existing_source not in (None, "plugin_yaml", "plugin_py"):
+                            log.warn("plugin.tool.duplicate", {
+                                "source": source,
+                                "name": spec.info.name,
+                                "existing_source": existing_source,
+                            })
                         continue
                     if spec.info.source is None:
                         spec.info.source = "plugin_yaml"
@@ -1115,8 +1128,18 @@ class ToolRegistry:
                         "spec_keys": list(spec.keys()),
                     })
                     continue
-                if name in cls._tools:
-                    log.warn("plugin.tool.duplicate", {"source": source, "name": name})
+                existing = cls._tools.get(name)
+                if existing is not None:
+                    # Idempotent re-scan: same plugin source discovered again
+                    # via another ``PluginLoader.load_all()`` pass.  Only warn
+                    # on genuine cross-source collisions.
+                    existing_source = getattr(existing.info, "source", None)
+                    if existing_source not in (None, "plugin_yaml", "plugin_py"):
+                        log.warn("plugin.tool.duplicate", {
+                            "source": source,
+                            "name": name,
+                            "existing_source": existing_source,
+                        })
                     continue
 
                 if isinstance(handler, str):
@@ -1523,13 +1546,29 @@ class ToolFileWatcher:
 
         watcher = self
 
+        # Only react to events that change file CONTENT.  watchdog also emits
+        # ``opened``/``closed``/``closed_no_write`` events whenever any process
+        # (including this one) reads a YAML/Python file, and ``refresh_plugin_tools``
+        # itself opens every plugin tool file on every reload.  Listening to those
+        # access events creates an infinite reload feedback loop where the watcher
+        # endlessly re-triggers itself every ~debounce-window seconds.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
         class _Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent) -> None:
                 if event.is_directory:
                     return
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
+                    return
                 src = getattr(event, "src_path", "") or ""
-                if src.endswith(".yaml") or src.endswith(".py"):
-                    watcher._schedule_refresh()
+                if not (src.endswith(".yaml") or src.endswith(".py")):
+                    return
+                # Ignore Python bytecode / temp / hidden files that get touched
+                # during normal imports but never carry plugin definitions.
+                fname = os.path.basename(src)
+                if fname.startswith(".") or fname.startswith("_") or "/__pycache__/" in src:
+                    return
+                watcher._schedule_refresh()
 
         handler = _Handler()
         observer = Observer()

@@ -47,7 +47,11 @@ def normalize_declared_tool_names(
             matches = [raw_name] if raw_name in available else []
 
         if not matches:
-            log.warn("agent.toolset.tool_missing", {"tool": raw_name})
+            # Built-in agent definitions (librarian, metis, …) declare optional
+            # tools such as ``lsp_*`` / ``ast_grep_search`` that ship in separate
+            # binaries; they are gracefully skipped when not installed.  Treat
+            # this as informational only to avoid flooding operational logs.
+            log.debug("agent.toolset.tool_missing", {"tool": raw_name})
             continue
 
         for match in matches:

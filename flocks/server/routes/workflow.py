@@ -465,10 +465,24 @@ async def _run_workflow_execution_task(
     loop = asyncio.get_running_loop()
 
     def _write_progress(update_fields: Dict[str, Any]) -> None:
+        # Called from the workflow-engine worker thread on every step
+        # start/complete.  Step events for a single execution are issued
+        # serially by the engine, so no extra lock is needed beyond the
+        # caller's invariant — but we must still tolerate transient
+        # ``Storage.read`` failures (e.g. SQLite contention) without
+        # corrupting ``current`` with a non-dict result.
         try:
-            current = asyncio.run_coroutine_threadsafe(Storage.read(exec_key), loop).result(timeout=5)
+            current = asyncio.run_coroutine_threadsafe(
+                Storage.read(exec_key), loop
+            ).result(timeout=5)
+            if not isinstance(current, dict):
+                # Execution record was trimmed mid-run or never persisted;
+                # rebuild a minimal payload so the write still goes through.
+                current = {"id": exec_id, "workflowId": workflow_id}
             current.update(update_fields)
-            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, current), loop).result(timeout=5)
+            asyncio.run_coroutine_threadsafe(
+                Storage.write(exec_key, current), loop
+            ).result(timeout=5)
         except Exception as exc:
             log.warning("workflow.step_progress.write_failed", {
                 "exec_id": exec_id,
@@ -510,6 +524,11 @@ async def _run_workflow_execution_task(
 
         duration = time.time() - start_time
         current_data = await Storage.read(exec_key)
+        if not isinstance(current_data, dict):
+            # Defensive: the execution record could be missing if it was
+            # trimmed/cleaned up mid-run.  Rebuild a baseline so the final
+            # status write still succeeds rather than blowing up.
+            current_data = {"id": exec_id, "workflowId": workflow_id}
         status_value, error_message = _resolve_execution_outcome(result)
         current_data.update({
             "outputResults": result.outputs,
@@ -534,6 +553,8 @@ async def _run_workflow_execution_task(
     except Exception as exc:
         duration = time.time() - start_time
         current_data = await Storage.read(exec_key)
+        if not isinstance(current_data, dict):
+            current_data = {"id": exec_id, "workflowId": workflow_id}
         current_data.update({
             "status": "cancelled" if cancel_event.is_set() else "error",
             "finishedAt": int(time.time() * 1000),
@@ -855,13 +876,21 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
                 exec_id=exec_id,
                 cancel_event=cancel_event,
                 tool_context=tool_context,
-            )
+            ),
+            name=f"workflow-run-{exec_id}",
         )
         _active_workflow_executions[exec_id] = ActiveWorkflowExecution(
             workflow_id=workflow_id,
             task=task,
             cancel_event=cancel_event,
         )
+        # Guarantee cleanup of the registry entry even when the task is
+        # cancelled or fails before reaching its own ``finally`` block (e.g.
+        # if the event loop is shutting down).  This prevents the ``Active*``
+        # map from growing forever when tasks are abandoned.
+        def _cleanup_active(_t: asyncio.Task, _eid: str = exec_id) -> None:
+            _active_workflow_executions.pop(_eid, None)
+        task.add_done_callback(_cleanup_active)
 
         log.info("workflow.execution.started", {
             "id": workflow_id,
@@ -1113,29 +1142,31 @@ async def get_workflow_history(
 ):
     """
     Get workflow execution history
-    
+
     Returns list of recent executions for this workflow.
     """
     try:
         if not _read_workflow_from_fs(workflow_id):
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        all_exec_keys = await Storage.list("workflow_execution/")
+        # 单次查询批量读取所有 execution 记录，避免 N 次单独 read 导致超长耗时
+        all_entries = await Storage.list_entries("workflow_execution/")
         executions = []
-        
-        for key in all_exec_keys:
+        for _key, exec_data in all_entries:
             try:
-                exec_data = await Storage.read(key)
-                if exec_data.get("workflowId") == workflow_id:
-                    executions.append(WorkflowExecutionResponse(**exec_data))
+                if not isinstance(exec_data, dict):
+                    continue
+                if exec_data.get("workflowId") != workflow_id:
+                    continue
+                executions.append(WorkflowExecutionResponse(**exec_data))
             except Exception as e:
-                log.warning("workflow.history.skip", {"key": key, "error": str(e)})
+                log.warning("workflow.history.skip", {"key": _key, "error": str(e)})
                 continue
-        
+
         # Sort by start time (newest first) and limit
         executions.sort(key=lambda e: e.startedAt, reverse=True)
         executions = executions[:limit]
-        
+
         log.info("workflow.history", {"id": workflow_id, "count": len(executions)})
         return executions
     except HTTPException:

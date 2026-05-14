@@ -189,8 +189,12 @@ async def lifespan(app: FastAPI):
     # but we still skip loading users when the marker is already set
     # to avoid unnecessary DB + session scans on every startup.
     async def _migrate_legacy_sessions_to_admin() -> None:
-        marker = await Storage.get("auth:migration:legacy_session_owner_to_admin", dict)
-        if marker and marker.get("done"):
+        # ``Storage.get`` interprets a non-``None`` ``model`` argument as a
+        # Pydantic model and calls ``model_validate_json``.  Passing the
+        # builtin ``dict`` type therefore raised ``AttributeError``; omit the
+        # model so the value is decoded with ``json.loads``.
+        marker = await Storage.get("auth:migration:legacy_session_owner_to_admin")
+        if isinstance(marker, dict) and marker.get("done"):
             return
         if not await AuthService.has_users():
             return
@@ -218,7 +222,11 @@ async def lifespan(app: FastAPI):
     # Register built-in hooks if memory is enabled
     try:
         config = await Config.get()
-        if config.memory.enabled:
+        # ``config.memory`` may be ``None`` when the memory system is not
+        # configured at all; in that case there is nothing to register.
+        memory_cfg = getattr(config, "memory", None)
+        memory_enabled = bool(getattr(memory_cfg, "enabled", False)) if memory_cfg else False
+        if memory_enabled:
             from flocks.hooks.builtin import register_builtin_hooks
             await _run_startup_phase(
                 log,
@@ -374,12 +382,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
-    # Start syslog listeners for workflows with syslog enabled
+    # Start syslog listeners for workflows with syslog enabled.
+    # Use a background task with a short delay so the main startup path is not
+    # blocked and to break the crash-restart loop where an immediate syslog
+    # flood would bring the server back down before it is fully ready.
     try:
         from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
 
-        await default_syslog_manager.start_all()
-        log.info("syslog.manager.started")
+        async def _delayed_syslog_start() -> None:
+            # Wait for storage and tool registry to be fully initialised before
+            # resuming syslog listeners.
+            await asyncio.sleep(3)
+            try:
+                await default_syslog_manager.start_all()
+                log.info("syslog.manager.started")
+            except Exception as exc:
+                log.warning("syslog.manager.start_failed", {"error": str(exc)})
+
+        _schedule_startup_phase(app, log, "syslog.manager.start", _delayed_syslog_start)
     except Exception as e:
         log.warning("syslog.manager.start_failed", {"error": str(e)})
 

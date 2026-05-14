@@ -103,7 +103,7 @@ def discover_commands() -> Dict[str, CommandInfo]:
 
     try:
         from flocks.utils.compat import get_flocks_config_dir
-        opencode_global_dir = str(get_flocks_config_dir(binary="opencode") / "command")
+        flocks_global_dir = str(get_flocks_config_dir(binary="opencode") / "command")
         sources.append(("flocks-global", flocks_global_dir, "**/*.md"))
     except Exception as e:
         log.warn("command.flocks_dir.error", {"error": str(e)})
