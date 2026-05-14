@@ -67,7 +67,7 @@ jobs:
           TMP_ARCHIVE="$(mktemp)"
           curl -fSL "${ARCHIVE_URL}" -o "${TMP_ARCHIVE}"
           ARCHIVE_SHA256="$(shasum -a 256 "${TMP_ARCHIVE}" | awk '{print $1}')"
-          ARCHIVE_FILENAME="flocks-core-$(echo "${OSS_VERSION}" | tr '/ ' '__').tar.gz"
+          ARCHIVE_FILENAME="flocks-${OSS_VERSION#v}.tar.gz"
           METADATA_JSON="$(jq -nc \
             --arg archive_url "${ARCHIVE_URL}" \
             --arg archive_sha256 "${ARCHIVE_SHA256}" \
