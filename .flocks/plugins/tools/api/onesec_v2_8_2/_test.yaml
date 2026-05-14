@@ -2,12 +2,13 @@ schema_version: 1
 provider: onesec_api
 
 # Service-level connectivity probe.
-# `dns_get_public_ip_list` is a lightweight GET with no required params
-# that verifies both base_url reachability and HMAC credential signing.
+# `threat_query_bd_version` is a lightweight read-only call with no required
+# params. It keeps the probe focused on basic auth/reachability, matching the
+# handler's built-in OneSEC connectivity action selection.
 connectivity:
-  tool: onesec_dns
+  tool: onesec_threat
   params:
-    action: dns_get_public_ip_list
+    action: threat_query_bd_version
 
 # Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
 # `label` is the default (English) display string; `label_cn` is the
