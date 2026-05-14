@@ -67,14 +67,10 @@ jobs:
           TMP_ARCHIVE="$(mktemp)"
           curl -fSL "${ARCHIVE_URL}" -o "${TMP_ARCHIVE}"
           ARCHIVE_SHA256="$(shasum -a 256 "${TMP_ARCHIVE}" | awk '{print $1}')"
-          jq -n \
-            --arg oss_version "${OSS_VERSION}" \
+          ARCHIVE_FILENAME="flocks-core-$(echo "${OSS_VERSION}" | tr '/ ' '__').tar.gz"
+          METADATA_JSON="$(jq -nc \
             --arg archive_url "${ARCHIVE_URL}" \
             --arg archive_sha256 "${ARCHIVE_SHA256}" \
-            --arg release_notes "${RELEASE_NOTES}" \
-            --arg source_repo "${{ github.repository }}" \
-            --arg github_release_id "${RELEASE_ID}" \
-            --arg published_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             --arg trigger_kind "${TRIGGER_KIND}" \
             --arg ref_name "${GITHUB_REF_NAME}" \
             --arg commit_sha "${GITHUB_SHA}" \
@@ -84,28 +80,25 @@ jobs:
             --arg workflow_ref "${GITHUB_WORKFLOW_REF}" \
             --arg dev_only "${DEV_ONLY}" \
             '{
-              oss_version:$oss_version,
-              archive_url:$archive_url,
-              archive_sha256:$archive_sha256,
-              release_notes:$release_notes,
-              source_repo:$source_repo,
-              github_release_id:$github_release_id,
-              published_at:$published_at,
-              metadata:{
-                schema_version:1,
-                artifact_type:"flocks-core",
-                trigger:$trigger_kind,
-                ref:$ref_name,
-                commit_sha:$commit_sha,
-                run_id:$run_id,
-                run_attempt:$run_attempt,
-                actor:$actor,
-                workflow_ref:$workflow_ref,
-                dev_only:($dev_only == "true")
-              }
-            }' \
-            > core-artifact.json
-          curl -fSL -X POST "${CONSOLE_API_BASE%/}/v1/ops/artifacts/flocks-core" \
+              schema_version:1,
+              artifact_type:"flocks-core",
+              trigger:$trigger_kind,
+              ref:$ref_name,
+              commit_sha:$commit_sha,
+              run_id:$run_id,
+              run_attempt:$run_attempt,
+              actor:$actor,
+              workflow_ref:$workflow_ref,
+              dev_only:($dev_only == "true"),
+              source_archive_url:$archive_url,
+              source_archive_sha256:$archive_sha256
+            }')"
+          curl -fSL -X POST "${CONSOLE_API_BASE%/}/v1/ops/artifacts/flocks-core/upload" \
             -H "authorization: Bearer ${OPS_TOKEN}" \
-            -H "content-type: application/json" \
-            --data-binary "@core-artifact.json"
+            -F "oss_version=${OSS_VERSION}" \
+            -F "release_notes=${RELEASE_NOTES}" \
+            -F "source_repo=${{ github.repository }}" \
+            -F "github_release_id=${RELEASE_ID}" \
+            -F "published_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            -F "metadata=${METADATA_JSON}" \
+            -F "file=@${TMP_ARCHIVE};filename=${ARCHIVE_FILENAME};type=application/gzip"
