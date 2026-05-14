@@ -16,7 +16,8 @@
     "fetchRequests": "Failed to load upgrade requests",
     "createRequest": "Failed to create upgrade request",
     "refreshRequest": "Failed to refresh request status",
-    "cancelRequest": "Failed to cancel request"
+    "cancelRequest": "Failed to cancel request",
+    "startUpgrade": "Failed to start upgrade"
   },
   "consoleLogin": {
     "title": "Console Account Login",
@@ -45,7 +46,20 @@
     "dismissRejected": "Dismiss rejection feedback",
     "startUpgrade": "Start Upgrade",
     "inDevelopment": "Flocks Pro upgrade is under development",
-    "afterUpgradeHint": "After upgrade completes, stop OSS process and launch from the Flocks Pro install path.",
+    "installingHint": "Downloading and installing the Flocks Pro component. OSS core will not be upgraded.",
+    "waitingRestart": "Upgrade is installed. Waiting for service restart...",
+    "restartTimeout": "Service restart timed out. Refresh later to confirm status.",
+    "afterUpgradeHint": "Starting upgrade will download the Pro bundle, install only the flockspro wheel, and restart automatically.",
+    "stageLabels": {
+      "fetching": "Download Pro bundle",
+      "backing_up": "Backup",
+      "applying": "Apply",
+      "syncing": "Install Pro wheel",
+      "building": "Build",
+      "restarting": "Restart service",
+      "done": "Done",
+      "error": "Failed"
+    },
     "noRequest": "No upgrade request yet.",
     "history": "Request History",
     "applyDialogTitle": "Flocks Pro Upgrade Application",

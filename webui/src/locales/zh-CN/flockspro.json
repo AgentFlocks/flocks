@@ -16,7 +16,8 @@
     "fetchRequests": "获取升级申请失败",
     "createRequest": "创建升级申请失败",
     "refreshRequest": "刷新申请状态失败",
-    "cancelRequest": "撤回申请失败"
+    "cancelRequest": "撤回申请失败",
+    "startUpgrade": "开始升级失败"
   },
   "consoleLogin": {
     "title": "云账号登录",
@@ -45,7 +46,20 @@
     "dismissRejected": "关闭拒绝反馈",
     "startUpgrade": "开始升级",
     "inDevelopment": "Flocks Pro升级正在开发中",
-    "afterUpgradeHint": "升级完成后请关闭开源版进程，并从 Flocks Pro 安装目录启动。",
+    "installingHint": "正在下载并安装 Flocks Pro 组件，期间不会升级 OSS core。",
+    "waitingRestart": "升级已安装，正在等待服务重启完成...",
+    "restartTimeout": "服务重启超时，请稍后手动刷新页面确认状态。",
+    "afterUpgradeHint": "开始升级后将下载 Pro bundle，仅安装 flockspro wheel，并在完成后自动重启。",
+    "stageLabels": {
+      "fetching": "下载 Pro bundle",
+      "backing_up": "备份",
+      "applying": "应用",
+      "syncing": "安装 Pro wheel",
+      "building": "构建",
+      "restarting": "重启服务",
+      "done": "完成",
+      "error": "失败"
+    },
     "noRequest": "暂无升级申请记录。",
     "history": "申请历史",
     "applyDialogTitle": "Flocks Pro 升级申请",

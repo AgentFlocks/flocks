@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowUpCircle, LogIn, X } from 'lucide-react';
+import { ArrowUpCircle, CheckCircle, Loader2, LogIn, X, XCircle } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
+import client from '@/api/client';
 import {
   consoleUpgradeApi,
   type UpgradeRequestCreatePayload,
   type UpgradeRequestStatus,
 } from '@/api/consoleUpgrade';
+import { checkUpdate, type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
 
 interface UpgradeApplyFormState {
@@ -21,6 +23,14 @@ interface UpgradeApplyFormState {
   notes: string;
 }
 
+interface FlocksproLicenseStatus {
+  activated: boolean;
+  active: boolean;
+  license_id?: string | null;
+  status?: string | null;
+  expires_at?: number | string | null;
+}
+
 const DEFAULT_FORM: UpgradeApplyFormState = {
   product: 'Flocks Pro',
   licenseType: 'trial_30d',
@@ -30,6 +40,32 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
   applicantPhone: '',
   notes: '',
 };
+
+const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
+const HEALTH_POLL_INTERVAL = 2000;
+const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+
+async function getFlocksproLicenseStatus(): Promise<FlocksproLicenseStatus> {
+  const response = await client.get('/api/flockspro/license/status');
+  return response.data;
+}
+
+function formatProVersion(version?: string | null): string {
+  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  return normalized ? `pro-v${normalized}` : 'pro-v...';
+}
+
+function formatDateTimeValue(value?: string | number | null): string {
+  if (value === null || value === undefined || value === '') {
+    return '-';
+  }
+  const d = typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    return String(value);
+  }
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
 
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
@@ -46,6 +82,12 @@ export default function FlocksproUpgradePage() {
   const [applyForm, setApplyForm] = useState<UpgradeApplyFormState>(DEFAULT_FORM);
   const [applyFormError, setApplyFormError] = useState<string | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [upgradeSteps, setUpgradeSteps] = useState<UpdateProgress[]>([]);
+  const [upgradeError, setUpgradeError] = useState<string | null>(null);
+  const [proUpgrading, setProUpgrading] = useState(false);
+  const [proRestarting, setProRestarting] = useState(false);
+  const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -67,6 +109,23 @@ export default function FlocksproUpgradePage() {
       visibleRequests.find((item) => item.request_id === activeRequestId) ?? visibleRequests[0] ?? null,
     [activeRequestId, visibleRequests],
   );
+
+  const latestActivatedRequest = useMemo(
+    () =>
+      requests.find((item) => {
+        const status = (item.status || '').toLowerCase();
+        const installResult = (item.details?.auto_install_result || '').toLowerCase();
+        return status === 'activated' || ['done', 'already_latest', 'restarting'].includes(installResult);
+      }) ?? null,
+    [requests],
+  );
+
+  const proVersion = formatProVersion(
+    currentVersion ||
+      latestActivatedRequest?.details?.auto_install_version ||
+      latestActivatedRequest?.details?.auto_install_target,
+  );
+  const isProLoaded = licenseStatus?.activated === true;
 
   const refreshConsoleLoginStatus = useCallback(async () => {
     setConsoleLoginLoading(true);
@@ -117,6 +176,33 @@ export default function FlocksproUpgradePage() {
     void refreshConsoleLoginStatus();
     void refreshRequests();
   }, [refreshConsoleLoginStatus, refreshRequests]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void checkUpdate()
+      .then((info) => {
+        if (!cancelled && info.current_version) {
+          setCurrentVersion(info.current_version);
+        }
+      })
+      .catch(() => {
+        // Version is auxiliary on this page.
+      });
+    void getFlocksproLicenseStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setLicenseStatus(status);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLicenseStatus(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const loginResult = searchParams.get('login');
@@ -216,7 +302,7 @@ export default function FlocksproUpgradePage() {
       setShowApplyDialog(false);
       setApplyForm(DEFAULT_FORM);
     } catch (err) {
-      setRequestError(extractErrorMessage(err, t('errors.createRequest')));
+      setApplyFormError(extractErrorMessage(err, t('errors.createRequest')));
     } finally {
       setSubmittingApply(false);
     }
@@ -250,6 +336,83 @@ export default function FlocksproUpgradePage() {
     }
   };
 
+  const upsertUpgradeStep = (progress: UpdateProgress) => {
+    setUpgradeSteps((prev) => {
+      const existingIndex = prev.findIndex((item) => item.stage === progress.stage);
+      if (existingIndex === -1) {
+        return [...prev, progress];
+      }
+      const next = [...prev];
+      next[existingIndex] = progress;
+      return next;
+    });
+  };
+
+  const pollUntilReady = () => {
+    const startedAt = Date.now();
+    const poll = async () => {
+      if (Date.now() - startedAt > HEALTH_POLL_TIMEOUT) {
+        setUpgradeError(t('upgrade.restartTimeout'));
+        setProRestarting(false);
+        setProUpgrading(false);
+        return;
+      }
+      try {
+        const rootResponse = await fetch('/', { cache: 'no-store' });
+        const rootHtml = await rootResponse.text();
+        const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
+        if (rootResponse.ok && !stillShowingUpgradePage) {
+          const healthResponse = await fetch('/api/health', { cache: 'no-store' });
+          if (healthResponse.ok) {
+            window.location.reload();
+            return;
+          }
+        }
+      } catch {
+        // Backend may be restarting.
+      }
+      setTimeout(() => {
+        void poll();
+      }, HEALTH_POLL_INTERVAL);
+    };
+    setTimeout(() => {
+      void poll();
+    }, 1500);
+  };
+
+  const startProUpgrade = async () => {
+    if (!activeRequest) {
+      return;
+    }
+    setShowUpdateModal(true);
+    setProUpgrading(true);
+    setProRestarting(false);
+    setUpgradeError(null);
+    setUpgradeSteps([]);
+    let sawRestarting = false;
+    try {
+      await consoleUpgradeApi.startRequest(activeRequest.request_id, (progress) => {
+        upsertUpgradeStep(progress);
+        if (progress.stage === 'restarting') {
+          sawRestarting = true;
+          setProRestarting(true);
+          pollUntilReady();
+        }
+      });
+      if (!sawRestarting) {
+        setProUpgrading(false);
+        await refreshRequests();
+        const status = await getFlocksproLicenseStatus();
+        setLicenseStatus(status);
+      }
+    } catch (err) {
+      if (!sawRestarting) {
+        setUpgradeError(extractErrorMessage(err, t('errors.startUpgrade')));
+        setProUpgrading(false);
+      }
+    }
+  };
+
   const canApplyUpgrade = consoleLoginStatus?.logged_in === true;
   const hasOpenRequest = requests.some((item) =>
     ['pending', 'reviewing', 'approved'].includes((item.status || '').toLowerCase()),
@@ -273,15 +436,7 @@ export default function FlocksproUpgradePage() {
   };
 
   const formatDateTime = (value?: string | null): string => {
-    if (!value) {
-      return '-';
-    }
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) {
-      return value;
-    }
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return formatDateTimeValue(value);
   };
 
   return (
@@ -344,8 +499,12 @@ export default function FlocksproUpgradePage() {
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
         <div className="flex items-center justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">{t('upgrade.title')}</h2>
-            <p className="text-sm text-gray-500 mt-1">{t('upgrade.description')}</p>
+            <h2 className="text-lg font-semibold text-gray-900">
+              {isProLoaded ? t('upgrade.installedTitle', { version: proVersion }) : t('upgrade.title')}
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              {isProLoaded ? t('upgrade.installedDescription') : t('upgrade.description')}
+            </p>
           </div>
           <button
             type="button"
@@ -359,7 +518,7 @@ export default function FlocksproUpgradePage() {
               setApplyFormError(null);
               setShowApplyDialog(true);
             }}
-            disabled={!canOpenApplyDialog}
+            disabled={!canOpenApplyDialog || isProLoaded}
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
           >
             {t('upgrade.applyAction')}
@@ -374,6 +533,23 @@ export default function FlocksproUpgradePage() {
         {requestError && (
           <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
             {requestError}
+          </div>
+        )}
+
+        {isProLoaded && (
+          <div className="grid gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 md:grid-cols-3">
+            <div>
+              <div className="text-xs text-emerald-700">{t('upgrade.installedVersion')}</div>
+              <div className="mt-1 font-semibold">{proVersion}</div>
+            </div>
+            <div>
+              <div className="text-xs text-emerald-700">{t('upgrade.licenseStatus')}</div>
+              <div className="mt-1 font-semibold">{licenseStatus?.status || '-'}</div>
+            </div>
+            <div>
+              <div className="text-xs text-emerald-700">{t('upgrade.expiresAt')}</div>
+              <div className="mt-1 font-semibold">{formatDateTimeValue(licenseStatus?.expires_at)}</div>
+            </div>
           </div>
         )}
 
@@ -440,7 +616,8 @@ export default function FlocksproUpgradePage() {
               {showApprovedActions && (
                 <button
                   type="button"
-                  onClick={() => setShowUpdateModal(true)}
+                  onClick={() => void startProUpgrade()}
+                  disabled={proUpgrading || proRestarting}
                   className="ml-auto rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
                 >
                   {t('upgrade.startUpgrade')}
@@ -453,10 +630,12 @@ export default function FlocksproUpgradePage() {
               </div>
             )}
           </div>
-        ) : (
+        ) : !isProLoaded ? (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
             {t('upgrade.noRequest')}
           </div>
+        ) : (
+          null
         )}
 
       </div>
@@ -555,27 +734,64 @@ export default function FlocksproUpgradePage() {
 
       {showUpdateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
-          <div className="w-full max-w-sm rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
+          <div className="w-full max-w-md rounded-xl bg-white border border-gray-200 shadow-xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-lg font-semibold text-gray-900">{t('upgrade.startUpgrade')}</h3>
               <button
                 type="button"
                 onClick={() => setShowUpdateModal(false)}
+                disabled={proUpgrading || proRestarting}
                 className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
                 aria-label={t('actions.cancel')}
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="text-sm text-gray-700">{t('upgrade.inDevelopment')}</div>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={() => setShowUpdateModal(false)}
-                className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-              >
-                {t('actions.confirm')}
-              </button>
+            <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+              {proRestarting ? t('upgrade.waitingRestart') : t('upgrade.installingHint')}
+            </div>
+            {upgradeSteps.length > 0 && (
+              <div className="space-y-2">
+                {upgradeSteps.map((step) => {
+                  const isError = step.stage === 'error';
+                  const isRunning = step.stage === 'restarting' || (step.stage === 'syncing' && proUpgrading);
+                  return (
+                    <div key={step.stage} className="flex items-start gap-2 text-sm">
+                      {isError ? (
+                        <XCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500" />
+                      ) : isRunning ? (
+                        <Loader2 className="mt-0.5 h-4 w-4 flex-shrink-0 animate-spin text-blue-500" />
+                      ) : (
+                        <CheckCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-emerald-500" />
+                      )}
+                      <div className="min-w-0">
+                        <div className={isError ? 'font-medium text-red-700' : 'font-medium text-gray-800'}>
+                          {t(`upgrade.stageLabels.${step.stage}`, { defaultValue: step.stage })}
+                        </div>
+                        <div className={isError ? 'text-xs text-red-600' : 'text-xs text-gray-500'}>
+                          {step.message}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {upgradeError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {upgradeError}
+              </div>
+            )}
+            <div className="flex justify-end gap-2">
+              {!proUpgrading && !proRestarting && (
+                <button
+                  type="button"
+                  onClick={() => setShowUpdateModal(false)}
+                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                >
+                  {t('actions.confirm')}
+                </button>
+              )}
             </div>
           </div>
         </div>

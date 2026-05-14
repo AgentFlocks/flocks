@@ -13,6 +13,7 @@ The updater tries each source in turn and falls back to the next on failure.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
@@ -72,6 +73,7 @@ class ConsoleManifestRelease:
     bundle_url: str
     bundle_sha256: str | None
     bundle_format: str
+    manifest: dict[str, Any]
 
 
 def _record_update_journal(message: str) -> None:
@@ -892,6 +894,17 @@ async def _fetch_gitlab_release(
     )
 
 
+async def _load_console_session_token() -> str | None:
+    try:
+        from flocks.storage.storage import Storage
+
+        session = await Storage.get("console:session")
+        token = session.get("console_session_token") if isinstance(session, dict) else None
+        return str(token).strip() if token else None
+    except Exception:
+        return None
+
+
 async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
     """
     Fetch latest Pro bundle manifest from console.
@@ -903,15 +916,9 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
     url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
     headers: dict[str, str] = {}
-    try:
-        from flocks.storage.storage import Storage
-
-        session = await Storage.get("console:session", dict)
-        token = session.get("console_session_token") if isinstance(session, dict) else None
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-    except Exception:
-        pass
+    token = await _load_console_session_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=headers, follow_redirects=True)
@@ -951,6 +958,7 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
         bundle_url=bundle_url,
         bundle_sha256=str(data.get("bundle_sha256") or "").strip() or None,
         bundle_format=bundle_format,
+        manifest=data,
     )
 
 
@@ -1110,6 +1118,25 @@ async def _download_archive(
     return dest
 
 
+async def _download_console_bundle(
+    url: str,
+    token: str | None,
+    dest_dir: Path,
+    filename: str,
+) -> Path:
+    """Download a console-hosted Pro bundle with the console session token."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _download_filename_for_url(url, filename)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+        async with client.stream("GET", url, headers=headers) as resp:
+            resp.raise_for_status()
+            with dest.open("wb") as handle:
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    handle.write(chunk)
+    return dest
+
+
 async def _download_with_fallback(
     sources: list[str],
     repo: str,
@@ -1256,6 +1283,23 @@ def _resolve_pro_bundle_content(content_root: Path) -> tuple[Path, Path | None, 
         wheels = sorted((content_root / "wheels").glob("*.whl"))
         wheel_path = wheels[0] if wheels else None
     return flocks_dir, wheel_path, manifest
+
+
+def _resolve_pro_bundle_wheel(content_root: Path) -> tuple[Path, dict[str, Any]]:
+    manifest_path = content_root / "manifest.json"
+    manifest = _load_json_file(manifest_path) if manifest_path.is_file() else {}
+    wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
+    wheel_path = content_root / wheel_value if wheel_value else None
+    if wheel_path is None or not wheel_path.is_file():
+        wheels = sorted((content_root / "wheels").glob("*.whl"))
+        wheel_path = wheels[0] if wheels else None
+    if wheel_path is None or not wheel_path.is_file():
+        raise ValueError("Pro bundle 中未找到 flockspro wheel")
+    return wheel_path, manifest
+
+
+def _is_pro_component_installed() -> bool:
+    return importlib.util.find_spec("flockspro") is not None
 
 
 def _venv_python_path(install_root: Path) -> Path:
@@ -2064,6 +2108,139 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
 # ------------------------------------------------------------------ #
 
 
+def _absolute_console_url(url: str) -> str:
+    if url.startswith(("http://", "https://", "file://")):
+        return url
+    manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
+    if not manifest_base:
+        return url
+    if url.startswith("/"):
+        return f"{manifest_base}{url}"
+    return f"{manifest_base}/{url}"
+
+
+async def perform_pro_bundle_install(
+    *,
+    restart: bool = True,
+) -> AsyncGenerator[UpdateProgress, None]:
+    """Install only the Flocks Pro wheel from a console bundle, then restart."""
+    install_root = _get_repo_root()
+    tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-pro-upgrade-"))
+    if sys.platform == "win32":
+        tmp_dir = _resolve_windows_long_path(tmp_dir)
+
+    try:
+        try:
+            manifest_info = await _fetch_console_manifest_release_info()
+        except Exception as exc:
+            log.error("updater.pro_bundle.manifest_failed", {"error": str(exc)})
+            yield UpdateProgress(
+                stage="error",
+                message="Failed to fetch the Flocks Pro bundle manifest.",
+                success=False,
+            )
+            return
+
+        if manifest_info.bundle_format != "zip":
+            yield UpdateProgress(stage="error", message="Flocks Pro bundle must be a zip archive.", success=False)
+            return
+
+        yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...")
+        token = await _load_console_session_token()
+        archive_path = await _download_console_bundle(
+            _absolute_console_url(manifest_info.bundle_url),
+            token,
+            tmp_dir,
+            _archive_filename_for_format(manifest_info.version, "zip"),
+        )
+        await asyncio.to_thread(_verify_download_sha256, archive_path, manifest_info.bundle_sha256)
+
+        extract_dir = tmp_dir / "extracted"
+        extract_dir.mkdir()
+        try:
+            content_root = await asyncio.to_thread(_extract_archive, archive_path, extract_dir)
+            pro_wheel_path, pro_bundle_manifest = _resolve_pro_bundle_wheel(content_root)
+        except Exception as exc:
+            yield UpdateProgress(stage="error", message=f"Failed to extract Flocks Pro bundle: {exc}", success=False)
+            return
+
+        uv_path = _find_executable("uv")
+        if not uv_path:
+            yield UpdateProgress(
+                stage="error",
+                message="Flocks Pro install failed: uv is required but was not found.",
+                success=False,
+            )
+            return
+
+        yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...")
+        python_path = _venv_python_path(install_root)
+        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
+        code, _, err = await _run_async(
+            install_cmd,
+            cwd=install_root,
+            timeout=180,
+            env=_build_uv_sync_env(),
+        )
+        if code != 0:
+            yield UpdateProgress(stage="error", message=f"Flocks Pro component install failed: {err}", success=False)
+            return
+
+        marker_manifest = dict(manifest_info.manifest)
+        marker_manifest.update(pro_bundle_manifest)
+        _write_pro_bundle_install_marker(marker_manifest)
+
+        if sys.platform == "win32":
+            validation_error = await _validate_windows_restart_runtime(install_root)
+            if validation_error:
+                yield UpdateProgress(stage="error", message=validation_error, success=False)
+                return
+
+        if not restart:
+            log.info("updater.pro_bundle.done", {"version": manifest_info.version, "restart": False})
+            yield UpdateProgress(
+                stage="done",
+                message=f"Flocks Pro component installed from v{manifest_info.version}",
+                success=True,
+            )
+            return
+
+        yield UpdateProgress(stage="restarting", message="Restarting service...")
+        log.info("updater.pro_bundle.restart", {"version": manifest_info.version})
+        await asyncio.sleep(0.8)
+
+        if "--reload" in sys.argv:
+            sys.exit(3)
+
+        try:
+            restart_argv = _build_restart_argv(install_root)
+        except Exception as exc:
+            log.error("updater.pro_bundle.restart.build_argv_failed", {"error": str(exc)})
+            yield UpdateProgress(stage="error", message=f"Failed to build restart command: {exc}", success=False)
+            return
+
+        if sys.platform == "win32":
+            try:
+                subprocess.Popen(restart_argv, cwd=install_root, close_fds=True)
+                os._exit(0)
+            except OSError as exc:
+                log.error("updater.pro_bundle.restart.spawn_failed", {"error": str(exc)})
+                yield UpdateProgress(stage="error", message=f"Failed to restart service: {exc}", success=False)
+                return
+
+        try:
+            os.execv(restart_argv[0], restart_argv)
+        except OSError as exc:
+            log.error("updater.pro_bundle.restart.execv_failed", {"error": str(exc)})
+            yield UpdateProgress(stage="error", message=f"Failed to restart service: {exc}", success=False)
+            return
+    except Exception as exc:
+        log.error("updater.pro_bundle.failed", {"error": str(exc)})
+        yield UpdateProgress(stage="error", message=f"Flocks Pro upgrade failed: {exc}", success=False)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def perform_update(
     latest_tag: str,
     *,
@@ -2449,7 +2626,7 @@ async def perform_update(
     if pro_wheel_path is not None:
         yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...")
         python_path = _venv_python_path(install_root)
-        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), str(pro_wheel_path)]
+        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
         code, _, err = await _run_async(
             install_cmd,
             cwd=install_root,

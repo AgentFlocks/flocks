@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import json
 from datetime import UTC, datetime
@@ -12,12 +13,13 @@ from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_admin
 from flocks.storage.storage import Storage
-from flocks.updater import check_update, perform_update
+from flocks.updater import perform_pro_bundle_install
 
 router = APIRouter()
 _AUTO_UPGRADE_TASKS: set[asyncio.Task[None]] = set()
@@ -78,6 +80,10 @@ def _is_approved(record: dict[str, Any]) -> bool:
     return str(record.get("status", "")).strip().lower() == "approved"
 
 
+def _is_pro_component_installed() -> bool:
+    return importlib.util.find_spec("flockspro") is not None
+
+
 async def _maybe_activate_pro_license(record: dict[str, Any]) -> None:
     activate_key = str(record.get("activate_key") or "").strip()
     if not activate_key:
@@ -115,38 +121,25 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
     details = record.setdefault("details", {})
     details["auto_install_result"] = "running"
     details["auto_install_started_at"] = datetime.now(UTC).isoformat()
-    info = await check_update()
-    if info.error:
-        raise ValueError(info.error)
-    if not info.has_update:
+    marker = _read_pro_bundle_install_marker()
+    if _is_pro_component_installed() and marker:
         details["auto_install_result"] = "already_latest"
-        details["auto_install_version"] = info.current_version
+        details["auto_install_version"] = marker.get("installed_version")
         details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
         await _report_pro_bundle_installation(record, install_result="success")
         return record
 
-    target_version = info.latest_version
-    if not target_version:
-        raise ValueError("missing target version")
-
-    details["auto_install_target"] = target_version
     final_stage = ""
     final_message = ""
-    async for progress in perform_update(
-        target_version,
-        zipball_url=info.zipball_url,
-        tarball_url=info.tarball_url,
-        bundle_sha256=info.bundle_sha256,
-        bundle_format=info.bundle_format,
-        restart=False,
-    ):
+    async for progress in perform_pro_bundle_install(restart=False):
         final_stage = progress.stage
         final_message = progress.message
         if progress.stage == "error":
             raise ValueError(progress.message)
 
+    marker = _read_pro_bundle_install_marker()
     details["auto_install_result"] = "done" if final_stage == "done" else "unknown"
-    details["auto_install_version"] = target_version
+    details["auto_install_version"] = marker.get("installed_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
     details["auto_install_message"] = final_message
     await _report_pro_bundle_installation(record, install_result="success")
@@ -202,6 +195,25 @@ async def _report_pro_bundle_installation(
             details["install_receipt_reported_at"] = datetime.now(UTC).isoformat()
     except Exception as exc:
         details["install_receipt_error"] = str(exc)
+
+
+async def _mark_console_upgrade_activated(record: dict[str, Any]) -> None:
+    request_id = str(record.get("request_id") or "").strip()
+    if not request_id:
+        return
+    console_base = _console_base_url()
+    if not console_base:
+        return
+    details = record.setdefault("details", {})
+    try:
+        console_session = await ConsoleLoginService.require_console_session()
+        headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(f"{console_base}/v1/upgrade-requests/{request_id}/activate", headers=headers)
+            resp.raise_for_status()
+            details["console_activated_reported_at"] = datetime.now(UTC).isoformat()
+    except Exception as exc:
+        details["console_activated_report_error"] = str(exc)
 
 
 async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]:
@@ -333,8 +345,6 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
 
     await Storage.set(_request_key(record["request_id"]), record, "json")
     await _push_request_id(record["request_id"])
-    _schedule_auto_activate_upgrade(record["request_id"], record)
-    await Storage.set(_request_key(record["request_id"]), record, "json")
     return UpgradeRequestStatus(**record)
 
 
@@ -390,9 +400,66 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
         raw["updated_at"] = datetime.now(UTC).isoformat()
 
     await Storage.set(_request_key(request_id), raw, "json")
-    _schedule_auto_activate_upgrade(request_id, raw)
-    await Storage.set(_request_key(request_id), raw, "json")
     return UpgradeRequestStatus(**raw)
+
+
+@router.post("/upgrade-requests/{request_id}/start")
+async def start_upgrade_request(request_id: str, request: Request) -> StreamingResponse:
+    require_admin(request)
+    raw = await Storage.get(_request_key(request_id))
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
+    if not _is_approved(raw):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅已审批通过的申请可以开始升级")
+
+    async def _stream():
+        details = raw.setdefault("details", {})
+        details["auto_install_result"] = "running"
+        details["auto_install_started_at"] = datetime.now(UTC).isoformat()
+        raw["updated_at"] = datetime.now(UTC).isoformat()
+        await Storage.set(_request_key(request_id), raw, "json")
+        try:
+            await _maybe_activate_pro_license(raw)
+            await _maybe_refresh_pro_license(raw)
+            async for progress in perform_pro_bundle_install(restart=True):
+                if progress.stage == "error":
+                    details["auto_install_result"] = "failed"
+                    details["auto_install_error"] = progress.message
+                    raw["updated_at"] = datetime.now(UTC).isoformat()
+                    await Storage.set(_request_key(request_id), raw, "json")
+                    await _report_pro_bundle_installation(raw, install_result="failed", error_message=progress.message)
+                elif progress.stage in {"done", "restarting"}:
+                    marker = _read_pro_bundle_install_marker()
+                    details["auto_install_result"] = "restarting" if progress.stage == "restarting" else "done"
+                    details["auto_install_version"] = marker.get("installed_version")
+                    details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+                    details["auto_install_message"] = progress.message
+                    raw["status"] = "activated"
+                    raw["updated_at"] = datetime.now(UTC).isoformat()
+                    await Storage.set(_request_key(request_id), raw, "json")
+                    await _report_pro_bundle_installation(raw, install_result="success")
+                    await _mark_console_upgrade_activated(raw)
+                yield f"data: {progress.model_dump_json()}\n\n"
+                await asyncio.sleep(0)
+                if progress.stage == "error":
+                    return
+        except Exception as exc:
+            details["auto_install_result"] = "failed"
+            details["auto_install_error"] = str(exc)
+            raw["updated_at"] = datetime.now(UTC).isoformat()
+            await Storage.set(_request_key(request_id), raw, "json")
+            await _report_pro_bundle_installation(raw, install_result="failed", error_message=str(exc))
+            yield f"data: {json.dumps({'stage': 'error', 'message': str(exc), 'success': False})}\n\n"
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/upgrade-requests/{request_id}/cancel", response_model=UpgradeRequestStatus)

@@ -313,7 +313,7 @@ async def test_cancel_approved_request_falls_back_to_local_cancel_when_console_r
     assert payload["status"] == "cancelled"
 
 
-async def test_refresh_approved_request_schedules_auto_activate_install(
+async def test_refresh_approved_request_does_not_auto_activate_install(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -340,20 +340,76 @@ async def test_refresh_approved_request_schedules_auto_activate_install(
         "json",
     )
 
-    scheduled: list[str] = []
-
-    def _fake_schedule(request_id_arg: str, record: dict):
-        scheduled.append(request_id_arg)
-        record.setdefault("details", {})["auto_install_task_scheduled_at"] = "2026-05-08T08:01:00+00:00"
-
-    monkeypatch.setattr(console_routes, "_schedule_auto_activate_upgrade", _fake_schedule)
-
     resp = await client.post(f"/api/console/upgrade-requests/{request_id}/refresh")
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
     assert payload["status"] == "approved"
-    assert payload["details"]["auto_install_task_scheduled_at"] == "2026-05-08T08:01:00+00:00"
-    assert scheduled == [request_id]
+    assert "auto_install_task_scheduled_at" not in payload["details"]
+
+
+async def test_start_approved_request_streams_upgrade_and_marks_activated(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    request_id = "req_start_001"
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "approved",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_start",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {"company": "acme"},
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    async def _fake_perform_pro_bundle_install(*args, **kwargs):
+        assert args == ()
+        assert kwargs["restart"] is True
+        yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...", success=None)
+        yield UpdateProgress(stage="restarting", message="Restarting service...", success=None)
+
+    async def _noop(_record: dict):
+        return None
+
+    reported: list[tuple[str, str | None]] = []
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        reported.append((install_result, error_message))
+
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_install", _fake_perform_pro_bundle_install)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_mark_console_upgrade_activated", _noop)
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {"installed_version": "v2026.5.9"},
+    )
+
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/start")
+    assert resp.status_code == status.HTTP_200_OK
+    assert "Downloading Flocks Pro bundle" in resp.text
+    assert "Restarting service" in resp.text
+
+    stored = await Storage.get(f"console:upgrade_request:{request_id}")
+    assert stored["status"] == "activated"
+    assert stored["details"]["auto_install_result"] == "restarting"
+    assert stored["details"]["auto_install_version"] == "v2026.5.9"
+    assert reported == [("success", None)]
 
 
 async def test_auto_activate_reports_already_latest_install(
@@ -363,32 +419,21 @@ async def test_auto_activate_reports_already_latest_install(
 
     reported: list[tuple[str, str | None]] = []
 
-    async def _fake_check_update():
-        return type(
-            "VersionInfoLike",
-            (),
-            {
-                "error": None,
-                "has_update": False,
-                "current_version": "2026.5.9",
-                "latest_version": None,
-                "zipball_url": None,
-                "tarball_url": None,
-                "bundle_sha256": None,
-                "bundle_format": None,
-            },
-        )()
-
     async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
         reported.append((install_result, error_message))
 
     async def _noop(_record: dict):
         return None
 
-    monkeypatch.setattr(console_routes, "check_update", _fake_check_update)
     monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
     monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
     monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {"installed_version": "v2026.5.9"},
+    )
 
     record = {
         "request_id": "req_auto_002",
@@ -402,6 +447,54 @@ async def test_auto_activate_reports_already_latest_install(
     payload = await console_routes._maybe_auto_activate_upgrade(record)
     assert payload["status"] == "activated"
     assert payload["details"]["auto_install_result"] == "already_latest"
-    assert payload["details"]["auto_install_version"] == "2026.5.9"
+    assert payload["details"]["auto_install_version"] == "v2026.5.9"
     assert reported == [("success", None)]
+
+
+async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.updater.models import UpdateProgress
+
+    installed = False
+
+    async def _fake_perform_pro_bundle_install(*args, **kwargs):
+        nonlocal installed
+        assert args == ()
+        assert kwargs["restart"] is False
+        yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...", success=None)
+        installed = True
+        yield UpdateProgress(stage="done", message="Flocks Pro component installed from v2026.5.9", success=True)
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        return None
+
+    async def _noop(_record: dict):
+        return None
+
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_install", _fake_perform_pro_bundle_install)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: installed)
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {"installed_version": "v2026.5.9"} if installed else {},
+    )
+
+    record = {
+        "request_id": "req_auto_003",
+        "status": "approved",
+        "activate_key": "key_auto",
+        "details": {},
+        "created_at": "2026-05-08T08:00:00+00:00",
+        "updated_at": "2026-05-08T08:00:00+00:00",
+    }
+
+    payload = await console_routes._maybe_auto_activate_upgrade(record)
+    assert payload["status"] == "activated"
+    assert payload["details"]["auto_install_result"] == "done"
+    assert payload["details"]["auto_install_version"] == "v2026.5.9"
 
