@@ -142,6 +142,20 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
+    with pytest.raises(ValueError, match="only 5-field cron is supported"):
+        await TaskManager.create_scheduler(
+            title="非法 cron",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+            ),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+
+
+@pytest.mark.asyncio
 async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path):
     manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
     scheduler = await TaskManager.create_scheduler(
@@ -702,6 +716,33 @@ async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.M
     await task_cli_commands._list_tasks("paused", "scheduled", 10, "json")
 
     assert printed
+
+
+@pytest.mark.asyncio
+async def test_cli_show_formats_scheduler_times_in_schedule_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = TaskScheduler(
+        title="CLI 定时任务详情",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="0 6 * * *",
+            timezone="Asia/Shanghai",
+            next_run=datetime(2026, 5, 15, 22, 0, tzinfo=timezone.utc),
+        ),
+        created_at=datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+    )
+    await TaskStore.create_scheduler(scheduler)
+
+    rendered: list[object] = []
+    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: rendered.append(args[0]))
+
+    await task_cli_commands._show_task(scheduler.id)
+
+    assert rendered
+    panel = rendered[0]
+    assert "Created:  2026-05-15 09:53:08+08:00 (Asia/Shanghai)" in panel.renderable
+    assert "Next run: 2026-05-16 06:00:00+08:00 (Asia/Shanghai)" in panel.renderable
 
 
 @pytest.mark.asyncio
