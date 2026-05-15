@@ -184,6 +184,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       submitDisabled={!canSubmit}
       submitLoading={loading}
       submitLabel={isReadonly ? t('sheet.submitClose') : undefined}
+      hideForm={!isEdit}
       width={700}
       maxWidth={900}
       onClose={onClose}

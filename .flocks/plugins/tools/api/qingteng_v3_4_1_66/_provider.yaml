@@ -1,0 +1,46 @@
+name: qingteng
+service_id: qingteng
+version: "3.4.1.66"
+description: QingTeng cloud security platform - host security, vulnerability detection, and intrusion monitoring.
+description_cn: 青藤云安全平台 - 主机安全、漏洞检测、入侵检测
+auth:
+  type: session
+  flow: login_then_sign
+  login_path: /v1/api/auth
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "http://{secret:qingteng_host}:80"
+  - key: username
+    label: Username
+    storage: config
+    config_key: username
+    input_type: text
+    required: true
+  - key: password
+    label: Password
+    storage: secret
+    config_key: password
+    secret_id: qingteng_password
+    input_type: password
+    required: true
+defaults:
+  base_url: "http://{secret:qingteng_host}:80"
+  timeout: 30
+  category: custom
+  product_version: "3.4.1.66"
+notes: |
+  青藤云 API 需要认证:
+  1. 登录获取 jwt token 和 signKey
+  2. 后续请求需要 SHA1 签名
+  推荐配置方式：
+  - api_services.qingteng.base_url = "https://qt.example.com:8443/openapi"
+  - api_services.qingteng.username = "dev@xx.com"
+  - api_services.qingteng.password = "{secret:qingteng_password}"
+  兼容旧配置：
+  - qingteng_host: 服务器地址 (如 192.168.1.100)
+  - qingteng_username: 用户名 (如 dev@xx.com)
+  - qingteng_password: 密码 (如 abc@123)

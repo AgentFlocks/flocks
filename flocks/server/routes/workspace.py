@@ -59,9 +59,11 @@ log = Log.create(service="workspace.routes")
 _DEFAULT_MAX_UPLOAD_MB = 100
 _ALLOWED_UPLOAD_EXTENSIONS = {
     ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
-    ".pdf", ".doc", ".docx",
+    ".pdf", ".doc", ".docx", ".html", ".htm", ".ppt", ".pptx", ".xls", ".xlsx",
 }
-_ALLOWED_UPLOAD_LABEL = "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx"
+_ALLOWED_UPLOAD_LABEL = (
+    "txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, xlsx"
+)
 _MAX_UPLOAD_RENAME_ATTEMPTS = 100
 
 
@@ -313,6 +315,7 @@ async def upload_files(
         results.append({
             "name": target.name,
             "path": str(target.relative_to(mgr.get_workspace_dir())),
+            "abs_path": str(target),
             "size": total,
             "is_text_file": is_text,
             "preview_warning": None if is_text else "Binary file — download only",

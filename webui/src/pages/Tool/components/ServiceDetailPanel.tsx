@@ -12,7 +12,7 @@ import { toolAPI } from '@/api/tool';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { EnabledBadge } from './badges';
-import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, MCPFormFields } from '../ToolSheets';
+import { buildMCPConfigFromForm, buildMCPFormDataFromConfig, getMCPFormError, MCPFormFields } from '../ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from '../ToolSheets';
 import type { APIServiceCredentialField, APIServiceMetadata, ProviderCredentials } from '@/types';
 
@@ -126,6 +126,10 @@ export function MCPServerDetailPanel({
 
   const handleTestConnection = async () => {
     if (!formData) return;
+    if (getMCPFormError(formData) === 'invalidHeaders') {
+      alert(t('alert.invalidHeaders'));
+      return;
+    }
     setTestingConnection(true);
     setTestResult(null);
     const currentConfig = buildMCPConfigFromForm(formData);
@@ -151,6 +155,10 @@ export function MCPServerDetailPanel({
 
   const handleSaveConfig = async () => {
     if (!formData || !isDirty) return;
+    if (getMCPFormError(formData) === 'invalidHeaders') {
+      alert(t('alert.invalidHeaders'));
+      return;
+    }
     try {
       setSavingConfig(true);
       setTestResult(null);
@@ -212,7 +220,7 @@ export function MCPServerDetailPanel({
         ))}
       </div>
 
-      <div className="p-5">
+      <div className="p-5 min-h-0">
         {detailLoading ? (
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : detailTab === 'overview' ? (
@@ -662,11 +670,14 @@ export function APIServiceDetailPanel({
     const schema = buildFallbackCredentialSchema(nextMetadata);
     const nextValues: Record<string, string> = {};
 
+    // Always show whatever the backend reports in `fields`. Do NOT compare with
+    // schema.default_value to decide visibility: the metadata endpoint reuses
+    // the persisted base_url as default_value for some providers (e.g. onesig),
+    // and that previously caused the saved URL to be cleared from the form.
     schema.forEach((field) => {
       const dynamicValue = nextCredentials?.fields?.[field.key];
-      const value = dynamicValue ?? getLegacyCredentialValue(nextCredentials, field.key) ?? '';
-      const effectiveDefault = field.default_value || (field.key === 'base_url' ? nextMetadata?.base_url : undefined);
-      nextValues[field.key] = (effectiveDefault && value === effectiveDefault) ? '' : (value || '');
+      const legacyValue = getLegacyCredentialValue(nextCredentials, field.key);
+      nextValues[field.key] = dynamicValue ?? legacyValue ?? '';
     });
 
     setFormValues(nextValues);

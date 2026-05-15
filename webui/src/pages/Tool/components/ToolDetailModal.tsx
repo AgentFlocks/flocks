@@ -5,7 +5,7 @@ import {
   CheckCircle, XCircle, AlertTriangle,
 } from 'lucide-react';
 import type { Tool } from '@/api/tool';
-import { toolAPI } from '@/api/tool';
+import { canDirectlyTestTool, toolAPI } from '@/api/tool';
 import { SOURCE_BADGE, CATEGORY_LABEL_KEY } from '../constants';
 import { EnabledBadge } from './badges';
 
@@ -35,6 +35,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
   const [testParams, setTestParams] = useState(defaultParams);
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const canDirectTest = canDirectlyTestTool(tool);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') onClose();
@@ -49,6 +50,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
   const sourceLabel = sb.labelKey ? t(sb.labelKey) : (sb.label ?? tool.source);
 
   const handleTest = async () => {
+    if (!canDirectTest) return;
     try {
       setTesting(true);
       setTestResult(null);
@@ -64,7 +66,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
 
   return (
     <div className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center justify-between">
@@ -108,12 +110,12 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">
           {section === 'info' ? (
             <div className="space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
-                <p className="text-sm text-gray-600 leading-relaxed">{tool.description}</p>
+                <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{tool.description}</p>
               </div>
               <div className="flex flex-wrap gap-4">
                 <div>
@@ -133,32 +135,34 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.params', { count: tool.parameters.length })}</label>
                   <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
-                    <table className="min-w-full divide-y divide-gray-200">
+                    <div className="overflow-x-auto">
+                      <table className="min-w-full table-fixed divide-y divide-gray-200">
                       <thead className="bg-gray-100">
                         <tr>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
+                          <th className="w-[28%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                          <th className="w-[16%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                          <th className="w-[14%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                          <th className="w-[42%] px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-200">
                         {tool.parameters.map((param, idx) => (
                           <tr key={idx}>
-                            <td className="px-4 py-2">
-                              <code className="text-xs font-mono text-gray-900 bg-white px-1.5 py-0.5 rounded border border-gray-200">{param.name}</code>
+                            <td className="px-4 py-2 align-top">
+                              <code className="text-xs font-mono text-gray-900 bg-white px-1.5 py-0.5 rounded border border-gray-200 break-all">{param.name}</code>
                             </td>
-                            <td className="px-4 py-2 text-xs text-gray-600">{param.type}</td>
-                            <td className="px-4 py-2">
+                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.type}</td>
+                            <td className="px-4 py-2 align-top">
                               {param.required
                                 ? <span className="text-xs text-red-600 font-medium">{t('toolDetail.yes')}</span>
                                 : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                             </td>
-                            <td className="px-4 py-2 text-xs text-gray-600">{param.description}</td>
+                            <td className="px-4 py-2 align-top text-xs text-gray-600 whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{param.description}</td>
                           </tr>
                         ))}
                       </tbody>
-                    </table>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
@@ -185,7 +189,7 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
               </div>
               <button
                 onClick={handleTest}
-                disabled={testing || !tool.enabled}
+                disabled={testing || !tool.enabled || !canDirectTest}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm"
               >
                 {testing ? (
@@ -196,6 +200,9 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
               </button>
               {!tool.enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
+              )}
+              {canDirectTest ? null : (
+                <p className="text-xs text-amber-600 text-center">{t('toolDetail.sessionTestOnly')}</p>
               )}
               {testResult && (
                 <div>
@@ -230,7 +237,9 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
           {section === 'info' && (
             <button
               onClick={() => setSection('test')}
-              className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 flex items-center"
+              className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
+              disabled={!canDirectTest}
+              title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}
             >
               <TestTube className="w-4 h-4 mr-1.5" />{t('toolDetail.testTool')}
             </button>

@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -31,8 +31,11 @@ jobs:
       - name: Python lint
         run: uv run ruff check flocks/cli/main.py flocks/cli/service_manager.py
 
+      - name: Validate bundled Hub
+        run: uv run python scripts/validate_flockshub.py
+
       - name: Python test
-        run: uv run pytest tests/scripts
+        run: uv run pytest tests/scripts tests/hub
 
 
   frontend:
@@ -42,7 +45,7 @@ jobs:
         working-directory: webui
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

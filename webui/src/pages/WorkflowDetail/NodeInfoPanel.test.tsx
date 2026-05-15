@@ -20,9 +20,24 @@ vi.mock('@/api/workflow', async () => {
   };
 });
 
+vi.mock('@/components/common/CopyButton', () => ({
+  default: ({ text, label }: { text: string; label?: string }) => (
+    <button type="button" data-testid="copy-button" aria-label={label ?? `copy:${text}`}>
+      {label ?? 'copy'}
+    </button>
+  ),
+}));
+
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
+      if (key === 'detail.nodeInfo.expandJsonBlock') {
+        return `展开${params?.label ?? ''}`;
+      }
+      if (key === 'detail.nodeInfo.collapseJsonBlock') {
+        return `收起${params?.label ?? ''}`;
+      }
+
       const translations: Record<string, string> = {
         'detail.nodeInfo.inputSources': '输入来源',
         'detail.nodeInfo.startNode': '起点节点',
@@ -44,11 +59,13 @@ vi.mock('react-i18next', () => ({
         'detail.nodeInfo.runNodeUnsupported': '当前节点类型暂不支持',
         'detail.nodeInfo.runNodeUnsupportedDesc': 'Branch 和 Loop 节点暂不支持单节点执行。',
         'detail.nodeInfo.runNodeInputs': '执行输入',
+        'detail.nodeInfo.copyInput': '复制输入',
         'detail.nodeInfo.useLatestInputs': '使用最近一次输入',
         'detail.nodeInfo.restoreSuggestedInputs': '恢复建议输入',
         'detail.nodeInfo.runNodeAction': '执行节点',
         'detail.nodeInfo.runningNode': '执行中...',
         'detail.nodeInfo.runNodeSuccess': '执行成功',
+        'detail.nodeInfo.copyOutput': '复制输出',
         'detail.nodeInfo.runNodeError': '执行错误',
         'detail.nodeInfo.runNodeStdout': '标准输出',
         'detail.nodeInfo.runNodeTraceback': '错误堆栈',
@@ -95,6 +112,9 @@ describe('NodeInfoPanel', () => {
     category: 'default',
     workflowJson: {
       start: 'node-1',
+      metadata: {
+        sampleInputs: { host: 'sample.local' },
+      },
       nodes: [
         {
           id: 'node-1',
@@ -147,8 +167,13 @@ describe('NodeInfoPanel', () => {
     expect(screen.getByText('最近一次运行')).toBeInTheDocument();
     expect(screen.getByText('真实输入')).toBeInTheDocument();
     expect(screen.getByText('真实输出')).toBeInTheDocument();
-    expect(screen.getByDisplayValue(/demo.local/)).toBeInTheDocument();
+    expect(screen.getByDisplayValue(/sample.local/)).toBeInTheDocument();
     expect(screen.getByText(/"result": "ok"/)).toBeInTheDocument();
+    const copyButtons = screen.getAllByTestId('copy-button');
+    expect(copyButtons).toHaveLength(3);
+    expect(copyButtons[0]).toHaveAttribute('aria-label', 'copy:{\n  "host": "demo.local"\n}');
+    expect(copyButtons[1]).toHaveAttribute('aria-label', 'copy:{\n  "result": "ok"\n}');
+    expect(copyButtons[2]).toHaveAttribute('aria-label', 'copy:{\n  "host": "sample.local"\n}');
   });
 
   it('shows empty runtime hint when there is no latest execution', () => {
@@ -204,6 +229,50 @@ describe('NodeInfoPanel', () => {
     expect(screen.getByText('真实输出')).toBeInTheDocument();
   });
 
+  it('toggles runtime input and output blocks independently', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <NodeInfoPanel
+        node={workflow.workflowJson.nodes[0]}
+        workflow={workflow}
+        latestExecution={{
+          id: 'exec-1',
+          workflowId: 'wf-1',
+          inputParams: { host: 'a' },
+          outputResults: { result: 'ok' },
+          status: 'success',
+          startedAt: Date.now(),
+          executionLog: [
+            {
+              node_id: 'node-1',
+              inputs: { host: 'demo.local' },
+              outputs: { result: 'ok' },
+            },
+          ],
+        }}
+        onClose={() => {}}
+        onSaved={() => {}}
+      />
+    );
+
+    expect(screen.getByDisplayValue(/sample.local/)).toBeInTheDocument();
+    expect(screen.getAllByText(/"host": "demo.local"/)).toHaveLength(1);
+    expect(screen.getAllByText(/"result": "ok"/)).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: '收起真实输入' }));
+    expect(screen.queryAllByText(/"host": "demo.local"/)).toHaveLength(0);
+    expect(screen.getAllByText(/"result": "ok"/)).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: '收起真实输出' }));
+    expect(screen.queryAllByText(/"result": "ok"/)).toHaveLength(0);
+
+    await user.click(screen.getByRole('button', { name: '展开真实输入' }));
+    await user.click(screen.getByRole('button', { name: '展开真实输出' }));
+    expect(screen.getAllByText(/"host": "demo.local"/)).toHaveLength(1);
+    expect(screen.getAllByText(/"result": "ok"/)).toHaveLength(1);
+  });
+
   it('runs a single node with latest runtime inputs', async () => {
     const user = userEvent.setup();
 
@@ -231,7 +300,13 @@ describe('NodeInfoPanel', () => {
       />
     );
 
+    expect(screen.getByDisplayValue(/sample.local/)).toBeInTheDocument();
+    expect(screen.getAllByTestId('copy-button')).toHaveLength(3);
+    await user.click(screen.getByRole('button', { name: '使用最近一次输入' }));
     expect(screen.getByDisplayValue(/demo.local/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '恢复建议输入' }));
+    expect(screen.getByDisplayValue(/sample.local/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '使用最近一次输入' }));
     await user.click(screen.getByRole('button', { name: '执行节点' }));
 
     expect(workflowAPI.runNode).toHaveBeenCalledWith('wf-1', {
@@ -239,6 +314,7 @@ describe('NodeInfoPanel', () => {
       inputs: { host: 'demo.local' },
     });
     expect(await screen.findByText('执行成功')).toBeInTheDocument();
+    expect(screen.getAllByTestId('copy-button')).toHaveLength(4);
     expect(screen.getByText(/done/)).toBeInTheDocument();
   });
 

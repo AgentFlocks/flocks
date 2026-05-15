@@ -6,10 +6,10 @@ OneSEC 当前优先复用 grouped tool，而不是直接从页面做数据获取
 
 | 用户意图 | 推荐 tool | 推荐 action | 最小参数 |
 |---|---|---|---|
-| 查威胁事件 | `onesec_edr` | `edr_get_incidents` / `edr_get_recent_incidents` | 常见至少带 `time_from`、`time_to` |
+| 查威胁事件 | `onesec_edr` | `edr_get_incidents`（默认） / `edr_get_recent_incidents`（仅最近 24 小时增量） | 建议显式带 `time_from`、`time_to` |
 | 查终端告警 | `onesec_edr` | `edr_get_endpoint_alerts` / `edr_get_recent_endpoint_alerts` | 常见至少带 `time_from`、`time_to` |
 | 查恶意文件 / 威胁行为 / 时间线 / IOC | `onesec_edr` | 对应 `edr_get_*` action | 时间范围、分页、筛选字段 |
-| 查 DNS 拦截 / 解析日志 / 受威胁终端 | `onesec_dns` | `dns_search_blocked_queries` / `dns_search_queries` / `dns_search_threatened_endpoint` | 多数需要 `time_from`、`time_to` |
+| 查 DNS 拦截 / 解析日志 / 受威胁终端 | `onesec_dns` | `dns_search_blocked_queries` / `dns_get_recent_blocked_queries` / `dns_search_queries` / `dns_search_threatened_endpoint` | 多数需要 `time_from`、`time_to` |
 | 查软件清单或安装终端 | `onesec_software` | `software_query_page_list` / `software_query_agent_list` | 软件终端查询要 `name` + `publisher` |
 | 查终端、任务、审计 | `onesec_ops` | `ops_query_agent_page_list` / `ops_query_task_page_list` / `ops_query_audit_log` | 审计/任务通常要时间范围 |
 | 查病毒库 / 下发扫描 | `onesec_threat` | `threat_query_bd_version` / `threat_virus_scan` | 查询通常空参，写操作需明确目标终端 |
@@ -21,28 +21,70 @@ OneSEC 当前优先复用 grouped tool，而不是直接从页面做数据获取
 - 时间字段多数为秒级 Unix 时间戳
 - 查询类 action 默认优先；写操作只有在用户明确授权时才执行
 
-## 时间参数规则
+## 时间参数注意事项（重点）
 
-OneSEC 高频查询动作通常使用：
+### 时间参数计算
+调用任何时间相关 OneSEC API 时，必须**动态计算**时间戳，禁止手动估算。
 
-- `time_from`
-- `time_to`
+**错误方法（禁止）**
 
-单位：
-
-- 秒级时间戳，不是毫秒
-
-示例：
-
-```json
-{
-  "action": "edr_get_incidents",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
-  "cur_page": 1,
-  "page_size": 20
-}
+```python
+# 手动估算，硬编码
+time_from = 1741536000
+time_to = 1741622400
 ```
+
+**正确方法**
+
+```python
+import datetime
+
+# 按执行时刻动态计算最近 24 小时窗口
+now = datetime.datetime.now()
+time_to = int(now.timestamp())
+time_from = int((now - datetime.timedelta(hours=24)).timestamp())
+```
+
+使用动态计算的时间戳调用工具执行
+```
+onesec_dns(action="dns_get_recent_blocked_queries", time_from=time_from, time_to=time_to)
+```
+
+如果要查“今天”或“最近 7 天”，也必须动态计算，不要手填固定时间戳。
+
+###  时间参数规则
+- 秒级时间戳，不是毫秒，UTC+8 时区
+- 分页接口建议显式传 `time_from`、`time_to`
+- `recent` 系列只适合最近 24 小时的增量查询
+- DNS `dns_search_queries` 也只支持最近 24 小时内的数据
+- `edr_get_threat_files`、`edr_get_threat_activities`、`edr_get_incidents`、`edr_get_endpoint_alerts` 的时间窗口最长三个月
+- `ops_query_audit_log` 仅支持最近 30 天内的审计日志
+- 未传时间时，返回范围由服务端默认窗口决定，仅作兜底，不推荐依赖
+
+
+## 时间窗口选择表
+
+| 查询目标 | 推荐 action | 时间参数策略 | 备注 |
+|---|---|---|---|
+| 查本周事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 默认做法 |
+| 查最近 7 天事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 适合历史回溯 |
+| 查最近 30 天事件 | `edr_get_incidents` | 显式传 `time_from`、`time_to` | 适合历史回溯 |
+| 查最近 24 小时增量 | `edr_get_recent_incidents` | 显式传 `time_from`、`time_to`，且跨度不超过 24 小时 | 仅增量同步 |
+| 未传时间兜底查询 | `edr_get_incidents` | 不传时间 | 返回范围由服务端默认窗口决定，不推荐依赖 |
+
+补充规则：
+
+- 若用户说“recent 事件”但时间范围是本周、最近 7 天、最近 30 天，agent 应主动改用 `edr_get_incidents`
+- `edr_get_recent_incidents` 只用于最近 24 小时增量，不要拿它做历史回溯
+
+## 标准时间模板
+
+以下模板仅用于给 agent 组装请求时参考：
+
+- 时间戳单位一律是秒
+- 以下示例按 `Asia/Shanghai` 计算
+- 以下示例假设当前时间是 `2026-04-23 10:00:00 +08:00`
+- 实际调用时，应按执行当时的业务时区重新计算
 
 ## 先区分事件、告警、DNS 和资产
 
@@ -70,14 +112,17 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 
 - `onesec_edr`
 - `action=edr_get_incidents`
+- 历史回溯场景显式传 `time_from` + `time_to`
+- 仅最近 24 小时增量才使用 `edr_get_recent_incidents`
+- 未传时间只作为兜底，不要把它当成稳定窗口
 
 最小示例：
 
 ```json
 {
   "action": "edr_get_incidents",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
   "cur_page": 1,
   "page_size": 20
 }
@@ -111,8 +156,8 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 ```json
 {
   "action": "edr_get_endpoint_alerts",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
   "sql": "threat.level = 'attack'",
   "cur_page": 1,
   "page_size": 20
@@ -152,8 +197,8 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 ```json
 {
   "action": "edr_get_threat_files",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
   "cur_page": 1,
   "page_size": 20
 }
@@ -164,6 +209,14 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 - `edr_get_recent_threat_files`
 - `edr_get_recent_threat_activities`
 - `edr_get_recent_threat_timeline`
+
+其中时间线类 action 需要额外注意：
+
+- `edr_get_threat_timeline` 需要 `incident_id`
+- `edr_get_recent_threat_timeline` 也需要 `incident_id`
+- 如果还没有 `incident_id`，应先调用 `edr_get_incidents`
+- `edr_get_recent_threat_timeline` 仅适合最近 24 小时内的增量时间线查询
+- `edr_get_threat_files`、`edr_get_threat_activities` 等分页接口按文档时间窗口最长三个月
 
 ### 4. 查询威胁处置清单
 
@@ -200,6 +253,7 @@ OneSEC 中几个相邻页面经常被混用，建议先按语义路由：
 高频 action：
 
 - `dns_search_blocked_queries`
+- `dns_get_recent_blocked_queries`
 - `dns_search_queries`
 - `dns_search_threatened_endpoint`
 - `dns_get_public_ip_list`
@@ -209,10 +263,28 @@ DNS 拦截记录示例：
 ```json
 {
   "action": "dns_search_blocked_queries",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
   "domain": "evil.com",
-  "keyword": "evil"
+  "keyword": "evil",
+  "show_unblocked_threat": 1
+}
+```
+
+如果用户只明确给了一个完整域名，优先把 `domain` 和 `keyword` 都设成该域名；当前工具在缺少 `keyword` 时也会默认复用 `domain`。
+
+如果用户没有给域名/关键字，只有 `public_ip` + 时间范围，并且查询目标是最近 24 小时拦截记录，优先改用 `dns_get_recent_blocked_queries`；不要硬套 `dns_search_blocked_queries`。
+
+DNS 近期拦截增量示例：
+
+```json
+{
+  "action": "dns_get_recent_blocked_queries",
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
+  "block_reason": "threat",
+  "show_unblocked_threat": 1,
+  "threat_level": [2, 3, 4]
 }
 ```
 
@@ -221,8 +293,8 @@ DNS 解析日志示例：
 ```json
 {
   "action": "dns_search_queries",
-  "time_from": 1741536000,
-  "time_to": 1741622400,
+  "time_from": 动态计算秒级时间戳,
+  "time_to": 动态计算秒级时间戳,
   "domain": "evil.com",
   "page_items_num": 20
 }
@@ -231,7 +303,12 @@ DNS 解析日志示例：
 注意：
 
 - 有些 DNS action 对时间窗口要求严格
+- DNS 查询优先使用 Unix 秒级时间戳；当前工具也会兼容常见日期字符串，如 `YYYY-MM-DD HH:MM:SS`
+- `public_ip` 按文档是数组；当前工具也会兼容单个字符串并自动包装成单元素数组
+- 查询具体域名或关键字的 DNS 拦截明细时，优先使用 `dns_search_blocked_queries`
+- `dns_get_recent_blocked_queries` 仅适合最近 24 小时增量拉取，不支持 `domain`、`keyword`、`private_ip`、`threat_type` 和分页参数
 - `page_items_num` 与 `page_size` 不是同一个字段
+- DNS 拦截结果优先读取 `result` 字段；当前工具也会补充 `is_blocked`
 - 目标地址列表增删改是写操作，不要误用
 
 ### 6. 查询软件资产
@@ -288,8 +365,8 @@ DNS 解析日志示例：
 ```json
 {
   "action": "ops_query_audit_log",
-  "begin_time": 1741536000,
-  "end_time": 1741622400,
+  "begin_time": 动态计算的 begin_time 秒级时间戳,
+  "end_time": 动态计算的 end_time 秒级时间戳,
   "cur_page": 1,
   "page_size": 20
 }
@@ -301,8 +378,8 @@ DNS 解析日志示例：
 {
   "action": "ops_query_task_page_list",
   "time_type": "create_time",
-  "begin_time": 1741536000,
-  "end_time": 1741622400,
+  "begin_time": 动态计算的 begin_time 秒级时间戳,
+  "end_time": 动态计算的 end_time 秒级时间戳,
   "auto": 0,
   "cur_page": 1,
   "page_size": 20
@@ -312,7 +389,10 @@ DNS 解析日志示例：
 注意：
 
 - 审计和任务查询通常要求时间范围
+- `ops_query_audit_log` 仅支持最近 30 天内的日志
 - `ops_query_task_page_list` 还要求 `time_type` 和 `auto`
+- `time_type` 仅支持 `create_time`、`update_time`
+- `auto` 仅支持 `0`（人工响应）和 `1`（自动响应）
 
 ### 8. 病毒库与扫描任务
 
@@ -343,6 +423,9 @@ DNS 解析日志示例：
 
 - 这是写操作
 - 扫描范围越大，对终端影响越大
+- `task_type` 仅支持 `10110`（快速扫描）、`10120`（全盘扫描）、`10130`（自定义扫描）
+- `scanmode` 仅支持 `1`（极速）、`2`（均衡）、`3`（低耗）
+- `threat_update_bd_version` 的 `os_platform` 仅支持 `windows/macos`，macOS 架构仅支持 `Apple Silicon/Intel Chip`
 
 ## 高风险写操作清单
 

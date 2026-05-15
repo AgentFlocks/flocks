@@ -8,7 +8,9 @@ from typing import List, Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from flocks.config.config import Config
 from flocks.utils.file import File, FileNode, FileContent, FileInfo
+from flocks.utils.http_file_read_guard import resolve_path_for_http_file_access
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -23,8 +25,13 @@ async def list_files(path: str = Query(..., description="Directory path")):
     List files and directories in a specified path.
     """
     try:
-        nodes = await File.list(path)
+        cfg = await Config.get()
+        safe_path = await resolve_path_for_http_file_access(path, cfg)
+        nodes = await File.list(safe_path)
         return nodes
+    except PermissionError:
+        log.warning("http_file.list.denied", {"path": path})
+        raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.list.error", {"error": str(e), "path": path})
         raise HTTPException(status_code=500, detail=str(e))
@@ -38,10 +45,15 @@ async def read_file(path: str = Query(..., description="File path")):
     Read the content of a specified file.
     """
     try:
-        content = await File.read(path)
+        cfg = await Config.get()
+        safe_path = await resolve_path_for_http_file_access(path, cfg)
+        content = await File.read(safe_path)
         return content
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except PermissionError:
+        log.warning("http_file.read.denied", {"path": path})
+        raise HTTPException(status_code=403, detail="Access denied")
     except Exception as e:
         log.error("file.read.error", {"error": str(e), "path": path})
         raise HTTPException(status_code=500, detail=str(e))
@@ -59,6 +71,14 @@ async def search_files(
     
     Search for files or directories by name or pattern in the project directory.
     """
+    # Only enforce basic resource limits here.  The underlying ``File.search``
+    # invokes ``subprocess.run`` with ``shell=False`` and an argv list, so the
+    # query cannot reach a shell — there is no injection vector that warrants
+    # rejecting legitimate filenames containing ``;`` ``|`` ``$`` ``` ``` etc.
+    # The null byte is still refused because many POSIX APIs treat it as a
+    # string terminator and will silently truncate the argument.
+    if not query or len(query) > 200 or "\x00" in query:
+        raise HTTPException(status_code=400, detail="Invalid search query")
     try:
         results = await File.search(query=query, limit=limit, dirs=dirs, type=type)
         return results
@@ -103,14 +123,26 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
     Find text
     
     Search for text patterns across files in the project using grep.
+    Only searches within the Flocks project root directory.
     """
     try:
         import subprocess
         import os
-        
-        cwd = os.getcwd()
-        
-        # Use grep for text search
+        from flocks.utils.paths import find_flocks_project_root
+
+        project_root = find_flocks_project_root()
+        if project_root is None:
+            raise HTTPException(status_code=403, detail="No Flocks project root found")
+        cwd = str(project_root)
+
+        if not pattern or len(pattern) > 500 or "\x00" in pattern:
+            raise HTTPException(status_code=400, detail="Invalid search pattern")
+
+        # ``grep`` runs as its own argv (no shell); the ``--`` sentinel stops
+        # ``grep`` from interpreting a leading ``-`` in ``pattern`` as an
+        # option.  We intentionally keep regex semantics (the historical
+        # contract) and rely on ``subprocess.run(shell=False)`` plus the
+        # bounded cwd (``project_root``) to contain the command.
         cmd = [
             "grep",
             "-rn",  # recursive, line numbers
@@ -132,6 +164,7 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
             "--exclude-dir=__pycache__",
             "--exclude-dir=.venv",
             "--exclude-dir=venv",
+            "--",
             pattern,
             ".",
         ]
@@ -147,7 +180,7 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
         matches = []
         
         if result.returncode == 0:
-            for line in result.stdout.split("\n")[:100]:  # Limit to 100 matches
+            for line in result.stdout.split("\n")[:100]:
                 if not line.strip():
                     continue
                 
@@ -164,6 +197,8 @@ async def find_text(pattern: str = Query(..., description="Search pattern")):
                     })
         
         return matches
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("text.search.error", {"error": str(e), "pattern": pattern})
         raise HTTPException(status_code=500, detail=str(e))

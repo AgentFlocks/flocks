@@ -2,13 +2,23 @@
 Tests for server module
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 from flocks.server.app import app
 from flocks.task.manager import TaskManager
-from flocks.task.models import DeliveryStatus, SchedulerMode, TaskStatus, TaskTrigger
+from flocks.task.store import TaskStore
+from flocks.task.models import (
+    DeliveryStatus,
+    ExecutionTriggerType,
+    SchedulerMode,
+    SchedulerStatus,
+    TaskStatus,
+    TaskTrigger,
+)
 
 
 @pytest.fixture
@@ -83,6 +93,29 @@ async def test_queue_items_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_create_scheduled_task_missing_cron_returns_422(client):
+    response = await client.post(
+        "/api/task-schedulers",
+        json={
+            "title": "缺少 cron 的定时任务",
+            "type": "scheduled",
+            "runOnce": False,
+        },
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["message"] == "cron is required for recurring scheduled tasks"
+
+
+@pytest.mark.asyncio
+async def test_list_executions_invalid_priority_returns_422(client):
+    response = await client.get("/api/task-executions", params={"priority": "bad"})
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["message"] == "Invalid task priority: bad"
+
+
+@pytest.mark.asyncio
 async def test_task_schedulers_scheduled_only_excludes_immediate_queue_templates(client):
     await TaskManager.create_scheduler(
         title="立即任务",
@@ -105,12 +138,33 @@ async def test_task_schedulers_scheduled_only_excludes_immediate_queue_templates
 
 
 @pytest.mark.asyncio
+async def test_task_scheduler_list_accepts_legacy_paused_status_query(client):
+    scheduler = await TaskManager.create_scheduler(
+        title="兼容旧 paused 调度查询",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+    await TaskManager.disable_scheduler(scheduler.id)
+
+    response = await client.get("/api/task-schedulers", params={"status": "paused"})
+
+    assert response.status_code == status.HTTP_200_OK
+    ids = {item["id"] for item in response.json()["items"]}
+    assert scheduler.id in ids
+
+
+@pytest.mark.asyncio
 async def test_task_schedulers_list_excludes_archived_builtin_after_delete(client):
     scheduler = await TaskManager.create_scheduler(
         title="内置计划任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
         dedup_key="builtin:test-scheduled-task",
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.SCHEDULED,
+        enqueue=True,
     )
 
     response = await client.delete(f"/api/task-schedulers/{scheduler.id}")
@@ -122,12 +176,125 @@ async def test_task_schedulers_list_excludes_archived_builtin_after_delete(clien
     ids = {item["id"] for item in data["items"]}
 
     assert scheduler.id not in ids
+    archived = await TaskManager.get_scheduler(scheduler.id)
+    cancelled_execution = await TaskManager.get_execution(execution.id)
+    assert archived is not None
+    assert archived.status == SchedulerStatus.ARCHIVED
+    assert cancelled_execution is not None
+    assert cancelled_execution.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_delete_scheduler_cleans_queue_state_for_non_builtin(client):
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
+        title="普通计划任务",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+
+    before = await client.get("/api/task-system/queue/status")
+    assert before.status_code == status.HTTP_200_OK
+    assert before.json()["queued"] + before.json()["running"] >= 1
+
+    response = await client.delete(f"/api/task-schedulers/{scheduler.id}")
+    assert response.status_code == status.HTTP_200_OK
+
+    after = await client.get("/api/task-system/queue/status")
+    assert after.status_code == status.HTTP_200_OK
+    assert after.json()["queued"] == 0
+
+    executions = await client.get("/api/task-executions")
+    assert executions.status_code == status.HTTP_200_OK
+    execution_ids = {item["id"] for item in executions.json()["items"]}
+
+    assert execution.id not in execution_ids
+
+
+@pytest.mark.asyncio
+async def test_task_execution_list_accepts_legacy_paused_status_query(client):
+    scheduler = await TaskManager.create_scheduler(
+        title="兼容旧 paused 执行查询",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    execution.status = TaskStatus.CANCELLED
+    execution.completed_at = datetime.now(timezone.utc)
+    await TaskStore.update_execution(execution)
+
+    response = await client.get("/api/task-executions", params={"status": "paused"})
+
+    assert response.status_code == status.HTTP_200_OK
+    ids = {item["id"] for item in response.json()["items"]}
+    assert execution.id in ids
+
+
+@pytest.mark.asyncio
+async def test_batch_cancel_endpoint_cancels_selected_executions(client):
+    scheduler = await TaskManager.create_scheduler(
+        title="批量取消接口",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+    cancellable = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+    completed = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=False,
+    )
+    completed.status = TaskStatus.COMPLETED
+    completed.completed_at = datetime.now(timezone.utc)
+    await TaskStore.update_execution(completed)
+
+    response = await client.post(
+        "/api/task-executions/batch/cancel",
+        json={"executionIds": [cancellable.id, completed.id]},
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["cancelled"] == 1
+
+    cancelled_execution = await TaskManager.get_execution(cancellable.id)
+    assert cancelled_execution is not None
+    assert cancelled_execution.status == TaskStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_execution_pause_and_resume_endpoints_are_removed(client):
+    scheduler = await TaskManager.create_scheduler(
+        title="旧暂停接口",
+        mode=SchedulerMode.ONCE,
+        trigger=TaskTrigger(run_immediately=False),
+    )
+    execution = await TaskManager.create_execution_from_scheduler(
+        scheduler,
+        trigger_type=ExecutionTriggerType.RUN_ONCE,
+        enqueue=True,
+    )
+
+    pause_response = await client.post(f"/api/task-executions/{execution.id}/pause")
+    resume_response = await client.post(f"/api/task-executions/{execution.id}/resume")
+
+    assert pause_response.status_code == status.HTTP_404_NOT_FOUND
+    assert resume_response.status_code == status.HTTP_404_NOT_FOUND
 
 
 @pytest.mark.asyncio
 async def test_mark_execution_viewed_endpoint_updates_delivery_status(client):
-    from flocks.task.store import TaskStore
-
     scheduler = await TaskManager.create_scheduler(
         title="标记已读",
         mode=SchedulerMode.ONCE,

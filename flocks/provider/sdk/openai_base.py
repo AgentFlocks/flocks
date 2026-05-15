@@ -10,6 +10,8 @@ Subclasses only need to define class attributes and get_models().
 import os
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import httpx
+
 from flocks.provider.provider import (
     BaseProvider,
     ChatMessage,
@@ -21,6 +23,182 @@ from flocks.provider.provider import (
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_base")
+
+# Shared HTTP timeout used by every OpenAI-style provider (OpenAIProvider,
+# OpenAICompatibleProvider, OpenAIBaseProvider). Centralised here so a single
+# change covers all three providers. Granular values (instead of a flat
+# timeout) let small control-plane requests fail fast while multimodal
+# (image) uploads get the headroom they need on slow links.
+DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=600.0, write=600.0, pool=60.0)
+
+
+# Canonical OpenAI-style content translation, shared by every provider that
+# talks the OpenAI chat-completions wire format. Kept as a module-level
+# function (instead of a method on a single class) because the three OpenAI
+# implementations — ``OpenAIProvider``, ``OpenAICompatibleProvider``, and
+# ``OpenAIBaseProvider`` — sit in parallel class hierarchies. Putting the
+# logic here gives all of them one point of truth: change the schema once,
+# every provider follows.
+#
+# Recognised input block schema (Flocks-internal):
+#   {"type": "text",  "text": "..."}
+#   {"type": "image", "mimeType": "image/png", "data": "<base64>"}
+# Plus already-OpenAI-native blocks (image_url / input_audio / audio /
+# refusal / file) which are passed through unchanged so callers that
+# pre-format won't lose them.
+_OPENAI_NATIVE_BLOCK_TYPES = frozenset({
+    "image_url", "input_audio", "audio", "refusal", "file",
+})
+
+# Flocks-internal block types that the translation logic knows about. Used to
+# distinguish "known type with missing/invalid fields" from "genuinely unknown
+# type" when logging dropped blocks.
+_FLOCKS_INTERNAL_BLOCK_TYPES = frozenset({"text", "image"})
+
+
+def _summarise_block(block: Any) -> Dict[str, Any]:
+    """Describe a content block for diagnostic logs without leaking base64.
+
+    Multimodal requests can carry several MB of base64 image data. Logging the
+    full payload would dwarf every other line in the journal *and* expose
+    user-uploaded data, so for ``image_url`` blocks we only record the URL
+    scheme and length. ``text`` blocks record character count only.
+    """
+    if isinstance(block, dict):
+        btype = block.get("type")
+        if btype == "image_url":
+            img = block.get("image_url") or {}
+            url = img.get("url") if isinstance(img, dict) else ""
+            scheme = (
+                url.split(":", 1)[0]
+                if isinstance(url, str) and ":" in url
+                else ""
+            )
+            return {
+                "type": btype,
+                "url_scheme": scheme,
+                "url_chars": len(url) if isinstance(url, str) else 0,
+            }
+        if btype == "text":
+            txt = block.get("text") or ""
+            return {"type": btype, "text_chars": len(txt)}
+        return {"type": btype}
+    return {"type": type(block).__name__}
+
+
+def _summarise_messages(openai_messages: List[Any]) -> List[Dict[str, Any]]:
+    """Compute a redacted ``message_shapes`` for diagnostic logging.
+
+    See :func:`_summarise_block`. Used by both streaming and non-streaming
+    request paths so multimodal regressions surface uniformly in the log.
+    """
+    out: List[Dict[str, Any]] = []
+    for m in openai_messages:
+        if not isinstance(m, dict):
+            out.append({"type": type(m).__name__, "skipped": True})
+            continue
+        content = m.get("content")
+        if isinstance(content, list):
+            out.append({
+                "role": m.get("role"),
+                "blocks": [_summarise_block(b) for b in content],
+            })
+        else:
+            out.append({
+                "role": m.get("role"),
+                "content_chars": len(content) if isinstance(content, str) else None,
+            })
+    return out
+
+
+def format_openai_content(content: Any) -> Any:
+    """Translate Flocks-internal content blocks to OpenAI chat.completions schema.
+
+    Plain string content (the common case for assistant/tool messages) is
+    passed through untouched. List content is rewritten so each block is in
+    the schema OpenAI's chat.completions API expects:
+
+    * ``{"type": "image", "mimeType": ..., "data": <b64>}``
+      → ``{"type": "image_url", "image_url": {"url": "data:...;base64,..."}}``
+    * ``{"type": "text", "text": ...}`` is preserved.
+    * Already-OpenAI-native block types are passed through unchanged.
+    * Unknown block types are dropped and logged at DEBUG level to avoid
+      sending malformed payloads that would otherwise trigger a 400 from
+      the gateway. Callers should monitor for ``unknown_block_dropped`` log
+      events when adding new block kinds.
+    """
+    if not isinstance(content, list):
+        return content
+
+    formatted: list[dict[str, Any]] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text" and isinstance(block.get("text"), str):
+            formatted.append({"type": "text", "text": block["text"]})
+        elif block_type == "image" and block.get("data") and block.get("mimeType"):
+            formatted.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{block['mimeType']};base64,{block['data']}",
+                },
+            })
+        elif block_type in _OPENAI_NATIVE_BLOCK_TYPES:
+            formatted.append(block)
+        elif block_type in _FLOCKS_INTERNAL_BLOCK_TYPES:
+            # Known type but missing required fields (e.g. image without data/mimeType,
+            # or text with a non-string value). Log at debug with the actual keys present
+            # to make it easy to diagnose upstream encoding bugs.
+            log.debug("openai_base.malformed_block_dropped", {
+                "type": block_type,
+                "keys": sorted(block.keys()),
+            })
+        else:
+            log.debug("openai_base.unknown_block_dropped", {"type": block_type})
+    # Return the translated list as-is (possibly empty). Callers that need to
+    # omit the ``content`` field entirely (e.g. assistant messages with
+    # tool_calls only) are responsible for detecting the empty-list case and
+    # dropping the key themselves. Returning ``None`` here risks silencing a
+    # 400 for user/system roles where ``content=null`` is not permitted.
+    return formatted
+
+
+def format_openai_messages(messages: List["ChatMessage"]) -> list:
+    """Convert a ``ChatMessage`` list to the OpenAI chat-completions wire format.
+
+    Shared by all three OpenAI-style providers (``OpenAIProvider``,
+    ``OpenAICompatibleProvider``, ``OpenAIBaseProvider``) so the role-aware
+    content-null guard lives in exactly one place.
+
+    Content-null rules (OpenAI chat completions spec):
+    * ``user`` / ``system`` / ``tool`` roles MUST have non-null content.
+    * ``assistant`` messages with ``tool_calls`` MAY omit ``content`` (null is
+      accepted) — we omit the key entirely for cleaner serialisation.
+    * An empty translated list (all blocks were dropped/malformed) is treated
+      the same as no content: safe fallback is ``""`` for non-assistant roles
+      and key-omission for assistant-with-tool-calls.
+    """
+    formatted = []
+    for m in messages:
+        role = m.role if isinstance(m.role, str) else m.role.value
+        content = format_openai_content(m.content)
+        d: Dict[str, Any] = {"role": role}
+        if isinstance(content, list) and not content:
+            if role == "assistant" and m.tool_calls:
+                pass  # omit content key — null is valid for tool-call-only turns
+            else:
+                d["content"] = ""
+        else:
+            d["content"] = content
+        if m.tool_calls:
+            d["tool_calls"] = m.tool_calls
+        if m.tool_call_id:
+            d["tool_call_id"] = m.tool_call_id
+        if m.name:
+            d["name"] = m.name
+        formatted.append(d)
+    return formatted
 
 
 def _coerce_bool(value: Any, default: bool) -> bool:
@@ -353,12 +531,18 @@ class OpenAIBaseProvider(BaseProvider):
         ENV_API_KEY: List of env var names for API key lookup
         ENV_BASE_URL: Env var name for base URL override
         CATALOG_ID: ID in catalog.json (for get_meta / get_model_definitions)
+        ALLOW_NO_API_KEY: When True, ``_get_client()`` falls back to a sentinel
+            placeholder key instead of raising. Use for self-hosted endpoints
+            (e.g. internal LLM gateways, vLLM behind a reverse proxy) that do
+            not enforce auth. Default False keeps SaaS providers strict.
     """
 
     DEFAULT_BASE_URL: str = ""
     ENV_API_KEY: List[str] = []
     ENV_BASE_URL: str = ""
     CATALOG_ID: str = ""
+    ALLOW_NO_API_KEY: bool = False
+    NO_API_KEY_PLACEHOLDER: str = "not-needed"
 
     def __init__(self, provider_id: str, name: str):
         super().__init__(provider_id=provider_id, name=name)
@@ -393,10 +577,15 @@ class OpenAIBaseProvider(BaseProvider):
 
             api_key = self._config.api_key if self._config else self._api_key
             if not api_key:
-                env_hint = self.ENV_API_KEY[0] if self.ENV_API_KEY else "API_KEY"
-                raise ValueError(
-                    f"{self.name} API key not configured. Set {env_hint}."
-                )
+                if self.ALLOW_NO_API_KEY:
+                    # Self-hosted / no-auth endpoint: pass a sentinel so the
+                    # OpenAI SDK still constructs a client.
+                    api_key = self.NO_API_KEY_PLACEHOLDER
+                else:
+                    env_hint = self.ENV_API_KEY[0] if self.ENV_API_KEY else "API_KEY"
+                    raise ValueError(
+                        f"{self.name} API key not configured. Set {env_hint}."
+                    )
 
             base_url = (
                 self._config.base_url
@@ -406,13 +595,34 @@ class OpenAIBaseProvider(BaseProvider):
 
             custom_settings = getattr(self._config, "custom_settings", None) or {}
             verify_ssl = resolve_verify_ssl(custom_settings, default=True)
-            http_client = httpx.AsyncClient(verify=verify_ssl, timeout=120.0)
+            # Honour the same env-var contract as ``OpenAIProvider``: by default
+            # we follow ambient HTTP_PROXY / HTTPS_PROXY / NO_PROXY settings
+            # (``trust_env=True``) so that corporate egress works out of the
+            # box. Operators can opt out globally via FLOCKS_HTTP_TRUST_ENV=0
+            # or per-provider via ``custom_settings.trust_env``.
+            trust_env = _coerce_bool(
+                os.getenv("FLOCKS_HTTP_TRUST_ENV"), True
+            )
+            if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
+                trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
+            timeout = DEFAULT_HTTP_TIMEOUT
+            http_client = httpx.AsyncClient(
+                trust_env=trust_env,
+                verify=verify_ssl,
+                timeout=timeout,
+            )
 
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
                 http_client=http_client,
             )
+            log.info("openai_base.client.created", {
+                "provider_id": getattr(self._config, "id", None),
+                "base_url": base_url,
+                "trust_env": trust_env,
+                "verify_ssl": verify_ssl,
+            })
         return self._client
 
     # ==================== Catalog Integration ====================
@@ -436,20 +646,16 @@ class OpenAIBaseProvider(BaseProvider):
 
     # ==================== Chat ====================
 
+    # Thin static-method wrapper so existing call-sites
+    # (``OpenAIBaseProvider._format_content``) keep working. Real logic lives
+    # in the module-level :func:`format_openai_content` so all OpenAI-style
+    # providers share one implementation.
+    _format_content = staticmethod(format_openai_content)
+
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:
         """Convert ChatMessage list to OpenAI API dicts, preserving tool_calls / tool results."""
-        formatted = []
-        for m in messages:
-            d: Dict[str, Any] = {"role": m.role, "content": m.content}
-            if m.tool_calls:
-                d["tool_calls"] = m.tool_calls
-            if m.tool_call_id:
-                d["tool_call_id"] = m.tool_call_id
-            if m.name:
-                d["name"] = m.name
-            formatted.append(d)
-        return formatted
+        return format_openai_messages(messages)
 
     async def chat(
         self, model_id: str, messages: List[ChatMessage], **kwargs
@@ -479,6 +685,19 @@ class OpenAIBaseProvider(BaseProvider):
             params["max_tokens"] = kwargs["max_tokens"]
         if kwargs.get("tools"):
             params["tools"] = kwargs["tools"]
+
+        # Mirror ``chat_stream``'s diagnostic log so non-streaming multimodal
+        # regressions are equally visible. Never logs raw base64 — see
+        # ``_summarise_block``.
+        log.info("openai_base.chat.request", {
+            "model": model_id,
+            "thinking_enabled": bool(thinking),
+            "has_extra_body": "extra_body" in params,
+            "has_tools": bool(kwargs.get("tools")),
+            "max_tokens": kwargs.get("max_tokens"),
+            "has_temperature": "temperature" in params,
+            "message_shapes": _summarise_messages(openai_messages),
+        })
 
         response = await client.chat.completions.create(**params)
         if not response.choices:
@@ -542,6 +761,8 @@ class OpenAIBaseProvider(BaseProvider):
         if kwargs.get("tools"):
             params["tools"] = kwargs["tools"]
 
+        # Inspect content shape so multimodal regressions surface in the log.
+        # We *never* log full base64 payloads — see ``_summarise_block``.
         log.info("openai_base.stream.request", {
             "model": model_id,
             "thinking_enabled": bool(thinking),
@@ -550,6 +771,7 @@ class OpenAIBaseProvider(BaseProvider):
             "max_tokens": kwargs.get("max_tokens"),
             "has_temperature": "temperature" in params,
             "include_usage": True,
+            "message_shapes": _summarise_messages(openai_messages),
         })
 
         try:

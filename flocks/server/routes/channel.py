@@ -178,6 +178,94 @@ async def list_channels():
     ]
 
 
+@router.post("/{channel_id}/record-inbound")
+async def record_inbound(channel_id: str):
+    """Notify the gateway that a message was received on this channel.
+
+    Used by out-of-process bridges (e.g. DingTalk's runner.ts) that bypass the
+    InboundDispatcher so that last_message_at is updated on the plugin status.
+    """
+    default_manager.record_message(channel_id)
+    return {"ok": True}
+
+
+class BindSessionRequest(BaseModel):
+    """Body for ``POST /api/channel/{channel_id}/bind``."""
+    session_id: str
+    chat_id: str
+    chat_type: str = "direct"  # "direct" | "group"
+    account_id: Optional[str] = "default"
+    thread_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+@router.post("/{channel_id}/bind")
+async def bind_session(channel_id: str, req: BindSessionRequest):
+    """Register a (channel, conversation) → session mapping in ``channel_bindings``.
+
+    For Feishu/WeCom/Telegram this row is written automatically inside
+    ``InboundDispatcher`` → ``SessionBindingService.resolve_or_create``.  Out-
+    of-process bridges (e.g. DingTalk's ``runner.ts``) create their Flocks
+    session on their own and must call this endpoint after each session
+    creation so that ``channel_message`` / ``POST /session-send`` can route
+    outbound replies back.
+
+    Idempotent — re-binding the same conversation key replaces the prior row.
+    """
+    from flocks.channel.base import ChatType
+    from flocks.channel.inbound.session_binding import SessionBindingService
+
+    # Conversation-level bindings only — CHANNEL-broadcast style targets
+    # (e.g. Telegram channels) are not addressable by a single chat reply
+    # and would never be a legitimate ``channel_message`` destination.
+    if req.chat_type not in ("direct", "group"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chat_type '{req.chat_type}', expected 'direct' or 'group'",
+        )
+    chat_type = ChatType(req.chat_type)
+
+    # Defense-in-depth: some out-of-process bridges build composite
+    # session-isolation keys like ``<conversationId>:<senderId>`` for
+    # per-sender group sessions (e.g. DingTalk's ``groupSessionScope=
+    # group_sender``).  Such keys are NOT valid outbound targets — they
+    # would be fed as ``openConversationId`` to the platform API and fail
+    # to deliver.  Reject them here so the bug can never regress silently
+    # into the bindings table.
+    if chat_type is ChatType.GROUP and ":" in req.chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid group chat_id '{req.chat_id}': contains ':', which "
+                "looks like a session-isolation composite (e.g. "
+                "'<conversationId>:<senderId>').  Pass the bare platform "
+                "conversation id (e.g. DingTalk openConversationId)."
+            ),
+        )
+
+    svc = SessionBindingService()
+    try:
+        binding = await svc.bind_session(
+            session_id=req.session_id,
+            channel_id=channel_id,
+            account_id=req.account_id or "default",
+            chat_id=req.chat_id,
+            chat_type=chat_type,
+            thread_id=req.thread_id,
+            agent_id=req.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {
+        "ok": True,
+        "channel_id": binding.channel_id,
+        "session_id": binding.session_id,
+        "chat_id": binding.chat_id,
+        "chat_type": binding.chat_type.value,
+    }
+
+
 @router.post("/{channel_id}/restart")
 async def restart_channel(channel_id: str):
     """Restart a single channel connection with the latest config.
@@ -210,6 +298,52 @@ async def restart_all_channels():
 
     asyncio.create_task(_do())
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Weixin QR login
+# ---------------------------------------------------------------------------
+
+class WeixinQrStartRequest(BaseModel):
+    baseUrl: Optional[str] = None
+
+
+@router.post("/weixin/qr-login/start")
+async def weixin_qr_login_start(req: WeixinQrStartRequest):
+    """Request a fresh iLink Bot QR code for WeChat account login.
+
+    No credentials needed — this is the pre-authentication step.
+    Returns ``{qrcode_value, qrcode_url}`` for the frontend to render.
+    """
+    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+    from flocks.channel.builtin.weixin.qr_login import start_qr_login
+
+    base_url = (req.baseUrl or "").strip() or ILINK_BASE_URL
+    try:
+        result = await start_qr_login(base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.start_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/weixin/qr-login/status")
+async def weixin_qr_login_status(qrcode: str, baseUrl: Optional[str] = None):
+    """Poll the QR code scan status once.
+
+    Returns ``{status}`` where status ∈ waiting | scaned | expired | confirmed.
+    On ``confirmed`` also returns ``{account_id, token}``.
+    """
+    from flocks.channel.builtin.weixin.config import ILINK_BASE_URL
+    from flocks.channel.builtin.weixin.qr_login import poll_qr_status
+
+    base_url = (baseUrl or "").strip() or ILINK_BASE_URL
+    try:
+        result = await poll_qr_status(qrcode_value=qrcode, base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.poll_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,17 @@
+{
+  "description": "Directory layout for Tier-B Windows installer staging (tools + flocks repo root, no prebuilt .venv).",
+  "install_root_children": [
+    "bin",
+    "tools/uv",
+    "tools/node",
+    "tools/chrome (Chrome for Testing from build-staging.ps1; includes flocks-bundled-chrome.exe.relative.txt)",
+    "tools/npm-global",
+    "flocks"
+  ],
+  "environment": {
+    "FLOCKS_INSTALL_ROOT": "Absolute path to install root (contains bin/, tools/, flocks/). Optional; used to derive defaults.",
+    "FLOCKS_REPO_ROOT": "Absolute path to repository root = {install_root}/flocks (contains pyproject.toml).",
+    "FLOCKS_NODE_HOME": "Directory containing node.exe (typically {install_root}/tools/node). Overrides PATH order for WebUI.",
+    "FLOCKS_ROOT": "User data directory (logs, run, workspace outputs); set by installer wizard."
+  }
+}

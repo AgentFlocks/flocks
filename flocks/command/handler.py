@@ -6,7 +6,7 @@ Provides shared, code-driven handling for /help, /tools, /skills.
 
 from typing import Awaitable, Callable, Optional
 
-from flocks.command.command import Command
+from flocks.command.command import API_SURFACES, Command, CommandSurface
 from flocks.tool.registry import ToolRegistry
 from flocks.skill.skill import Skill
 
@@ -14,7 +14,6 @@ from flocks.skill.skill import Skill
 SendText = Callable[[str], Awaitable[None]]
 SendPrompt = Callable[[str], Awaitable[None]]
 ClearScreen = Callable[[], Awaitable[None]]
-RestartSession = Callable[[], Awaitable[None]]
 
 
 async def handle_slash_command(
@@ -23,7 +22,7 @@ async def handle_slash_command(
     send_text: SendText,
     send_prompt: SendPrompt,
     clear_screen: Optional[ClearScreen] = None,
-    restart_session: Optional[RestartSession] = None,
+    surface: Optional[CommandSurface] = None,
 ) -> bool:
     """
     Handle supported slash commands.
@@ -38,11 +37,18 @@ async def handle_slash_command(
     if not cmd_parts:
         return False
 
-    name = cmd_parts[0].lower()
+    resolved = Command.resolve(cmd_parts[0].lower())
+    if not resolved or resolved.execution_kind != "direct":
+        return False
+
+    name = resolved.name
     args = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
 
     if name == "help":
-        commands = Command.list()
+        if surface:
+            commands = Command.list(surface=surface)
+        else:
+            commands = Command.list_for_surfaces(API_SURFACES)
         lines = ["Available / commands:", ""]
         for command in commands:
             lines.append(f"- /{command.name}: {command.description}")
@@ -50,7 +56,6 @@ async def handle_slash_command(
             "",
             "Tips:",
             "- /clear clears the screen",
-            "- /restart resets the session",
             "- /tools [list|refresh|info <name>|create <requirement>]",
             "- /skills [list|refresh]",
             "- /workflows — list all available workflows",
@@ -64,13 +69,6 @@ async def handle_slash_command(
             await clear_screen()
         else:
             await send_text("Screen cleared.")
-        return True
-
-    if name == "restart":
-        if restart_session:
-            await restart_session()
-        else:
-            await send_text("This environment does not support /restart.")
         return True
 
     if name == "tools":

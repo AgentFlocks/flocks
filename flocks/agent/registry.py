@@ -579,6 +579,27 @@ class Agent:
 # ---------------------------------------------------------------------------
 
 
+def _agent_event_should_reload(event: object) -> bool:
+    """Return True if a watchdog event should invalidate the agent cache.
+
+    Mirrors ``flocks.tool.registry._tool_event_should_reload``: atomic-save
+    editors surface the real target via ``dest_path``, so we inspect both
+    endpoints before deciding to skip.
+    """
+    candidates = []
+    src = getattr(event, "src_path", "") or ""
+    if src:
+        candidates.append(src)
+    dest = getattr(event, "dest_path", "") or ""
+    if dest:
+        candidates.append(dest)
+    for path in candidates:
+        fname = os.path.basename(path)
+        if fname == "agent.yaml" or path.endswith(".md"):
+            return True
+    return False
+
+
 class AgentFileWatcher:
     """Watch plugin agent directories and auto-invalidate the Agent cache on change.
 
@@ -621,13 +642,20 @@ class AgentFileWatcher:
 
         watcher = self
 
+        # Only react to actual content-mutation events.  Without this guard the
+        # ``opened``/``closed``/``closed_no_write`` events that watchdog emits
+        # whenever any code (including the agent loader itself) reads
+        # ``agent.yaml`` / ``*.md`` would re-trigger cache invalidation on every
+        # access, causing a self-sustaining reload loop.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
         class _Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent) -> None:
                 if event.is_directory:
                     return
-                src = getattr(event, "src_path", "") or ""
-                fname = os.path.basename(src)
-                if fname == "agent.yaml" or src.endswith(".md"):
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
+                    return
+                if _agent_event_should_reload(event):
                     watcher._schedule_invalidate()
 
         handler = _Handler()

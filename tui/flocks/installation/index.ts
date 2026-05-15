@@ -1,6 +1,7 @@
 import { BusEvent } from "@/bus/bus-event"
 import path from "path"
 import { $ } from "bun"
+import { spawn } from "child_process"
 import z from "zod"
 import { NamedError } from "@flocks-ai/util/error"
 import { Log } from "../util/log"
@@ -120,6 +121,71 @@ export namespace Installation {
     }),
   )
 
+  const DEFAULT_NPM_REGISTRY = "https://registry.npmjs.org"
+
+  export function normalizeNpmRegistry(registry?: string | null) {
+    const value = registry?.trim() || DEFAULT_NPM_REGISTRY
+    return value.endsWith("/") ? value.slice(0, -1) : value
+  }
+
+  export function resolveAgentBrowserNpmRegistry(input: {
+    flocksNpmRegistry?: string | null
+    npmConfigRegistry?: string | null
+    npmConfigRegistryUpper?: string | null
+    configuredRegistry?: string | null
+  }) {
+    return normalizeNpmRegistry(
+      [
+        input.flocksNpmRegistry,
+        input.npmConfigRegistry,
+        input.npmConfigRegistryUpper,
+        input.configuredRegistry,
+      ].find((registry) => registry?.trim()),
+    )
+  }
+
+  function explicitAgentBrowserNpmRegistry() {
+    const registry = [
+      process.env.FLOCKS_NPM_REGISTRY,
+      process.env.npm_config_registry,
+      process.env.NPM_CONFIG_REGISTRY,
+    ].find((registry) => registry?.trim())
+
+    return registry ? normalizeNpmRegistry(registry) : undefined
+  }
+
+  export function updateAgentBrowserInBackground() {
+    const registry = explicitAgentBrowserNpmRegistry()
+    const env = registry
+      ? {
+          ...process.env,
+          npm_config_registry: registry,
+        }
+      : process.env
+
+    try {
+      const npm = process.platform === "win32" ? "npm.cmd" : "npm"
+      const child = spawn(npm, ["update", "-g", "agent-browser"], {
+        detached: true,
+        env,
+        stdio: "ignore",
+        windowsHide: true,
+      })
+
+      child.on("error", (error) => {
+        log.warn("agent-browser background update failed to start", { error })
+      })
+      child.unref()
+    } catch (error) {
+      log.warn("agent-browser background update failed to start", { error })
+      return
+    }
+
+    log.info("agent-browser background update started", {
+      registry: registry ?? "npm-config",
+    })
+  }
+
   async function getBrewFormula() {
     const tapFormula = await $`brew list --formula anomalyco/tap/opencode`.throws(false).quiet().text()
     if (tapFormula.includes("opencode")) return "anomalyco/tap/opencode"
@@ -176,6 +242,7 @@ export namespace Installation {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     })
+    updateAgentBrowserInBackground()
     await $`${process.execPath} --version`.nothrow().quiet().text()
   }
 

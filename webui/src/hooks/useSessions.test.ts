@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { applyMessagePartUpdate, useSessionMessages } from './useSessions';
+import client from '@/api/client';
 import type { Message } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,28 @@ describe('applyMessagePartUpdate', () => {
 describe('updateMessagePart scheduling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('keeps parentID from fetched messages for regenerate truncation', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: [{
+        info: {
+          id: 'msg-2',
+          sessionID: 'sess-1',
+          role: 'assistant',
+          parentID: 'msg-1',
+          time: { created: 123 },
+        },
+        parts: [],
+      }],
+    } as any);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+
+    await act(async () => {});
+
+    expect(result.current.messages).toHaveLength(1);
+    expect(result.current.messages[0].parentID).toBe('msg-1');
   });
 
   it('first appearance of a new part updates messages state immediately', async () => {

@@ -191,7 +191,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       if (messages.length > lastKnownCount) {
         const lastAssistant = [...messages]
           .reverse()
-          .find((m: any) => m.role === 'assistant' && m.finish);
+          .find((m: any) => (m.info?.role ?? m.role) === 'assistant' && (m.info?.finish ?? m.finish));
 
         if (lastAssistant) {
           const text = (lastAssistant.parts ?? [])

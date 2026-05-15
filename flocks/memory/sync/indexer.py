@@ -222,7 +222,7 @@ class MemoryIndexer:
         indexed = {}
         
         try:
-            async with aiosqlite.connect(Storage.get_db_path()) as db:
+            async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
                     SELECT path, hash, mtime, size
                     FROM memory_files
@@ -449,7 +449,7 @@ class MemoryIndexer:
         import aiosqlite
         
         try:
-            async with aiosqlite.connect(Storage.get_db_path()) as db:
+            async with Storage.connect(Storage.get_db_path()) as db:
                 await db.execute(
                     "DELETE FROM memory_chunks WHERE project_id = ? AND path = ?",
                     (self.project_id, path),
@@ -465,7 +465,7 @@ class MemoryIndexer:
         now = datetime.now().timestamp()
         
         try:
-            async with aiosqlite.connect(Storage.get_db_path()) as db:
+            async with Storage.connect(Storage.get_db_path()) as db:
                 await db.execute("""
                     INSERT OR REPLACE INTO memory_files
                     (path, project_id, source, hash, mtime, size, indexed_at)
@@ -496,7 +496,7 @@ class MemoryIndexer:
         import aiosqlite
         
         try:
-            async with aiosqlite.connect(Storage.get_db_path()) as db:
+            async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
                     SELECT path FROM memory_files WHERE project_id = ?
                 """, (self.project_id,))

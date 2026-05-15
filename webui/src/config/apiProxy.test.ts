@@ -19,10 +19,12 @@ describe('apiProxy helpers', () => {
       '/api': {
         target: 'http://127.0.0.1:9000',
         changeOrigin: true,
+        xfwd: true,
       },
       '/event': {
         target: 'http://127.0.0.1:9000',
         changeOrigin: true,
+        xfwd: true,
       },
     });
   });

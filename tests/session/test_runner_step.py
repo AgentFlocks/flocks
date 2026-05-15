@@ -622,6 +622,38 @@ class TestMiniMaxTextToolMode:
         )
         assert runner._should_use_text_tool_call_mode() is True
 
+    def test_enabled_for_threatbook_cn_llm_minimax(self):
+        # Regression: threatbook-cn-llm gateway strips the OpenAI tool_calls
+        # field for MiniMax models, so the XML text-call protocol must be
+        # forced or every turn ends with finish_reason=stop and zero tools.
+        session = _make_session("ses_minimax_threatbook_cn_llm")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="minimax-m2.7",
+        )
+        assert runner._should_use_text_tool_call_mode() is True
+
+    def test_enabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
+        session = _make_session("ses_minimax_threatbook_cn_llm_case")
+        runner = SessionRunner(
+            session=session,
+            provider_id="ThreatBook-CN-LLM",
+            model_id="MiniMax-M2.5",
+        )
+        assert runner._should_use_text_tool_call_mode() is True
+
+    def test_disabled_for_threatbook_cn_llm_non_minimax(self):
+        # Other models routed through the same gateway (e.g. qwen, GLM) keep
+        # the standard OpenAI native function-calling path.
+        session = _make_session("ses_threatbook_cn_llm_qwen")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="qwen3.6-plus",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
     def test_disabled_for_other_models(self):
         session = _make_session("ses_normal_mode")
         runner = SessionRunner(
@@ -886,3 +918,37 @@ async def test_record_usage_if_available_swallows_runtime_error():
     )
     with patch.dict("sys.modules", {"flocks.provider.usage_service": fake_module}):
         await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
+    runner = _make_runner("ses_runner_node_ref")
+    user_message = UserMessageInfo(
+        id="msg_user_node_ref",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts",
+        AsyncMock(return_value=[
+            SimpleNamespace(
+                type="text",
+                text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
+            ),
+        ]),
+    )
+
+    chat_messages = await runner._to_chat_messages([user_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "user"
+    assert isinstance(chat_messages[0].content, str)
+    assert "Selected workflow node context:" in chat_messages[0].content
+    assert "node_id: query_fofa" in chat_messages[0].content
+    assert "node_type: python" in chat_messages[0].content
+    assert "只修改这个节点的代码并保留其他节点不变" in chat_messages[0].content

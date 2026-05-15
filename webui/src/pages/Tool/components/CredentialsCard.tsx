@@ -7,8 +7,11 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 
 interface Credentials {
-  secret_id?: string;
-  api_key_masked?: string;
+  // Backend returns JSON ``null`` (not ``undefined``) for empty fields,
+  // so widen these to ``string | null | undefined`` to stay assignable from
+  // both ProviderCredentials and MCPCredentials.
+  secret_id?: string | null;
+  api_key_masked?: string | null;
   has_credential: boolean;
 }
 

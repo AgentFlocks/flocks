@@ -50,6 +50,7 @@ vi.mock('../ToolSheets', () => ({
           url: formData.url,
         }
   ),
+  getMCPFormError: () => null,
   buildMCPFormDataFromConfig: (
     name: string,
     config?: { type?: 'stdio' | 'sse' | 'local' | 'remote'; url?: string } | null,

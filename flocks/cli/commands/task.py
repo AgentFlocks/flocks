@@ -96,12 +96,19 @@ async def _list_tasks(status_val, type_val, limit, fmt):
         scheduler_status = None
         if status_val == "running":
             scheduler_status = SchedulerStatus.ACTIVE
-        elif status_val == "paused":
+        elif status_val in ("paused", "disabled"):
             scheduler_status = SchedulerStatus.DISABLED
         tasks, total = await TaskManager.list_schedulers(status=scheduler_status, limit=limit)
     else:
+        task_status = None
+        if status_val:
+            mapped_status = "cancelled" if status_val == "paused" else status_val
+            try:
+                task_status = TaskStatus(mapped_status)
+            except ValueError as exc:
+                raise typer.BadParameter(f"Invalid execution status: {status_val}") from exc
         tasks, total = await TaskManager.list_executions(
-            status=TaskStatus(status_val) if status_val else None,
+            status=task_status,
             limit=limit,
         )
 
@@ -121,7 +128,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
     status_icon = {
         "pending": "⏳", "queued": "📋", "running": "🟢",
         "completed": "✅", "failed": "❌", "cancelled": "🚫",
-        "paused": "⏸️", "stopped": "🛑",
+        "disabled": "⏸️", "stopped": "🛑",
     }
     for t in tasks:
         icon = status_icon.get(t.status.value, "·")

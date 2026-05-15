@@ -59,6 +59,7 @@ class LaunchInput:
     parent_agent: Optional[str]
     parent_model: Optional[dict] = None
     model: Optional[dict] = None
+    model_pinned: bool = False
     category: Optional[str] = None
     directory: Optional[str] = None
     project_id: Optional[str] = None
@@ -265,13 +266,20 @@ class BackgroundManager:
         timeout_seconds: int = _INACTIVITY_TIMEOUT_SECONDS,
         *,
         allow_user_questions: bool = True,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
     ):
         """运行 SessionLoop，若超过 timeout_seconds 无任何活跃交互则取消并抛出异常。"""
         inactivity_triggered: list[bool] = [False]
         question_blocked: list[bool] = [False]
 
         loop_task = asyncio.create_task(
-            SessionLoop.run(session_id, callbacks=callbacks)
+            SessionLoop.run(
+                session_id,
+                provider_id=provider_id,
+                model_id=model_id,
+                callbacks=callbacks,
+            )
         )
 
         async def _watchdog() -> None:
@@ -356,15 +364,30 @@ class BackgroundManager:
                 if not project_id or not directory:
                     raise RuntimeError("Failed to resolve project context for background task")
 
-                child_session = await Session.create(
+                launch_model = input_data.model or {}
+                launch_provider = launch_model.get("providerID")
+                launch_model_id = launch_model.get("modelID")
+                persist_model = bool(
+                    input_data.model_pinned and launch_provider and launch_model_id
+                )
+
+                create_kwargs = dict(
                     project_id=project_id,
                     directory=directory,
                     title=f"{input_data.description} (@{input_data.agent} subagent)",
                     parent_id=input_data.parent_session_id,
                     agent=input_data.agent,
-                    model=(input_data.model or {}).get("modelID"),
-                    provider=(input_data.model or {}).get("providerID"),
                     category=input_data.category or "task",
+                )
+                if persist_model:
+                    create_kwargs.update(
+                        model=launch_model_id,
+                        provider=launch_provider,
+                        model_pinned=True,
+                    )
+
+                child_session = await Session.create(
+                    **create_kwargs,
                 )
                 task.session_id = child_session.id
 
@@ -376,8 +399,14 @@ class BackgroundManager:
                 )
 
                 callbacks = self._build_activity_callbacks(task)
+                runtime_provider = launch_provider if launch_provider and not persist_model else None
+                runtime_model = launch_model_id if launch_model_id and not persist_model else None
                 result = await self._run_session_with_watchdog(
-                    task, child_session.id, callbacks
+                    task,
+                    child_session.id,
+                    callbacks,
+                    provider_id=runtime_provider,
+                    model_id=runtime_model,
                 )
                 output = ""
                 if result.last_message:

@@ -7,6 +7,7 @@ import warnings
 from unittest.mock import AsyncMock
 
 import pytest
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageInfo, MessageRole, TokenUsage
 from flocks.session.callable_state import add_session_callable_tools, get_session_callable_tools
@@ -171,6 +172,50 @@ async def test_session_update():
     
     assert updated is not None
     assert updated.title == "Updated Title"
+
+
+@pytest.mark.asyncio
+async def test_session_accessible_to_recreated_user_with_same_username():
+    session = await Session.create(
+        project_id="test_project_username_owner",
+        directory="/test/dir",
+        title="Owned by Username",
+        owner_user_id="usr_old_owner",
+        owner_username="alice",
+    )
+
+    token = set_current_auth_user(
+        AuthUser(
+            id="usr_new_owner",
+            username="alice",
+            role="member",
+            status="active",
+        )
+    )
+    try:
+        sessions = await Session.list_all()
+        assert any(item.id == session.id for item in sessions)
+    finally:
+        reset_current_auth_user(token)
+
+
+@pytest.mark.asyncio
+async def test_retain_deleted_user_sessions_detaches_owner_id_and_preserves_username():
+    session = await Session.create(
+        project_id="test_project_deleted_owner",
+        directory="/test/dir",
+        title="Deleted Owner",
+        owner_user_id="usr_deleted_owner",
+        owner_username="alice",
+    )
+
+    migrated = await Session.retain_deleted_user_sessions("usr_deleted_owner", "alice")
+    assert migrated == 1
+
+    stored = await Session.get("test_project_deleted_owner", session.id)
+    assert stored is not None
+    assert stored.owner_user_id is None
+    assert stored.owner_username == "alice"
 
 
 @pytest.mark.asyncio

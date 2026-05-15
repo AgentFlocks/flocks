@@ -17,22 +17,33 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCircle, X, RefreshCw, Pencil, Save } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, Plus, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool } from './QuestionTool';
-import DelegateTaskCard, { isDelegateTool } from './DelegateTaskCard';
+import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
 import { sessionApi } from '@/api/session';
-import client from '@/api/client';
+import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
+import {
+  FILE_INPUT_ACCEPT_IMAGES,
+  batchCompressOptions,
+  buildPromptParts,
+  compressImageFile,
+  getFileExtension,
+  isImageFile,
+  readFileAsDataUrl,
+  type ImagePartData,
+} from '@/utils/imageUpload';
 import type { Message, MessagePart, ToolState } from '@/types';
 
 export { formatSmartTime };
@@ -105,11 +116,25 @@ export interface SessionChatProps {
   onError?: (message: string) => void;
   /**
    * Called when the user sends a message but sessionId is not yet available.
-   * The parent should create a session and update sessionId + initialMessage props.
+   * The parent should create a session and dispatch the prompt (with the
+   * provided text and any image attachments) to the new session.
+   *
+   * `imageParts` carries inline image data URLs — parents that don't yet
+   * support image input can ignore the second argument.
+   *
+   * The return value is intentionally typed as ``unknown`` so callers can
+   * pass ``useSessionChat().createAndSend`` (which resolves to the new
+   * session id) directly without an empty ``async (..) => { await ... }``
+   * shim.
    */
-  onCreateAndSend?: (text: string) => Promise<void> | void;
+  onCreateAndSend?: (text: string, imageParts?: ImagePartData[]) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
+  /**
+   * Whether the current model supports vision/image analysis.
+   * true = allow images; false = block images with a UI warning; null/undefined = allow (unknown).
+   */
+  supportsVision?: boolean | null;
 }
 
 type AttachmentStatus = 'uploading' | 'success' | 'error';
@@ -119,8 +144,95 @@ interface ComposerAttachment {
   file: File;
   name: string;
   status: AttachmentStatus;
+  /** For document attachments: the workspace-relative path after upload */
   workspacePath?: string;
+  /** For image attachments: the base64 data URL (no server upload needed) */
+  dataUrl?: string;
+  /** True if this attachment is an image file */
+  isImage?: boolean;
   error?: string;
+}
+
+// Composer drafts are persisted to ``localStorage`` so navigating away from
+// the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
+// back doesn't lose the half-typed message. Keyed per session so two sessions
+// don't share a draft, and namespaced to avoid colliding with other features.
+import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
+
+// Backend stages emitted by ``SessionCompaction.process`` /
+// ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
+// Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
+type CompactionStage =
+  | 'load'
+  | 'strategy'
+  | 'chunk_done'
+  | 'merge_started'
+  | 'merge_done'
+  | 'summarize_done'
+  | 'complete';
+
+interface CompactionStageEntry {
+  stage: CompactionStage;
+  data: Record<string, unknown>;
+  ts: number;
+}
+
+/**
+ * Render a single human-readable line for one compaction stage event.
+ *
+ * Kept i18n-aware (caller passes ``t``) and total-aware so e.g.
+ * ``chunk_done`` shows ``2 / 5``.  Numbers are rendered defensively —
+ * the SSE payload is untyped JSON, so we type-narrow before formatting.
+ *
+ * Returns ``null`` if the stage is unknown so the caller can ``filter
+ * Boolean`` the list without printing raw event names to end users.
+ */
+function describeCompactionStage(
+  entry: CompactionStageEntry,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  const data = entry.data;
+  const num = (k: string): number | undefined =>
+    typeof data[k] === 'number' ? (data[k] as number) : undefined;
+  switch (entry.stage) {
+    case 'load': {
+      const count = num('message_count');
+      return t('chat.compactionStage.load', { count: count ?? '?' });
+    }
+    case 'strategy': {
+      const decision = typeof data.decision === 'string' ? data.decision : 'single_pass';
+      const chunks = num('chunks');
+      if (chunks && chunks > 1) {
+        return t('chat.compactionStage.strategyChunked', { count: chunks });
+      }
+      return t(`chat.compactionStage.strategy_${decision}`, {
+        defaultValue: t('chat.compactionStage.strategyGeneric'),
+      });
+    }
+    case 'chunk_done':
+      // Per-chunk events drive the percentage bar but are intentionally
+      // hidden from the milestone list — users asked for a single
+      // overall progress signal rather than N noisy "chunk X/N done"
+      // lines that arrive out of order under ``asyncio.gather``.
+      return null;
+    case 'merge_started':
+      return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
+    case 'merge_done': {
+      const ok = data.ok !== false;
+      const ms = num('duration_ms');
+      return ok
+        ? t('chat.compactionStage.mergeDone', {
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+          })
+        : t('chat.compactionStage.mergeFailed');
+    }
+    case 'summarize_done':
+      return t('chat.compactionStage.summarizeDone', { chars: num('summary_chars') ?? 0 });
+    case 'complete':
+      return t('chat.compactionStage.complete');
+    default:
+      return null;
+  }
 }
 
 // ============================================================================
@@ -163,6 +275,46 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
   return result;
 }
 
+export function getMessageBubbleClassName({
+  compact,
+  isUser,
+  isEditing,
+}: {
+  compact: boolean;
+  isUser: boolean;
+  isEditing: boolean;
+}): string {
+  if (compact) {
+    return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
+      isUser
+        ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+        : 'bg-white border border-gray-200 shadow-sm'
+    }`;
+  }
+
+  const widthClass = isUser
+    ? (isEditing ? 'max-w-2xl w-full' : 'max-w-2xl w-auto')
+    : 'max-w-2xl w-full';
+
+  return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
+    isUser
+      ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
+      : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
+  }`;
+}
+
+export function getRegenerateTruncateTarget(
+  messages: Message[],
+  messageId: string,
+): { messageId: string; includeTarget?: boolean } {
+  const targetMessage = messages.find((message) => message.id === messageId);
+  if (targetMessage?.role === 'assistant' && targetMessage.parentID) {
+    return { messageId: targetMessage.parentID };
+  }
+  return { messageId, includeTarget: true };
+}
+
+
 // ============================================================================
 // Main component
 // ============================================================================
@@ -171,16 +323,12 @@ const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
-const FILE_INPUT_ACCEPT = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx';
+const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
+const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
   'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
+  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx',
 ]);
-
-function getFileExtension(filename: string): string {
-  const normalized = filename.toLowerCase();
-  const idx = normalized.lastIndexOf('.');
-  return idx >= 0 ? normalized.slice(idx + 1) : '';
-}
 
 function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
@@ -207,6 +355,7 @@ export default function SessionChat({
   onCreateAndSend,
   onCreateNewSession,
   onInitialMessageConsumed,
+  supportsVision,
 }: SessionChatProps) {
   const { t } = useTranslation('session');
   const compact = display?.compact ?? true;
@@ -214,13 +363,74 @@ export default function SessionChat({
   const showTimestamp = display?.showTimestamp ?? false;
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
-  const [input, setInput] = useState('');
+  // Restore any persisted draft on first mount so navigating away (e.g.
+  // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
+  // message. Subsequent session changes are re-hydrated by the effect below.
+  const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  // Lightbox preview for composer thumbnails. Shares the same overlay
+  // component used by message bubbles so the click-to-enlarge gesture is
+  // consistent across the upload tray and the rendered chat history.
+  const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  // Live compaction progress, populated by ``session.compaction_progress`` SSE
+  // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
+  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
+  // The chunk progress bar (``done/total``) is *derived* from this single
+  // source via useMemo below — keeping a parallel state would risk drift if
+  // either updater missed an event (and earlier did: a stale closure read
+  // froze ``done`` at 1 for multi-chunk runs).
+  const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
+  // Single weighted progress percentage (0–100) covering the whole
+  // compaction pipeline. Per-chunk events drive the parallel-summary
+  // band (10–70%); merge owns 70–95%; summary write + completion
+  // close the last 5%. Single-pass runs skip the chunk band entirely
+  // and jump strategy → summarize_done (20% → 95%).
+  //
+  // Why fixed weights instead of timing-based progress:
+  //  - Chunks finish in non-deterministic order so a time-linear bar
+  //    would jitter or stall whenever the slowest chunk dominates.
+  //  - The user only needs "where am I in the pipeline", not real-time
+  //    estimation; phase advancement gives a credible signal of life.
+  const compactionPercent = useMemo<number | null>(() => {
+    if (compactionStages.length === 0) return null;
+    const seenStage = new Set(compactionStages.map((e) => e.stage));
+    if (seenStage.has('complete')) return 100;
+
+    const strategyEvent = compactionStages.find((e) => e.stage === 'strategy');
+    const useChunked = strategyEvent
+      ? Boolean((strategyEvent.data as { use_chunked?: boolean }).use_chunked)
+      : false;
+
+    if (useChunked) {
+      if (seenStage.has('summarize_done')) return 97;
+      if (seenStage.has('merge_done')) return 95;
+      if (seenStage.has('merge_started')) return 75;
+      let total = 0;
+      const seenChunks = new Set<number>();
+      for (const entry of compactionStages) {
+        if (entry.stage !== 'chunk_done') continue;
+        const d = entry.data as { chunk?: number; total?: number };
+        if (typeof d.chunk === 'number') seenChunks.add(d.chunk);
+        if (typeof d.total === 'number' && d.total > total) total = d.total;
+      }
+      if (total > 0) {
+        return Math.min(70, 10 + Math.round((seenChunks.size / total) * 60));
+      }
+      if (seenStage.has('strategy')) return 10;
+      if (seenStage.has('load')) return 5;
+      return 1;
+    }
+
+    if (seenStage.has('summarize_done')) return 95;
+    if (seenStage.has('strategy')) return 20;
+    if (seenStage.has('load')) return 10;
+    return 1;
+  }, [compactionStages]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
@@ -256,12 +466,22 @@ export default function SessionChat({
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const commandsLoadedRef = useRef(false);
-  const successfulAttachments = useMemo(
-    () => attachments.filter((attachment) => attachment.status === 'success' && attachment.workspacePath),
+  const successfulDocAttachments = useMemo(
+    () => attachments.filter((a) => a.status === 'success' && a.workspacePath && !a.isImage),
     [attachments],
   );
+  const successfulImageAttachments = useMemo(
+    () => attachments.filter((a) => a.status === 'success' && a.isImage && a.dataUrl),
+    [attachments],
+  );
+  // Keep backward-compat alias (used in slash-command guard)
+  const successfulAttachments = useMemo(
+    () => [...successfulDocAttachments, ...successfulImageAttachments],
+    [successfulDocAttachments, successfulImageAttachments],
+  );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !isStreaming && !hasUploadingFiles && (!!input.trim() || successfulAttachments.length > 0);
+  const canSend = !sending && !isStreaming && !hasUploadingFiles &&
+    (!!input.trim() || successfulDocAttachments.length > 0 || successfulImageAttachments.length > 0);
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
@@ -301,7 +521,7 @@ export default function SessionChat({
 
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
-  const sseEnabled = live || isStreaming || !hideInput;
+  const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
@@ -357,16 +577,41 @@ export default function SessionChat({
           setIsCompacting(true);
           isCompactingRef.current = true;
           setCompactingMessage(properties.status.message || t('chat.compacting'));
+          // Reset progress state on each new compaction cycle so a stale
+          // run's stages do not leak into a fresh "Compacting..." panel.
+          setCompactionStages([]);
         } else {
           const wasCompacting = isCompactingRef.current;
           setIsCompacting(false);
           isCompactingRef.current = false;
           setCompactingMessage('');
+          setCompactionStages([]);
           if (wasCompacting) refetch();
         }
+      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
+        const stage = properties.stage as CompactionStage | undefined;
+        const data = (properties.data ?? {}) as Record<string, unknown>;
+        if (!stage) return;
+        // Single source of truth: append into ``compactionStages`` and let
+        // the progress bar derive ``done/total`` from it via useMemo.
+        // ``chunk_done`` arrives in non-deterministic order under
+        // ``asyncio.gather``; deduplicate by chunk index here so SSE
+        // reconnects / accidental re-deliveries are idempotent.
+        setCompactionStages((prev) => {
+          if (stage === 'chunk_done') {
+            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
+            if (chunkIdx !== undefined && prev.some(
+              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+            )) {
+              return prev;
+            }
+          }
+          return [...prev, { stage, data, ts: Date.now() }];
+        });
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
+        setCompactionStages([]);
         abortingRef.current = false;
         onError?.(properties.error?.message || t('chat.placeholder'));
       }
@@ -407,7 +652,7 @@ export default function SessionChat({
   );
 
   const { status: sseStatus } = useSSE({
-    url: `${import.meta.env.VITE_API_BASE_URL || ''}/api/event`,
+    url: `${getApiBase()}/api/event`,
     onEvent: handleSSEEvent,
     onReconnect: () => {
       if (!sessionId) return;
@@ -446,12 +691,25 @@ export default function SessionChat({
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
+    setCompactionStages([]);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();
+    // Swap the draft when the session changes — needed for callers that
+    // don't force a remount (Session/index.tsx does, but other consumers
+    // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
+    setInput(readChatDraft(sessionId));
   }, [sessionId, clearPendingQuestions]);
+
+  // Persist the draft on every keystroke. localStorage writes are synchronous
+  // and cheap, so debouncing isn't worth the added latency on send (which
+  // depends on the draft being flushed). Drafts are removed when ``input``
+  // becomes empty (e.g. after a successful send).
+  useEffect(() => {
+    writeChatDraft(sessionId, input);
+  }, [sessionId, input]);
 
   // Recover streaming state after page refresh / session switch
   useEffect(() => {
@@ -585,7 +843,7 @@ export default function SessionChat({
           ...attachment,
           name: result.name || attachment.name,
           status: 'success',
-          workspacePath: result.path,
+          workspacePath: result.abs_path ?? result.path,
           error: undefined,
         };
       }));
@@ -599,13 +857,29 @@ export default function SessionChat({
     }
   }, [t]);
 
-  const queueFilesForUpload = useCallback((files: File[]) => {
+  const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
     if (files.length === 0) return;
-    const validEntries: Array<{ id: string; file: File }> = [];
+    const validDocEntries: Array<{ id: string; file: File }> = [];
+    const validImageFiles: Array<{ id: string; file: File }> = [];
     const invalidAttachments: ComposerAttachment[] = [];
+    let imageRejectedToastShown = false;
 
     files.forEach((file, index) => {
       const id = `attachment-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+
+      if (isImageFile(file)) {
+        if (imageBlocked || supportsVision === false) {
+          // Show a toast once for the whole batch of rejected images
+          if (!imageRejectedToastShown) {
+            imageRejectedToastShown = true;
+            toast.error(t('chat.upload.imageNotSupported'));
+          }
+        } else {
+          validImageFiles.push({ id, file });
+        }
+        return;
+      }
+
       if (!isAllowedUploadFile(file)) {
         invalidAttachments.push({
           id,
@@ -616,27 +890,63 @@ export default function SessionChat({
         });
         return;
       }
-      validEntries.push({ id, file });
+      validDocEntries.push({ id, file });
     });
 
     if (invalidAttachments.length > 0) {
       setAttachments((prev) => [...prev, ...invalidAttachments]);
     }
 
-    if (validEntries.length === 0) return;
+    // Handle document uploads (server upload)
+    if (validDocEntries.length > 0) {
+      setAttachments((prev) => [
+        ...prev,
+        ...validDocEntries.map(({ id, file }) => ({
+          id,
+          file,
+          name: file.name,
+          status: 'uploading' as const,
+        })),
+      ]);
+      void uploadSelectedFiles(validDocEntries);
+    }
 
-    setAttachments((prev) => [
-      ...prev,
-      ...validEntries.map(({ id, file }) => ({
-        id,
-        file,
-        name: file.name,
-        status: 'uploading' as const,
-      })),
-    ]);
-
-    void uploadSelectedFiles(validEntries);
-  }, [t, uploadSelectedFiles]);
+    // Handle image files (read as base64, no server upload)
+    if (validImageFiles.length > 0) {
+      setAttachments((prev) => [
+        ...prev,
+        ...validImageFiles.map(({ id, file }) => ({
+          id,
+          file,
+          name: file.name,
+          status: 'uploading' as const,
+          isImage: true,
+        })),
+      ]);
+      // Pick compression aggressiveness from how many images are arriving
+      // together. A 4-image drop gets a tighter cap than a single image so
+      // the combined base64 body still fits inside upstream gateway limits.
+      const batchOpts = batchCompressOptions(validImageFiles.length);
+      validImageFiles.forEach(({ id, file }) => {
+        compressImageFile(file, batchOpts)
+          .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
+          .then(({ compressed, dataUrl }) => {
+            setAttachments((prev) => prev.map((a) =>
+              a.id === id
+                ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, isImage: true }
+                : a
+            ));
+          })
+          .catch(() => {
+            setAttachments((prev) => prev.map((a) =>
+              a.id === id
+                ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
+                : a
+            ));
+          });
+      });
+    }
+  }, [t, toast, uploadSelectedFiles, supportsVision]);
 
   const handleFileSelection = useCallback((fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -651,8 +961,27 @@ export default function SessionChat({
       status: 'uploading',
       error: undefined,
     }));
-    void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
-  }, [attachments, updateAttachment, uploadSelectedFiles]);
+    if (attachment.isImage) {
+      compressImageFile(attachment.file)
+        .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
+        .then(({ compressed, dataUrl }) => {
+          setAttachments((prev) => prev.map((a) =>
+            a.id === attachmentId
+              ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, error: undefined }
+              : a
+          ));
+        })
+        .catch(() => {
+          setAttachments((prev) => prev.map((a) =>
+            a.id === attachmentId
+              ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
+              : a
+          ));
+        });
+    } else {
+      void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
+    }
+  }, [attachments, updateAttachment, uploadSelectedFiles, t]);
 
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
     setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
@@ -664,6 +993,7 @@ export default function SessionChat({
     event.preventDefault();
     queueFilesForUpload(files);
   }, [queueFilesForUpload]);
+
 
   const handleComposerDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
@@ -731,7 +1061,7 @@ export default function SessionChat({
   };
 
   /** Core send logic */
-  const sendText = async (text: string) => {
+  const sendText = async (text: string, imageParts: ImagePartData[] = []) => {
     if (!sessionId) return;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
@@ -741,17 +1071,23 @@ export default function SessionChat({
     setIsStreaming(true);
 
     const tempId = `temp-${Date.now()}`;
+    const tempParts: MessagePart[] = [];
+    if (text) tempParts.push({ id: `${tempId}-text`, type: 'text', text });
+    imageParts.forEach((img, i) => {
+      tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+    });
+
     addMessage({
       id: tempId,
       sessionID: sessionId,
       role: 'user',
-      parts: [{ id: `${tempId}-part`, type: 'text', text }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text }],
       timestamp: Date.now(),
     } as Message);
 
     try {
       const payload: Record<string, unknown> = {
-        parts: [{ type: 'text', text }],
+        parts: buildPromptParts(text, imageParts),
       };
       if (agentName) payload.agent = agentName;
 
@@ -773,15 +1109,25 @@ export default function SessionChat({
   const handleSend = async () => {
     if (!canSend) return;
     const rawText = input.trim();
-    const attachmentsToSend = [...successfulAttachments];
-    const text = buildMessageText(rawText, attachmentsToSend);
-    if (!text) return;
+    const docAttachmentsToSend = [...successfulDocAttachments];
+    const imageAttachmentsToSend = [...successfulImageAttachments];
+    const text = buildMessageText(rawText, docAttachmentsToSend);
+
+    // Need either text content or image attachments
+    if (!text && imageAttachmentsToSend.length === 0) return;
 
     setInput('');
     setShowCommandDropdown(false);
 
-    // Route slash commands through the command API (requires an active session)
-    const parsed = attachmentsToSend.length === 0 ? parseSlashCommand(rawText) : null;
+    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((a) => ({
+      url: a.dataUrl!,
+      mime: a.file.type,
+      filename: a.name,
+    }));
+
+    // Route slash commands through the command API (requires an active session, no images)
+    const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
+      ? parseSlashCommand(rawText) : null;
     if (parsed) {
       // Handle /new command locally: create a new session
       if (parsed.command === 'new') {
@@ -808,10 +1154,14 @@ export default function SessionChat({
       if (onCreateAndSend) {
         setSending(true);
         try {
-          await onCreateAndSend(text);
+          await onCreateAndSend(text, imageParts);
           setAttachments([]);
         } catch {
+          // Restore both the text and the attachment list so the user can
+          // retry without re-uploading images. Image data URLs are already
+          // in memory, so restoring the array is safe and cheap.
           setInput(rawText);
+          setAttachments(imageAttachmentsToSend);
         } finally {
           setSending(false);
         }
@@ -820,10 +1170,11 @@ export default function SessionChat({
     }
 
     try {
-      await sendText(text);
+      await sendText(text, imageParts);
       setAttachments([]);
     } catch {
       setInput(rawText);
+      setAttachments(imageAttachmentsToSend);
     }
   };
 
@@ -1035,7 +1386,11 @@ export default function SessionChat({
     setActionMessageId(messageId);
     try {
       await sessionApi.regenerateMessage(sessionId, messageId);
-      truncateAfterMessage(messageId, { includeTarget: true });
+      const truncateTarget = getRegenerateTruncateTarget(messagesRef.current, messageId);
+      truncateAfterMessage(
+        truncateTarget.messageId,
+        truncateTarget.includeTarget ? { includeTarget: true } : undefined,
+      );
       setIsStreaming(true);
       if (editingMessageId === messageId) {
         resetEditingState();
@@ -1172,7 +1527,7 @@ export default function SessionChat({
               );
             })}
 
-            {/* Compacting indicator */}
+            {/* Compacting indicator with live progress stages */}
             {isCompacting && (
               <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
                 <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
@@ -1180,6 +1535,36 @@ export default function SessionChat({
                     <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
                     <span>{compactingMessage || t('chat.compacting')}</span>
                   </div>
+                  {compactionPercent !== null && (
+                    <div className="mt-2">
+                      <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                        <span>{compactionPercent}%</span>
+                      </div>
+                      <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                        <div
+                          className="h-full bg-amber-500 transition-all duration-300"
+                          style={{ width: `${compactionPercent}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {compactionStages.length > 0 && (
+                    <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                      {compactionStages
+                        .map((entry, idx) => {
+                          const text = describeCompactionStage(entry, t);
+                          if (!text) return null;
+                          return (
+                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                              <span className="text-amber-400">·</span>
+                              <span>{text}</span>
+                            </li>
+                          );
+                        })
+                        .filter(Boolean)}
+                    </ul>
+                  )}
                 </div>
               </div>
             )}
@@ -1232,12 +1617,12 @@ export default function SessionChat({
       {/* Follow-up input */}
       {!hideInput && (
         <div className={`flex-shrink-0 border-t border-gray-200 bg-white ${compact ? 'px-4 py-3' : 'px-6 py-4'}`}>
-          <div className={`flex items-end gap-2 ${!compact ? 'max-w-3xl mx-auto w-full gap-3' : ''}`}>
+          <div className={`flex min-w-0 items-end gap-2 ${!compact ? 'max-w-3xl mx-auto w-full gap-3' : ''}`}>
             <input
               ref={fileInputRef}
               type="file"
               className="hidden"
-              accept={FILE_INPUT_ACCEPT}
+              accept={FILE_INPUT_ACCEPT_ALL}
               multiple
               onChange={(event) => {
                 handleFileSelection(event.target.files);
@@ -1248,14 +1633,14 @@ export default function SessionChat({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={sending || isStreaming}
-              title={t('chat.upload.select')}
+              title={t('chat.upload.selectWithImage')}
               className={`flex-shrink-0 rounded-lg border border-gray-300 bg-white text-gray-600 hover:bg-gray-50 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed transition-colors ${
                 compact ? 'w-10 h-[40px]' : 'w-12 h-[52px] rounded-xl'
               } inline-flex items-center justify-center`}
             >
               <Plus className="w-4 h-4" />
             </button>
-            <div className="relative flex-1">
+            <div className="relative min-w-0 flex-1">
               <CommandDropdown
                 visible={showCommandDropdown}
                 query={commandQuery}
@@ -1306,6 +1691,43 @@ export default function SessionChat({
                       const isUploading = attachment.status === 'uploading';
                       const isError = attachment.status === 'error';
                       const attachmentPath = attachment.workspacePath ?? null;
+
+                      // Image thumbnail display
+                      if (attachment.isImage && attachment.dataUrl && !isError) {
+                        return (
+                          <div
+                            key={attachment.id}
+                            className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
+                              isUploading ? 'border-sky-200 bg-sky-50' : 'border-gray-200 bg-gray-50'
+                            }`}
+                          >
+                            {isUploading ? (
+                              <div className="w-16 h-16 flex items-center justify-center">
+                                <Loader2 className="w-5 h-5 animate-spin text-sky-500" />
+                              </div>
+                            ) : (
+                              <img
+                                src={attachment.dataUrl}
+                                alt={attachment.name}
+                                className="w-16 h-16 object-cover cursor-zoom-in"
+                                title={attachment.name}
+                                onClick={() =>
+                                  setComposerPreview({ url: attachment.dataUrl!, alt: attachment.name })
+                                }
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveAttachment(attachment.id)}
+                              className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
+                              title={t('chat.upload.remove')}
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          </div>
+                        );
+                      }
+
                       return (
                         <div
                           key={attachment.id}
@@ -1321,6 +1743,8 @@ export default function SessionChat({
                             <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
                           ) : isError ? (
                             <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                          ) : attachment.isImage ? (
+                            <ImageIcon className="w-3.5 h-3.5 flex-shrink-0" />
                           ) : (
                             <FileText className="w-3.5 h-3.5 flex-shrink-0" />
                           )}
@@ -1333,7 +1757,7 @@ export default function SessionChat({
                               <div className="truncate text-[11px]">{attachment.error}</div>
                             )}
                           </div>
-                          {isError && (
+                          {isError && !attachment.isImage && (
                             <button
                               type="button"
                               onClick={() => handleRetryAttachment(attachment.id)}
@@ -1427,6 +1851,13 @@ export default function SessionChat({
           </div>
         </div>
       )}
+      {composerPreview && (
+        <ImageLightbox
+          src={composerPreview.url}
+          alt={composerPreview.alt}
+          onClose={() => setComposerPreview(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1485,6 +1916,11 @@ function ChatMessageBubbleInner({
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
+  // Lightbox state for inline image previews. Browsers block top-level
+  // navigation to ``data:`` URLs (the format we send for chat images), so a
+  // ``window.open`` would land on a blank page. We open an in-app overlay
+  // instead — same UX, no popup blocker / data-URL restriction headaches.
+  const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
   if (message.finish === 'summary') {
     const hasArchived = compactedMessages && compactedMessages.length > 0;
     return (
@@ -1601,32 +2037,67 @@ function ChatMessageBubbleInner({
             />
           </div>
         ) : (
-          parts.map((part: MessagePart, i: number) => (
-            <div key={part.id || i}>
-              {/* Text */}
-              {part.type === 'text' && part.text && (() => {
-                const nodeRefMatch = isUser
-                  ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-                  : null;
-                const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
-                return (
-                  <>
-                    {nodeRefMatch && (
-                      <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                        <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
-                        <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
-                      </div>
-                    )}
-                    <StreamingMarkdown
-                      content={displayText}
-                      isStreaming={isActive && !isUser}
-                    />
-                  </>
-                );
-              })()}
+          (() => {
+            // Render attachments (file/image parts) first so the bubble shows
+            // image previews above the textual prompt — matches typical chat
+            // UX for "look at this image and …" style messages.
+            const fileParts = parts.filter((p) => p.type === 'file' && p.url);
+            const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
+            return (
+              <>
+                {fileParts.length > 0 && (
+                  <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
+                    {fileParts.map((part, i) => {
+                      const isImage = (part.mime || '').startsWith('image/');
+                      if (isImage && part.url) {
+                        return (
+                          <img
+                            key={part.id || `file-${i}`}
+                            src={part.url}
+                            alt={part.filename || ''}
+                            className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
+                            onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
+                          />
+                        );
+                      }
+                      return (
+                        <div
+                          key={part.id || `file-${i}`}
+                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
+                        >
+                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {otherParts.map((part: MessagePart, i: number) => (
+                  <div key={part.id || i}>
+                    {/* Text */}
+                    {part.type === 'text' && part.text && (() => {
+                      const nodeRefMatch = isUser
+                        ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
+                        : null;
+                      const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
+                      return (
+                        <>
+                          {nodeRefMatch && (
+                            <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                              <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                              <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
+                            </div>
+                          )}
+                          <StreamingMarkdown
+                            content={displayText}
+                            isStreaming={isActive && !isUser}
+                          />
+                        </>
+                      );
+                    })()}
 
-              {/* Tool call */}
+                    {/* Tool call */}
               {part.type === 'tool' && (
                 <ChatToolPart
                   part={part}
@@ -1682,8 +2153,11 @@ function ChatMessageBubbleInner({
                   </div>
                 );
               })()}
-            </div>
-          ))
+                  </div>
+                ))}
+              </>
+            );
+          })()
         )}
 
         {/* Streaming indicator */}
@@ -1785,6 +2259,13 @@ function ChatMessageBubbleInner({
           </div>
         )}
       </div>
+      {previewImage && (
+        <ImageLightbox
+          src={previewImage.url}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1804,14 +2285,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
-  // Primary check: tool name is a known delegate tool.
-  // Fallback: state.input contains delegate-specific fields (handles cases where
-  // part.tool may be missing or unrecognized after reload).
-  const stateInput = part.state?.input as Record<string, any> | undefined;
-  if (
-    isDelegateTool(toolName) ||
-    (stateInput && ('subagent_type' in stateInput || 'category' in stateInput))
-  ) {
+  // Keep the delegate fallback narrow: many MCP tools also carry a generic
+  // `category` field (for example wecom_mcp category="doc").
+  if (shouldRenderDelegateTaskCard(part)) {
     return <DelegateTaskCard part={part} />;
   }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -50,3 +51,41 @@ def test_read_workflow_from_fs_refreshes_cached_workspace_root(
     assert first["workflowJson"]["name"] == "workspace-a"
     assert second["workflowJson"]["name"] == "workspace-b"
     assert fs_store.find_workspace_root() == second_workspace
+
+
+def test_read_workflow_dir_uses_latest_file_mtime_when_meta_is_stale(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workflow_id = "mtime-sync-demo"
+    _write_workflow(workspace, workflow_id, "mtime-demo")
+    workflow_dir = workspace / ".flocks" / "plugins" / "workflows" / workflow_id
+
+    meta_file = workflow_dir / "meta.json"
+    meta_file.write_text(
+        json.dumps(
+            {
+                "name": "mtime-demo",
+                "description": "demo",
+                "category": "default",
+                "status": "draft",
+                "createdBy": None,
+                "createdAt": 1000,
+                "updatedAt": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    md_file = workflow_dir / "workflow.md"
+    md_file.write_text("# demo\n", encoding="utf-8")
+
+    json_file = workflow_dir / "workflow.json"
+    os.utime(meta_file, (1, 1))
+    os.utime(json_file, (5, 5))
+    os.utime(md_file, (9, 9))
+
+    data = fs_store.read_workflow_dir(workflow_dir, workflow_id, "project")
+
+    assert data is not None
+    assert data["updatedAt"] == 9000
+    assert data["markdownContent"] == "# demo\n"

@@ -29,9 +29,13 @@ from flocks.mcp.utils import (
     LOCAL_MCP_TYPES,
     REMOTE_MCP_TYPES,
     extract_api_key_from_mcp_url,
+    extract_auth_value_from_mcp_config,
+    extract_sensitive_headers_from_mcp_config,
     get_connect_block_reason,
+    mask_sensitive_mcp_config_for_frontend,
     normalize_mcp_config,
     normalize_mcp_config_aliases,
+    restore_masked_mcp_config_secrets,
     should_allow_unconnected_add,
     should_skip_connect_on_add,
 )
@@ -45,6 +49,7 @@ log = Log.create(service="routes.mcp")
 
 def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize backend transport names for the frontend form."""
+    server_config = mask_sensitive_mcp_config_for_frontend(server_config)
     transport = str(server_config.get("type", "sse")).strip().lower()
     if transport in LOCAL_MCP_TYPES:
         transport = "stdio"
@@ -79,10 +84,14 @@ def _to_frontend_mcp_config(server_config: Dict[str, Any]) -> Dict[str, Any]:
         "url": server_config.get("url"),
         "command": command,
         "args": args,
+        "transport": server_config.get("transport", "auto"),
+        "headers": server_config.get("headers"),
+        "auth": server_config.get("auth"),
+        "oauth": server_config.get("oauth"),
     }
 
 async def _load_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
-    """Load a server config from resolved config, falling back to raw JSON."""
+    """Load a server config with secrets resolved for runtime connect/test paths."""
     config = await Config.get()
     mcp_config = getattr(config, "mcp", None) or {}
 
@@ -100,6 +109,21 @@ async def _load_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
     if server_config is None:
         server_config = ConfigWriter.get_mcp_server(name)
 
+    if hasattr(server_config, "model_dump"):
+        server_config = server_config.model_dump()
+    elif hasattr(server_config, "dict"):
+        server_config = server_config.dict()
+    elif server_config is not None and not isinstance(server_config, dict):
+        server_config = dict(server_config)
+
+    if not isinstance(server_config, dict):
+        return None
+    return normalize_mcp_config(server_config)
+
+
+def _load_raw_mcp_server_config(name: str) -> Optional[Dict[str, Any]]:
+    """Load a server config without resolving secret placeholders."""
+    server_config = ConfigWriter.get_mcp_server(name)
     if hasattr(server_config, "model_dump"):
         server_config = server_config.model_dump()
     elif hasattr(server_config, "dict"):
@@ -137,6 +161,14 @@ def _persist_mcp_server_config(name: str, config: Dict[str, Any]) -> None:
 
     from flocks.tool.tool_loader import save_mcp_config
     save_mcp_config(name, config)
+
+
+def _prepare_mcp_config_for_save(name: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize config and move any plain-text remote secrets into SecretManager."""
+    clean_config = extract_api_key_from_mcp_url(name, normalize_mcp_config(config))
+    clean_config = extract_auth_value_from_mcp_config(name, clean_config)
+    clean_config = extract_sensitive_headers_from_mcp_config(name, clean_config)
+    return clean_config
 
 
 # Request/Response models
@@ -202,9 +234,7 @@ async def add_mcp_server(request: McpAddRequest):
         # Extract any API key embedded in the URL and move it to .secret.json.
         # The URL is rewritten to use a {secret:...} reference so that the
         # plain-text credential is never written to flocks.json.
-        clean_config = extract_api_key_from_mcp_url(
-            request.name, normalize_mcp_config(request.config)
-        )
+        clean_config = _prepare_mcp_config_for_save(request.name, request.config)
 
         if should_skip_connect_on_add(clean_config):
             _persist_mcp_server_config(request.name, clean_config)
@@ -332,6 +362,7 @@ async def test_existing_mcp_connection(name: str, request: McpUpdateRequest):
 
         merged_config = dict(base_config)
         merged_config.update(normalize_mcp_config(request.config))
+        merged_config = restore_masked_mcp_config_secrets(base_config, merged_config)
 
         success = await MCP.connect(temp_name, merged_config)
         if not success:
@@ -432,13 +463,16 @@ async def remove_mcp_server(name: str):
 async def update_mcp_server(name: str, request: McpUpdateRequest):
     """Update an existing MCP server configuration and clear stale runtime state."""
     try:
-        existing_config = await _load_mcp_server_config(name)
+        existing_config = _load_raw_mcp_server_config(name)
         if not existing_config:
             raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
 
         updated_config = dict(existing_config)
         updated_config.update(normalize_mcp_config(request.config))
-        clean_config = extract_api_key_from_mcp_url(name, updated_config)
+        updated_config = restore_masked_mcp_config_secrets(
+            existing_config, updated_config
+        )
+        clean_config = _prepare_mcp_config_for_save(name, updated_config)
         _persist_mcp_server_config(name, clean_config)
 
         status = await MCP.status()
@@ -467,7 +501,7 @@ async def get_mcp_server_info(name: str):
     """Get info for a specific MCP server, with config from flocks.json when available."""
     try:
         info = await MCP.get_server_info(name)
-        server_config = await _load_mcp_server_config(name)
+        server_config = _load_raw_mcp_server_config(name)
         if not info and not server_config:
             raise HTTPException(status_code=404, detail=f"MCP server not found: {name}")
         if not info:

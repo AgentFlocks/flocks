@@ -96,6 +96,9 @@ class TestWorkflowsCommandRegistration:
         for name in ("tools", "skills", "workflows"):
             assert Command.get(name) is not None, f"Command '/{name}' not registered"
 
+    def test_restart_command_removed(self):
+        assert Command.get("restart") is None
+
 
 # ===========================================================================
 # /workflows handler — happy path
@@ -111,6 +114,11 @@ class TestWorkflowsHandler:
         with patch(self._SCAN_WF_CENTER, new_callable=AsyncMock, return_value=entries):
             texts, handled = await _collect_text("/workflows")
         assert handled
+
+    async def test_removed_restart_command_not_handled(self):
+        texts, handled = await _collect_text("/restart")
+        assert handled is False
+        assert texts == []
 
     async def test_workflow_names_in_output(self):
         entries = [

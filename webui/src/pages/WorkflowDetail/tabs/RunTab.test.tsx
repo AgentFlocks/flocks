@@ -17,6 +17,8 @@ const { workflowAPI } = vi.hoisted(() => ({
     unpublish: vi.fn(),
     getKafkaConfig: vi.fn(),
     saveKafkaConfig: vi.fn(),
+    getSyslogConfig: vi.fn(),
+    saveSyslogConfig: vi.fn(),
     getHistory: vi.fn(),
   },
 }));
@@ -26,7 +28,11 @@ vi.mock('@/api/workflow', () => ({
 }));
 
 vi.mock('@/components/common/CopyButton', () => ({
-  default: () => null,
+  default: ({ text }: { text: string }) => (
+    <button type="button" data-testid="copy-button" aria-label={`copy:${text}`}>
+      copy
+    </button>
+  ),
 }));
 
 vi.mock('@/components/common/WorkflowStatusBadge', () => ({
@@ -70,6 +76,15 @@ vi.mock('react-i18next', () => ({
         'detail.run.savedConfig': '已保存',
         'detail.run.saveConfig': '保存配置',
         'detail.run.kafkaHint': 'hint',
+        'detail.run.syslogSection': 'Syslog',
+        'detail.run.syslogExperimental': '实验性',
+        'detail.run.syslogEnabled': '启用',
+        'detail.run.syslogProtocol': '协议',
+        'detail.run.syslogHost': '地址',
+        'detail.run.syslogPort': '端口',
+        'detail.run.syslogFormat': '格式',
+        'detail.run.syslogInputKey': '键名',
+        'detail.run.syslogHint': 'syslog hint',
         'detail.run.historySection': '执行历史',
         'detail.run.noHistory': '暂无执行记录',
         'detail.run.noOutput': '无输出数据',
@@ -126,6 +141,7 @@ describe('RunTab', () => {
     workflowAPI.saveSampleInputs.mockResolvedValue({ data: { ok: true } });
     workflowAPI.getService.mockResolvedValue({ data: null });
     workflowAPI.getKafkaConfig.mockResolvedValue({ data: null });
+    workflowAPI.getSyslogConfig.mockResolvedValue({ data: null });
     workflowAPI.getHistory.mockResolvedValue({ data: [] });
     workflowAPI.run.mockResolvedValue({
       data: {
@@ -201,6 +217,27 @@ describe('RunTab', () => {
     await waitFor(() => {
       expect(workflowAPI.saveSampleInputs).toHaveBeenCalledWith('wf-1', { topic: 'saved' });
       expect(workflowAPI.run).toHaveBeenCalledWith('wf-1', { inputs: { topic: 'saved' } });
+    });
+  });
+
+  it('shows a copy button when output results are available', async () => {
+    render(
+      <ControlledRunTab
+        initialExecution={{
+          id: 'exec-output',
+          workflowId: 'wf-1',
+          inputParams: { topic: 'demo' },
+          outputResults: { result: 'ok' },
+          status: 'success',
+          startedAt: Date.now(),
+          executionLog: [],
+        }}
+      />
+    );
+
+    await waitFor(() => {
+      const copyButtons = screen.getAllByTestId('copy-button');
+      expect(copyButtons.some((button) => button.getAttribute('aria-label') === 'copy:{\n  "result": "ok"\n}')).toBe(true);
     });
   });
 

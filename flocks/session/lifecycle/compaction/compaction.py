@@ -6,7 +6,22 @@ to manage context window limits.  Delegates heavy lifting to sibling modules.
 
 from __future__ import annotations
 
-from typing import List, Optional, Dict, Any, Literal
+import ast
+import asyncio
+import os
+import re
+import time
+from collections import OrderedDict
+from typing import Awaitable, Callable, List, Optional, Dict, Any, Literal
+
+# Optional progress sink injected by the route layer so the front-end can
+# render a multi-stage "Compacting..." panel instead of a 30–60 s opaque
+# spinner.  Kept dependency-free: the callback signature is just
+# ``(stage, data) -> Awaitable[None]``.  Producers MUST tolerate a
+# ``None`` callback (silent / no-op) and any exception raised by the
+# sink — progress reporting is observability, never a correctness
+# contract for compaction itself.  See ``_emit_progress`` below.
+ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
@@ -19,6 +34,483 @@ from .models import (
 from . import pruning, summary
 
 log = Log.create(service="session.compaction")
+
+
+# ---------------------------------------------------------------------------
+# Background memory-flush task tracking
+# ---------------------------------------------------------------------------
+#
+# Memory flush (``_flush_memory_to_daily`` → ``extract_and_save``) issues a
+# second LLM call after the summary has already been generated.  It writes to
+# a daily memory file but is NOT required for the session to continue, so we
+# run it in the background to avoid blocking the post-compaction continuation.
+#
+# A module-level set keeps a strong reference to in-flight tasks so they are
+# not garbage-collected mid-flight (Python's ``asyncio.create_task`` only
+# holds a weak reference).  The done-callback removes finished tasks from the
+# set and logs any exception.
+#
+# Concurrency safety:
+#   * ``daily.write_daily(append=True)`` is *not* atomic — it does a
+#     read-modify-write on the daily memory file.  When the synchronous flush
+#     was inlined into ``process()`` two flushes for the same session could
+#     never overlap.  Now that we fire-and-forget, two consecutive
+#     compactions on the same session would race and silently drop the older
+#     memory.  We restore strict per-session serialisation via
+#     ``_session_flush_locks`` while still letting *different* sessions run
+#     in parallel.
+#   * The background task is wrapped in ``asyncio.wait_for`` so that a stuck
+#     provider call cannot hold ``chat_messages`` / ``provider`` references
+#     forever.  See ``_DEFAULT_FLUSH_TIMEOUT_SECONDS`` (currently 90s) and
+#     override per-deployment via ``FLOCKS_COMPACTION_FLUSH_TIMEOUT``.
+#
+# Set ``FLOCKS_COMPACTION_FLUSH_BACKGROUND=0`` to fall back to the legacy
+# synchronous behaviour (useful for tests or debugging).
+
+_FLUSH_TASK_NAME_PREFIX = "compaction.flush."
+
+# Default upper bound on a single background flush.  ``extract_and_save``
+# normally finishes in 5–30s; 90s gives us ~3x slack for cold provider
+# starts / large contexts without holding ``chat_messages`` references for
+# minutes when the LLM call truly wedges.  Override per deployment via
+# ``FLOCKS_COMPACTION_FLUSH_TIMEOUT``.
+_DEFAULT_FLUSH_TIMEOUT_SECONDS = 90
+
+_pending_flush_tasks: set[asyncio.Task] = set()
+_session_flush_locks: dict[str, asyncio.Lock] = {}
+
+
+# ---------------------------------------------------------------------------
+# Last-error breadcrumb for "stop" returns
+# ---------------------------------------------------------------------------
+#
+# ``SessionCompaction.process`` historically returns the literal "stop" on
+# any unrecoverable error, swallowing the underlying provider exception
+# (e.g. ``Error code: 529 - {'error': {'message': '模型服务暂时不可用'}}``).
+# Callers like ``session_loop`` only need to know whether to halt, but the
+# manual ``/compact`` path in ``server/routes/session.py`` raises
+# ``RuntimeError("Compaction failed")`` which surfaces to the UI as a
+# useless red toast.
+#
+# We keep ``return "stop"`` to preserve the loop contract, but stash the
+# user-facing message here so ``_run_session_compaction`` can raise a
+# detailed RuntimeError that the SSE ``session.error`` payload propagates
+# verbatim to the toast.  Consumption is single-shot (the manual
+# ``/compact`` path ``pop``s on read); the auto-compaction path in
+# ``session_loop`` writes but never reads, so we cap the cache size with
+# an LRU eviction policy to prevent unbounded growth on long-running
+# instances where many sessions fail compaction without ever being
+# manually retried.
+_LAST_ERROR_MAX_ENTRIES = 256
+# Keep the toast readable.  Provider exceptions can embed huge JSON
+# payloads or stack traces; the UI shows this verbatim so we cap it.
+_LAST_ERROR_MAX_LEN = 500
+# Matches a trailing repr-formatted dict at the end of the error string,
+# anchored on the dict opening brace.  We use ``re.search`` (not
+# ``partition``) so embedded ``" - "`` separators inside the leading
+# context (e.g. ``"500 - upstream error - {...}"``) don't fool us.
+_PROVIDER_ERROR_PAYLOAD_RE = re.compile(r"(\{.*\})\s*$", re.DOTALL)
+# Matches ``Error code: 529`` (or similar) at the start, used as a
+# grep-friendly prefix for screenshots.
+_PROVIDER_ERROR_CODE_RE = re.compile(r"^\s*Error code:\s*\d+", re.IGNORECASE)
+
+_last_compaction_error: "OrderedDict[str, str]" = OrderedDict()
+
+
+def _record_compaction_error(session_id: str, error: BaseException) -> None:
+    """Stash a user-facing message for the next ``pop_last_compaction_error``.
+
+    Tries to extract the human-readable ``message`` field from JSON-shaped
+    provider errors (most OpenAI-compatible SDKs include a literal
+    ``{"error": {"message": "..."}}`` block in ``str(exc)``).  Falls back
+    to the raw ``str(exc)`` otherwise — *never* fabricates a generic
+    "Compaction failed", because the whole point of this helper is to
+    avoid that.
+
+    The detail is truncated and the per-session cache is bounded so the
+    UI toast stays readable and we never leak memory across thousands of
+    failed sessions.
+    """
+    raw = str(error).strip()
+    detail = _extract_provider_message(raw) or raw or type(error).__name__
+    if len(detail) > _LAST_ERROR_MAX_LEN:
+        # Keep head (carries the HTTP code + start of message) and add a
+        # visible truncation marker so users know it's been clipped.
+        detail = detail[: _LAST_ERROR_MAX_LEN - 1].rstrip() + "…"
+    _last_compaction_error[session_id] = detail
+    _last_compaction_error.move_to_end(session_id)
+    while len(_last_compaction_error) > _LAST_ERROR_MAX_ENTRIES:
+        _last_compaction_error.popitem(last=False)
+
+
+def pop_last_compaction_error(session_id: str) -> Optional[str]:
+    """Return + clear the last error recorded for ``session_id``."""
+    return _last_compaction_error.pop(session_id, None)
+
+
+async def _emit_progress(
+    callback: Optional[ProgressCallback],
+    stage: str,
+    data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort progress emit.
+
+    Swallows any callback exception (and logs WARN) so a flaky SSE sink
+    or a disconnected front-end can never cause the compaction itself
+    to fail.  Returns immediately when ``callback`` is ``None``.
+    """
+    if callback is None:
+        return
+    try:
+        await callback(stage, dict(data or {}))
+    except Exception as exc:
+        log.warn("compaction.progress.emit_error", {
+            "stage": stage,
+            "error": str(exc),
+        })
+
+
+def _extract_provider_message(text: str) -> Optional[str]:
+    """Best-effort: pull the inner ``message`` out of an SDK error string.
+
+    OpenAI-compatible SDKs format errors like
+    ``Error code: 529 - {'error': {'message': '模型服务暂时不可用',
+    'type': 'SERVICE_UNAVAILABLE'}}``.  The dict is repr-formatted
+    (single quotes), so ``json.loads`` won't work directly; we anchor on
+    the trailing ``{...}`` payload and run ``ast.literal_eval`` on it.
+    Returns ``None`` if the pattern doesn't match — the caller falls
+    back to the raw text.
+
+    Anchoring on the trailing dict (rather than splitting on the *first*
+    ``" - "``) is deliberate: provider error strings sometimes contain
+    stray ``" - "`` separators in the leading context (e.g.
+    ``"500 - upstream error - {...}"``) which would otherwise feed
+    invalid syntax to ``literal_eval``.
+    """
+    if not text:
+        return None
+    match = _PROVIDER_ERROR_PAYLOAD_RE.search(text)
+    if not match:
+        return None
+    try:
+        parsed = ast.literal_eval(match.group(1))
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    err = parsed.get("error")
+    if not isinstance(err, dict):
+        return None
+    msg = err.get("message")
+    if not isinstance(msg, str) or not msg.strip():
+        return None
+    # Prepend the HTTP code if present so users / ops can still grep for
+    # "529" in screenshots.
+    head = text[: match.start()].strip().rstrip("-").strip()
+    code_prefix = f"{head} — " if _PROVIDER_ERROR_CODE_RE.match(head) else ""
+    return f"{code_prefix}{msg.strip()}"
+
+
+def _flush_in_background_enabled() -> bool:
+    raw = os.getenv("FLOCKS_COMPACTION_FLUSH_BACKGROUND", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
+def _flush_timeout_seconds() -> float:
+    raw = os.getenv("FLOCKS_COMPACTION_FLUSH_TIMEOUT")
+    if raw is None or raw.strip() == "":
+        return float(_DEFAULT_FLUSH_TIMEOUT_SECONDS)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warn("compaction.flush.timeout_parse_error", {
+            "raw": raw,
+            "fallback": _DEFAULT_FLUSH_TIMEOUT_SECONDS,
+        })
+        return float(_DEFAULT_FLUSH_TIMEOUT_SECONDS)
+    if value <= 0:
+        log.warn("compaction.flush.timeout_non_positive", {
+            "raw": raw,
+            "fallback": _DEFAULT_FLUSH_TIMEOUT_SECONDS,
+        })
+        return float(_DEFAULT_FLUSH_TIMEOUT_SECONDS)
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Chunked-summarization preemptive trigger
+# ---------------------------------------------------------------------------
+#
+# Empirically a single ``summarize_single_pass`` call against a 10–14k char
+# conversation can take 60–90s on slow OpenAI-compatible providers (e.g.
+# minimax via threatbook).  ``summarize_chunked`` issues N small parallel
+# calls + 1 short merge call, so it scales much better with provider
+# latency even when the conversation would technically *fit* a single pass.
+#
+# The legacy hand-off rule was ``total_chars > target_chars * 2``, which
+# means medium conversations (well below ~60k chars) always took the slow
+# path.  We add a second, looser trigger that splits at a fraction of the
+# target so even ~10k conversations get the parallel speedup.
+#
+# Tunables (all overridable via env for emergency tuning):
+#   * ``FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO`` (default 0.2):
+#     fraction of ``target_chars`` above which we proactively chunk.
+#   * ``FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS`` (default 3):
+#     desired number of chunks when preemptive chunking kicks in.
+#   * ``FLOCKS_COMPACTION_MIN_CHUNK_CHARS`` (default 3000):
+#     floor on chunk size so we never pay the merge-LLM tax for trivial
+#     conversations (where single_pass is genuinely faster).
+
+_DEFAULT_PREEMPTIVE_CHUNK_RATIO = 0.2
+_DEFAULT_TARGET_PARALLEL_CHUNKS = 3
+_DEFAULT_MIN_CHUNK_CHARS = 3000
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        log.warn("compaction.env.parse_error", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    if value <= 0:
+        log.warn("compaction.env.non_positive", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    return value
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        log.warn("compaction.env.parse_error", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    if value <= 0:
+        log.warn("compaction.env.non_positive", {
+            "key": key, "raw": raw, "fallback": default,
+        })
+        return default
+    return value
+
+
+def _decide_chunked_strategy(
+    *, total_chars: int, target_chars: int,
+) -> tuple[bool, Optional[int], str]:
+    """Decide whether to use chunked summarisation and at what chunk size.
+
+    Returns ``(use_chunked, chunk_size, reason)``:
+      * ``use_chunked``: ``True`` if the caller should invoke
+        ``summarize_chunked``; ``False`` for ``summarize_single_pass``.
+      * ``chunk_size``: when chunked, the per-chunk char budget passed
+        through to ``summarize_chunked``; ``None`` when not chunked.
+      * ``reason``: short tag for observability (logged at the call site).
+
+    Three branches:
+      1. ``"oversize"``    — legacy rule, conversation is much bigger
+         than the target; chunked is *required* for correctness.
+      2. ``"preemptive"``  — conversation fits single-pass but is large
+         enough that parallel chunked summarisation is faster than one
+         big LLM call.  Triggered when ``total_chars`` exceeds both
+         ``target_chars * ratio`` and ``min_chunk_chars * 2``.
+      3. ``"single_pass"`` — small conversation; parallelism overhead
+         (one extra merge LLM call) outweighs the speedup.
+    """
+    if total_chars > target_chars * 2:
+        # Legacy hard requirement — content does not fit a single pass.
+        ratio_hint = _env_float(
+            "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
+            _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
+        )
+        target_parallel = _env_int(
+            "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
+            _DEFAULT_TARGET_PARALLEL_CHUNKS,
+        )
+        min_chunk = _env_int(
+            "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
+            _DEFAULT_MIN_CHUNK_CHARS,
+        )
+        # For oversize content keep the legacy behaviour: pass through
+        # the original target_chars as the split cap (chunk_size=None
+        # makes summarize_chunked default to target_chars).  Splitting
+        # finer for already-huge conversations would explode chunk
+        # count without obvious benefit.
+        del ratio_hint, target_parallel, min_chunk
+        return True, None, "oversize"
+
+    ratio = _env_float(
+        "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
+        _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
+    )
+    min_chunk = _env_int(
+        "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
+        _DEFAULT_MIN_CHUNK_CHARS,
+    )
+    target_parallel = _env_int(
+        "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
+        _DEFAULT_TARGET_PARALLEL_CHUNKS,
+    )
+
+    threshold = max(min_chunk * 2, int(target_chars * ratio))
+    if total_chars < threshold:
+        return False, None, "single_pass"
+
+    # Aim for ``target_parallel`` chunks; never go below ``min_chunk``
+    # so we don't fragment a 6k conversation into 6 tiny calls.
+    raw_size = total_chars // max(1, target_parallel) + 1
+    chunk_size = max(min_chunk, raw_size)
+    return True, chunk_size, "preemptive"
+
+
+def _get_flush_lock(session_id: str) -> asyncio.Lock:
+    """Return (lazily creating) the per-session flush serialisation lock."""
+    lock = _session_flush_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_flush_locks[session_id] = lock
+    return lock
+
+
+def _release_session_lock_if_idle(session_id: str, lock: asyncio.Lock) -> None:
+    """Drop ``session_id``'s lock entry if no other task still needs it.
+
+    Called after a background flush finishes.  Without this the
+    ``_session_flush_locks`` registry would grow unboundedly across the
+    lifetime of a long-running process (each new session_id is unique).
+
+    Safe under asyncio's single-threaded scheduler:
+      * we exclude the *current* task (its done-callback hasn't run yet
+        so it is still in ``_pending_flush_tasks``);
+      * we only pop the entry when it is *still* the same Lock instance
+        we acquired, defending against an interleaved dispatch having
+        replaced it (cannot happen today but cheap to be safe).
+
+    Best-effort under cancellation: if two same-session tasks are
+    cancelled and run their ``finally`` blocks before either is marked
+    done, each will see the other as "still pending" and skip cleanup.
+    The orphaned entry is bounded (only same-session shutdown races) and
+    ``drain_pending_flush_tasks(cancel_on_timeout=True)`` is the
+    documented shutdown path, after which the process is expected to
+    terminate or the registry can be cleared explicitly.
+    """
+    current = asyncio.current_task()
+    for t in _pending_flush_tasks:
+        if t is current:
+            continue
+        if t.done():
+            continue
+        if _session_id_from_task(t) == session_id:
+            return
+    if _session_flush_locks.get(session_id) is lock:
+        _session_flush_locks.pop(session_id, None)
+
+
+def _session_id_from_task(task: asyncio.Task) -> Optional[str]:
+    """Return the session_id encoded in a flush task's name, or None."""
+    name = task.get_name() or ""
+    if name.startswith(_FLUSH_TASK_NAME_PREFIX):
+        return name[len(_FLUSH_TASK_NAME_PREFIX):]
+    return None
+
+
+def _on_flush_task_done(task: asyncio.Task) -> None:
+    _pending_flush_tasks.discard(task)
+    session_id = _session_id_from_task(task)
+    payload: Dict[str, Any] = {"task": task.get_name()}
+    if session_id is not None:
+        payload["session_id"] = session_id
+    if task.cancelled():
+        log.info("compaction.flush.background.cancelled", payload)
+        return
+    exc = task.exception()
+    if exc is not None:
+        # Unexpected exception (network, disk, ...).  TimeoutError is
+        # already absorbed inside ``_runner`` and never reaches here, so
+        # anything we see is genuinely unplanned and worth ERROR level.
+        log.error("compaction.flush.background.error", {
+            **payload,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        })
+    else:
+        log.debug("compaction.flush.background.done", payload)
+
+
+async def drain_pending_flush_tasks(
+    timeout: float = 30.0,
+    *,
+    cancel_on_timeout: bool = False,
+) -> int:
+    """Await all in-flight background flush tasks.
+
+    Intended for graceful process shutdown / test fixtures so that
+    fire-and-forget flushes do not get cancelled with their daily-memory
+    writes half-applied.
+
+    Args:
+        timeout: Wall-clock seconds to wait for pending tasks.
+        cancel_on_timeout: When True, leftover tasks are cancelled and
+            briefly awaited so the caller can close the event loop
+            cleanly.  Use this from shutdown paths.  When False (default),
+            leftover tasks are logged at WARN and left running — the
+            caller is expected to keep the loop alive.
+
+    Returns:
+        The number of tasks that were *still pending* when the function
+        returned (always 0 when ``cancel_on_timeout=True``).
+
+    Note:
+        The pending set is snapshotted at function entry; any new
+        dispatches that occur *during* drain will NOT be awaited and
+        will not be reflected in the returned leftover count.  Callers
+        performing a true shutdown should arrange to stop new dispatches
+        first (e.g. by flipping a "shutting down" flag the dispatcher
+        consults before scheduling).
+    """
+    if not _pending_flush_tasks:
+        return 0
+    pending = list(_pending_flush_tasks)
+    log.info("compaction.flush.drain.start", {
+        "pending": len(pending),
+        "timeout": timeout,
+        "cancel_on_timeout": cancel_on_timeout,
+    })
+    done, still_pending = await asyncio.wait(pending, timeout=timeout)
+
+    leftover = len(still_pending)
+    if still_pending:
+        names = [t.get_name() for t in still_pending]
+        if cancel_on_timeout:
+            for t in still_pending:
+                t.cancel()
+            # Absorb CancelledError so the loop can be torn down.
+            await asyncio.gather(*still_pending, return_exceptions=True)
+            log.warn("compaction.flush.drain.cancelled_pending", {
+                "cancelled": leftover,
+                "task_names": names,
+            })
+            leftover = 0
+        else:
+            log.warn("compaction.flush.drain.timeout_pending", {
+                "still_pending": leftover,
+                "task_names": names,
+            })
+
+    log.info("compaction.flush.drain.complete", {
+        "drained": len(done),
+        "still_pending": leftover,
+    })
+    return leftover
 
 
 class SessionCompaction:
@@ -139,6 +631,96 @@ class SessionCompaction:
             count_tokens=SessionPrompt.count_tokens,
         )
 
+    @classmethod
+    async def _dispatch_memory_flush(
+        cls,
+        *,
+        session_id: str,
+        summary_text: str,
+        chat_messages: list,
+        model_id: str,
+        provider_client: Any,
+        ChatMessage: Any,
+        policy: Optional[CompactionPolicy],
+    ) -> None:
+        """Run ``_flush_memory_to_daily`` either in the background or inline.
+
+        Background scheduling is the default; the legacy synchronous mode is
+        re-enabled by setting ``FLOCKS_COMPACTION_FLUSH_BACKGROUND=0``.
+
+        The background path adds two safety guarantees over a naive
+        ``create_task``:
+
+        1. **Per-session serialisation** — the daily memory file is updated
+           with a non-atomic read-modify-write, so two overlapping flushes
+           for the same session would race.  We acquire a per-session
+           ``asyncio.Lock`` so a second compaction's flush is queued behind
+           the first.  Different sessions remain fully parallel.
+        2. **Hard timeout** — wraps the flush in ``asyncio.wait_for`` so a
+           stuck provider call cannot indefinitely retain ``chat_messages``
+           / provider references.  Tunable via
+           ``FLOCKS_COMPACTION_FLUSH_TIMEOUT`` (default
+           ``_DEFAULT_FLUSH_TIMEOUT_SECONDS``, currently 90s).
+        """
+        kwargs = dict(
+            session_id=session_id,
+            summary=summary_text,
+            chat_messages=chat_messages,
+            model_id=model_id,
+            provider=provider_client,
+            ChatMessage=ChatMessage,
+            policy=policy,
+        )
+
+        if not _flush_in_background_enabled():
+            await cls._flush_memory_to_daily(**kwargs)
+            return
+
+        timeout_s = _flush_timeout_seconds()
+
+        async def _runner() -> None:
+            lock = _get_flush_lock(session_id)
+            wait_started = time.perf_counter()
+            try:
+                async with lock:
+                    wait_ms = (time.perf_counter() - wait_started) * 1000.0
+                    run_started = time.perf_counter()
+                    try:
+                        await asyncio.wait_for(
+                            cls._flush_memory_to_daily(**kwargs),
+                            timeout=timeout_s,
+                        )
+                        duration_ms = (time.perf_counter() - run_started) * 1000.0
+                        log.info("compaction.flush.background.completed", {
+                            "session_id": session_id,
+                            "wait_ms": round(wait_ms, 2),
+                            "duration_ms": round(duration_ms, 2),
+                        })
+                    except asyncio.TimeoutError:
+                        duration_ms = (time.perf_counter() - run_started) * 1000.0
+                        # Known failure mode that we deliberately bound;
+                        # WARN keeps it out of error-rate alerts while
+                        # still surfacing in dashboards.
+                        log.warn("compaction.flush.background.timeout", {
+                            "session_id": session_id,
+                            "wait_ms": round(wait_ms, 2),
+                            "duration_ms": round(duration_ms, 2),
+                            "timeout_s": timeout_s,
+                        })
+            finally:
+                _release_session_lock_if_idle(session_id, lock)
+
+        flush_task = asyncio.create_task(
+            _runner(),
+            name=f"{_FLUSH_TASK_NAME_PREFIX}{session_id}",
+        )
+        _pending_flush_tasks.add(flush_task)
+        flush_task.add_done_callback(_on_flush_task_done)
+        log.info("compaction.flush.scheduled_background", {
+            "session_id": session_id,
+            "timeout_s": timeout_s,
+        })
+
     # ------------------------------------------------------------------
     # Main compaction process
     # ------------------------------------------------------------------
@@ -154,11 +736,27 @@ class SessionCompaction:
         auto: bool = True,
         custom_prompt: Optional[str] = None,
         policy: Optional[CompactionPolicy] = None,
+        focus_instruction: Optional[str] = None,
+        progress_callback: Optional[ProgressCallback] = None,
     ) -> Literal["continue", "stop"]:
         """Process compaction by generating a summary message.
 
         Creates an assistant message with a summary of the conversation
         to reduce token count while preserving context.
+
+        ``focus_instruction`` is a free-form user directive (e.g. from
+        ``/compact 专注于未解决的决策``) that is passed through to the
+        summariser and injected into BOTH the per-chunk prompts and the
+        final merge prompt, biasing what information the model retains.
+        It is composed *with* (not in place of) ``custom_prompt`` /
+        ``DEFAULT_COMPACTION_PROMPT`` so the structural sections
+        (Decisions / Current Task / Open TODOs / Key Files) are still
+        produced.
+
+        ``progress_callback`` (optional) receives ``(stage, data)``
+        tuples for each pipeline phase so the route layer can mirror
+        them onto an SSE channel for live UI updates.  Errors raised
+        by the sink are logged and swallowed.
         """
         effective_summary_tokens = policy.summary_max_tokens if policy else 4000
 
@@ -172,8 +770,12 @@ class SessionCompaction:
 
         try:
             from flocks.provider.provider import Provider, ChatMessage
-        except ImportError:
+        except ImportError as imp_err:
             log.error("compaction.process.import_error")
+            _record_compaction_error(
+                session_id,
+                RuntimeError(f"Provider SDK unavailable: {imp_err}"),
+            )
             return "stop"
 
         provider_client = Provider.get(provider_id)
@@ -183,6 +785,12 @@ class SessionCompaction:
                 "provider_id": provider_id,
                 "model_id": model_id,
             })
+            _record_compaction_error(
+                session_id,
+                RuntimeError(
+                    f"Provider '{provider_id}' not configured for model '{model_id}'"
+                ),
+            )
             return "stop"
 
         try:
@@ -206,12 +814,17 @@ class SessionCompaction:
 
         chat_messages = cls._extract_chat_messages(msgs_with_parts, ChatMessage, session_id, policy)
 
+        loaded_total_chars = sum(len(m.content) for m in chat_messages)
         log.info("compaction.process.messages_loaded", {
             "session_id": session_id,
             "raw_count": len(messages),
             "with_parts_count": len(msgs_with_parts),
             "chat_messages_count": len(chat_messages),
-            "total_chars": sum(len(m.content) for m in chat_messages),
+            "total_chars": loaded_total_chars,
+        })
+        await _emit_progress(progress_callback, "load", {
+            "message_count": len(chat_messages),
+            "total_chars": loaded_total_chars,
         })
 
         # Summarization
@@ -232,42 +845,82 @@ class SessionCompaction:
         })
 
         try:
-            if total_chars <= target_chars * 2:
+            use_chunked, chunk_size, decision = _decide_chunked_strategy(
+                total_chars=total_chars, target_chars=target_chars,
+            )
+
+            log.info("compaction.process.strategy", {
+                "session_id": session_id,
+                "decision": decision,
+                "use_chunked": use_chunked,
+                "chunk_size": chunk_size,
+                "total_chars": total_chars,
+                "target_chars": target_chars,
+                "has_focus": bool(focus_instruction and focus_instruction.strip()),
+            })
+            # ``chunks`` here is an *upper-bound estimate* — the actual
+            # split happens inside ``summarize_chunked`` which may emit
+            # a slightly different N via ``chunk_done``.  For the UI
+            # progress bar this approximation is good enough and lets
+            # us show the segment count before the first chunk completes.
+            estimated_chunks: Optional[int] = None
+            if use_chunked:
+                split_at = chunk_size if (chunk_size and chunk_size > 0) else target_chars
+                estimated_chunks = max(1, -(-total_chars // max(1, split_at)))
+            await _emit_progress(progress_callback, "strategy", {
+                "decision": decision,
+                "use_chunked": use_chunked,
+                "chunks": estimated_chunks,
+            })
+
+            if not use_chunked:
                 summary_text = await summary.summarize_single_pass(
                     conversation_text, prompt_text, target_chars,
                     provider_client, model_id, effective_summary_tokens,
+                    focus_instruction=focus_instruction,
                 )
             else:
                 summary_text = await summary.summarize_chunked(
                     chat_messages, prompt_text, target_chars,
                     provider_client, model_id, effective_summary_tokens,
                     session_id,
+                    chunk_size=chunk_size,
+                    focus_instruction=focus_instruction,
+                    progress_callback=progress_callback,
                 )
 
             log.info("compaction.process.complete", {
                 "session_id": session_id,
                 "summary_length": len(summary_text) if summary_text else 0,
                 "summary_max_tokens": effective_summary_tokens,
-                "chunked": total_chars > target_chars * 2,
+                "chunked": use_chunked,
+                "decision": decision,
+            })
+            await _emit_progress(progress_callback, "summarize_done", {
+                "summary_chars": len(summary_text) if summary_text else 0,
             })
 
             if not summary_text:
                 log.warn("compaction.process.empty_summary_fallback", {"session_id": session_id})
                 summary_text = summary.build_fallback_summary(chat_messages)
 
-            # Memory flush
-            await cls._flush_memory_to_daily(
+            # Memory flush — issues another LLM call to extract durable
+            # memories. The compacted session does NOT depend on it for
+            # continuation, so we schedule it as a fire-and-forget task by
+            # default and let the main flow proceed with archive + summary
+            # write immediately.
+            await cls._dispatch_memory_flush(
                 session_id=session_id,
-                summary=summary_text,
+                summary_text=summary_text,
                 chat_messages=chat_messages,
                 model_id=model_id,
-                provider=provider_client,
+                provider_client=provider_client,
                 ChatMessage=ChatMessage,
                 policy=policy,
             )
 
             # Write summary and archive old messages
-            return await cls._archive_and_write_summary(
+            result = await cls._archive_and_write_summary(
                 session_id=session_id,
                 parent_id=parent_id,
                 summary=summary_text,
@@ -276,12 +929,21 @@ class SessionCompaction:
                 auto=auto,
                 policy=policy,
             )
+            await _emit_progress(progress_callback, "complete", {
+                "result": result,
+            })
+            return result
 
         except Exception as e:
             log.error("compaction.process.error", {
                 "session_id": session_id,
                 "error": str(e),
             })
+            _record_compaction_error(session_id, e)
+            # Note: no progress emit here.  The route layer raises
+            # RuntimeError on "stop", which surfaces via the existing
+            # ``session.error`` SSE channel — duplicating the failure
+            # on the progress channel would cause two toasts.
             return "stop"
 
     # ------------------------------------------------------------------

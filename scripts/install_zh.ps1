@@ -27,6 +27,10 @@ function Test-IsAdministrator {
 }
 
 function Assert-Administrator {
+    if ($env:FLOCKS_SKIP_ADMIN_CHECK -eq "1") {
+        return
+    }
+
     if (Test-IsAdministrator) {
         return
     }
@@ -45,6 +49,7 @@ function Show-Usage {
     Write-Host "  npm : https://registry.npmmirror.com/"
     Write-Host "  uv  : https://astral.org.cn/uv/install.ps1"
     Write-Host "  uv 备用源: https://uv.agentsmirror.com/install-cn.ps1"
+    Write-Host "  uv 官方回退: https://astral.sh/uv/install.ps1"
     Write-Host ""
     Write-Host "一键安装入口："
     Write-Host "  curl -fsSL $RawInstallZhShUrl | bash"
@@ -74,11 +79,20 @@ function Set-CnInstallerEnvironment {
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_URL)) {
         $env:FLOCKS_UV_INSTALL_SH_URL = "https://astral.org.cn/uv/install.sh"
     }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_FALLBACK_URL = "https://uv.agentsmirror.com/install-cn.sh"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL = "https://astral.sh/uv/install.sh"
+    }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) {
         $env:FLOCKS_UV_INSTALL_PS1_URL = "https://astral.org.cn/uv/install.ps1"
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) {
         $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL = "https://uv.agentsmirror.com/install-cn.ps1"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL = "https://astral.sh/uv/install.ps1"
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
         $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"

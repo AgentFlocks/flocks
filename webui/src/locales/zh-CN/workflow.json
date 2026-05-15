@@ -2,6 +2,10 @@
   "pageTitle": "工作流",
   "pageDescription": "管理和执行工作流",
   "createWorkflow": "创建工作流",
+  "section": {
+    "custom": "自定义工作流",
+    "builtin": "内置工作流"
+  },
   "emptyState": {
     "title": "暂无工作流",
     "description": "创建您的第一个工作流"
@@ -39,12 +43,22 @@
     },
     "topBar": {
       "collapsePanel": "收起面板",
-      "expandPanel": "展开面板"
+      "expandPanel": "展开面板",
+      "runningStage": "当前阶段：{{phase}} · 节点：{{node}}",
+      "phase": {
+        "queued": "排队中",
+        "running": "执行中",
+        "success": "已完成",
+        "error": "执行失败",
+        "timeout": "超时",
+        "cancelled": "已取消"
+      }
     },
     "rightPanel": {
       "tabOverview": "概览",
       "tabChat": "AI 编辑",
       "tabRun": "运行",
+      "tabIntegration": "集成",
       "renderError": "组件渲染出错",
       "deleteWorkflow": "删除工作流",
       "deleteConfirmTitle": "删除工作流",
@@ -115,16 +129,20 @@
       "runtimeStatus": "执行状态：{{status}}",
       "runtimeInputs": "真实输入",
       "runtimeOutputs": "真实输出",
+      "expandJsonBlock": "展开{{label}}",
+      "collapseJsonBlock": "收起{{label}}",
       "runNodeSection": "单节点执行",
       "runNodeHint": "隔离执行当前节点",
       "runNodeUnsupported": "当前节点类型暂不支持",
       "runNodeUnsupportedDesc": "Branch 和 Loop 节点暂不支持单节点执行。",
       "runNodeInputs": "执行输入",
+      "copyInput": "复制输入",
       "useLatestInputs": "使用最近一次输入",
       "restoreSuggestedInputs": "恢复建议输入",
       "runNodeAction": "执行节点",
       "runningNode": "执行中...",
       "runNodeSuccess": "执行成功",
+      "copyOutput": "复制输出",
       "runNodeError": "执行错误",
       "runNodeStdout": "标准输出",
       "runNodeTraceback": "错误堆栈",
@@ -187,6 +205,17 @@
       "savedConfig": "已保存",
       "saveConfig": "保存配置",
       "kafkaHint": "Kafka 集成功能开发中，配置将在后续版本生效",
+      "syslogSection": "Syslog 输入",
+      "syslogExperimental": "（实验性）",
+      "syslogEnabled": "启用监听",
+      "syslogProtocol": "协议",
+      "syslogHost": "监听地址",
+      "syslogPort": "端口",
+      "syslogFormat": "解析格式",
+      "syslogInputKey": "Inputs 键名",
+      "syslogHint": "开启后 Flocks 在指定地址/端口接收 syslog，解析结果写入工作流 inputs（默认键名 syslog_message）。",
+      "syslogPortError": "端口范围无效，请输入 1 ~ 65535 之间的整数",
+      "syslogActive": "监听中",
       "historySection": "执行历史",
       "noHistory": "暂无执行记录",
       "noOutput": "无输出数据",

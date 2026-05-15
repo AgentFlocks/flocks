@@ -12,12 +12,64 @@ $ErrorActionPreference = "Stop"
 
 $RepoSlug = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_REPO_SLUG)) { "AgentFlocks/Flocks" } else { $env:FLOCKS_REPO_SLUG }
 $DefaultBranch = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_DEFAULT_BRANCH)) { "main" } else { $env:FLOCKS_DEFAULT_BRANCH }
-$DefaultInstallDir = Join-Path (Get-Location) "flocks"
-$InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }
-
 function Test-IsWindowsPlatform {
     return [System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT
 }
+
+function Test-IsSystem32Path {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
+    $rawComparablePath = $Path.TrimEnd('\', '/').Replace('/', '\')
+
+    try {
+        $normalizedPath = [System.IO.Path]::GetFullPath($Path)
+    }
+    catch {
+        $normalizedPath = $Path
+    }
+    $comparablePath = $normalizedPath.TrimEnd('\', '/').Replace('/', '\')
+
+    if ($rawComparablePath -match '^[A-Za-z]:\\Windows\\System32$' -or $comparablePath -match '^[A-Za-z]:\\Windows\\System32$') {
+        return $true
+    }
+
+    $windowsDir = [Environment]::GetFolderPath("Windows")
+    if ([string]::IsNullOrWhiteSpace($windowsDir) -and -not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+        $windowsDir = $env:SystemRoot
+    }
+
+    if ([string]::IsNullOrWhiteSpace($windowsDir)) {
+        return $false
+    }
+
+    $system32Path = [System.IO.Path]::Combine($windowsDir, "System32").TrimEnd('\', '/').Replace('/', '\')
+    return [string]::Equals(
+        $comparablePath,
+        $system32Path,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Get-DefaultInstallDir {
+    param(
+        [string]$CurrentDirectory = (Get-Location).Path,
+        [string]$HomeDirectory = $HOME
+    )
+
+    $baseDirectory = $CurrentDirectory
+    if (Test-IsSystem32Path -Path $CurrentDirectory -and -not [string]::IsNullOrWhiteSpace($HomeDirectory)) {
+        $baseDirectory = $HomeDirectory
+    }
+
+    return ([System.IO.Path]::Combine($baseDirectory, "flocks"))
+}
+
+$DefaultInstallDir = Get-DefaultInstallDir
+$InstallDir = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR)) { $DefaultInstallDir } else { $env:FLOCKS_INSTALL_DIR }
 
 function Test-IsAdministrator {
     if (-not (Test-IsWindowsPlatform)) {
@@ -64,6 +116,7 @@ function Show-Usage {
     Write-Host "This script downloads the GitHub source archive to a temporary directory,"
     Write-Host "copies it to a persistent install location, and delegates to scripts/install.ps1."
     Write-Host "By default it creates a 'flocks' subdirectory under the current directory."
+    Write-Host "If the current directory is Windows System32, it falls back to the user home directory."
     Write-Host "Run this installer in a PowerShell window opened as Administrator."
     Write-Host ""
     Write-Host "Remote usage:"
@@ -181,6 +234,9 @@ function Main {
         Write-Info "Repository: $RepoSlug"
         Write-Info "Version: $Version"
         Write-Info "Temporary directory: $tempDir"
+        if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_DIR) -and (Test-IsSystem32Path -Path (Get-Location).Path)) {
+            Write-Info "Current directory is Windows System32. Falling back to the user home install directory."
+        }
 
         $downloadUrl = Download-Archive -ArchivePath $archivePath
 

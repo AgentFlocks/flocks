@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 查主机、进程、账号、端口、网站、数据库、安装包 | `qingteng_assets` | `list` | `resource`、`os_type` |
 | 刷新资产 | `qingteng_assets` | `refresh` / `refresh_all` | `resource`、`os_type` 或仅 `os_type` |
-| 查可疑操作、暴力破解、异常登录、WebShell、后门、蜜罐 | `qingteng_detect` | 对应 `*_list` | 多数至少要 `os_type` 或分页参数 |
+| 查可疑操作、暴力破解、异常登录、WebShell、后门、蜜罐 | `qingteng_detect` | `shelllog_list` / `brutecrack_list` / `abnormallogin_list` / `webshell_list` / `backdoor_list` / `honeypot_list` | 查询类多数需要 `os_type`；`shelllog_list` / `localrights_list` 可不传；详情/扫描/规则类需看下方 detect 速查表 |
 | 查补丁、风险、弱密码、风险文件、漏洞检测 | `qingteng_risk` | `patch_list` / `risk_list` / `weakpwd_list` / `weakfile_list` / `poc_list` | 多数需要 `os_type`，部分需要 `risk_type` |
 | 查基线任务、基线结果、授权 | `qingteng_baseline` | `job_list` / `job_status` / `spec_check_result` / `auth_list` | 通常至少要 `os_type` |
 | 查系统审计日志 | `qingteng_system_audit` | tool 直接调用 | 可空参，常补 `eventName`、`userName` |
@@ -28,6 +28,17 @@
   - `page` / `size`
   - `groups`
   - `hostId` / `hostIds`
+- detect 相关高频参数还包括：
+  - `realmType`
+  - `agentId` / `agentIds`
+  - `crackId`
+  - `filePath`
+
+### 时间字段规则
+
+- GET 查询里凡是手册标成 `DateRange` 的字段，都要按 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss` 传值。
+- 前后空格不能省略；如果结束时间省略，表示到当前时间。
+- 返回结果里大量 `*Time` / `time` 字段是 **Unix 秒级时间戳**，未经过代码转换前不要直接脑补成人类可读时间。
 
 ## 1. 资产查询：`qingteng_assets`
 
@@ -140,8 +151,31 @@
 - `brutecrack_log`
 - `abnormallogin_list`
 - `webshell_list`
+- `bounceshell_list`
+- `localrights_list`
 - `backdoor_list`
 - `honeypot_list`
+
+### detect 最小参数速查
+
+| 场景 | action | 最小参数 | 常用补充字段 |
+|---|---|---|---|
+| Linux 可疑操作 | `shelllog_list` | `action` | `page`、`size`、`groups`、`logTime`、`auditStatus`、`cmd` |
+| 暴力破解结果 | `brutecrack_list` | `action`、`os_type` | `groups`、`loginTime`、`serviceType`、`clientIp`、`ip`、`hostname` |
+| 暴力破解记录 | `brutecrack_log` | `action`、`os_type`、`crackId` | `page`、`size` |
+| 暴力破解封停/解封 | `brutecrack_block` | `action`、`os_type`、`id`、`block` | 无 |
+| 异常登录结果 | `abnormallogin_list` | `action`、`os_type` | `groups`、`loginTime`、`flag`、`uname`、`clientIp` |
+| 异常登录规则设置 | `abnormallogin_rule_set` | `action`、`os_type`、`realmType` | `groups`、`agentIds`、`loginIpInfo`、`loginTimeInfo`、`loginLocationInfo` |
+| WebShell 结果 | `webshell_list` | `action`、`os_type` | `agentId`、`hostname`、`groups`、`types`、`ip`、`serverName`、`filePath` |
+| WebShell 扫描 | `webshell_scan` | `action`、`os_type`、`realmType` | `agentIds` 或 `groups` |
+| 反弹 Shell 结果 | `bounceshell_list` | `action` | `os_type`、`groups`、`createTime`、`processName`、`targetIpLike` |
+| 本地提权结果 | `localrights_list` | `action` | `groups`、`time`、`ip`、`procName`、`procUserName` |
+| 后门检测结果 | `backdoor_list` | `action`、`os_type` | Linux 用 `backDoorTypes/backDoorCheckNames/backDoorName`；Windows 用 `backDoorTypeIds/name` |
+| 后门扫描 | `backdoor_scan` | `action`、`os_type`、`realmType` | `agentIds` 或 `groups` |
+| 蜜罐结果 | `honeypot_list` | `action`、`os_type` | `groups`、`time`、`clientIp`、`ip`、`port` |
+| 蜜罐单条规则创建/更新 | `honeypot_rule_create` / `honeypot_rule_update` | `action`、`os_type`、`agentId`、`ports` | 无 |
+| 蜜罐规则开关 | `honeypot_rule_enable` | `action`、`os_type`、`agentId`、`status` | 无 |
+| 蜜罐批量规则创建/删除 | `honeypot_rules_create` / `honeypot_rules_delete` | `action`、`os_type`、`realmType`、`ports` | `groups`、`agentIds`，批量创建还可用 `excludeGroups`、`excludeAgentIds` |
 
 ### 高频最小示例
 
@@ -152,7 +186,8 @@
   "action": "abnormallogin_list",
   "os_type": "linux",
   "page": 0,
-  "size": 20
+  "size": 20,
+  "loginTime": "2025-05-01 00:00:00 - 2025-05-07 23:59:59"
 }
 ```
 
@@ -164,7 +199,7 @@
   "os_type": "linux",
   "page": 0,
   "size": 20,
-  "severity": "high"
+  "filePath": "/var/www/html/index.php"
 }
 ```
 
@@ -179,6 +214,49 @@
   "ip": "1.1.1.1"
 }
 ```
+
+查询暴力破解攻击记录：
+
+```json
+{
+  "action": "brutecrack_log",
+  "os_type": "linux",
+  "crackId": "tFU7aUo3o5w7GDPlJqQfMA==",
+  "page": 0,
+  "size": 20
+}
+```
+
+发起 WebShell 扫描（自定义主机）：
+
+```json
+{
+  "action": "webshell_scan",
+  "os_type": "linux",
+  "realmType": 1,
+  "agentIds": ["979f3c4d44b2e765"]
+}
+```
+
+更新单条蜜罐规则：
+
+```json
+{
+  "action": "honeypot_rule_update",
+  "os_type": "linux",
+  "agentId": "70db8ef89e9ae79a",
+  "ports": [80, 8080]
+}
+```
+
+### detect 常见错误
+
+- 把 `brutecrack_log` 的必填参数写成 `id`，实际上需要 `crackId`
+- 把 `webshell_list` / `backdoor_list` 错写成 `severity`、`hostId`、`file_path` 这类旧字段
+- 扫描类 action 漏传 `realmType`
+- `realmType=1` 时忘了补 `agentIds`，`realmType=2` 时忘了补 `groups`
+- 蜜罐单条规则操作误传 `id`，实际上创建/更新/开关更常用的是 `agentId`
+- Linux/Windows 后门检测筛选字段混用
 
 ### 高风险 action
 

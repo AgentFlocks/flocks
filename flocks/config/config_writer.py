@@ -469,15 +469,38 @@ class ConfigWriter:
     # API Services CRUD  (api_services section)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _normalize_api_service_config(service_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonicalize API service config keys before persisting.
+
+        ``verify_ssl`` is the canonical field. ``ssl_verify`` remains a
+        read-time compatibility alias, but writers should never persist both
+        fields at once or keep writing the legacy alias forward.
+        """
+        normalized = dict(service_config)
+        if "verify_ssl" in normalized:
+            normalized.pop("ssl_verify", None)
+            return normalized
+        if "ssl_verify" in normalized:
+            normalized["verify_ssl"] = normalized.pop("ssl_verify")
+        return normalized
+
     @classmethod
     def get_api_service_raw(cls, service_id: str) -> Optional[Dict[str, Any]]:
-        """Read a single api_services entry (raw, secrets unresolved).
+        """Read a single ``api_services`` entry (raw, secrets unresolved).
 
-        Returns:
-            The service config dict, or None if not found.
+        Version-aware: delegates the storage-key/legacy-id resolution to
+        :func:`flocks.config.api_versioning.resolve_api_service`.
+        Falls back to a plain dict lookup if the versioning module is
+        unavailable, so a bug there cannot break credential reads.
         """
-        data = cls._read_raw()
-        return data.get("api_services", {}).get(service_id)
+        raw = cls._read_raw().get("api_services")
+        services = raw if isinstance(raw, dict) else {}
+        try:
+            from flocks.config.api_versioning import resolve_api_service
+            return resolve_api_service(service_id, services)
+        except Exception:
+            return services.get(service_id)
 
     @classmethod
     def list_api_services_raw(cls) -> Dict[str, Any]:
@@ -496,17 +519,25 @@ class ConfigWriter:
                 {"apiKey": "{secret:threatbook_api_key}"},
             )
 
-        Args:
-            service_id: e.g. "threatbook_api", "virustotal"
-            service_config: Config dict; use ``"apiKey": "{secret:<id>}"`` to
-                            reference a secret stored in .secret.json.
+        ``service_id`` is the literal storage key — writes are NOT redirected
+        to a versioned shadow even when one exists. New callers should pass
+        the versioned storage key (e.g. ``tdp_api_v3_3_10``); see
+        :mod:`flocks.config.api_versioning`. Writes that target a
+        shadowed legacy id emit a warning, since
+        :meth:`get_api_service_raw` would prefer the shadow and silently
+        ignore them.
         """
         data = cls._read_raw()
-        if "api_services" not in data:
-            data["api_services"] = {}
-        data["api_services"][service_id] = service_config
+        services = data.setdefault("api_services", {})
+        services[service_id] = cls._normalize_api_service_config(service_config)
         cls._write_raw(data)
         log.info("config_writer.api_service_set", {"service_id": service_id})
+
+        try:
+            from flocks.config.api_versioning import warn_if_shadowing_legacy
+            warn_if_shadowing_legacy(service_id, services)
+        except Exception:
+            pass
 
     @classmethod
     def remove_api_service(cls, service_id: str) -> bool:
@@ -523,6 +554,88 @@ class ConfigWriter:
         data["api_services"] = services
         cls._write_raw(data)
         log.info("config_writer.api_service_removed", {"service_id": service_id})
+        return True
+
+    # ------------------------------------------------------------------
+    # Tool settings  (tool_settings section)
+    # ------------------------------------------------------------------
+    #
+    # User-level overlay for per-tool settings (currently: ``enabled``).
+    # The section mirrors ``model_settings`` for naming consistency —
+    # both are flat maps keyed by the entity's unique id.
+    #
+    # Why this exists:  YAML plugin tool files under
+    # ``<project>/.flocks/plugins/tools/`` are tracked by git and may be
+    # overwritten on upgrade.  Writing a user toggle (e.g. enable/disable)
+    # back into the YAML pollutes git diffs and breaks upgrades.  We keep
+    # the YAML as "factory defaults" and store the user's choice in
+    # ``flocks.json`` instead.
+    #
+    # The same overlay applies uniformly to user-level YAML files under
+    # ``~/.flocks/plugins/tools/`` so that UI behaviour is consistent
+    # regardless of where the YAML lives.
+
+    @classmethod
+    def list_tool_settings(cls) -> Dict[str, Dict[str, Any]]:
+        """Return all raw tool_settings entries from flocks.json."""
+        data = cls._read_raw()
+        settings = data.get("tool_settings", {})
+        return settings if isinstance(settings, dict) else {}
+
+    @classmethod
+    def get_tool_setting(cls, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Read a single tool_settings entry, or None if not set."""
+        settings = cls.list_tool_settings()
+        entry = settings.get(tool_name)
+        return entry if isinstance(entry, dict) else None
+
+    @classmethod
+    def set_tool_setting(cls, tool_name: str, setting: Dict[str, Any]) -> None:
+        """Merge ``setting`` into the tool_settings[tool_name] entry.
+
+        Existing keys not present in ``setting`` are preserved so callers
+        can update a single field (e.g. ``{"enabled": False}``) without
+        wiping other overlay fields that may be added later.
+        """
+        if not tool_name:
+            raise ValueError("tool_name must be a non-empty string")
+        data = cls._read_raw()
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        existing = settings.get(tool_name)
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, **(setting or {})}
+        settings[tool_name] = merged
+        data["tool_settings"] = settings
+        cls._write_raw(data)
+        log.info("config_writer.tool_setting_set", {
+            "tool": tool_name,
+            "fields": sorted(merged.keys()),
+        })
+
+    @classmethod
+    def delete_tool_setting(cls, tool_name: str) -> bool:
+        """Remove the tool_settings[tool_name] entry.
+
+        Pops the whole ``tool_settings`` key when the last entry is
+        removed so flocks.json doesn't accumulate empty container objects
+        as users toggle their last customised tool back to default.
+
+        Returns True if an entry existed and was removed.
+        """
+        data = cls._read_raw()
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict) or tool_name not in settings:
+            return False
+        del settings[tool_name]
+        if settings:
+            data["tool_settings"] = settings
+        else:
+            data.pop("tool_settings", None)
+        cls._write_raw(data)
+        log.info("config_writer.tool_setting_removed", {"tool": tool_name})
         return True
 
     # ------------------------------------------------------------------

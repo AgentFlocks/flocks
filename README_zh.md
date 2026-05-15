@@ -44,9 +44,9 @@ Flocks 支持两种部署方式，请**任选其一**：
 
 如果安装过程中自动安装 `npm` 失败，请手动安装 `npm`，并使用 `22.+` 或更高版本。
 
-#### 3.1.2 安装（二选一）
+#### 3.1.2 安装
 
-> 以下提供两种安装方式，**选择其中一种**完成安装后，继续执行 3.1.3 启动服务。
+> 支持以下安装方式，**选择其中一种**完成安装后，继续执行 3.1.3 启动服务。
 
 ---
 
@@ -78,13 +78,25 @@ cd flocks
 
 macOS / Linux
 ```bash
-./scripts/install_zh.sh
+sh ./scripts/install_zh.sh
 ```
 
 Windows PowerShell (Administrator)
 ```powershell
 powershell -ep Bypass -File .\scripts\install_zh.ps1
 ```
+
+
+**选项 C: Windows 安装包（EXE，BETA）** 
+
+Flocks 提供 **Windows x64** 下的 **Inno Setup 安装向导**（`.exe`）。请从 [GitHub Releases](https://github.com/AgentFlocks/flocks/releases) 页面下载对应版本的安装包。
+
+| 平台 | 下载文件 |
+| --- | --- |
+| Windows (x64) | `FlocksSetup-<tag>.exe` |
+
+安装完成后，可通过 **开始菜单** 或可选的 **桌面快捷方式** 启动；或在**新开**的终端中执行 `flocks start`，以便新的 `PATH` 等环境变量生效。更多说明见 [`packaging/README.md`](packaging/README.md)。
+
 
 ---
 
@@ -195,12 +207,74 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 ```
 虚拟机远程访问失败请指定 host 为虚拟机 IP。
 
+### 4.4 鉴权与 API Token
+
+启用本地账号体系后，所有 HTTP 路径默认要求鉴权，仅以下路径放行：WebUI 引导页（`/`、`/auth/*`）、静态资源、以及 IM 平台 webhook 回调（`/api/channel/{channel_id}/webhook`）。
+
+初次部署：
+
+1. 打开 WebUI，按提示完成 **bootstrap-admin**，创建唯一的 `admin` 账号。
+2. WebUI 会自动写入 `flocks_session` Cookie，浏览器侧无需额外配置。
+
+非浏览器客户端（TUI / SDK / 脚本）：
+
+- 所有非浏览器客户端（包括本机回环调用）都必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
+
+  在 **服务端** 生成（或轮换）token，会持久化到服务端本机的 secret store：
+
+  ```bash
+  flocks admin generate-api-token        # 打印 token 并写入 server_api_token
+  ```
+
+  在 **每台远程客户端** 上把同一个 token 写入客户端自己的 secret 文件，让 SDK / TUI 自动携带：
+
+  ```bash
+  flocks admin set-api-token --token <服务端打印的 token>
+  ```
+
+  也可以按请求显式携带任一 Header：
+
+  ```text
+  Authorization: Bearer <token>
+  X-Flocks-API-Token: <token>
+  ```
+
+  快速验证：
+
+  ```bash
+  curl -H "Authorization: Bearer <token>" https://flocks.example.com/api/health
+  ```
+
+反向代理部署：
+
+- 反代必须主动注入 `X-Forwarded-For`。若缺失，凡是直连本机回环的请求都会被自动放行为 `admin`；中间件依靠该头来区分"真本机"与"经由反代的外部请求"。
+- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确给 Cookie 加 `Secure` 标志。
+
+忘记密码 / 应急恢复：
+
+- 在服务器上执行 `flocks admin generate-one-time-password`，账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**这种状态下所有非浏览器接口都会返回 403**，请勿在不通知调用方的情况下对依赖自动化的账号执行该命令。
+
+无主 session（CLI / 后台任务 / inbound 渠道）：
+
+- 没有 auth 上下文创建出的 session（CLI 子命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 字段为空。bootstrap admin 仍可看到，但**之后新增的 member 账号将完全看不到**。可通过下列命令把这类 session 批量赋给指定 admin：
+
+  ```bash
+  flocks admin reassign-orphan-sessions --username admin --dry-run   # 预览
+  flocks admin reassign-orphan-sessions --username admin             # 实际写入
+  ```
+
+  命令会输出 `scanned / orphaned / reassigned / failed` 四个计数；只要 `failed` 非零就以 exit code 2 退出，方便 CI / 脚本捕获"部分写入"情况、修复底层故障（一般是临时存储错误）后再次运行。
+
 ## 5. 加入社区
 
 请使用**微信**扫描下方二维码，加入官方交流群。  
 
 ![企业微信官方交流群二维码](assets/community-wecom-qr.png)
 
-## 6. 开源协议
+## 6. 参与贡献
+
+开发环境、代码规范、测试要求和 Pull Request 流程请参考 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)。
+
+## 7. 开源协议
 
 Apache License 2.0

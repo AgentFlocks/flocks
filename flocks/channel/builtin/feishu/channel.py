@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections import OrderedDict
 from typing import Optional
 
@@ -95,7 +94,7 @@ class FeishuChannel(ChannelPlugin):
                 reply_to_id=ctx.reply_to_id,
                 account_id=ctx.account_id,
             )
-            self._status.last_message_at = time.monotonic()
+            self.record_message()
             return DeliveryResult(
                 channel_id="feishu",
                 message_id=result["message_id"],
@@ -130,7 +129,7 @@ class FeishuChannel(ChannelPlugin):
         try:
             # Write full text at once (send_text scenario has no per-chunk streaming data)
             await card.finalize(ctx.text)
-            self._status.last_message_at = time.monotonic()
+            self.record_message()
             return DeliveryResult(
                 channel_id="feishu",
                 message_id=message_id,
@@ -158,7 +157,7 @@ class FeishuChannel(ChannelPlugin):
                 reply_to_id=ctx.reply_to_id,
                 account_id=ctx.account_id,
             )
-            self._status.last_message_at = time.monotonic()
+            self.record_message()
             return DeliveryResult(
                 channel_id="feishu",
                 message_id=result["message_id"],

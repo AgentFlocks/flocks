@@ -44,13 +44,19 @@ class TaskExecutor:
         execution: TaskExecution,
         scheduler: TaskScheduler,
     ) -> TaskExecution:
+        # The execution row was already flipped to RUNNING atomically with the
+        # queue ref inside TaskStore.claim_next_queue_execution. We only need
+        # to make sure the in-memory object reflects that and to persist the
+        # session_id once the task session has been created.
+        if execution.status != TaskStatus.RUNNING:
+            execution.status = TaskStatus.RUNNING
+        if execution.started_at is None:
+            execution.started_at = datetime.now(timezone.utc)
+
         session_id: Optional[str] = None
         if execution.execution_mode == ExecutionMode.AGENT:
             session_id = await cls._create_task_session(execution, scheduler)
 
-        started_at = datetime.now(timezone.utc)
-        execution.status = TaskStatus.RUNNING
-        execution.started_at = started_at
         execution.session_id = session_id
         await TaskStore.update_execution(execution)
 

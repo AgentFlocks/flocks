@@ -2,18 +2,24 @@
 Tool routes - API endpoints for tool management and execution
 """
 
+import asyncio
+import time
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from flocks.server.auth import require_admin
+from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
+from flocks.permission.next import DeniedError, PermissionNext
 from flocks.tool.registry import (
     ToolRegistry,
     ToolInfo,
     ToolSchema,
     ToolResult,
     ToolCategory,
+    ToolContext,
 )
 
 
@@ -32,7 +38,9 @@ class ToolInfoResponse(BaseModel):
     source: str = Field("builtin", description="Tool source: builtin, mcp, api, custom")
     source_name: Optional[str] = Field(None, description="Source detail, e.g. MCP server name or API module name")
     parameters: List[Dict[str, Any]] = Field(default_factory=list, description="Tool parameters")
-    enabled: bool = Field(True, description="Is tool enabled")
+    enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
+    enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
+    enabled_customized: bool = Field(False, description="True if a user setting is recorded in flocks.json tool_settings")
     requires_confirmation: bool = Field(False, description="Requires confirmation")
 
 
@@ -49,7 +57,22 @@ class ToolUpdateRequest(BaseModel):
 
 class ToolExecuteRequest(BaseModel):
     """Tool execution request"""
+    model_config = {"populate_by_name": True}
     params: Dict[str, Any] = Field(default_factory=dict, description="Tool parameters")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 class ToolExecuteResponse(BaseModel):
@@ -68,8 +91,23 @@ class BatchToolCall(BaseModel):
 
 class BatchExecuteRequest(BaseModel):
     """Batch tool execution request"""
+    model_config = {"populate_by_name": True}
     calls: List[BatchToolCall] = Field(..., description="Tool calls to execute")
     parallel: bool = Field(True, description="Execute in parallel")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 class BatchExecuteResponse(BaseModel):
@@ -83,6 +121,15 @@ _BUILTIN_CATEGORIES = {
     ToolCategory.FILE, ToolCategory.TERMINAL, ToolCategory.BROWSER,
     ToolCategory.CODE, ToolCategory.SEARCH, ToolCategory.SYSTEM,
 }
+
+_DIRECT_HTTP_BLOCKED_MESSAGE = (
+    "Direct HTTP tool execution is disabled for local or permission-gated tools. "
+    "Use a session-backed request (provide sessionID/messageID) or run the tool via the normal agent/session flow."
+)
+_VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
+    "Direct HTTP execution for local or permission-gated tools requires a verified "
+    "session-backed request with both sessionID and messageID."
+)
 
 
 def _get_tool_source(tool_info: ToolInfo) -> tuple:
@@ -126,8 +173,11 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
 
 
 def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
-    """Build ToolInfoResponse with source info."""
+    """Build ToolInfoResponse with source info and overlay metadata."""
     source, source_name = _get_tool_source(t)
+    setting = ConfigWriter.get_tool_setting(t.name) or {}
+    customized = "enabled" in setting
+    enabled_default = _get_default_enabled(t)
     return ToolInfoResponse(
         name=t.name,
         description=t.description,
@@ -137,8 +187,226 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         source_name=source_name,
         parameters=[p.model_dump() for p in t.parameters],
         enabled=_get_effective_tool_enabled(t),
+        enabled_default=enabled_default,
+        enabled_customized=customized,
         requires_confirmation=t.requires_confirmation,
     )
+
+
+def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
+    """Return True when a tool must be anchored to a real session/message context."""
+    source, _ = _get_tool_source(tool_info)
+    return source == "builtin"
+
+
+async def _validate_verified_session_message_context(
+    *,
+    requires_verified_context: bool,
+    session_id: Optional[str],
+    message_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate that session/message context exists and the message belongs to the session."""
+    effective_session_id = str(session_id or "").strip() or None
+    effective_message_id = str(message_id or "").strip() or None
+    needs_verified_context = requires_verified_context or bool(effective_session_id or effective_message_id)
+
+    if not needs_verified_context:
+        return None, None
+
+    if not effective_session_id or not effective_message_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_VERIFIED_CONTEXT_REQUIRED_MESSAGE,
+        )
+
+    from flocks.session.message import Message
+    from flocks.session.session import Session
+
+    session = await Session.get_by_id(effective_session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session not found: {effective_session_id}",
+        )
+
+    message = await Message.get(effective_session_id, effective_message_id)
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message {effective_message_id} not found in session {effective_session_id}",
+        )
+
+    return effective_session_id, effective_message_id
+
+
+async def _validate_session_message_context(
+    *,
+    tool_info: ToolInfo,
+    session_id: Optional[str],
+    message_id: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Validate context for a single tool execution request."""
+    return await _validate_verified_session_message_context(
+        requires_verified_context=_requires_session_backed_context(tool_info),
+        session_id=session_id,
+        message_id=message_id,
+    )
+
+
+def _build_http_tool_context(
+    *,
+    tool_name: str,
+    tool_info: ToolInfo,
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+) -> ToolContext:
+    """Create a safe ToolContext for HTTP-triggered execution."""
+    agent_name = agent or "rex"
+    effective_message_id = message_id or f"http-tool:{tool_name}"
+
+    if session_id:
+        async def permission_callback(request) -> None:
+            metadata = dict(request.metadata or {})
+            metadata.setdefault("messageID", effective_message_id)
+            metadata.setdefault("route", "tool.execute")
+            await PermissionNext.ask(
+                session_id=session_id,
+                permission=request.permission,
+                patterns=list(request.patterns or []),
+                ruleset=[],
+                metadata=metadata,
+                always=list(request.always or []),
+                tool={"name": tool_name},
+            )
+
+        return ToolContext(
+            session_id=session_id,
+            message_id=effective_message_id,
+            agent=agent_name,
+            permission_callback=permission_callback,
+        )
+
+    if _requires_session_backed_context(tool_info):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_DIRECT_HTTP_BLOCKED_MESSAGE,
+        )
+
+    async def deny_permission_callback(request) -> None:
+        raise PermissionError(
+            "This HTTP execution context cannot auto-approve tool permissions."
+        )
+
+    return ToolContext(
+        session_id="http-tool",
+        message_id=effective_message_id,
+        agent=agent_name,
+        permission_callback=deny_permission_callback,
+    )
+
+
+def _permission_denied_http_error(exc: Exception) -> HTTPException:
+    """Normalize permission failures into a consistent 403 response."""
+    detail = str(exc).strip() or _DIRECT_HTTP_BLOCKED_MESSAGE
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+async def _execute_with_http_context(
+    *,
+    tool_name: str,
+    tool_info: ToolInfo,
+    params: Dict[str, Any],
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+) -> ToolResult:
+    """Execute a tool using an HTTP-safe ToolContext."""
+    validated_session_id, validated_message_id = await _validate_session_message_context(
+        tool_info=tool_info,
+        session_id=session_id,
+        message_id=message_id,
+    )
+    ctx = _build_http_tool_context(
+        tool_name=tool_name,
+        tool_info=tool_info,
+        session_id=validated_session_id,
+        message_id=validated_message_id,
+        agent=agent,
+    )
+    try:
+        return await ToolRegistry.execute(tool_name=tool_name, ctx=ctx, **params)
+    except (DeniedError, PermissionError) as exc:
+        raise _permission_denied_http_error(exc) from exc
+
+
+async def _execute_batch_with_http_context(
+    *,
+    calls: List[BatchToolCall],
+    session_id: Optional[str],
+    message_id: Optional[str],
+    agent: Optional[str],
+    parallel: bool,
+) -> List[ToolResult]:
+    """Execute batch calls with a per-tool HTTP context."""
+
+    async def run_call(call: BatchToolCall) -> ToolResult:
+        tool = ToolRegistry.get(call.name)
+        if tool is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tool not found: {call.name}",
+            )
+        return await _execute_with_http_context(
+            tool_name=call.name,
+            tool_info=tool.info,
+            params=call.params,
+            session_id=session_id,
+            message_id=message_id,
+            agent=agent,
+        )
+
+    if parallel:
+        return await asyncio.gather(*(run_call(call) for call in calls))
+
+    results: List[ToolResult] = []
+    for call in calls:
+        results.append(await run_call(call))
+    return results
+
+def _get_default_enabled(t: ToolInfo) -> bool:
+    """Return the registration-time default for ``enabled``.
+
+    Prefers :meth:`ToolRegistry.get_default_enabled` (a snapshot taken
+    before sync/overlay mutate ``info.enabled`` in place).  Falls back to
+    the YAML file when the snapshot is missing (e.g. a tool registered
+    after init), then to the live value as the very last resort.
+    """
+    snapshot = ToolRegistry.get_default_enabled(t.name)
+    if snapshot is not None:
+        return snapshot
+    try:
+        from flocks.tool.tool_loader import read_yaml_tool
+        raw = read_yaml_tool(t.name)
+    except Exception:
+        raw = None
+    if isinstance(raw, dict) and "enabled" in raw:
+        return bool(raw["enabled"])
+    return t.enabled
+
+
+def _service_allows_enable(t: ToolInfo) -> bool:
+    """Return True when the API service backing ``t`` (if any) is enabled.
+
+    Mirrors the gate in :meth:`ToolRegistry._apply_tool_settings` so that
+    HTTP mutations stay consistent with what the registry would compute
+    on its next reload: an overlay can never *open* a tool whose service
+    is currently disabled.
+    """
+    if not t.provider:
+        return True
+    svc = ConfigWriter.get_api_service_raw(t.provider) or {}
+    return bool(svc.get("enabled", False))
 
 
 def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
@@ -173,6 +441,7 @@ async def list_tools(
         List of tool information
     """
     # Initialize registry if needed
+    started_at = time.perf_counter()
     ToolRegistry.init()
     
     # Parse category filter
@@ -192,7 +461,12 @@ async def list_tools(
     # Apply source filter if specified
     if source:
         result = [t for t in result if t.source == source]
-    
+
+    log_route_timing(log, "tools.list.complete", started_at=started_at, extra={
+        "count": len(result),
+        "category": category,
+        "source": source,
+    })
     return result
 
 
@@ -228,19 +502,28 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
-async def update_tool(tool_name: str, request: ToolUpdateRequest):
+async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object = Depends(require_admin)):
     """
-    Update tool settings (e.g., enable or disable)
+    Update tool settings (e.g., enable or disable).
 
-    Args:
-        tool_name: Tool name
-        request: Update payload
+    The ``enabled`` flag is persisted to the user-level overlay in
+    ``flocks.json`` (``tool_settings.<tool_name>.enabled``) instead of
+    mutating the YAML plugin file.  This keeps project-level YAML files
+    (which may be tracked by git and overwritten on upgrade) clean and
+    treats the YAML's ``enabled:`` field as the factory default that the
+    overlay can selectively customise.
 
-    Returns:
-        Updated tool information
+    Two behaviours of note:
+
+    * If ``request.enabled`` matches the registration-time default we
+      *delete* the overlay entry instead of writing one — the tool is
+      back to "no customisation", and the UI's "已自定义" badge clears.
+    * Asking to enable a tool whose API service is currently disabled
+      still persists the overlay (so the intent survives the service
+      being re-enabled later) but does not flip the in-memory
+      ``info.enabled`` flag, mirroring the gate in
+      :meth:`ToolRegistry._apply_tool_settings`.
     """
-    from flocks.tool.tool_loader import find_yaml_tool, update_yaml_tool
-
     ToolRegistry.init()
 
     tool = ToolRegistry.get(tool_name)
@@ -250,11 +533,70 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
             detail=f"Tool not found: {tool_name}",
         )
 
-    if find_yaml_tool(tool_name):
-        update_yaml_tool(tool_name, {"enabled": request.enabled})
+    desired = bool(request.enabled)
+    default = _get_default_enabled(tool.info)
+    # Service gate: only matters when the user is trying to enable.
+    # Disabling is always honoured.
+    service_ok = _service_allows_enable(tool.info)
+    new_enabled = desired and service_ok
 
-    tool.info.enabled = request.enabled
-    log.info("tool.updated", {"name": tool_name, "enabled": request.enabled})
+    if desired == default:
+        removed = ConfigWriter.delete_tool_setting(tool_name)
+        log.info("tool.updated.reset_to_default", {
+            "name": tool_name,
+            "enabled": new_enabled,
+            "default": default,
+            "removed_overlay": removed,
+        })
+    else:
+        ConfigWriter.set_tool_setting(tool_name, {"enabled": desired})
+        log.info("tool.updated", {
+            "name": tool_name,
+            "enabled": new_enabled,
+            "requested": desired,
+            "blocked_by_service": desired and not service_ok,
+            "native": tool.info.native,
+            "store": "overlay",
+        })
+
+    tool.info.enabled = new_enabled
+    return _build_tool_response(tool.info)
+
+
+@router.post(
+    "/{tool_name}/reset",
+    response_model=ToolInfoResponse,
+    summary="Reset a tool to its YAML/registration default",
+)
+async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_admin)):
+    """Remove the user setting for ``tool_name`` and restore the default.
+
+    Restores the registration-time ``enabled`` value from the registry's
+    snapshot (or the YAML file as a fallback) and re-applies the same
+    service gate as :meth:`ToolRegistry._apply_tool_settings`, so the
+    HTTP layer never leaves the in-memory state in a position the
+    registry would refuse on its next reload.
+    """
+    ToolRegistry.init()
+
+    tool = ToolRegistry.get(tool_name)
+    if not tool:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tool not found: {tool_name}",
+        )
+
+    removed = ConfigWriter.delete_tool_setting(tool_name)
+    default = _get_default_enabled(tool.info)
+    new_enabled = default and _service_allows_enable(tool.info)
+    tool.info.enabled = new_enabled
+
+    log.info("tool.setting.reset", {
+        "name": tool_name,
+        "removed": removed,
+        "default": default,
+        "restored_enabled": new_enabled,
+    })
     return _build_tool_response(tool.info)
 
 
@@ -322,9 +664,17 @@ async def execute_tool(tool_name: str, request: ToolExecuteRequest):
     log.info("tool.execute.request", {
         "tool": tool_name,
         "params": list(request.params.keys()),
+        "session": request.session_id,
     })
-    
-    result = await ToolRegistry.execute(tool_name=tool_name, **request.params)
+
+    result = await _execute_with_http_context(
+        tool_name=tool_name,
+        tool_info=tool.info,
+        params=request.params,
+        session_id=request.session_id,
+        message_id=request.message_id,
+        agent=request.agent,
+    )
     
     return ToolExecuteResponse(
         success=result.success,
@@ -363,11 +713,32 @@ async def execute_batch(request: BatchExecuteRequest):
     log.info("tool.batch.request", {
         "count": len(request.calls),
         "parallel": request.parallel,
+        "session": request.session_id,
     })
-    
-    # Execute batch
-    calls = [{"name": c.name, "params": c.params} for c in request.calls]
-    results = await ToolRegistry.execute_batch(calls, parallel=request.parallel)
+
+    requires_verified_context = False
+    for call in request.calls:
+        tool = ToolRegistry.get(call.name)
+        if tool and _requires_session_backed_context(tool.info):
+            requires_verified_context = True
+            break
+
+    validated_session_id, validated_message_id = await _validate_verified_session_message_context(
+        requires_verified_context=requires_verified_context,
+        session_id=request.session_id,
+        message_id=request.message_id,
+    )
+
+    try:
+        results = await _execute_batch_with_http_context(
+            calls=request.calls,
+            session_id=validated_session_id,
+            message_id=validated_message_id,
+            agent=request.agent,
+            parallel=request.parallel,
+        )
+    except (DeniedError, PermissionError) as exc:
+        raise _permission_denied_http_error(exc) from exc
     
     return BatchExecuteResponse(
         results=[
@@ -394,13 +765,14 @@ class RefreshResponse(BaseModel):
     response_model=RefreshResponse,
     summary="Refresh all plugin and dynamic tools",
 )
-async def refresh_tools():
+async def refresh_tools(_admin: object = Depends(require_admin)):
     """
     Reload all plugin tools (YAML + Python) and dynamically generated tools
     from disk without restarting the service.
 
     This is the batch counterpart to the single-tool ``/{name}/reload`` endpoint.
     """
+    started_at = time.perf_counter()
     ToolRegistry.init()
 
     errors: list[str] = []
@@ -420,7 +792,10 @@ async def refresh_tools():
         errors.append(f"plugin: {e}")
 
     tool_count = len(ToolRegistry.all_tool_ids())
-    log.info("tools.refresh.done", {"tool_count": tool_count, "errors": len(errors)})
+    log_route_timing(log, "tools.refresh.done", started_at=started_at, extra={
+        "tool_count": tool_count,
+        "errors": len(errors),
+    })
 
     if errors:
         return RefreshResponse(
@@ -442,7 +817,22 @@ async def refresh_tools():
 
 class ToolTestRequest(BaseModel):
     """Request to test a tool"""
+    model_config = {"populate_by_name": True}
     params: Dict[str, Any] = Field(default_factory=dict, description="Test parameters")
+    session_id: Optional[str] = Field(
+        None,
+        alias="sessionID",
+        description="Optional session ID used for permission-gated execution",
+    )
+    message_id: Optional[str] = Field(
+        None,
+        alias="messageID",
+        description="Optional message ID used for permission-gated execution",
+    )
+    agent: Optional[str] = Field(
+        "rex",
+        description="Agent name recorded for the execution context",
+    )
 
 
 @router.post(
@@ -466,16 +856,32 @@ async def test_tool(name: str, request: ToolTestRequest):
         )
     
     log.info("tool.test", {"name": name, "params": request.params})
-    
+
+    tool_request = ToolExecuteRequest(
+        params=request.params,
+        sessionID=request.session_id,
+        messageID=request.message_id,
+        agent=request.agent,
+    )
+
     # Execute tool
     try:
-        result = await ToolRegistry.execute(tool_name=name, **request.params)
+        result = await _execute_with_http_context(
+            tool_name=name,
+            tool_info=tool.info,
+            params=tool_request.params,
+            session_id=tool_request.session_id,
+            message_id=tool_request.message_id,
+            agent=tool_request.agent,
+        )
         return ToolExecuteResponse(
             success=result.success,
             output=result.output,
             error=result.error,
             metadata=result.metadata,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("tool.test.error", {"name": name, "error": str(e)})
         return ToolExecuteResponse(
@@ -484,6 +890,44 @@ async def test_tool(name: str, request: ToolTestRequest):
             error=str(e),
             metadata={},
         )
+
+
+# =============================================================================
+# Test Fixtures Route
+# =============================================================================
+
+
+class FixtureItemResponse(BaseModel):
+    """One predeclared test sample for a tool."""
+    label: str = Field(..., description="Default (English) sample name for the UI drop-down")
+    label_cn: Optional[str] = Field(None, description="Optional Chinese override; WebUI picks it when locale is zh-*")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Call params, verbatim")
+    tags: List[str] = Field(default_factory=list, description="Semantic labels (smoke, ip, …)")
+    has_assertion: bool = Field(False, description="Whether the sample declares a pass/fail assertion")
+
+
+@router.get(
+    "/{name}/fixtures",
+    response_model=List[FixtureItemResponse],
+    summary="List declared test fixtures for a tool",
+)
+async def list_tool_fixtures(name: str) -> List[FixtureItemResponse]:
+    """Return predeclared test samples sourced from the tool's provider ``_test.yaml``.
+
+    Returns an empty list when no manifest exists or no fixtures are declared.
+    """
+    from flocks.tool.probe_loader import get_tool_fixtures_by_tool_name
+
+    return [
+        FixtureItemResponse(
+            label=f.label,
+            label_cn=f.label_cn,
+            params=f.params,
+            tags=list(f.tags),
+            has_assertion=bool(f.assertion),
+        )
+        for f in get_tool_fixtures_by_tool_name(name)
+    ]
 
 
 # =============================================================================
@@ -527,7 +971,7 @@ class PluginToolListResponse(BaseModel):
     status_code=status.HTTP_201_CREATED,
     summary="Create a YAML plugin tool",
 )
-async def create_tool(request: CreateToolRequest):
+async def create_tool(request: CreateToolRequest, _admin: object = Depends(require_admin)):
     """
     Create a new tool via YAML plugin.
 
@@ -603,7 +1047,7 @@ async def create_tool(request: CreateToolRequest):
     response_model=ToolInfoResponse,
     summary="Update a YAML plugin tool",
 )
-async def update_plugin_tool(name: str, request: UpdateToolRequest):
+async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: object = Depends(require_admin)):
     """
     Update an existing YAML plugin tool.
 
@@ -664,7 +1108,7 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest):
     "/{name}",
     summary="Delete a plugin tool",
 )
-async def delete_tool(name: str):
+async def delete_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Delete a plugin tool.
 
@@ -698,6 +1142,10 @@ async def delete_tool(name: str):
     # Refresh plugin tools so stale decorator-registered python tools are removed too.
     ToolRegistry.refresh_plugin_tools()
 
+    from flocks.hub import local as hub_local
+
+    hub_local.remove_installed_record("tool", name)
+
     return {"status": "success", "message": f"Tool {name} deleted"}
 
 
@@ -706,7 +1154,7 @@ async def delete_tool(name: str):
     response_model=ToolInfoResponse,
     summary="Reload a YAML plugin tool",
 )
-async def reload_tool(name: str):
+async def reload_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Hot-reload a single YAML plugin tool.
 

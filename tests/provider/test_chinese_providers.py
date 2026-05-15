@@ -30,6 +30,7 @@ class TestCuratedCatalogProviders:
             "zhipu",
             "minimax",
             "stepfun",
+            "cherry",
         }
 
     def test_removed_provider_ids_are_absent(self):
@@ -97,9 +98,9 @@ class TestCuratedCatalogModels:
 
         models = get_provider_model_definitions("anthropic")
         ids = {m.id for m in models}
-        assert ids == {"claude-sonnet-4.6", "claude-opus-4.6"}
+        assert ids == {"claude-sonnet-4-6", "claude-opus-4-6"}
 
-        opus = next(m for m in models if m.id == "claude-opus-4.6")
+        opus = next(m for m in models if m.id == "claude-opus-4-6")
         assert opus.capabilities.supports_vision is True
         assert opus.pricing.output == 25.0
 
@@ -164,9 +165,16 @@ class TestCuratedCatalogModels:
         models = get_provider_model_definitions("moonshot")
         assert {m.id for m in models} == {
             "kimi-k2.5",
+            "kimi-k2.6",
             "kimi-k2-thinking",
             "kimi-k2",
         }
+
+        k26 = next(m for m in models if m.id == "kimi-k2.6")
+        assert k26.capabilities.supports_reasoning is True
+        assert k26.pricing.currency == "CNY"
+        assert k26.pricing.cache_read == 1.3
+        assert k26.limits.context_window == 256000
 
         thinking = next(m for m in models if m.id == "kimi-k2-thinking")
         assert thinking.capabilities.supports_reasoning is True
@@ -208,13 +216,20 @@ class TestCuratedCatalogModels:
             "minimax-m2.7",
             "minimax-m2.5",
             "GLM-5",
+            "qwen3.6-plus",
+            "qwen3-max",
+            "kimi-k2.6",
         }
 
-        glm5 = next(m for m in models if m.id == "GLM-5")
-        assert glm5.pricing.currency == "CNY"
-        assert glm5.pricing.output == 18.0
-        assert glm5.limits.context_window == 200000
-        assert glm5.limits.max_output_tokens == 128000
+        kimi = next(m for m in models if m.id == "kimi-k2.6")
+        assert kimi.capabilities.supports_reasoning is True
+        assert kimi.pricing.currency == "CNY"
+        assert kimi.pricing.cache_read == 1.3
+        assert kimi.pricing.input == 6.5
+        assert kimi.pricing.output == 27.0
+        assert kimi.limits.context_window == 256000
+        assert kimi.limits.max_input_tokens == 224000
+        assert kimi.limits.max_output_tokens == 16000
 
     def test_threatbook_io_llm_catalog(self):
         meta = get_provider_meta("threatbook-io-llm")
@@ -226,6 +241,8 @@ class TestCuratedCatalogModels:
             "minimax-m2.7",
             "minimax-m2.5",
             "GLM-5",
+            "qwen3.6-plus",
+            "qwen3-max",
         }
 
         m27 = next(m for m in models if m.id == "minimax-m2.7")

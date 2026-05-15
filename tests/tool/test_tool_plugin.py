@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from flocks.tool.tool_loader import (
+    _build_execution_handler,
     _build_http_handler,
     _extract_response,
     _json_schema_to_params,
@@ -32,7 +33,10 @@ from flocks.tool.registry import (
     Tool,
     ToolCategory,
     ToolContext,
+    ToolInfo,
+    ToolParameter,
     ToolResult,
+    _coerce_params,
 )
 
 
@@ -159,6 +163,96 @@ class TestJsonSchemaToParams:
         assert types["b"] == ParameterType.BOOLEAN
         assert types["a"] == ParameterType.ARRAY
         assert types["o"] == ParameterType.OBJECT
+
+    def test_preserves_object_and_array_subschemas(self):
+        schema = {
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "List of item ids",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Configuration map",
+                    "additionalProperties": True,
+                    "properties": {
+                        "mode": {"type": "string"},
+                    },
+                },
+            },
+            "required": ["config"],
+        }
+
+        params = _json_schema_to_params(schema)
+        params_by_name = {param.name: param for param in params}
+
+        assert params_by_name["items"].json_schema == schema["properties"]["items"]
+        assert params_by_name["config"].json_schema == schema["properties"]["config"]
+
+        tool_info = ToolInfo(
+            name="test_complex_schema",
+            description="Test tool",
+            category=ToolCategory.CUSTOM,
+            parameters=params,
+        )
+        json_schema = tool_info.get_schema().to_json_schema()
+
+        assert json_schema["properties"]["items"]["items"]["type"] == "integer"
+        assert json_schema["properties"]["items"]["minItems"] == 1
+        assert json_schema["properties"]["config"]["additionalProperties"] is True
+        assert json_schema["properties"]["config"]["properties"]["mode"]["type"] == "string"
+
+
+class TestCoerceParams:
+    def test_coerces_object_and_array_json_strings(self):
+        parameters = [
+            ToolParameter(
+                name="config",
+                type=ParameterType.OBJECT,
+            ),
+            ToolParameter(
+                name="items",
+                type=ParameterType.ARRAY,
+            ),
+        ]
+
+        result = _coerce_params(
+            {
+                "config": '{"enabled": true, "retries": 3}',
+                "items": '["a", "b"]',
+            },
+            parameters,
+            tool_name="test_tool",
+        )
+
+        assert result["config"] == {"enabled": True, "retries": 3}
+        assert result["items"] == ["a", "b"]
+
+    def test_keeps_non_json_or_type_mismatch_strings(self):
+        parameters = [
+            ToolParameter(
+                name="workflow",
+                type=ParameterType.OBJECT,
+            ),
+            ToolParameter(
+                name="items",
+                type=ParameterType.ARRAY,
+            ),
+        ]
+
+        result = _coerce_params(
+            {
+                "workflow": "/tmp/workflow.json",
+                "items": '{"not": "a list"}',
+            },
+            parameters,
+            tool_name="test_tool",
+        )
+
+        assert result["workflow"] == "/tmp/workflow.json"
+        assert result["items"] == '{"not": "a list"}'
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +468,62 @@ class TestYamlToTool:
         tool = yaml_to_tool(data, yaml_path)
 
         assert tool.info.source is None
+
+    def test_provider_version_from_provider_yaml(self, tmp_path: Path, monkeypatch):
+        """`version` in _provider.yaml should be propagated to ToolInfo.provider_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "sangfor_sip_v92"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "sangfor_sip",
+            "version": "9.2",
+            "defaults": {"base_url": "https://sip.test/api"},
+        })
+        data = _make_tool_yaml(name="sangfor_sip_assets", url="{base_url}/assets")
+        yaml_path = _write_yaml(api_dir / "sangfor_sip_assets.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        # ``info.provider`` is the storage key (service_id + version) so that
+        # ``api_services`` lookups can keep multiple versions side-by-side.
+        # The unversioned ``service_id`` is preserved on the Tool instance.
+        assert tool.info.provider == "sangfor_sip_v9_2"
+        assert tool.info.provider_version == "9.2"
+        assert getattr(tool, "_service_id", None) == "sangfor_sip"
+        assert getattr(tool, "_provider_version", None) == "9.2"
+
+    def test_provider_version_falls_back_to_defaults_product_version(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When top-level `version` is missing, fall back to defaults.product_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "legacy_provider"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "legacy_provider",
+            "defaults": {"base_url": "https://x.test", "product_version": "8.1"},
+        })
+        data = _make_tool_yaml(name="legacy_tool", url="{base_url}/x")
+        yaml_path = _write_yaml(api_dir / "legacy_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version == "8.1"
+
+    def test_provider_version_absent_when_not_declared(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """No `version` anywhere → provider_version stays None."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "no_version"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {"name": "no_version"})
+        data = _make_tool_yaml(name="no_version_tool")
+        yaml_path = _write_yaml(api_dir / "no_version_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version is None
 
 
 # ---------------------------------------------------------------------------
@@ -790,3 +940,34 @@ class TestHttpHandler:
 
         assert result.success is True
         assert result.output == [1, 2]
+
+
+class TestExecutionHandler:
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_loads_but_refuses_to_run_by_default(
+        self,
+        tmp_path: Path,
+    ):
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True}"},
+            tmp_path / "tool.yaml",
+        )
+        result = await handler(ToolContext(session_id="test", message_id="test"))
+
+        assert result.success is False
+        assert "Inline YAML execution is disabled" in result.error
+
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_stays_disabled(
+        self,
+        tmp_path: Path,
+    ):
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True, 'value': _kw_['name']}"},
+            tmp_path / "tool.yaml",
+        )
+
+        result = await handler(ToolContext(session_id="test", message_id="test"), name="after")
+
+        assert result.success is False
+        assert "handler.type=script" in result.error

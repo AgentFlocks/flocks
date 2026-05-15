@@ -4,11 +4,12 @@
  * 使用 useSessionChat 创建会话，通过 SessionChat 展示对话并支持追问。
  * 会话在用户首次发送消息时才创建，避免空会话污染会话列表。
  */
-import { useEffect, useCallback } from 'react';
+import { useEffect } from 'react';
 import { X, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from './SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 
 interface ChatDialogProps {
   open: boolean;
@@ -35,23 +36,18 @@ export default function ChatDialog({
   width = 'max-w-2xl',
 }: ChatDialogProps) {
   const { t } = useTranslation('common');
+  const supportsVision = useDefaultModelVision();
   const { sessionId, createAndSend, reset } = useSessionChat({
     title,
   });
 
   useEffect(() => {
     if (open && initialPrompt) {
-      createAndSend(initialPrompt).catch(() => {});
+      createAndSend({ text: initialPrompt }).catch(() => {});
     }
     if (!open) reset();
   }, [open, reset, initialPrompt, createAndSend]);
 
-  const handleCreateAndSend = useCallback(
-    async (text: string) => {
-      await createAndSend(text);
-    },
-    [createAndSend],
-  );
 
   if (!open) return null;
 
@@ -87,7 +83,8 @@ export default function ChatDialog({
           className="flex-1 min-h-0 rounded-b-xl"
           emptyText={t('chat.starting')}
           suggestions={suggestions}
-          onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
+          supportsVision={supportsVision}
+          onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
               <Sparkles className="w-10 h-10 text-red-500 mx-auto mb-3" />

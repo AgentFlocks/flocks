@@ -15,6 +15,8 @@ from __future__ import annotations
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
+from flocks.auth.context import AuthUser
+from flocks.session.session import Session
 
 # ===========================================================================
 # CRUD
@@ -172,6 +174,42 @@ class TestSessionMessages:
             for m in messages
         )
 
+
+# ===========================================================================
+# Delete permissions (single-admin model)
+# ===========================================================================
+
+class TestSessionDeletePermissions:
+    @pytest.mark.asyncio
+    async def test_owner_and_admin_can_delete_but_not_other_member(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        admin = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        other = AuthUser(id="usr_other", username="other", role="member", status="active")
+
+        session = await Session.create(
+            project_id="delete_permissions",
+            directory="/tmp",
+            title="owner-only-delete",
+            owner_user_id=owner.id,
+            owner_username=owner.username,
+        )
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: other)
+        forbidden = await client.delete(f"/api/session/{session.id}")
+        assert forbidden.status_code == status.HTTP_403_FORBIDDEN
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
+        admin_ok = await client.delete(f"/api/session/{session.id}")
+        assert admin_ok.status_code == status.HTTP_200_OK
+
+
+class TestSessionMessagesRemaining:
     @pytest.mark.asyncio
     async def test_send_message_empty_parts_returns_success(
         self, client: AsyncClient, session_id: str

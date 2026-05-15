@@ -1,220 +1,243 @@
-"""
-Tests for MCP Client SSE transport support
-
-Verifies that McpClient correctly handles:
-- remote / sse server type (auto-detect: Streamable HTTP -> SSE fallback)
-- Timeout does NOT fall back (avoids double wait)
-- Unknown server types (raises ValueError)
-- Error message extraction from ExceptionGroups
-"""
+"""Tests for MCP client remote transport lifecycle and fallback behavior."""
 
 import asyncio
+from contextlib import asynccontextmanager
+from types import MethodType, SimpleNamespace
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+
+import flocks.mcp.client as mcp_client_module
 from flocks.mcp.client import McpClient, _extract_root_cause
 
 
-class TestMcpClientServerTypes:
-    """Test McpClient server type routing"""
+def _make_session_class(
+    *,
+    events: dict[str, object] | None = None,
+    tool_result: object | None = None,
+    tools: list[object] | None = None,
+    resources: list[object] | None = None,
+):
+    class FakeSession:
+        def __init__(self, read_stream, write_stream):
+            self.read_stream = read_stream
+            self.write_stream = write_stream
 
-    def test_init_sse_type(self):
-        """SSE type should be accepted"""
-        client = McpClient(
-            name="test-sse",
-            server_type="sse",
-            url="https://example.com/sse",
-        )
-        assert client.server_type == "sse"
-        assert client.url == "https://example.com/sse"
+        async def __aenter__(self):
+            if events is not None:
+                events["session_enter_task"] = asyncio.current_task()
+            return self
 
-    def test_init_remote_type(self):
-        """Remote type should be accepted"""
-        client = McpClient(
-            name="test-remote",
-            server_type="remote",
-            url="https://example.com/mcp",
-        )
-        assert client.server_type == "remote"
+        async def __aexit__(self, exc_type, exc, tb):
+            if events is not None:
+                events["session_exit_task"] = asyncio.current_task()
+            return False
 
-    @pytest.mark.asyncio
-    async def test_unknown_type_raises_value_error(self):
-        """Unknown server type should raise ValueError"""
-        client = McpClient(
-            name="test-bad",
-            server_type="websocket",
-            url="wss://example.com",
-        )
-        with pytest.raises(ValueError, match="Unknown server type: websocket"):
-            await client.connect()
+        async def initialize(self):
+            return SimpleNamespace(protocolVersion="2026-05-12", serverInfo={"name": "demo"})
 
-    @pytest.mark.asyncio
-    async def test_sse_type_uses_auto_detect(self):
-        """SSE type should use _connect_remote (auto-detect) same as remote"""
-        client = McpClient(
-            name="test",
-            server_type="sse",
-            url="https://example.com/sse",
-        )
-        client._connect_remote = AsyncMock()
-        await client.connect()
-        client._connect_remote.assert_called_once()
+        async def list_tools(self):
+            return SimpleNamespace(tools=tools or [])
 
-    @pytest.mark.asyncio
-    async def test_remote_type_calls_connect_remote(self):
-        """Remote type should call _connect_remote"""
-        client = McpClient(
-            name="test",
-            server_type="remote",
-            url="https://example.com/mcp",
-        )
-        client._connect_remote = AsyncMock()
-        await client.connect()
-        client._connect_remote.assert_called_once()
+        async def call_tool(self, name, arguments):
+            if events is not None:
+                events["call_tool_task"] = asyncio.current_task()
+            if isinstance(tool_result, Exception):
+                raise tool_result
+            if tool_result is not None:
+                return tool_result
+            return {"name": name, "arguments": arguments}
 
-    @pytest.mark.asyncio
-    async def test_stdio_type_calls_connect_local(self):
-        """Stdio type attempts connection (raises RuntimeError on failure)"""
-        client = McpClient(
-            name="test",
-            server_type="stdio",
-            url=None,
-            command=["python", "-m", "some_server"],
-        )
-        # Stdio connection will fail since 'some_server' doesn't exist
-        with pytest.raises((NotImplementedError, RuntimeError)):
-            await client.connect()
+        async def list_resources(self):
+            return SimpleNamespace(resources=resources or [])
 
-    @pytest.mark.asyncio
-    async def test_already_connected_skips(self):
-        """Already connected client should skip reconnection"""
-        client = McpClient(
-            name="test",
-            server_type="sse",
-            url="https://example.com/sse",
-        )
-        client._connected = True
-        client._connect_remote = AsyncMock()
-        await client.connect()
-        client._connect_remote.assert_not_called()
+        async def read_resource(self, uri):
+            return {"uri": uri}
+
+    return FakeSession
+
+
+def _make_remote_transport_factory(
+    label: str,
+    *,
+    streams: tuple[object, ...] | None = None,
+    error: Exception | None = None,
+    events: dict[str, object] | None = None,
+    captures: list[tuple[str, str, dict | None]] | None = None,
+):
+    if streams is None:
+        if label == "http":
+            streams = ("read", "write", lambda: None)
+        else:
+            streams = ("read", "write")
+
+    @asynccontextmanager
+    async def factory(self, url, headers):
+        if captures is not None:
+            captures.append((label, url, headers))
+        if error is not None:
+            raise error
+        if events is not None:
+            events[f"{label}_enter_task"] = asyncio.current_task()
+        try:
+            yield streams
+        finally:
+            if events is not None:
+                events[f"{label}_exit_task"] = asyncio.current_task()
+
+    return factory
+
+
+def _bind_method(monkeypatch: pytest.MonkeyPatch, client: McpClient, name: str, method) -> None:
+    monkeypatch.setattr(client, name, MethodType(method, client))
 
 
 class TestMcpClientRemoteFallback:
-    """Test remote type fallback from Streamable HTTP to SSE"""
-
     @pytest.mark.asyncio
-    async def test_remote_falls_back_to_sse(self):
-        """Remote type should fall back to SSE when Streamable HTTP fails"""
+    async def test_remote_falls_back_to_sse(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-remote",
             server_type="remote",
             url="https://mcp.example.com/mcp",
             timeout=10.0,
         )
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        # Mock _do_connect_streamable_http to fail
-        client._do_connect_streamable_http = AsyncMock(
-            side_effect=RuntimeError("Streamable HTTP not supported")
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", error=RuntimeError("HTTP failed")),
         )
-        # Mock _do_connect_sse to succeed
-        async def mark_connected(url, headers=None):
-            client._connected = True
-        client._do_connect_sse = AsyncMock(side_effect=mark_connected)
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse"),
+        )
 
         await client.connect()
 
-        client._do_connect_streamable_http.assert_called_once()
-        client._do_connect_sse.assert_called_once()
         assert client._transport_type == "sse"
+        await client.disconnect()
 
     @pytest.mark.asyncio
-    async def test_remote_streamable_http_success_no_sse(self):
-        """Remote type should not try SSE if Streamable HTTP succeeds"""
+    async def test_remote_streamable_http_success_no_sse(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-remote",
             server_type="remote",
             url="https://mcp.example.com/mcp",
             timeout=10.0,
         )
+        captures: list[tuple[str, str, dict | None]] = []
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        async def mark_connected(url, headers=None):
-            client._connected = True
-        client._do_connect_streamable_http = AsyncMock(side_effect=mark_connected)
-        client._do_connect_sse = AsyncMock()
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", captures=captures),
+        )
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", captures=captures),
+        )
 
         await client.connect()
 
-        client._do_connect_streamable_http.assert_called_once()
-        client._do_connect_sse.assert_not_called()
         assert client._transport_type == "streamable_http"
+        assert [label for label, _, _ in captures] == ["http"]
+        await client.disconnect()
 
     @pytest.mark.asyncio
-    async def test_remote_both_fail_raises(self):
-        """Remote type should raise RuntimeError if both transports fail"""
+    async def test_remote_both_fail_raises(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-remote",
             server_type="remote",
             url="https://mcp.example.com/mcp",
             timeout=10.0,
         )
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        client._do_connect_streamable_http = AsyncMock(
-            side_effect=RuntimeError("HTTP failed")
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", error=RuntimeError("HTTP failed")),
         )
-        client._do_connect_sse = AsyncMock(
-            side_effect=RuntimeError("SSE failed")
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", error=RuntimeError("SSE failed")),
         )
 
         with pytest.raises(RuntimeError, match="Connection failed.*SSE failed"):
             await client.connect()
 
     @pytest.mark.asyncio
-    async def test_sse_type_also_tries_streamable_http_first(self):
-        """SSE type uses same auto-detect strategy as remote (Streamable HTTP first)"""
+    async def test_sse_type_also_tries_streamable_http_first(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-sse",
             server_type="sse",
             url="https://mcp.example.com/mcp",
             timeout=10.0,
         )
+        captures: list[tuple[str, str, dict | None]] = []
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        async def mark_connected(url, headers=None):
-            client._connected = True
-        client._do_connect_streamable_http = AsyncMock(side_effect=mark_connected)
-        client._do_connect_sse = AsyncMock()
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", captures=captures),
+        )
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", captures=captures),
+        )
 
         await client.connect()
 
-        # "sse" and "remote" share the same auto-detect logic
-        client._do_connect_streamable_http.assert_called_once()
-        client._do_connect_sse.assert_not_called()
         assert client._transport_type == "streamable_http"
+        assert [label for label, _, _ in captures] == ["http"]
+        await client.disconnect()
 
     @pytest.mark.asyncio
-    async def test_timeout_does_not_fall_back(self):
-        """Streamable HTTP timeout should NOT fall back to SSE (avoids double wait)"""
+    async def test_timeout_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-timeout",
             server_type="remote",
             url="https://mcp.example.com/mcp",
             timeout=10.0,
         )
+        captures: list[tuple[str, str, dict | None]] = []
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        client._do_connect_streamable_http = AsyncMock(
-            side_effect=asyncio.TimeoutError()
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", error=asyncio.TimeoutError()),
         )
-        client._do_connect_sse = AsyncMock()
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", captures=captures),
+        )
 
         with pytest.raises(RuntimeError, match="Connection timeout"):
             await client.connect()
 
-        # SSE should NOT have been attempted
-        client._do_connect_sse.assert_not_called()
+        assert captures == []
         assert client._transport_type is None
 
     @pytest.mark.asyncio
-    async def test_remote_passes_resolved_headers_to_transports(self):
-        """Remote connection should pass config and auth headers to SDK transports"""
+    async def test_remote_passes_resolved_headers_to_transports(self, monkeypatch: pytest.MonkeyPatch):
         client = McpClient(
             name="test-headers",
             server_type="remote",
@@ -228,15 +251,21 @@ class TestMcpClientRemoteFallback:
             },
             timeout=10.0,
         )
+        captures: list[tuple[str, str, dict | None]] = []
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class())
 
-        client._do_connect_streamable_http = AsyncMock(
-            side_effect=RuntimeError("HTTP failed")
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", captures=captures, error=RuntimeError("HTTP failed")),
         )
-
-        async def mark_connected(url, headers):
-            client._connected = True
-
-        client._do_connect_sse = AsyncMock(side_effect=mark_connected)
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", captures=captures),
+        )
 
         await client.connect()
 
@@ -244,46 +273,104 @@ class TestMcpClientRemoteFallback:
             "Api-Key": "token123",
             "Authorization": "Bearer abc",
         }
-        client._do_connect_streamable_http.assert_called_once_with(
-            "https://mcp.example.com/mcp",
-            expected_headers,
+        assert captures == [
+            ("http", "https://mcp.example.com/mcp", expected_headers),
+            ("sse", "https://mcp.example.com/mcp", expected_headers),
+        ]
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_closes_streams_and_session_in_owner_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        client = McpClient(
+            name="test-owner",
+            server_type="remote",
+            url="https://mcp.example.com/mcp",
         )
-        client._do_connect_sse.assert_called_once_with(
-            "https://mcp.example.com/mcp",
-            expected_headers,
+        events: dict[str, object] = {}
+        monkeypatch.setattr(mcp_client_module, "ClientSession", _make_session_class(events=events))
+
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http", events=events),
         )
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse", events=events),
+        )
+
+        await client.connect()
+        await client.disconnect()
+
+        assert events["http_enter_task"] is events["http_exit_task"]
+        assert events["session_enter_task"] is events["session_exit_task"]
+
+    @pytest.mark.asyncio
+    async def test_call_tool_runs_through_owner_task(self, monkeypatch: pytest.MonkeyPatch):
+        client = McpClient(
+            name="test-call",
+            server_type="remote",
+            url="https://mcp.example.com/mcp",
+        )
+        events: dict[str, object] = {}
+        monkeypatch.setattr(
+            mcp_client_module,
+            "ClientSession",
+            _make_session_class(events=events),
+        )
+
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_streamable_http_streams",
+            _make_remote_transport_factory("http"),
+        )
+        _bind_method(
+            monkeypatch,
+            client,
+            "_create_sse_streams",
+            _make_remote_transport_factory("sse"),
+        )
+
+        await client.connect()
+        result = await client.call_tool("demo_tool", {"value": 1})
+        await client.disconnect()
+
+        assert result == {"name": "demo_tool", "arguments": {"value": 1}}
+        assert events["call_tool_task"] is events["session_enter_task"]
 
 
 class TestExtractRootCause:
-    """Test _extract_root_cause helper function"""
-
     def test_simple_exception(self):
-        """Simple exception returns its message"""
         assert _extract_root_cause(RuntimeError("simple error")) == "simple error"
 
     def test_exception_group(self):
-        """ExceptionGroup should unwrap to the root cause"""
         inner = RuntimeError("real error")
         group = ExceptionGroup("group", [inner])
         assert _extract_root_cause(group) == "real error"
 
     def test_nested_exception_group(self):
-        """Nested ExceptionGroups should be fully unwrapped"""
         inner = ValueError("deep error")
         group1 = ExceptionGroup("inner group", [inner])
         group2 = ExceptionGroup("outer group", [group1])
         assert _extract_root_cause(group2) == "deep error"
 
     def test_http_status_error(self):
-        """HTTP status errors should show status code"""
-        # Simulate httpx.HTTPStatusError
         class MockResponse:
             status_code = 401
+
         class MockRequest:
             url = "https://example.com/mcp?apikey=secret123"
+
         exc = Exception("HTTP error")
         exc.response = MockResponse()
         exc.request = MockRequest()
         result = _extract_root_cause(exc)
         assert "401" in result
-        assert "secret" not in result  # URL should be masked
+        assert "secret" not in result

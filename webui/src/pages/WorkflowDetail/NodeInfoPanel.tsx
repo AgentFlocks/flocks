@@ -6,6 +6,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
+import CopyButton from '@/components/common/CopyButton';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -53,13 +54,7 @@ function getLatestNodeInputs(nodeId: string, latestExecution?: WorkflowExecution
 function buildSuggestedNodeInputs(
   node: WorkflowNode,
   workflow: Workflow,
-  latestExecution?: WorkflowExecution | null,
 ): Record<string, unknown> {
-  const runtimeInputs = getLatestNodeInputs(node.id, latestExecution);
-  if (runtimeInputs) {
-    return runtimeInputs;
-  }
-
   if (node.id === workflow.workflowJson.start) {
     return workflow.workflowJson.metadata?.sampleInputs ?? {};
   }
@@ -290,21 +285,46 @@ export interface NodeInfoPanelProps {
   onSaved: (updated: Workflow) => void;
 }
 
-function RuntimeJsonBlock({ label, value, tone }: {
+function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
   label: string;
   value: Record<string, unknown>;
   tone: 'amber' | 'green';
+  copyable?: boolean;
 }) {
+  const { t } = useTranslation('workflow');
+  const [expanded, setExpanded] = useState(true);
   const bgClass = tone === 'amber' ? 'bg-amber-50 border-amber-100 text-amber-900' : 'bg-green-50 border-green-100 text-green-900';
+  const formattedValue = JSON.stringify(value, null, 2);
+  const toggleLabel = expanded
+    ? t('detail.nodeInfo.collapseJsonBlock', { label })
+    : t('detail.nodeInfo.expandJsonBlock', { label });
 
   return (
     <div className="space-y-1.5">
-      <FL>{label}</FL>
-      <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
-        <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
-          {JSON.stringify(value, null, 2)}
-        </pre>
+      <div className="flex items-center justify-between gap-2">
+        <FL>{label}</FL>
+        <div className="flex items-center gap-1">
+          {copyable && <CopyButton text={formattedValue} size="w-3 h-3" />}
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            aria-label={toggleLabel}
+            title={toggleLabel}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
+          >
+            {expanded
+              ? <ChevronDown className="w-3 h-3" />
+              : <ChevronRight className="w-3 h-3" />}
+          </button>
+        </div>
       </div>
+      {expanded && (
+        <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
+          <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
+            {formattedValue}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -383,7 +403,7 @@ function NodeRunSection({
   const { t } = useTranslation('workflow');
   const supported = canRunNode(node);
   const [expanded, setExpanded] = useState(true);
-  const suggestedInputs = buildSuggestedNodeInputs(node, workflow, latestExecution);
+  const suggestedInputs = buildSuggestedNodeInputs(node, workflow);
   const latestRuntimeInputs = getLatestNodeInputs(node.id, latestExecution);
   const [rawInputs, setRawInputs] = useState(() => JSON.stringify(suggestedInputs, null, 2));
   const [inputError, setInputError] = useState('');
@@ -391,7 +411,7 @@ function NodeRunSection({
   const [result, setResult] = useState<WorkflowNodeExecution | null>(null);
 
   useEffect(() => {
-    setRawInputs(JSON.stringify(buildSuggestedNodeInputs(node, workflow, latestExecution), null, 2));
+    setRawInputs(JSON.stringify(buildSuggestedNodeInputs(node, workflow), null, 2));
     setInputError('');
     setResult(null);
   }, [node, workflow, latestExecution]);
@@ -478,14 +498,21 @@ function NodeRunSection({
                     </button>
                   </div>
                 </div>
-                <textarea
-                  value={rawInputs}
-                  onChange={(e) => setRawInputs(e.target.value)}
-                  rows={6}
-                  className={`${IB} font-mono resize-y ${inputError ? 'border-red-300 focus:ring-red-300' : ''}`}
-                  placeholder="{}"
-                  spellCheck={false}
-                />
+                <div className="relative">
+                  <CopyButton
+                    text={rawInputs}
+                    size="w-3 h-3"
+                    className="absolute right-2 top-2 z-10 rounded-md border border-gray-200 bg-white/95 p-1.5 text-gray-400 shadow-sm transition-colors hover:bg-white hover:text-gray-600"
+                  />
+                  <textarea
+                    value={rawInputs}
+                    onChange={(e) => setRawInputs(e.target.value)}
+                    rows={6}
+                    className={`${IB} font-mono resize-y pr-10 ${inputError ? 'border-red-300 focus:ring-red-300' : ''}`}
+                    placeholder="{}"
+                    spellCheck={false}
+                  />
+                </div>
                 {inputError && (
                   <p className="text-[11px] text-red-500 flex items-center gap-1">
                     <AlertCircle className="w-3 h-3" />
@@ -510,12 +537,27 @@ function NodeRunSection({
                     <span className={`text-[11px] font-semibold ${result.success ? 'text-green-600' : 'text-red-600'}`}>
                       {result.success ? t('detail.nodeInfo.runNodeSuccess') : t('detail.nodeInfo.runNodeError')}
                     </span>
-                    {result.duration_ms != null && (
-                      <span className="text-[11px] text-gray-400">{(result.duration_ms / 1000).toFixed(2)}s</span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {result.outputs && Object.keys(result.outputs).length > 0 && (
+                        <CopyButton
+                          text={JSON.stringify(result.outputs, null, 2)}
+                          label={t('detail.nodeInfo.copyOutput')}
+                          size="w-3 h-3"
+                          className="inline-flex items-center rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                        />
+                      )}
+                      {result.duration_ms != null && (
+                        <span className="text-[11px] text-gray-400">{(result.duration_ms / 1000).toFixed(2)}s</span>
+                      )}
+                    </div>
                   </div>
 
-                  <RuntimeJsonBlock label={t('detail.nodeInfo.runtimeOutputs')} value={result.outputs ?? {}} tone="green" />
+                  <RuntimeJsonBlock
+                    label={t('detail.nodeInfo.runtimeOutputs')}
+                    value={result.outputs ?? {}}
+                    tone="green"
+                    copyable={false}
+                  />
 
                   {result.stdout && (
                     <div className="space-y-1.5">

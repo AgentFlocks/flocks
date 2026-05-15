@@ -1,6 +1,7 @@
 {
   "name": "tdp_alert_triage",
-  "description": "NDR/TDP 告警调查工作流 - 兼容 TDP 嵌套告警结构并自动化研判 HTTP 类安全事件",
+  "description": "NDR/TDP alert triage workflow - handles nested TDP alert payloads and automates HTTP-focused security investigation.",
+  "description_cn": "NDR/TDP 告警调查工作流 - 兼容 TDP 嵌套告警结构并自动化研判 HTTP 类安全事件",
   "start": "receive_alert",
   "nodes": [
     {

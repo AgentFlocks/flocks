@@ -24,7 +24,7 @@ export function useWorkflows(category?: string, status?: string) {
       }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch workflows');
-      if (!silent) setWorkflows([]);
+      setWorkflows([]);
     } finally {
       loadingRef.current = false;
       if (!silent) setLoading(false);

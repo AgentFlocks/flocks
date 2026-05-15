@@ -195,11 +195,6 @@ async def _show_session(session_id: str, project_id: Optional[str]):
         console.print(f"  Additions: +{session.summary.additions}")
         console.print(f"  Deletions: -{session.summary.deletions}")
     
-    if session.share:
-        console.print()
-        console.print("[dim]Share:[/dim]")
-        console.print(f"  URL: {session.share.url}")
-    
     # Get message count
     message_count = await Session.get_message_count(session_id)
     console.print()

@@ -23,6 +23,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,17 +50,28 @@ _CN_NPM_REGISTRY = "https://registry.npmmirror.com/"
 _CN_UV_DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple"
 _CN_PIP_INDEX_URL = _CN_UV_DEFAULT_INDEX
 _CURL_USER_AGENT = "curl/8.7.1"
+_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
+_FRONTEND_BUILD_TIMEOUT_SECONDS = 300
+_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 180
+_WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS = 300
 
 _PRESERVE_NAMES: set[str] = {
     ".venv",
     "node_modules",
     "logs",
     ".env",
-    "flocks.json",
+    ".git",
     "__pycache__",
 }
 
 log = Log.create(service="updater")
+
+
+def _record_update_journal(message: str) -> None:
+    """Append a human-readable line to ``update.log`` (see ``append_upgrade_text_log``)."""
+    from flocks.utils.log import append_upgrade_text_log
+
+    append_upgrade_text_log(message)
 
 
 @dataclass(frozen=True)
@@ -71,6 +83,15 @@ class UpdateMirrorProfile:
     npm_registry: str | None = None
     uv_default_index: str | None = None
     pip_index_url: str | None = None
+
+
+@dataclass(frozen=True)
+class _FrontendNpmCandidate:
+    """A single npm launcher candidate for frontend rebuilds."""
+
+    npm: str
+    env: dict[str, str] | None
+    source: str
 
 
 # ------------------------------------------------------------------ #
@@ -115,6 +136,25 @@ def _running_from_legacy_uv_tool_install() -> bool:
     return "/uv/tools/flocks/" in executable
 
 
+def _bundled_node_install_dir() -> Path | None:
+    """Return bundled Node.js install dir when Windows installer env vars are set."""
+    candidates: list[str] = []
+    node_home = os.getenv("FLOCKS_NODE_HOME")
+    if node_home:
+        candidates.append(node_home)
+
+    install_root = os.getenv("FLOCKS_INSTALL_ROOT")
+    if install_root:
+        candidates.append(str(Path(install_root).expanduser() / "tools" / "node"))
+
+    for candidate in candidates:
+        node_dir = Path(candidate).expanduser()
+        node_executable = node_dir / ("node.exe" if sys.platform == "win32" else "bin/node")
+        if node_executable.exists():
+            return node_dir.resolve()
+    return None
+
+
 def _windows_paths_match(left: str, right: str) -> bool:
     """Return True when two Windows paths likely point to the same launcher/script."""
     if not left or not right:
@@ -127,6 +167,65 @@ def _windows_paths_match(left: str, right: str) -> bool:
 def _looks_like_windows_python_launcher(entry: str) -> bool:
     """Return True when *entry* looks like a Windows Python launcher."""
     return _windows_path_stem(entry) in {"python", "pythonw", "py"}
+
+
+def _is_windows_file_in_use_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like a Windows file-lock failure."""
+    if sys.platform != "win32":
+        return False
+    if isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32:
+        return True
+
+    text = str(exc).lower()
+    return "winerror 32" in text or "used by another process" in text
+
+
+def _is_uv_managed_python_runtime_error(text: str) -> bool:
+    """Return True when uv reports a broken managed Python runtime cache."""
+    if not text:
+        return False
+    return bool(
+        re.search(
+            (
+                r"Failed to inspect Python interpreter from managed installations|"
+                r"Failed to query Python interpreter|"
+                r"failed to query metadata of file|"
+                r"Failed to create temporary virtualenv|"
+                r"Could not find a suitable Python executable for the virtual "
+                r"environment based on the interpreter"
+            ),
+            text,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _uv_managed_python_install_dir_from_text(text: str) -> Path | None:
+    """Extract the cached uv-managed Python install directory from error text."""
+    if not text:
+        return None
+    match = re.search(
+        r"([A-Z]:\\[^'\"\r\n]+\\uv\\python\\[^'\"\r\n]+\\python\.exe)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return Path(str(PureWindowsPath(match.group(1)).parent))
+
+
+def _repair_windows_uv_managed_python_install(text: str) -> Path | None:
+    """Remove the broken cached uv-managed Python install directory when possible."""
+    install_dir = _uv_managed_python_install_dir_from_text(text)
+    if install_dir is None:
+        return None
+
+    target = _resolve_windows_long_path(install_dir)
+    if not target.exists():
+        return target
+
+    _safe_rmtree(target)
+    return target
 
 
 def _resolve_windows_long_path(path: Path) -> Path:
@@ -258,6 +357,198 @@ def _build_uv_sync_env() -> dict[str, str] | None:
     if not missing:
         return None
     return {"PATH": os.pathsep.join([current_path] + missing)}
+
+
+def _build_frontend_subprocess_env_for_node_dir(
+    node_dir: Path | None,
+    *,
+    npm_registry: str | None = None,
+) -> dict[str, str] | None:
+    """Build supplemental env vars for frontend npm commands."""
+    env: dict[str, str] = {}
+    if npm_registry:
+        env["npm_config_registry"] = npm_registry
+
+    if node_dir is not None:
+        node_bin = str(node_dir if sys.platform == "win32" else node_dir / "bin")
+        current_path = os.environ.get("PATH", "")
+        path_entries = current_path.split(os.pathsep) if current_path else []
+        if node_bin not in path_entries:
+            env["PATH"] = node_bin if not current_path else node_bin + os.pathsep + current_path
+
+    return env or None
+
+
+def _build_frontend_subprocess_env(*, npm_registry: str | None = None) -> dict[str, str] | None:
+    """Build supplemental env vars for frontend npm commands."""
+    return _build_frontend_subprocess_env_for_node_dir(
+        _bundled_node_install_dir(),
+        npm_registry=npm_registry,
+    )
+
+
+def _reset_frontend_workspace(webui_dir: Path) -> None:
+    """Remove transient frontend build artifacts before retrying another npm candidate."""
+    for name in ("node_modules", "dist"):
+        target = webui_dir / name
+        if target.exists():
+            _safe_remove(target)
+
+
+async def _build_frontend_workspace(
+    webui_dir: Path,
+    *,
+    npm_registry: str | None = None,
+) -> str | None:
+    """Install dependencies and build the frontend in the active install tree."""
+    npm_candidates = _resolve_frontend_npm_candidates(npm_registry=npm_registry)
+    if not npm_candidates:
+        log.warning(
+            "updater.frontend.npm_not_found",
+            {
+                "hint": ("Cannot build frontend during restart because npm was not found"),
+            },
+        )
+        return "Frontend dependency install failed: npm was not found."
+
+    has_package_lock = (webui_dir / "package-lock.json").exists()
+    install_subcommands = ["install"]
+    if has_package_lock:
+        install_subcommands.append("ci")
+    final_frontend_error: str | None = None
+
+    for index, candidate in enumerate(npm_candidates):
+        attempt_source = candidate.source
+        is_last_attempt = index == len(npm_candidates) - 1
+        install_succeeded = False
+        for install_attempt_index, install_subcommand in enumerate(install_subcommands):
+            install_label = f"npm {install_subcommand}"
+            install_cmd = [candidate.npm, install_subcommand]
+            try:
+                code, _, err = await _run_async(
+                    install_cmd,
+                    cwd=webui_dir,
+                    timeout=_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+                    env=candidate.env,
+                )
+            except subprocess.TimeoutExpired:
+                final_frontend_error = (
+                    "Frontend dependency install timed out after "
+                    f"{_FRONTEND_DEPENDENCY_INSTALL_TIMEOUT_SECONDS}s while running {install_label}."
+                )
+            else:
+                if code == 0:
+                    install_succeeded = True
+                    final_frontend_error = None
+                    break
+                final_frontend_error = f"Frontend dependency install failed ({install_label}): {err}"
+
+            has_same_candidate_fallback = install_attempt_index < len(install_subcommands) - 1
+            if has_same_candidate_fallback:
+                next_install_label = f"npm {install_subcommands[install_attempt_index + 1]}"
+                _record_update_journal(
+                    "WARN "
+                    f"{final_frontend_error} Retrying {next_install_label} "
+                    f"with the same npm/node after {attempt_source} {install_label} attempt."
+                )
+
+        if not install_succeeded:
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        try:
+            code, _, err = await _run_async(
+                [candidate.npm, "run", "build"],
+                cwd=webui_dir,
+                timeout=_FRONTEND_BUILD_TIMEOUT_SECONDS,
+                env=candidate.env,
+            )
+        except subprocess.TimeoutExpired:
+            final_frontend_error = (
+                f"Frontend build timed out after {_FRONTEND_BUILD_TIMEOUT_SECONDS}s while running npm run build."
+            )
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        if code != 0:
+            final_frontend_error = f"Frontend build failed: {err}"
+            if is_last_attempt:
+                break
+            _reset_frontend_workspace(webui_dir)
+            _record_update_journal(
+                "WARN "
+                f"{final_frontend_error} Cleaned frontend workspace and retrying with fallback "
+                f"npm/node after {attempt_source} attempt."
+            )
+            continue
+
+        final_frontend_error = None
+        break
+
+    if final_frontend_error is not None:
+        return final_frontend_error
+
+    dist_index = webui_dir / "dist" / "index.html"
+    if not dist_index.exists():
+        return "Frontend build output is missing after npm run build."
+
+    return None
+
+
+async def build_updated_frontend(
+    *,
+    locale: str | None = None,
+    region: str | None = None,
+) -> None:
+    """Build the active install tree frontend after a non-restarting update."""
+    ucfg = await _get_updater_config()
+    profile = _resolve_update_mirror_profile(
+        ucfg.sources,
+        region=region,
+        locale=locale,
+    )
+    install_root = _get_repo_root()
+    webui_dir = install_root / "webui"
+    if not webui_dir.is_dir() or not (webui_dir / "package.json").exists():
+        return
+
+    frontend_error = await _build_frontend_workspace(
+        webui_dir,
+        npm_registry=profile.npm_registry,
+    )
+    if frontend_error is not None:
+        raise RuntimeError(frontend_error)
+
+
+async def _await_ignoring_cancellation(awaitable):
+    """Finish a post-handover critical step even if the SSE client disconnects."""
+    task = asyncio.create_task(awaitable)
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            log.warning("updater.restart.critical_step_cancelled_ignored")
+
+
+def _dependency_sync_timeout_seconds() -> int:
+    """Return the timeout budget for ``uv sync`` during self-update."""
+    if sys.platform == "win32":
+        return _WINDOWS_DEPENDENCY_SYNC_TIMEOUT_SECONDS
+    return _DEPENDENCY_SYNC_TIMEOUT_SECONDS
 
 
 # ------------------------------------------------------------------ #
@@ -930,21 +1221,19 @@ def _backup_current_version(
     """
     Compress the current install directory into ~/.flocks/version/ .
     Returns the backup path on success, None on failure.
-    Heavy directories (.venv, node_modules, ...) are excluded.
+    Preserved runtime/user directories are excluded.
     """
     _BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     backup_name = f"flocks-{current_version}-{ts}"
     backup_path = _BACKUP_DIR / f"{backup_name}.tar.gz"
 
-    exclude = {".venv", "node_modules", "__pycache__", ".git", "logs"}
-
     def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
         parts = info.name.split("/")
         for index, part in enumerate(parts):
-            if part in exclude:
+            if part in _PRESERVE_NAMES:
                 return None
-            if part == "dist" and parts[max(index - 1, 0)] != "webui":
+            if part == "dist":
                 return None
         return info
 
@@ -1597,44 +1886,40 @@ def _replace_install_dir(
 _VERSION_MARKER_PATH = _BACKUP_DIR / ".current_version"
 
 
+def _read_version_marker() -> str:
+    """Read the persisted installed version marker."""
+    try:
+        if _VERSION_MARKER_PATH.is_file():
+            return _VERSION_MARKER_PATH.read_text(encoding="utf-8").strip().lstrip("v")
+    except Exception:
+        pass
+    return ""
+
+
+def _read_pyproject_version() -> str:
+    """Read the source version from the repository pyproject.toml."""
+    try:
+        pyproject_path = _get_repo_root() / "pyproject.toml"
+        if not pyproject_path.is_file():
+            return ""
+        payload = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        version = str(payload.get("project", {}).get("version", "")).strip()
+        return version.lstrip("v")
+    except Exception:
+        pass
+    return ""
+
+
 def get_current_version() -> str:
     """
     Return the running version.
-    Priority:
-      1. Version marker at ~/.flocks/version/.current_version — always
-         accurate after a download-based upgrade since local git tags
-         are no longer updated.
-      2. git describe --tags (works when installed from a git checkout).
-         If found, also persist it to the marker for future lookups.
-      3. importlib.metadata / pyproject.toml via flocks.__version__.
+    Compare the persisted marker at ~/.flocks/version/.current_version
+    with the source version in pyproject.toml and return the higher one.
     """
-    try:
-        if _VERSION_MARKER_PATH.is_file():
-            ver = _VERSION_MARKER_PATH.read_text(encoding="utf-8").strip()
-            if ver:
-                return ver.lstrip("v")
-    except Exception:
-        pass
-
-    try:
-        result = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            cwd=_get_repo_root(),
-            capture_output=True,
-            text=False,
-            timeout=3,
-        )
-        stdout = _clean_process_output(result.stdout)
-        if result.returncode == 0 and stdout:
-            ver = stdout.lstrip("v")
-            _write_version_marker(ver)
-            return ver
-    except Exception:
-        pass
-
-    from flocks import __version__
-
-    return __version__
+    return _pick_best_tag([
+        _read_version_marker(),
+        _read_pyproject_version(),
+    ])
 
 
 def _write_version_marker(version: str) -> None:
@@ -1776,6 +2061,7 @@ async def perform_update(
     )
     install_root = _get_repo_root()
     current_version = get_current_version()
+    handover_active = False
 
     fmt = _choose_archive_format(ucfg.archive_format)
 
@@ -1807,9 +2093,11 @@ async def perform_update(
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         log.error("updater.download.all_failed", {"error": str(exc)})
+        _dl_msg = "Failed to download the update. Please check your network connection."
+        _record_update_journal(f"ERROR {_dl_msg} ({exc})")
         yield UpdateProgress(
             stage="error",
-            message="Failed to download the update. Please check your network connection.",
+            message=_dl_msg,
             success=False,
         )
         return
@@ -1849,78 +2137,48 @@ async def perform_update(
         msg = f"Failed to extract files: {exc}"
         if backup_path:
             msg += f"\nRestore from backup: {backup_path}"
+        _record_update_journal(f"ERROR {msg}")
         yield UpdateProgress(stage="error", message=msg, success=False)
         return
 
     # ------------------------------------------------------------------ #
-    # Step 3 – prepare staged frontend
+    # Step 3 – determine whether frontend handover is needed
     # ------------------------------------------------------------------ #
     staged_webui_dir = content_root / "webui"
-    if staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists():
-        npm = _find_executable("npm.cmd") or _find_executable("npm")
-        if npm:
-            yield UpdateProgress(stage="building", message="Installing frontend dependencies...")
-            npm_env = {"npm_config_registry": profile.npm_registry} if profile.npm_registry else None
-            code, _, err = await _run_async(
-                [npm, "install"],
-                cwd=staged_webui_dir,
-                timeout=180,
-                env=npm_env,
-            )
-            if code != 0:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                yield UpdateProgress(
-                    stage="error",
-                    message=f"Frontend dependency install failed: {err}",
-                    success=False,
-                )
-                return
-
-            yield UpdateProgress(stage="building", message="Building frontend...")
-            code, _, err = await _run_async(
-                [npm, "run", "build"],
-                cwd=staged_webui_dir,
-                timeout=300,
-                env=npm_env,
-            )
-            if code != 0:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                yield UpdateProgress(
-                    stage="error",
-                    message=f"Frontend build failed: {err}",
-                    success=False,
-                )
-                return
-        else:
-            log.warning(
-                "updater.frontend.npm_not_found",
-                {
-                    "hint": ("Cannot prebuild frontend during upgrade because npm was not found"),
-                },
-            )
-        dist_index = staged_webui_dir / "dist" / "index.html"
-        if not dist_index.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            yield UpdateProgress(
-                stage="error",
-                message="Frontend build output is missing; upgrade aborted before cutover.",
-                success=False,
-            )
-            return
-
-    # ------------------------------------------------------------------ #
-    # Step 4 – determine whether frontend handover is needed
-    # ------------------------------------------------------------------ #
     needs_handover = staged_webui_dir.is_dir() and (staged_webui_dir / "package.json").exists()
 
     # ------------------------------------------------------------------ #
-    # Step 5 – replace install tree
+    # Step 4 – replace install tree
     # (Frontend proxy is still alive so the SSE stream keeps flowing.)
     # ------------------------------------------------------------------ #
     yield UpdateProgress(
         stage="applying",
         message=f"Applying v{latest_tag}...",
     )
+
+    async def _restore_after_apply_failure() -> None:
+        nonlocal handover_active
+        if backup_path is None:
+            if handover_active:
+                await asyncio.to_thread(rollback_upgrade_handover)
+                handover_active = False
+            return
+        if handover_active:
+            await asyncio.to_thread(
+                _rollback_failed_update,
+                backup_path,
+                install_root,
+                current_version,
+            )
+            handover_active = False
+            return
+        await asyncio.to_thread(
+            _restore_backup_if_possible,
+            backup_path,
+            install_root,
+            current_version,
+        )
+
     try:
         await asyncio.to_thread(
             _replace_install_dir,
@@ -1928,35 +2186,46 @@ async def perform_update(
             install_root,
         )
     except Exception as exc:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
-        msg = f"Failed to replace files: {exc}"
-        if backup_path:
-            msg += f"\nRestore from backup: {backup_path}"
-        yield UpdateProgress(stage="error", message=msg, success=False)
-        return
+        final_replace_error: Exception | None = exc
+        if (
+            sys.platform == "win32"
+            and restart
+            and needs_handover
+            and not handover_active
+            and _is_windows_file_in_use_error(exc)
+        ):
+            log.warning("updater.replace.locked_retry_with_handover", {"error": str(exc)})
+            try:
+                _prepare_upgrade_handover(latest_tag)
+                handover_active = True
+                await asyncio.to_thread(
+                    _replace_install_dir,
+                    content_root,
+                    install_root,
+                )
+            except Exception as retry_exc:
+                final_replace_error = retry_exc
+            else:
+                final_replace_error = None
+
+        if final_replace_error is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            msg = f"Failed to replace files: {final_replace_error}"
+            if backup_path:
+                msg += f"\nRestore from backup: {backup_path}"
+            yield UpdateProgress(stage="error", message=msg, success=False)
+            return
 
     # ------------------------------------------------------------------ #
-    # Step 6 – sync dependencies
+    # Step 5 – sync dependencies
     # ------------------------------------------------------------------ #
     yield UpdateProgress(stage="syncing", message="Syncing dependencies...")
 
     uv_path = _find_executable("uv")
     if not uv_path:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
+        await _restore_after_apply_failure()
         hint = (
             "Dependency sync failed: uv is required but was not found. "
             "Please install uv (https://docs.astral.sh/uv/) and ensure it "
@@ -1964,6 +2233,7 @@ async def perform_update(
         )
         if sys.platform == "win32":
             hint = "Dependency sync failed: uv is required to refresh the Windows project runtime."
+        _record_update_journal(f"ERROR {hint}")
         yield UpdateProgress(stage="error", message=hint, success=False)
         return
 
@@ -1973,25 +2243,92 @@ async def perform_update(
         uv_cmd.extend(["--default-index", profile.uv_default_index])
 
     sync_env = _build_uv_sync_env()
-    code, _, err = await _run_async(
-        uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-    )
+    sync_timeout = _dependency_sync_timeout_seconds()
+    retried_after_managed_python_repair = False
+
+    async def _run_uv_sync(cmd: list[str]) -> tuple[int, str, str]:
+        return await _run_async(
+            cmd,
+            cwd=install_root,
+            timeout=sync_timeout,
+            env=sync_env,
+        )
+
+    def _dependency_sync_timeout_message() -> str:
+        return f"Dependency sync timed out after {sync_timeout}s while running uv sync."
+
+    try:
+        code, _, err = await _run_uv_sync(uv_cmd)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        await _restore_after_apply_failure()
+        timeout_message = _dependency_sync_timeout_message()
+        _record_update_journal(f"ERROR {timeout_message}")
+        yield UpdateProgress(stage="error", message=timeout_message, success=False)
+        return
+    if (
+        code != 0
+        and sys.platform == "win32"
+        and not retried_after_managed_python_repair
+        and _is_uv_managed_python_runtime_error(err)
+    ):
+        retried_after_managed_python_repair = True
+        repaired_dir = await asyncio.to_thread(_repair_windows_uv_managed_python_install, err)
+        if repaired_dir is not None:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python",
+                {"path": str(repaired_dir)},
+            )
+        else:
+            log.warning(
+                "updater.dependencies.sync_repair_uv_python_missing_path",
+                {"error": err},
+            )
+        await asyncio.sleep(2)
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
+    if code != 0 and profile.uv_default_index:
+        log.warning(
+            "updater.dependencies.sync_retry_default_index",
+            {
+                "first_error": err,
+                "default_index": profile.uv_default_index,
+            },
+        )
+        await asyncio.sleep(3)
+        uv_cmd = [uv_path, "sync"]
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
     if code != 0:
         log.warning("updater.dependencies.sync_retry", {"first_error": err})
         await asyncio.sleep(3)
-        code, _, err = await _run_async(
-            uv_cmd, cwd=install_root, timeout=180, env=sync_env,
-        )
+        try:
+            code, _, err = await _run_uv_sync(uv_cmd)
+        except subprocess.TimeoutExpired:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            timeout_message = _dependency_sync_timeout_message()
+            _record_update_journal(f"ERROR {timeout_message}")
+            yield UpdateProgress(stage="error", message=timeout_message, success=False)
+            return
 
     if code != 0:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        if backup_path is not None:
-            await asyncio.to_thread(
-                _restore_backup_if_possible,
-                backup_path,
-                install_root,
-                current_version,
-            )
+        await _restore_after_apply_failure()
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
 
@@ -1999,13 +2336,7 @@ async def perform_update(
         validation_error = await _validate_windows_restart_runtime(install_root)
         if validation_error:
             shutil.rmtree(tmp_dir, ignore_errors=True)
-            if backup_path is not None:
-                await asyncio.to_thread(
-                    _restore_backup_if_possible,
-                    backup_path,
-                    install_root,
-                    current_version,
-                )
+            await _restore_after_apply_failure()
             yield UpdateProgress(stage="error", message=validation_error, success=False)
             return
 
@@ -2018,14 +2349,14 @@ async def perform_update(
         log.warning("updater.refresh_cli.failed", {"error": str(exc)})
 
     # ------------------------------------------------------------------ #
-    # Step 7 – restart in-place (skipped when restart=False, e.g. CLI)
+    # Step 6 – restart in-place (skipped when restart=False, e.g. CLI)
     # Send the "restarting" event while the proxy is still alive, then
-    # perform the handover (kill frontend + start temp page) right
-    # before os.execv so the SSE stream is not broken prematurely.
+    # perform the handover, rebuild the frontend in the active install tree,
+    # and finally restart the service.
     #
-    # CRITICAL: handover + execv run SYNCHRONOUSLY (no await) so that
-    # CancelledError from client disconnect cannot interrupt between
-    # killing the Vite proxy and calling os.execv.
+    # CRITICAL: once handover starts we ignore client-disconnect cancellation
+    # until the build/restart sequence finishes, so the temporary upgrade page
+    # is not left behind half-way through cutover.
     # ------------------------------------------------------------------ #
     if not restart:
         yield UpdateProgress(
@@ -2056,6 +2387,12 @@ async def perform_update(
         restart_argv = _build_restart_argv(install_root)
     except Exception as exc:
         log.error("updater.restart.build_argv_failed", {"error": str(exc)})
+        if handover_active:
+            try:
+                rollback_upgrade_handover()
+            except Exception:
+                pass
+            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to build restart command: {exc}",
@@ -2063,11 +2400,47 @@ async def perform_update(
         )
         return
 
-    if needs_handover:
+    if needs_handover and not handover_active:
         try:
             _prepare_upgrade_handover(latest_tag)
+            handover_active = True
         except Exception as exc:
             log.error("updater.handover.failed", {"error": str(exc)})
+            await _restore_after_apply_failure()
+            yield UpdateProgress(
+                stage="error",
+                message=f"Failed to prepare WebUI handover: {exc}",
+                success=False,
+            )
+            return
+
+    install_webui_dir = install_root / "webui"
+    if install_webui_dir.is_dir() and (install_webui_dir / "package.json").exists():
+        if not handover_active:
+            frontend_error = "Refusing to rebuild frontend before WebUI handover completes."
+            _record_update_journal(f"ERROR {frontend_error}")
+            await _restore_after_apply_failure()
+            yield UpdateProgress(
+                stage="error",
+                message=frontend_error,
+                success=False,
+            )
+            return
+        frontend_error = await _await_ignoring_cancellation(
+            _build_frontend_workspace(
+                install_webui_dir,
+                npm_registry=profile.npm_registry,
+            )
+        )
+        if frontend_error is not None:
+            _record_update_journal(f"ERROR {frontend_error}")
+            await _await_ignoring_cancellation(_restore_after_apply_failure())
+            yield UpdateProgress(
+                stage="error",
+                message=frontend_error,
+                success=False,
+            )
+            return
 
     if sys.platform == "win32":
         log.info("updater.restart.spawn", {"argv": restart_argv})
@@ -2080,11 +2453,12 @@ async def perform_update(
             os._exit(0)
         except OSError as exc:
             log.error("updater.restart.spawn_failed", {"error": str(exc)})
-            if needs_handover:
+            if handover_active:
                 try:
                     rollback_upgrade_handover()
                 except Exception:
                     pass
+                handover_active = False
             yield UpdateProgress(
                 stage="error",
                 message=f"Failed to restart service: {exc}",
@@ -2097,11 +2471,12 @@ async def perform_update(
         os.execv(restart_argv[0], restart_argv)
     except OSError as exc:
         log.error("updater.restart.execv_failed", {"error": str(exc)})
-        if needs_handover:
+        if handover_active:
             try:
                 rollback_upgrade_handover()
             except Exception:
                 pass
+            handover_active = False
         yield UpdateProgress(
             stage="error",
             message=f"Failed to restart service: {exc}",
@@ -2306,3 +2681,91 @@ def _find_executable(name: str) -> str | None:
                 return str(p)
 
     return None
+
+
+def _resolve_npm_executable() -> str | None:
+    """Resolve npm from bundled Node first, then standard executable probing."""
+    candidates = _resolve_frontend_npm_candidates()
+    if candidates:
+        return candidates[0].npm
+    return None
+
+
+def _resolve_bundled_npm_executable() -> tuple[str, Path] | None:
+    """Resolve npm from the bundled Node.js install, if available."""
+    node_dir = _bundled_node_install_dir()
+    if node_dir is None:
+        return None
+
+    candidates = (
+        [node_dir / "npm.cmd", node_dir / "npm", node_dir / "bin" / "npm"]
+        if sys.platform == "win32"
+        else [node_dir / "bin" / "npm", node_dir / "npm"]
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate), node_dir
+    return None
+
+
+def _resolve_system_npm_executable() -> str | None:
+    """Resolve npm without relying on the bundled Node.js install."""
+    if sys.platform == "win32":
+        return _find_executable("npm.cmd") or _find_executable("npm")
+    return _find_executable("npm") or _find_executable("npm.cmd")
+
+
+def _resolve_frontend_npm_candidates(*, npm_registry: str | None = None) -> list[_FrontendNpmCandidate]:
+    """Resolve npm candidates for frontend rebuilds."""
+    candidates: list[_FrontendNpmCandidate] = []
+
+    bundled = _resolve_bundled_npm_executable()
+    if bundled is not None:
+        bundled_npm, node_dir = bundled
+        candidates.append(
+            _FrontendNpmCandidate(
+                npm=bundled_npm,
+                env=_build_frontend_subprocess_env_for_node_dir(
+                    node_dir,
+                    npm_registry=npm_registry,
+                ),
+                source="bundled",
+            )
+        )
+
+    system_npm = _resolve_system_npm_executable()
+    if system_npm is not None and sys.platform == "win32":
+        if sys.platform == "win32":
+            normalized_system_npm = system_npm.replace("/", "\\").lower()
+            duplicate = any(
+                candidate.npm.replace("/", "\\").lower() == normalized_system_npm
+                for candidate in candidates
+            )
+        if not duplicate:
+            candidates.append(
+                _FrontendNpmCandidate(
+                    npm=system_npm,
+                    env=_build_frontend_subprocess_env_for_node_dir(
+                        None,
+                        npm_registry=npm_registry,
+                    ),
+                    source="system",
+                )
+            )
+
+    if candidates:
+        return candidates
+
+    if system_npm is not None:
+        candidates.append(
+            _FrontendNpmCandidate(
+                npm=system_npm,
+                env=_build_frontend_subprocess_env_for_node_dir(
+                    None,
+                    npm_registry=npm_registry,
+                ),
+                source="default",
+            )
+        )
+
+    return candidates

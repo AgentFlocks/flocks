@@ -6,9 +6,10 @@ Provides command-line interface for Flocks
 
 import asyncio
 import os
+import secrets as secrets_lib
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from dotenv import load_dotenv
@@ -17,6 +18,9 @@ from rich.panel import Panel
 
 from flocks import __version__
 from flocks.cli.commands import (
+    admin_app,
+    BROWSER_CONTEXT_SETTINGS,
+    browser_command,
     export_app,
     import_app,
     mcp_app,
@@ -29,8 +33,10 @@ from flocks.cli.commands.update import update_command
 from flocks.cli.service_manager import (
     ServiceConfig,
     ServiceError,
+    read_runtime_record,
     resolve_flocks_cli_command,
     restart_all,
+    runtime_paths,
     show_logs,
     show_status,
     start_all,
@@ -57,10 +63,29 @@ app.add_typer(import_app, name="import")
 app.add_typer(stats_app, name="stats")
 app.add_typer(task_app, name="task")
 app.add_typer(skill_app, name="skills")
+app.add_typer(admin_app, name="admin")
 
 app.command(name="update")(update_command)
+app.command(
+    name="browser",
+    context_settings=BROWSER_CONTEXT_SETTINGS,
+    help="Direct browser control via the built-in CDP runtime",
+)(browser_command)
 
 console = Console()
+
+
+def _ensure_server_api_token() -> bool:
+    """Ensure local non-browser clients such as `flocks tui` can authenticate."""
+    from flocks.security import get_secret_manager
+    from flocks.server.auth import API_TOKEN_SECRET_ID
+
+    secrets = get_secret_manager()
+    if secrets.get(API_TOKEN_SECRET_ID):
+        return False
+
+    secrets.set(API_TOKEN_SECRET_ID, secrets_lib.token_urlsafe(32))
+    return True
 
 
 def version_callback(value: bool):
@@ -119,6 +144,10 @@ def _service_config(
     server_port: Optional[int] = None,
     webui_host: Optional[str] = None,
     webui_port: Optional[int] = None,
+    default_server_host: Optional[str] = None,
+    default_server_port: Optional[int] = None,
+    default_webui_host: Optional[str] = None,
+    default_webui_port: Optional[int] = None,
 ) -> ServiceConfig:
     """Build service config from environment and CLI toggles."""
     global_config = Config.get_global()
@@ -126,23 +155,23 @@ def _service_config(
         backend_host=_resolve_host(
             cli_value=server_host,
             env_names=("FLOCKS_SERVER_HOST", "FLOCKS_BACKEND_HOST"),
-            default=global_config.server_host,
+            default=default_server_host or global_config.server_host,
         ),
         backend_port=_resolve_port(
             cli_value=server_port,
             env_names=("FLOCKS_SERVER_PORT", "FLOCKS_BACKEND_PORT"),
-            default=global_config.server_port,
+            default=default_server_port or global_config.server_port,
             label="server",
         ),
         frontend_host=_resolve_host(
             cli_value=webui_host,
             env_names=("FLOCKS_WEBUI_HOST", "FLOCKS_FRONTEND_HOST"),
-            default="127.0.0.1",
+            default=default_webui_host or "127.0.0.1",
         ),
         frontend_port=_resolve_port(
             cli_value=webui_port,
             env_names=("FLOCKS_WEBUI_PORT", "FLOCKS_FRONTEND_PORT"),
-            default=5173,
+            default=default_webui_port or 5173,
             label="webui",
         ),
         no_browser=no_browser,
@@ -179,6 +208,45 @@ def _resolve_port(
         except ValueError as error:
             raise ServiceError(f"{label} port from {env_name} must be an integer.") from error
     return default
+
+
+def _restart_runtime_defaults() -> dict[str, Any]:
+    """Load host/port defaults from the last recorded service runtime."""
+    paths = runtime_paths()
+    backend = read_runtime_record(paths.backend_pid)
+    frontend = read_runtime_record(paths.frontend_pid)
+    defaults: dict[str, Any] = {}
+    if backend is not None:
+        if backend.host:
+            defaults["default_server_host"] = backend.host
+        if backend.port is not None:
+            defaults["default_server_port"] = backend.port
+    if frontend is not None:
+        if frontend.host:
+            defaults["default_webui_host"] = frontend.host
+        if frontend.port is not None:
+            defaults["default_webui_port"] = frontend.port
+    return defaults
+
+
+def _restart_service_config(
+    no_browser: bool = False,
+    skip_webui_build: bool = False,
+    server_host: Optional[str] = None,
+    server_port: Optional[int] = None,
+    webui_host: Optional[str] = None,
+    webui_port: Optional[int] = None,
+) -> ServiceConfig:
+    """Build restart config, reusing recorded host/port when CLI/env omit them."""
+    return _service_config(
+        no_browser=no_browser,
+        skip_webui_build=skip_webui_build,
+        server_host=server_host,
+        server_port=server_port,
+        webui_host=webui_host,
+        webui_port=webui_port,
+        **_restart_runtime_defaults(),
+    )
 
 
 def _handle_service_error(error: Exception) -> None:
@@ -248,7 +316,7 @@ def restart(
     """
     try:
         restart_all(
-            _service_config(
+            _restart_service_config(
                 no_browser=no_browser,
                 skip_webui_build=skip_webui_build,
                 server_host=server_host,
@@ -289,6 +357,23 @@ def logs(
         _handle_service_error(error)
 
 
+def _uvicorn_log_config() -> dict[str, Any]:
+    """Uvicorn logging with timestamps, but without noisy access logs."""
+    import copy
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    cfg = copy.deepcopy(LOGGING_CONFIG)
+    stamp_fmt = "%Y-%m-%d %H:%M:%S"
+    for name in ("default", "access"):
+        formatter = cfg["formatters"][name]
+        formatter["fmt"] = "%(asctime)s | " + formatter["fmt"]
+        formatter["datefmt"] = stamp_fmt
+    cfg["loggers"]["uvicorn.access"]["handlers"] = []
+    cfg["loggers"]["uvicorn.access"]["propagate"] = False
+    return cfg
+
+
 @app.command(hidden=True)
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Server host"),
@@ -311,6 +396,8 @@ def serve(
         port=port,
         reload=reload,
         log_level="info",
+        log_config=_uvicorn_log_config(),
+        access_log=False,
     )
 
 
@@ -378,6 +465,8 @@ def tui(
 
         # Start server process
         env = os.environ.copy()
+        if _ensure_server_api_token():
+            console.print("[dim]Initialized local API token for TUI access[/dim]")
 
         # Set auto-approve environment variable for TUI mode
         if auto_approve:

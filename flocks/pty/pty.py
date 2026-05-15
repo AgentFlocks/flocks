@@ -24,6 +24,37 @@ log = Log.create(service="pty")
 # Buffer configuration matching Flocks
 BUFFER_LIMIT = 1024 * 1024 * 2  # 2MB
 BUFFER_CHUNK = 64 * 1024  # 64KB
+_ALLOWED_SHELL_NAMES = {
+    "ash",
+    "bash",
+    "csh",
+    "cmd",
+    "cmd.exe",
+    "dash",
+    "fish",
+    "ksh",
+    "ksh93",
+    "mksh",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "sh",
+    "tcsh",
+    "zsh",
+}
+_ALLOWED_SHELL_ARGS = {"-i", "-l", "--login"}
+_LOGIN_FLAG_SHELL_NAMES = {"bash", "fish", "ksh", "ksh93", "mksh", "sh", "zsh"}
+_BLOCKED_PTY_ENV_NAMES = {
+    "BASH_ENV",
+    "ENV",
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "PROMPT_COMMAND",
+    "PYTHONSTARTUP",
+    "ZDOTDIR",
+}
+_BLOCKED_PTY_ENV_PREFIXES = ("DYLD_",)
 
 
 class PtyStatus(str, Enum):
@@ -99,6 +130,49 @@ class Pty:
                 return shell_path
         
         return "sh"
+
+    @classmethod
+    def _validate_interactive_shell(cls, command: str, args: List[str]) -> None:
+        """Allow PTY creation only for interactive shell sessions."""
+        if not command or "\x00" in command:
+            raise ValueError("Invalid PTY command")
+
+        shell_name = os.path.basename(command).lower()
+        if shell_name not in _ALLOWED_SHELL_NAMES:
+            raise ValueError("PTY command must be an approved interactive shell")
+
+        for arg in args:
+            if not isinstance(arg, str) or "\x00" in arg or arg not in _ALLOWED_SHELL_ARGS:
+                raise ValueError("PTY command arguments are restricted to interactive shell flags")
+
+    @classmethod
+    def _is_blocked_env_name(cls, name: str) -> bool:
+        normalized = name.upper()
+        return normalized in _BLOCKED_PTY_ENV_NAMES or any(
+            normalized.startswith(prefix) for prefix in _BLOCKED_PTY_ENV_PREFIXES
+        )
+
+    @classmethod
+    def _prepare_environment(cls, input_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+        """Build a PTY environment without shell/linker startup injection hooks."""
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not cls._is_blocked_env_name(key)
+        }
+
+        if input_env:
+            for key, value in input_env.items():
+                if not isinstance(key, str) or not key or "\x00" in key:
+                    raise ValueError("Invalid PTY environment variable name")
+                if cls._is_blocked_env_name(key):
+                    raise ValueError(f"PTY environment variable is not allowed: {key}")
+                if not isinstance(value, str) or "\x00" in value:
+                    raise ValueError(f"Invalid PTY environment variable value: {key}")
+                env[key] = value
+
+        env["TERM"] = "xterm-256color"
+        return env
     
     @classmethod
     def list(cls) -> List[PtyInfo]:
@@ -125,18 +199,18 @@ class Pty:
         pty_id = Identifier.create("pty")
         command = input_data.command or cls._get_shell()
         args = list(input_data.args) if input_data.args else []
+        cls._validate_interactive_shell(command, args)
         
-        # Add login flag for shells
-        if command.endswith("sh") and "-l" not in args:
+        # Add login flag only for shells known to accept it.  Some approved
+        # POSIX-compatible shells (e.g. dash/ash) reject ``-l``.
+        shell_name = os.path.basename(command).lower()
+        if shell_name in _LOGIN_FLAG_SHELL_NAMES and "-l" not in args and "--login" not in args:
             args.append("-l")
         
         cwd = input_data.cwd or os.getcwd()
         
         # Prepare environment
-        env = dict(os.environ)
-        if input_data.env:
-            env.update(input_data.env)
-        env["TERM"] = "xterm-256color"
+        env = cls._prepare_environment(input_data.env)
         
         log.info("pty.creating", {
             "id": pty_id,

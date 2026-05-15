@@ -7,7 +7,7 @@ Supports both synchronous (blocking) and background (async) execution.
 Model resolution priority for child sessions:
   1. Explicit ``model`` param (WebUI override, format: "provider/model" or "model")
   2. Agent-specific model from AgentInfo.model (set in flocks.json agent config)
-  3. Parent session's model/provider (inherits from Rex — TUI/CLI default)
+  3. Parent session's pinned model/provider
   4. Global default LLM (``default_models.llm`` in config)
   5. Environment / hardcoded fallback
 """
@@ -22,6 +22,7 @@ from flocks.task.background import get_background_manager, LaunchInput, ResumeIn
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
+from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
 
@@ -36,18 +37,19 @@ async def _resolve_child_model(
     agent_name: str,
     parent_session,
     model_override: Optional[str] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Resolve (provider_id, model_id) for a child subagent session.
+) -> Tuple[Optional[str], Optional[str], str]:
+    """Resolve ``(provider_id, model_id, source)`` for a child subagent session.
 
     Priority:
       1. ``model_override`` — explicit param from WebUI (format "provider/model" or "model")
       2. Agent model override from Storage (set via WebUI)
       3. Agent-specific model from ``AgentInfo.model``
-      4. Parent session's stored model/provider
+      4. Parent session's pinned model/provider
       5. Global default LLM from config
     """
     provider: Optional[str] = None
     model: Optional[str] = None
+    source = "unknown"
 
     # 1. Explicit override (WebUI)
     if model_override:
@@ -55,6 +57,7 @@ async def _resolve_child_model(
             provider, model = model_override.split("/", 1)
         else:
             model = model_override
+        source = "explicit"
 
     # 2. Agent model override from Storage (set via WebUI)
     if not model:
@@ -68,6 +71,7 @@ async def _resolve_child_model(
                 if override_provider and override_model:
                     provider = override_provider
                     model = override_model
+                    source = "agent_override"
         except Exception:
             pass
 
@@ -79,14 +83,16 @@ async def _resolve_child_model(
             if agent_info and agent_info.model:
                 provider = provider or agent_info.model.provider_id
                 model = agent_info.model.model_id
+                source = "agent"
         except Exception:
             pass
 
-    # 4. Inherit from parent session
-    if not model and parent_session:
-        model = getattr(parent_session, "model", None)
-    if not provider and parent_session:
-        provider = getattr(parent_session, "provider", None)
+    # 4. Inherit only explicit parent pins
+    if (not model or not provider) and parent_session and Session.has_pinned_model(parent_session):
+        provider = provider or getattr(parent_session, "provider", None)
+        model = model or getattr(parent_session, "model", None)
+        if provider and model:
+            source = "parent_session"
 
     # 5. Global default LLM
     if not model or not provider:
@@ -96,10 +102,12 @@ async def _resolve_child_model(
             if default_llm:
                 provider = provider or default_llm.get("provider_id")
                 model = model or default_llm.get("model_id")
+                if provider and model and source == "unknown":
+                    source = "config"
         except Exception:
             pass
 
-    return provider, model
+    return provider, model, source
 
 
 def _model_dict(provider: Optional[str], model: Optional[str]) -> Optional[Dict[str, str]]:
@@ -218,14 +226,20 @@ async def task_tool(
     parent_session = await Session.get_by_id(ctx.session_id)
 
     # Resolve effective model for the child agent
-    child_provider, child_model = await _resolve_child_model(
+    child_provider, child_model, child_source = await _resolve_child_model(
         normalized, parent_session, model_override=model,
+    )
+    child_model_pinned = (
+        child_source in {"explicit", "parent_session"}
+        and bool(child_provider and child_model)
     )
 
     log.info("task.model_resolved", {
         "subagent": normalized,
         "provider": child_provider,
         "model": child_model,
+        "source": child_source,
+        "model_pinned": child_model_pinned,
         "override": model,
         "parent_provider": getattr(parent_session, "provider", None) if parent_session else None,
         "parent_model": getattr(parent_session, "model", None) if parent_session else None,
@@ -271,12 +285,13 @@ async def task_tool(
             session.id,
             callbacks=_LoopCbs(event_publish_callback=ctx.event_publish_callback),
         )
-        output_text = ""
-        if result.last_message:
-            output_text = await Message.get_text_content(result.last_message)
-        output = f"{output_text}\n\n<task_metadata>\nsession_id: {session.id}\n</task_metadata>"
         ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": session.id}})
-        return ToolResult(success=True, output=output, title=description, metadata={"sessionId": session.id})
+        return await format_sync_subagent_result(
+            description=description,
+            session_id=session.id,
+            loop_result=result,
+            metadata={"sessionId": session.id},
+        )
 
     # --- Background launch (new session) ---
     if run_in_background:
@@ -289,7 +304,8 @@ async def task_tool(
                 parent_session_id=ctx.session_id,
                 parent_message_id=ctx.message_id,
                 parent_agent=ctx.agent,
-                model=_model_dict(child_provider, child_model),
+                model=_model_dict(child_provider, child_model) if child_model_pinned else None,
+                model_pinned=child_model_pinned,
             )
         )
         ctx.metadata({"title": description, "metadata": {"sessionId": task.session_id}})
@@ -309,17 +325,22 @@ async def task_tool(
         return ToolResult(success=False, error="Parent session not found")
 
     try:
-        created = await Session.create(
+        create_kwargs = dict(
             project_id=parent_session.project_id,
             directory=parent_session.directory,
             title=f"{description} (@{normalized} subagent)",
             parent_id=parent_session.id,
             agent=normalized,
-            model=child_model,
-            provider=child_provider,
             permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
             category="task",
         )
+        if child_model_pinned:
+            create_kwargs.update(
+                model=child_model,
+                provider=child_provider,
+                model_pinned=True,
+            )
+        created = await Session.create(**create_kwargs)
         await Message.create(
             session_id=created.id,
             role=MessageRole.USER,
@@ -342,12 +363,18 @@ async def task_tool(
                 event_publish_callback=ctx.event_publish_callback,
             ),
         )
-        output_text = ""
-        if result.last_message:
-            output_text = await Message.get_text_content(result.last_message)
-        output = f"{output_text}\n\n<task_metadata>\nsession_id: {created.id}\n</task_metadata>"
-        ctx.metadata({"title": description, "metadata": forwarder.final_metadata})
-        return ToolResult(success=True, output=output, title=description, metadata=forwarder.final_metadata)
+        tool_result = await format_sync_subagent_result(
+            description=description,
+            session_id=created.id,
+            loop_result=result,
+            metadata=forwarder.final_metadata,
+        )
+        result_status = "running" if tool_result.success else "error"
+        ctx.metadata({
+            "title": description,
+            "metadata": {**forwarder.final_metadata, "status": result_status},
+        })
+        return tool_result
 
     except Exception as e:
         log.error("task.execute.error", {"error": str(e)})

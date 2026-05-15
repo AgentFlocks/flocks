@@ -22,10 +22,11 @@ export function useTaskSchedulers(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const tasksRef = useRef<TaskScheduler[]>([]);
+  const initializedRef = useRef(false);
 
   const fetchTasks = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initializedRef.current) setLoading(true);
       setError(null);
       const response = await taskAPI.listSchedulers(filters);
       const data = response.data;
@@ -39,6 +40,7 @@ export function useTaskSchedulers(
       setTotal(0);
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, [
     filters?.status,
@@ -87,10 +89,11 @@ export function useTaskExecutions(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const tasksRef = useRef<TaskExecution[]>([]);
+  const initializedRef = useRef(false);
 
   const fetchTasks = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initializedRef.current) setLoading(true);
       setError(null);
       const response = await taskAPI.listExecutions(filters);
       const data = response.data;
@@ -104,6 +107,7 @@ export function useTaskExecutions(
       setTotal(0);
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, [
     filters?.status,
@@ -173,10 +177,11 @@ export function useTaskDashboard(options?: { pollInterval?: number }) {
   const [counts, setCounts] = useState<DashboardCounts | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const initializedRef = useRef(false);
 
   const fetchDashboard = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initializedRef.current) setLoading(true);
       setError(null);
       const response = await taskAPI.dashboard();
       setCounts(response.data);
@@ -184,6 +189,7 @@ export function useTaskDashboard(options?: { pollInterval?: number }) {
       setError(err.message || 'Failed to fetch dashboard');
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, []);
 
@@ -232,10 +238,11 @@ export function useQueueStatus(options?: { pollInterval?: number }) {
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const initializedRef = useRef(false);
 
   const fetchQueueStatus = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initializedRef.current) setLoading(true);
       setError(null);
       const response = await taskAPI.queueStatus();
       setQueueStatus(response.data);
@@ -243,6 +250,7 @@ export function useQueueStatus(options?: { pollInterval?: number }) {
       setError(err.message || 'Failed to fetch queue status');
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, []);
 
@@ -263,10 +271,11 @@ export function useTaskSystemNotice() {
   const [notice, setNotice] = useState<TaskSystemNotice | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const initializedRef = useRef(false);
 
   const fetchNotice = useCallback(async () => {
     try {
-      setLoading(true);
+      if (!initializedRef.current) setLoading(true);
       setError(null);
       const response = await taskAPI.getSystemNotice();
       setNotice(response.data ?? null);
@@ -274,6 +283,7 @@ export function useTaskSystemNotice() {
       setError(err.message || 'Failed to fetch system notice');
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, []);
 

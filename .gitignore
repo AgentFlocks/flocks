@@ -100,7 +100,6 @@ tmp/
 
 # Documentation
 docs/_build/
-docs/*.md
 site/
 
 # Node.js (TUI)
@@ -108,7 +107,6 @@ node_modules/
 tui/node_modules/
 bun.lockb
 .bun/
-docs/*
 !docs/CHANGELOG.md
 
 # TUI build
@@ -123,6 +121,9 @@ webui/.env.development.local
 webui/.env.production.local
 webui/.vite/deps/_metadata.json
 .vite
+
+# Windows packaging outputs
+packaging/windows/Output/
 
 .flocks/.storage_migrated
 artifacts/

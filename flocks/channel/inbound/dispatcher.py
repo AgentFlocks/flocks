@@ -263,7 +263,15 @@ class InboundDispatcher:
             log.warning("dispatcher.hook_inbound_failed", {"error": str(e)})
 
         # 5. session binding — resolve feishu group-level overrides (scope & agent)
-        default_agent = channel_config.default_agent or "default"
+        # default_agent priority (matches WebUI):
+        #   1. ChannelConfig.defaultAgent (or feishu group override)
+        #   2. Agent.default_agent() — honours global ``defaultAgent`` and
+        #      finally falls back to ``rex``
+        # The literal string ``"default"`` is no longer used as a fallback,
+        # because that was not a real agent name and silently fell through to
+        # ``rex`` only via ``Agent.get(name) or Agent.get("rex")``, hiding the
+        # real default and making behaviour diverge between WebUI and channel.
+        default_agent = channel_config.default_agent
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
             scope_override, feishu_agent = _resolve_feishu_group_overrides(
@@ -271,11 +279,21 @@ class InboundDispatcher:
             )
             if feishu_agent:
                 default_agent = feishu_agent
+        if not default_agent:
+            try:
+                from flocks.agent.registry import Agent as _Agent
+                default_agent = await _Agent.default_agent()
+            except Exception as exc:
+                log.debug("dispatcher.default_agent_resolution_failed", {
+                    "error": str(exc),
+                })
+                default_agent = "rex"
 
         binding = await self.binding_service.resolve_or_create(
             msg,
             default_agent=default_agent,
             scope_override=scope_override,
+            directory=channel_config.workspace_dir,
         )
 
         user_text = msg.mention_text if msg.mention_text else msg.text
@@ -371,11 +389,27 @@ class InboundDispatcher:
                     pass  # 引用内容获取失败不阻塞消息流程
 
             # 10. append user message to Session
+            #
+            # Resolve provider/model BEFORE writing the user message, mirroring
+            # what _process_session_message does in the WebUI route. Storing
+            # the resolved model on the user message keeps two things aligned
+            # between WebUI and channel:
+            #   - Title generation (``SessionLoop._run_loop`` reads
+            #     ``last_user.model``).
+            #   - The provider-specific base prompt template
+            #     (``SystemPrompt.provider``) selected on the next loop tick.
+            # Without this, channel sessions ended up with the hardcoded
+            # ``defaults.fallback_*`` values from ``Message.create``, while
+            # WebUI sessions got the real resolved model.
+            resolved_model = await _resolve_session_model(binding.session_id)
+
             await self._append_user_message(
                 binding.session_id,
                 user_text,
                 msg,
                 channel_config,
+                model=resolved_model,
+                agent=binding.agent_id,
             )
 
             # 11. build delivery callbacks
@@ -558,43 +592,69 @@ class InboundDispatcher:
         user_text: str,
         scope_override: Optional[str],
     ) -> bool:
-        if msg.channel_id != "feishu":
-            return False
-
         command_name, command_args = _parse_slash_command(user_text)
         if not command_name:
             return False
 
+        from flocks.command.command import Command
+        from flocks.input.dispatcher import dispatch_user_input
+        from flocks.input.events import UserInputEvent
+        from flocks.input.output import ChannelOutputSink
+
+        command_def = Command.resolve(command_name)
+        if command_def is None:
+            return False
+
         callbacks = self._build_callbacks(binding, msg)
 
-        if command_name == "help":
-            from flocks.command.handler import handle_slash_command
+        async def _publish_direct_response(_event, text: str) -> None:
+            await callbacks.deliver_text(text)
 
-            return await handle_slash_command(
-                user_text,
-                send_text=callbacks.deliver_text,
-                send_prompt=callbacks.deliver_text,
+        async def _run_llm(_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+            await callbacks.deliver_text(
+                f"命令 `{display_text or prompt_text}` 暂不支持在当前渠道中以 slash 形式执行。"
             )
 
-        if command_name == "status":
-            await self._handle_status_command(binding, msg, callbacks)
-            return True
+        async def _run_session_control(_event, parsed) -> bool:
+            if parsed.canonical_name == "status":
+                await self._handle_status_command(binding, msg, callbacks)
+                return True
+            if parsed.canonical_name == "model":
+                await self._handle_model_command(binding, callbacks, command_args)
+                return True
+            if parsed.canonical_name == "new":
+                await self._handle_session_command(
+                    binding=binding,
+                    msg=msg,
+                    callbacks=callbacks,
+                    scope_override=scope_override,
+                )
+                return True
+            return False
 
-        if command_name == "model":
-            await self._handle_model_command(binding, callbacks, command_args)
-            return True
-
-        if command_name in {"new", "reset"}:
-            await self._handle_session_command(
-                binding=binding,
-                msg=msg,
-                callbacks=callbacks,
-                scope_override=scope_override,
-                action=command_name,
-            )
-            return True
-
-        return False
+        event = UserInputEvent(
+            source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram"} else "channel",
+            sessionID=binding.session_id,
+            text=user_text,
+            parts=[{"type": "text", "text": user_text}],
+            agent=binding.agent_id,
+            display_text=user_text,
+            working_directory=channel_config.workspace_dir,
+            metadata={
+                "channel_id": msg.channel_id,
+                "chat_id": msg.chat_id or msg.sender_id,
+            },
+        )
+        await dispatch_user_input(
+            event,
+            ChannelOutputSink(
+                "channel",
+                direct_response=_publish_direct_response,
+                run_llm=_run_llm,
+                session_control=_run_session_control,
+            ),
+        )
+        return True
 
     async def _handle_status_command(self, binding, msg: InboundMessage, callbacks: ChannelDeliveryCallbacks) -> None:
         from flocks.session.core.status import SessionStatus
@@ -681,8 +741,7 @@ class InboundDispatcher:
         await Session.update(
             session.project_id,
             session.id,
-            provider=provider_id,
-            model=model_id,
+            **Session.explicit_model_updates(provider_id, model_id),
         )
         await self._trigger_command_hook(
             "model",
@@ -701,23 +760,21 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
-        action: str,
     ) -> None:
         from flocks.session.session import Session
+        from flocks.channel.inbound.session_binding import _build_title
 
         session = await Session.get_by_id(binding.session_id)
         if not session:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
-        parent_id = session.id if action == "new" else None
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
-            parent_id=parent_id,
+            title=_build_title(msg),
             agent=session.agent,
-            provider=session.provider,
-            model=session.model,
+            **Session.inherited_model_kwargs(session),
         )
         new_binding = await self.binding_service.rebind(
             msg,
@@ -726,7 +783,7 @@ class InboundDispatcher:
             scope_override=scope_override,
         )
         await self._trigger_command_hook(
-            action,
+            "new",
             session.id,
             {
                 "previous_session_id": session.id,
@@ -736,11 +793,10 @@ class InboundDispatcher:
             },
         )
         new_callbacks = self._build_callbacks(new_binding, msg)
-        action_text = "已创建新会话。" if action == "new" else "已重置当前会话。"
         await new_callbacks.deliver_text(
             "\n".join(
                 [
-                    action_text,
+                    "已开始全新对话。",
                     f"Session: `{new_session.id}`",
                     f"Agent: `{new_session.agent or 'default'}`",
                 ]
@@ -900,10 +956,17 @@ class InboundDispatcher:
         text: str,
         msg: InboundMessage,
         channel_config: Optional[ChannelConfig] = None,
+        model: Optional[dict] = None,
+        agent: Optional[str] = None,
     ) -> None:
+        import mimetypes
+        import os
+        from pathlib import Path
+        from urllib.parse import unquote, urlparse
+
         from flocks.session.message import FilePart, Message, MessageRole
 
-        message = await Message.create(
+        create_kwargs: dict = dict(
             session_id=session_id,
             role=MessageRole.USER,
             content=text,
@@ -915,30 +978,77 @@ class InboundDispatcher:
                 "message_id": msg.message_id,
             },
         )
+        if model is not None:
+            create_kwargs["model"] = model
+        if agent:
+            create_kwargs["agent"] = agent
 
-        if msg.channel_id != "feishu" or not msg.media_url or channel_config is None:
+        message = await Message.create(**create_kwargs)
+
+        if not msg.media_url:
             return
 
         try:
-            from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
+            parsed = urlparse(msg.media_url)
+            scheme = parsed.scheme.lower()
 
-            raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
-            media = await download_inbound_media(msg, raw_cfg)
-            if not media:
-                return
+            if msg.channel_id == "feishu" and channel_config is not None:
+                # Feishu: media is still on the remote server, download first.
+                from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
 
-            await Message.store_part(
-                session_id,
-                message.id,
-                FilePart(
-                    sessionID=session_id,
-                    messageID=message.id,
-                    mime=media.mime,
-                    filename=media.filename,
-                    url=media.url,
-                    source=media.source,
-                ),
-            )
+                raw_cfg = channel_config.model_dump(by_alias=True, exclude_none=True)
+                media = await download_inbound_media(msg, raw_cfg)
+                if not media:
+                    return
+
+                await Message.store_part(
+                    session_id,
+                    message.id,
+                    FilePart(
+                        sessionID=session_id,
+                        messageID=message.id,
+                        mime=media.mime,
+                        filename=media.filename,
+                        url=media.url,
+                        source=media.source,
+                    ),
+                )
+
+            elif scheme in ("", "file"):
+                # Local file already downloaded by the channel plugin (e.g. weixin).
+                # file:// URIs may have URL-encoded paths (e.g. Chinese filenames).
+                local_path = unquote(parsed.path) if scheme == "file" else msg.media_url
+                if not os.path.isfile(local_path):
+                    log.warning("dispatcher.inbound_media_missing", {
+                        "channel_id": msg.channel_id,
+                        "path": local_path,
+                    })
+                    return
+                filename = Path(local_path).name
+                mime = (
+                    msg.media_mime
+                    or mimetypes.guess_type(local_path)[0]
+                    or "application/octet-stream"
+                )
+                file_uri = Path(local_path).resolve().as_uri()
+                await Message.store_part(
+                    session_id,
+                    message.id,
+                    FilePart(
+                        sessionID=session_id,
+                        messageID=message.id,
+                        mime=mime,
+                        filename=filename,
+                        url=file_uri,
+                        source=None,
+                    ),
+                )
+                log.info("dispatcher.inbound_media_attached", {
+                    "channel_id": msg.channel_id,
+                    "filename": filename,
+                    "mime": mime,
+                })
+
         except Exception as e:
             log.warning("dispatcher.inbound_media_download_failed", {
                 "channel_id": msg.channel_id,
@@ -972,6 +1082,39 @@ async def _extract_message_text(
         log.warning("dispatcher.extract_text.failed", {
             "session": session_id,
             "error": f"{type(e).__name__}: {e}",
+        })
+        return None
+
+
+async def _resolve_session_model(session_id: str) -> Optional[dict]:
+    """Resolve provider/model for a channel-bound session.
+
+    Reuses ``SessionLoop._resolve_model`` so that channel and WebUI follow
+    the exact same resolution chain (session-stored → agent override
+    storage → AgentInfo.model → parent → config default → env). Returns
+    a ``{"providerID", "modelID"}`` dict on success, ``None`` on failure
+    so the caller can fall back to ``Message.create`` defaults.
+
+    The session's own ``agent`` field is what drives agent-scoped lookups
+    inside ``_resolve_model``, so no agent argument is needed here.
+    """
+    try:
+        from flocks.session.session import Session as _Session
+        from flocks.session.session_loop import SessionLoop
+
+        session = await _Session.get_by_id(session_id)
+        if not session:
+            return None
+        provider_id, model_id = await SessionLoop._resolve_model(
+            session, None, None,
+        )
+        if not provider_id or not model_id:
+            return None
+        return {"providerID": provider_id, "modelID": model_id}
+    except Exception as exc:
+        log.debug("dispatcher.model_resolution_failed", {
+            "session": session_id,
+            "error": str(exc),
         })
         return None
 

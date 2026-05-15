@@ -14,6 +14,7 @@ $script:InstallLanguage = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_INSTALL_L
 $script:UvDefaultIndex = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_DEFAULT_INDEX)) { "https://pypi.org/simple" } else { $env:FLOCKS_UV_DEFAULT_INDEX }
 $script:UvInstallPs1Url = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_URL }
 $script:UvInstallPs1FallbackUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) { "https://uv.agentsmirror.com/install-cn.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL }
+$script:UvInstallPs1SecondaryFallbackUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL)) { "https://astral.sh/uv/install.ps1" } else { $env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL }
 $script:NpmRegistry = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) { "https://registry.npmjs.org/" } else { $env:FLOCKS_NPM_REGISTRY }
 $script:NodejsManualDownloadUrl = if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL)) { "https://nodejs.org/en/download" } else { $env:FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL }
 
@@ -75,6 +76,10 @@ function Test-IsAdministrator {
 }
 
 function Assert-Administrator {
+    if ($env:FLOCKS_SKIP_ADMIN_CHECK -eq "1") {
+        return
+    }
+
     if (Test-IsAdministrator) {
         return
     }
@@ -92,6 +97,7 @@ function Initialize-InstallSources {
     Write-Info (Get-LocalizedText -English "Using uv install script: $script:UvInstallPs1Url" -Chinese "使用 uv 安装脚本: $script:UvInstallPs1Url")
     if (Test-IsZhInstall) {
         Write-Info (Get-LocalizedText -English "Using uv fallback script: $script:UvInstallPs1FallbackUrl" -Chinese "使用 uv 备用安装脚本: $script:UvInstallPs1FallbackUrl")
+        Write-Info (Get-LocalizedText -English "Using official uv fallback script: $script:UvInstallPs1SecondaryFallbackUrl" -Chinese "使用 uv 官方回退安装脚本: $script:UvInstallPs1SecondaryFallbackUrl")
     }
 }
 
@@ -376,6 +382,9 @@ function Install-Uv {
 
     Write-Info (Get-LocalizedText -English "uv was not found. Installing it automatically..." -Chinese "未检测到 uv，正在自动安装...")
     $primaryInstallError = $null
+    $fallbackInstallError = $null
+    $secondaryFallbackInstallError = $null
+
     try {
         powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1Url' | iex"
     }
@@ -388,7 +397,7 @@ function Install-Uv {
         return
     }
 
-    if (Test-IsZhInstall) {
+    if (Test-IsZhInstall -and -not [string]::IsNullOrWhiteSpace($script:UvInstallPs1FallbackUrl)) {
         if ($null -ne $primaryInstallError) {
             Write-Info (Get-LocalizedText -English "Primary uv install script failed. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本失败，正在尝试中国大陆备用源...")
             Write-Warning $primaryInstallError
@@ -397,7 +406,6 @@ function Install-Uv {
             Write-Info (Get-LocalizedText -English "uv is still unavailable after the primary install script. Trying the mainland China fallback script..." -Chinese "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试中国大陆备用源...")
         }
 
-        $fallbackInstallError = $null
         try {
             powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1FallbackUrl' | iex"
         }
@@ -409,9 +417,40 @@ function Install-Uv {
         if (Test-Command "uv") {
             return
         }
+    }
 
-        if ($null -ne $fallbackInstallError) {
-            Fail (Get-LocalizedText -English "uv installation failed with both the primary script and the mainland China fallback script. Check network access or PATH and retry." -Chinese "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。")
+    if (Test-IsZhInstall -and -not [string]::IsNullOrWhiteSpace($script:UvInstallPs1SecondaryFallbackUrl)) {
+        if (-not [string]::IsNullOrWhiteSpace($script:UvInstallPs1FallbackUrl)) {
+            if ($null -ne $fallbackInstallError) {
+                Write-Info (Get-LocalizedText -English "The mainland China fallback script failed. Trying the official uv install script..." -Chinese "中国大陆备用源失败，正在尝试官方 uv 安装脚本...")
+                Write-Warning $fallbackInstallError
+            }
+            else {
+                Write-Info (Get-LocalizedText -English "uv is still unavailable after the mainland China fallback script. Trying the official uv install script..." -Chinese "中国大陆备用源执行后仍未检测到 uv，正在尝试官方 uv 安装脚本...")
+            }
+        }
+        elseif ($null -ne $primaryInstallError) {
+            Write-Info (Get-LocalizedText -English "Primary uv install script failed. Trying the official uv install script..." -Chinese "默认 uv 安装脚本失败，正在尝试官方 uv 安装脚本...")
+            Write-Warning $primaryInstallError
+        }
+        else {
+            Write-Info (Get-LocalizedText -English "uv is still unavailable after the primary install script. Trying the official uv install script..." -Chinese "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试官方 uv 安装脚本...")
+        }
+
+        try {
+            powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm '$script:UvInstallPs1SecondaryFallbackUrl' | iex"
+        }
+        catch {
+            $secondaryFallbackInstallError = $_.Exception.Message
+        }
+        Refresh-Path
+
+        if (Test-Command "uv") {
+            return
+        }
+
+        if ($null -ne $secondaryFallbackInstallError) {
+            Fail (Get-LocalizedText -English "uv installation failed with the primary script, the mainland China fallback script, and the official fallback script. Check network access or PATH and retry." -Chinese "默认 uv 安装脚本、中国大陆备用源和官方 uv 安装脚本都执行失败。请检查网络连通性或 PATH 后重试。")
         }
     }
 
@@ -581,6 +620,62 @@ function Test-IsLockError {
     }
 
     return $Text -match '拒绝访问|Access is denied|os error 5|WinError 5|failed to remove directory|Failed to update Windows PE resources'
+}
+
+function Test-IsUvManagedPythonInspectionError {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $false
+    }
+
+    return $Text -match 'Failed to inspect Python interpreter from managed installations|Failed to query Python interpreter|failed to query metadata of file'
+}
+
+function Get-UvManagedPythonInstallDirFromText {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $null
+    }
+
+    $pathMatch = [Regex]::Match(
+        $Text,
+        '(?im)([A-Z]:\\[^''"\r\n]+\\uv\\python\\[^''"\r\n]+\\python\.exe)'
+    )
+    if (-not $pathMatch.Success) {
+        return $null
+    }
+
+    $pythonPath = $pathMatch.Groups[1].Value
+    if ([string]::IsNullOrWhiteSpace($pythonPath)) {
+        return $null
+    }
+
+    return (Split-Path -Parent $pythonPath)
+}
+
+function Repair-UvManagedPythonInstall {
+    param([string]$Text)
+
+    $installDir = Get-UvManagedPythonInstallDirFromText -Text $Text
+    if ([string]::IsNullOrWhiteSpace($installDir)) {
+        Write-Warning "uv reported a broken managed Python runtime, but the cached install directory could not be determined."
+        return
+    }
+
+    if (-not (Test-Path $installDir)) {
+        Write-Warning "uv reported a broken managed Python runtime, but the cached install directory was already missing: $installDir"
+        return
+    }
+
+    Write-Info "Removing broken uv-managed Python runtime: $installDir"
+    try {
+        Remove-Item -Path $installDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ("Could not remove cached uv-managed Python runtime at {0}: {1}" -f $installDir, $_.Exception.Message)
+    }
 }
 
 function Format-CmdArgument {
@@ -824,32 +919,38 @@ function Invoke-InstallerCommandWithLockRetry {
         [switch]$StreamOutput
     )
 
-    $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
-    if (-not $StreamOutput) {
-        Write-ProcessOutputText -Text $result.StdOut
-        Write-ProcessOutputText -Text $result.StdErr
-    }
+    $retriedAfterLockCleanup = $false
+    $retriedAfterManagedPythonRepair = $false
 
-    if ($result.ExitCode -eq 0) {
-        return
-    }
+    while ($true) {
+        $result = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
+        if (-not $StreamOutput) {
+            Write-ProcessOutputText -Text $result.StdOut
+            Write-ProcessOutputText -Text $result.StdErr
+        }
 
-    $combinedOutput = @($result.StdOut, $result.StdErr) -join [Environment]::NewLine
-    if (-not (Test-IsLockError -Text $combinedOutput)) {
-        Fail "$Description failed."
-    }
+        if ($result.ExitCode -eq 0) {
+            return
+        }
 
-    Write-Info "$Description detected a file lock. Cleaning up leftover processes before retrying..."
-    Stop-FlocksProcesses
-    Start-Sleep -Seconds 3
+        $combinedOutput = @($result.StdOut, $result.StdErr) -join [Environment]::NewLine
 
-    $retryResult = Invoke-NativeCommand -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -Environment $Environment -StreamOutput:$StreamOutput
-    if (-not $StreamOutput) {
-        Write-ProcessOutputText -Text $retryResult.StdOut
-        Write-ProcessOutputText -Text $retryResult.StdErr
-    }
+        if (-not $retriedAfterManagedPythonRepair -and (Test-IsUvManagedPythonInspectionError -Text $combinedOutput)) {
+            $retriedAfterManagedPythonRepair = $true
+            Write-Info "$Description detected a broken uv-managed Python runtime. Clearing the cached interpreter before retrying..."
+            Repair-UvManagedPythonInstall -Text $combinedOutput
+            Start-Sleep -Seconds 2
+            continue
+        }
 
-    if ($retryResult.ExitCode -ne 0) {
+        if (-not $retriedAfterLockCleanup -and (Test-IsLockError -Text $combinedOutput)) {
+            $retriedAfterLockCleanup = $true
+            Write-Info "$Description detected a file lock. Cleaning up leftover processes before retrying..."
+            Stop-FlocksProcesses
+            Start-Sleep -Seconds 3
+            continue
+        }
+
         Fail "$Description failed."
     }
 }
@@ -937,6 +1038,23 @@ function Get-CommandPath {
         return $command.Source
     }
 
+    return $null
+}
+
+function Resolve-ExplicitBrowserPath {
+    $browserOverride = $env:FLOCKS_BROWSER_EXECUTABLE_OVERRIDE
+    if ([string]::IsNullOrWhiteSpace($browserOverride)) {
+        return $null
+    }
+
+    if (Test-Path $browserOverride) {
+        return $browserOverride
+    }
+
+    $warningMessage = Get-LocalizedText `
+        -English "The explicit browser override path does not exist and will be ignored: $browserOverride" `
+        -Chinese "显式指定的浏览器路径不存在，已忽略：$browserOverride"
+    Write-Warning $warningMessage
     return $null
 }
 
@@ -1042,7 +1160,14 @@ function Install-ChromeForTesting {
 }
 
 function Configure-AgentBrowserBrowser {
-    $browserPath = Find-SystemBrowserPath
+    $browserPath = Resolve-ExplicitBrowserPath
+
+    if (-not [string]::IsNullOrWhiteSpace($browserPath)) {
+        Write-Info "Using explicit browser override. agent-browser will use: $browserPath"
+    }
+    else {
+        $browserPath = Find-SystemBrowserPath
+    }
 
     if ([string]::IsNullOrWhiteSpace($browserPath)) {
         $browserPath = Resolve-ChromeForTestingPath -BrowserDir (Get-ChromeForTestingDir)
@@ -1087,46 +1212,6 @@ function Install-AgentBrowser {
     }
 
     Configure-AgentBrowserBrowser
-}
-
-function Install-DingtalkChannelDeps {
-    $connectorDir = Join-Path $RootDir ".flocks\plugins\channels\dingtalk\dingtalk-openclaw-connector"
-    $packageJson  = Join-Path $connectorDir "package.json"
-
-    if (-not (Test-Path $packageJson)) {
-        return
-    }
-
-    $nodeModulesDir = Join-Path $connectorDir "node_modules"
-    if (Test-Path $nodeModulesDir) {
-        Write-Info (Get-LocalizedText -English "DingTalk channel dependencies already exist. Skipping installation." -Chinese "钉钉频道依赖已存在，跳过安装。")
-        return
-    }
-
-    Write-Info (Get-LocalizedText -English "Detected DingTalk channel plugin. Installing npm dependencies..." -Chinese "检测到钉钉频道插件，正在安装 npm 依赖...")
-
-    Push-Location $connectorDir
-    try {
-        $null = Invoke-NativeCommandOrFail `
-            -Description "DingTalk channel npm dependency installation" `
-            -FilePath "npm.cmd" `
-            -ArgumentList @("install") `
-            -WorkingDirectory $connectorDir `
-            -Environment @{ npm_config_registry = $script:NpmRegistry } `
-            -StreamOutput
-    }
-    finally {
-        Pop-Location
-    }
-
-    Write-Info (Get-LocalizedText -English "DingTalk channel dependencies installed." -Chinese "钉钉频道依赖安装完成。")
-}
-
-function Write-RunCommandHint {
-    param([string]$Action)
-
-    $runScriptPath = Join-Path $RootDir "scripts\run.ps1"
-    Write-Host ('     & "{0}" {1}' -f $runScriptPath, $Action)
 }
 
 function Main {
@@ -1178,8 +1263,6 @@ function Main {
     finally {
         Pop-Location
     }
-
-    Install-DingtalkChannelDeps
 
     if ($InstallTui) {
         Install-Bun

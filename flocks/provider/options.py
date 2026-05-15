@@ -22,10 +22,48 @@ DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
 
 
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """Coerce config values to bool while preserving None."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool]:
+    """Read model-level default reasoning settings from flocks.json."""
+    try:
+        from flocks.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        default_parameters = setting.default_parameters or {}
+        return _coerce_optional_bool(default_parameters.get("enable_thinking"))
+    except Exception as exc:
+        log.debug("options.reasoning_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
 def build_provider_options(
     provider_id: str,
     model_id: str,
     *,
+    reasoning_enabled: Optional[bool] = None,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
     resolve_max_tokens: bool = True,
 ) -> Dict[str, Any]:
@@ -49,6 +87,11 @@ def build_provider_options(
     """
     options: Dict[str, Any] = {}
     model_lower = model_id.lower()
+    reasoning_enabled = (
+        _coerce_optional_bool(reasoning_enabled)
+        if reasoning_enabled is not None
+        else _resolve_reasoning_enabled(provider_id, model_id)
+    )
 
     # -- Claude extended thinking (any provider, including proxies) ----------
     if "claude" in model_lower:
@@ -57,22 +100,23 @@ def build_provider_options(
         # the catalog entry (catalog takes priority over flocks.json overrides
         # per anthropic.py get_model_definitions), so api_limit reflects the
         # real Anthropic limit (e.g. 64 000 for claude-sonnet-4-20250514).
-        api_limit = _get_catalog_model_max_tokens(model_id)
-        effective_budget = min(thinking_budget, api_limit // 2) if api_limit else thinking_budget
-        options["thinking"] = {
-            "type": "enabled",
-            "budget_tokens": effective_budget,
-        }
-        options["max_tokens"] = api_limit if api_limit else (thinking_budget + DEFAULT_OUTPUT_BUFFER)
+        if reasoning_enabled is not False:
+            api_limit = _get_catalog_model_max_tokens(model_id)
+            effective_budget = min(thinking_budget, api_limit // 2) if api_limit else thinking_budget
+            options["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": effective_budget,
+            }
+            options["max_tokens"] = api_limit if api_limit else (thinking_budget + DEFAULT_OUTPUT_BUFFER)
 
     # -- OpenAI reasoning (o1 / o3 / gpt-5) --------------------------------
     elif provider_id == "openai":
-        if any(tag in model_lower for tag in ("o1", "o3", "gpt-5")):
+        if reasoning_enabled is not False and any(tag in model_lower for tag in ("o1", "o3", "gpt-5")):
             options["reasoningEffort"] = "medium"
 
     # -- Google Gemini thinking ---------------------------------------------
     elif provider_id == "google":
-        if "gemini" in model_lower:
+        if reasoning_enabled is not False and "gemini" in model_lower:
             if "2.5" in model_lower:
                 options["thinkingConfig"] = {
                     "includeThoughts": True,
@@ -86,21 +130,31 @@ def build_provider_options(
 
     # -- Groq thinking ------------------------------------------------------
     elif provider_id == "groq":
-        options["thinkingLevel"] = "high"
+        if reasoning_enabled is not False:
+            options["thinkingLevel"] = "high"
 
     # -- Qwen reasoning (ThreatBook-hosted or Alibaba DashScope) -------------
-    elif provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba"):
+    elif provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba", "moonshot"):
         if "qwen3-max" in model_lower or "qwen3.6-plus" in model_lower:
-            options["extra_body"] = {"enable_thinking": True}
+            options["extra_body"] = {
+                "enable_thinking": True if reasoning_enabled is None else reasoning_enabled
+            }
+        elif "kimi-k2.5" in model_lower or "kimi-k2.6" in model_lower:
+            # ThreatBook CN defaults hybrid-thinking models to reasoning-on.
+            # Other compatible providers keep direct reply as the default.
+            default_enabled = provider_id == "threatbook-cn-llm"
+            options["extra_body"] = {
+                "enable_thinking": default_enabled if reasoning_enabled is None else reasoning_enabled
+            }
 
     # -- Amazon Bedrock reasoning -------------------------------------------
     elif provider_id == "amazon-bedrock":
-        if "anthropic" in model_lower:
+        if reasoning_enabled is not False and "anthropic" in model_lower:
             options["reasoningConfig"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget,
             }
-        elif "nova" in model_lower:
+        elif reasoning_enabled is not False and "nova" in model_lower:
             options["reasoningConfig"] = {
                 "type": "enabled",
                 "maxReasoningEffort": "high",

@@ -1,0 +1,264 @@
+from flocks.browser import admin
+
+
+class FakeSocket:
+    def __init__(self, response=b'{"target_id":"target-1","session_id":"session-1","page":null}\n'):
+        self.response = response
+        self.closed = False
+        self.sent = b""
+
+    def sendall(self, data):
+        self.sent += data
+
+    def recv(self, _size):
+        output, self.response = self.response, b""
+        return output
+
+    def close(self):
+        self.closed = True
+
+
+def test_local_chrome_mode_is_false_when_env_provides_remote_cdp() -> None:
+    assert not admin._is_local_chrome_mode({"BU_CDP_WS": "ws://example.test/devtools/browser/1"})
+
+
+def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp(monkeypatch) -> None:
+    monkeypatch.setenv("BU_CDP_WS", "ws://example.test/devtools/browser/1")
+    assert not admin._is_local_chrome_mode()
+
+
+def test_handshake_timeout_needs_chrome_remote_debugging_prompt() -> None:
+    msg = "CDP WS handshake failed: timed out during opening handshake"
+    assert admin._needs_chrome_remote_debugging_prompt(msg)
+
+
+def test_handshake_403_needs_chrome_remote_debugging_prompt() -> None:
+    msg = "CDP WS handshake failed: server rejected WebSocket connection: HTTP 403"
+    assert admin._needs_chrome_remote_debugging_prompt(msg)
+
+
+def test_load_env_uses_shared_loader_for_existing_files(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo_env = tmp_path / ".env"
+    workspace_env = workspace / ".env"
+    repo_env.write_text("TOKEN=repo\n", encoding="utf-8")
+    workspace_env.write_text("TOKEN=workspace\n", encoding="utf-8")
+    loaded_paths = []
+
+    monkeypatch.setattr(admin, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("BH_AGENT_WORKSPACE", str(workspace))
+    monkeypatch.setattr(admin, "load_env_file", lambda path: loaded_paths.append(path))
+
+    admin._load_env()
+
+    assert loaded_paths == [repo_env, workspace_env]
+
+
+def test_stale_websocket_does_not_open_chrome_inspect() -> None:
+    msg = "no close frame received or sent"
+    assert not admin._needs_chrome_remote_debugging_prompt(msg)
+
+
+def test_generic_remote_debugging_message_triggers_prompt() -> None:
+    msg = "The browser's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:9222"
+    assert admin._needs_chrome_remote_debugging_prompt(msg)
+
+
+def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", None)
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    (tmp_path / "bu-default.sock").touch()
+    (tmp_path / "bu-remote_1.sock").touch()
+    (tmp_path / "bu-invalid.name.sock").touch()
+    (tmp_path / "not-bu-default.sock").touch()
+
+    assert admin._daemon_endpoint_names() == ["default", "remote_1"]
+
+
+def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
+    (tmp_path / "bu.sock").touch()
+
+    assert admin._daemon_endpoint_names() == ["session-xyz"]
+
+
+def test_daemon_endpoint_names_with_bh_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
+    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
+    monkeypatch.setattr(admin, "NAME", "session-xyz")
+
+    assert admin._daemon_endpoint_names() == []
+
+
+def test_active_browser_connections_counts_only_healthy_daemons(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale", "remote"])
+
+    def fake_connect(name, timeout=1.0):
+        if name == "stale":
+            raise ConnectionRefusedError()
+        if name == "remote":
+            return FakeSocket(b'{"error":"no close frame received or sent"}\n')
+        return FakeSocket()
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+    assert admin.active_browser_connections() == 1
+
+
+def test_active_browser_connections_skips_daemons_reporting_cdp_disconnected(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "stale"])
+
+    def fake_connect(name, timeout=1.0):
+        if name == "stale":
+            return FakeSocket(b'{"error":"cdp_disconnected"}\n')
+        return FakeSocket()
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+    assert admin.active_browser_connections() == 1
+
+
+def test_browser_connections_returns_attached_page(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default"])
+    response = (
+        b'{"target_id":"target-1","session_id":"session-1",'
+        b'"page":{"targetId":"target-1","title":"Cat - Wikipedia","url":"https://en.wikipedia.org/wiki/Cat"}}\n'
+    )
+    monkeypatch.setattr(admin.ipc, "connect", lambda name, timeout=1.0: FakeSocket(response))
+
+    assert admin.browser_connections() == [
+        {
+            "name": "default",
+            "page": {"title": "Cat - Wikipedia", "url": "https://en.wikipedia.org/wiki/Cat"},
+        }
+    ]
+
+
+def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(
+        admin,
+        "browser_connections",
+        lambda: [
+            {"name": "default", "page": {"title": "Example", "url": "https://example.test"}},
+            {"name": "cats", "page": {"title": "Cat - Wikipedia", "url": "https://en.wikipedia.org/wiki/Cat"}},
+        ],
+    )
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 0
+
+    out = capsys.readouterr().out
+    assert "[ok  ] active browser connections — 2" in out
+    assert "        default — active page: Example — https://example.test" in out
+    assert "        cats — active page: Cat - Wikipedia — https://en.wikipedia.org/wiki/Cat" in out
+    assert "profile-use installed" not in out
+    assert "BROWSER_USE_API_KEY set" not in out
+
+
+def test_doctor_page_output_truncates_long_text(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "DOCTOR_TEXT_LIMIT", 20)
+    monkeypatch.setattr(
+        admin,
+        "browser_connections",
+        lambda: [
+            {
+                "name": "default",
+                "page": {"title": "A very long page title", "url": "https://example.test/very/long/path"},
+            }
+        ],
+    )
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 0
+
+    out = capsys.readouterr().out
+    assert "A very long page ..." in out
+    assert "https://example.t..." in out
+    assert "profile-use installed" not in out
+    assert "BROWSER_USE_API_KEY set" not in out
+
+
+def test_run_setup_uses_generic_missing_browser_wording(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+
+    assert admin.run_setup() == 1
+
+    out = capsys.readouterr().out
+    assert "no Chrome/Chromium/Edge process detected" in out
+
+
+def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: None)
+
+    calls = {"count": 0}
+
+    def fake_ensure_daemon(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError(
+                "The browser's remote-debugging page is open, but DevTools is not live yet on 127.0.0.1:9222"
+            )
+        return None
+
+    monkeypatch.setattr(admin, "ensure_daemon", fake_ensure_daemon)
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "browser remote debugging is not enabled on the current profile." in out
+    assert "opening your browser's inspect page" in out
+    assert "if the browser shows the profile picker" in out
+
+
+def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 1
+
+    out = capsys.readouterr().out
+    assert "[FAIL] browser running" in out
+    assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
+
+
+def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setattr(
+        "subprocess.check_output", lambda *args, **kwargs: b"\xcf\xd6\xce\xf1\xbc\xfe\r\nmsedge.exe\r\n"
+    )
+
+    assert admin._chrome_running()
+
+
+def test_chrome_running_on_windows_detects_chromium_process(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Windows")
+    monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: b"chromium.exe\r\n")
+
+    assert admin._chrome_running()
+
+
+def test_chrome_running_on_non_windows_matches_text_output(monkeypatch) -> None:
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    monkeypatch.setattr("subprocess.check_output", lambda *args, **kwargs: "Google Chrome\n")
+
+    assert admin._chrome_running()

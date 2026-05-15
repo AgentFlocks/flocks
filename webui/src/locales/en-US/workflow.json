@@ -2,6 +2,10 @@
   "pageTitle": "Workflows",
   "pageDescription": "Manage and execute workflows",
   "createWorkflow": "Create Workflow",
+  "section": {
+    "custom": "Custom Workflows",
+    "builtin": "Built-in Workflows"
+  },
   "emptyState": {
     "title": "No Workflows",
     "description": "Create your first workflow"
@@ -39,12 +43,22 @@
     },
     "topBar": {
       "collapsePanel": "Collapse Panel",
-      "expandPanel": "Expand Panel"
+      "expandPanel": "Expand Panel",
+      "runningStage": "Current stage: {{phase}} · Node: {{node}}",
+      "phase": {
+        "queued": "Queued",
+        "running": "Running",
+        "success": "Completed",
+        "error": "Failed",
+        "timeout": "Timed out",
+        "cancelled": "Cancelled"
+      }
     },
     "rightPanel": {
       "tabOverview": "Overview",
       "tabChat": "AI Edit",
       "tabRun": "Run",
+      "tabIntegration": "Integration",
       "renderError": "Component render error",
       "deleteWorkflow": "Delete Workflow",
       "deleteConfirmTitle": "Delete Workflow",
@@ -115,16 +129,20 @@
       "runtimeStatus": "Execution status: {{status}}",
       "runtimeInputs": "Runtime Inputs",
       "runtimeOutputs": "Runtime Outputs",
+      "expandJsonBlock": "Expand {{label}}",
+      "collapseJsonBlock": "Collapse {{label}}",
       "runNodeSection": "Run Node",
       "runNodeHint": "Execute this node in isolation",
       "runNodeUnsupported": "This node type is not supported yet",
       "runNodeUnsupportedDesc": "Branch and Loop nodes are not supported for isolated execution yet.",
       "runNodeInputs": "Execution Inputs",
+      "copyInput": "Copy input",
       "useLatestInputs": "Use latest inputs",
       "restoreSuggestedInputs": "Restore suggested inputs",
       "runNodeAction": "Run Node",
       "runningNode": "Running...",
       "runNodeSuccess": "Run Succeeded",
+      "copyOutput": "Copy output",
       "runNodeError": "Run Error",
       "runNodeStdout": "Stdout",
       "runNodeTraceback": "Traceback",
@@ -187,6 +205,17 @@
       "savedConfig": "Saved",
       "saveConfig": "Save Configuration",
       "kafkaHint": "Kafka integration is under development, configuration will take effect in a future version",
+      "syslogSection": "Syslog input",
+      "syslogExperimental": "(Experimental)",
+      "syslogEnabled": "Enable listener",
+      "syslogProtocol": "Protocol",
+      "syslogHost": "Bind address",
+      "syslogPort": "Port",
+      "syslogFormat": "Parse format",
+      "syslogInputKey": "Inputs key",
+      "syslogHint": "When enabled, Flocks listens for syslog on the given address/port and passes parsed payloads to workflow inputs (default key: syslog_message).",
+      "syslogPortError": "Invalid port: must be an integer between 1 and 65535",
+      "syslogActive": "Listening",
       "historySection": "Execution History",
       "noHistory": "No execution records",
       "noOutput": "No output data",

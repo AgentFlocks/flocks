@@ -53,6 +53,7 @@ class InboundMessage:
     chat_type: ChatType = ChatType.DIRECT
     text: str = ""
     media_url: Optional[str] = None
+    media_mime: Optional[str] = None
     reply_to_id: Optional[str] = None
     thread_id: Optional[str] = None
     mentioned: bool = False
@@ -286,4 +287,4 @@ class ChannelPlugin(ABC):
 
     def record_message(self) -> None:
         """Update the last-message timestamp (called by inbound dispatcher)."""
-        self._status.last_message_at = time.monotonic()
+        self._status.last_message_at = time.time()

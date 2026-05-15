@@ -32,12 +32,19 @@ export interface Skill {
 
 export interface Command {
   name: string;
+  canonical_name: string;
   description: string;
   template: string;
   agent?: string;
   model?: string;
   subtask?: boolean;
   hidden: boolean;
+  aliases: string[];
+  visible_surfaces: string[];
+  execution_kind: 'direct' | 'llm' | 'session_control';
+  allow_attachments: boolean;
+  requires_existing_session: boolean;
+  channel_safe: boolean;
 }
 
 export interface SkillInstallRequest {

@@ -11,7 +11,6 @@ import asyncio
 import re
 from typing import Optional
 from html.parser import HTMLParser
-from urllib.parse import urlparse
 
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
@@ -297,20 +296,20 @@ async def webfetch_tool(
         
     except ImportError:
         # Fallback to urllib if aiohttp not available
-        import urllib.request
         import urllib.error
-        
+        import urllib.request
+
         try:
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
-            
+
             with urllib.request.urlopen(req, timeout=timeout_sec) as response:
                 content = response.read().decode('utf-8', errors='replace')
                 content_type = response.headers.get("Content-Type", "")
-            
+
             title = f"{url} ({content_type})"
-            
+
             if format == "markdown":
                 if "text/html" in content_type:
                     output = html_to_markdown(content)
@@ -323,14 +322,14 @@ async def webfetch_tool(
                     output = content
             else:
                 output = content
-            
+
             return ToolResult(
                 success=True,
                 output=output,
                 title=title,
                 metadata={}
             )
-            
+
         except urllib.error.HTTPError as e:
             return ToolResult(
                 success=False,

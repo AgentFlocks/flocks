@@ -142,16 +142,23 @@ async def list_commands() -> List[Dict[str, Any]]:
     Flocks compatible endpoint.
     """
     try:
-        commands = Command.list()
+        commands = Command.list_for_surfaces(("webui", "tui", "acp"))
         return [
             {
                 "name": cmd.name,
+                "canonical_name": cmd.canonical_name,
                 "description": cmd.description,
                 "template": cmd.template,
                 "agent": cmd.agent,
                 "model": cmd.model,
                 "subtask": cmd.subtask,
                 "hidden": cmd.hidden,
+                "aliases": list(cmd.aliases),
+                "visible_surfaces": list(cmd.visible_surfaces),
+                "execution_kind": cmd.execution_kind,
+                "allow_attachments": cmd.allow_attachments,
+                "requires_existing_session": cmd.requires_existing_session,
+                "channel_safe": cmd.channel_safe,
             }
             for cmd in commands
             if not cmd.hidden
@@ -180,12 +187,19 @@ async def get_command(name: str) -> Dict[str, Any]:
         
         return {
             "name": cmd.name,
+            "canonical_name": cmd.canonical_name,
             "description": cmd.description,
             "template": cmd.template,
             "agent": cmd.agent,
             "model": cmd.model,
             "subtask": cmd.subtask,
             "hidden": cmd.hidden,
+            "aliases": list(cmd.aliases),
+            "visible_surfaces": list(cmd.visible_surfaces),
+            "execution_kind": cmd.execution_kind,
+            "allow_attachments": cmd.allow_attachments,
+            "requires_existing_session": cmd.requires_existing_session,
+            "channel_safe": cmd.channel_safe,
         }
     except Exception as e:
         log.error("command.get.error", {"error": str(e), "name": name})

@@ -85,10 +85,13 @@ class ChatMessage(BaseModel):
     """Chat message"""
     role: str = Field(..., description="Message role (user, assistant, system, tool)")
     content: Union[str, List[Dict[str, Any]]] = Field("", description="Message content")
+    # Reasoning/Thinking content (optional)
+    reasoning: Optional[str] = Field(None, description="Reasoning or thinking content")
     # OpenAI function-calling fields (optional)
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls for assistant messages")
     tool_call_id: Optional[str] = Field(None, description="Tool call ID for tool-result messages")
     name: Optional[str] = Field(None, description="Tool name for tool-result messages")
+    custom_settings: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatRequest(BaseModel):
@@ -108,6 +111,8 @@ class ChatResponse(BaseModel):
     content: str
     finish_reason: str
     usage: Dict[str, int]
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    reasoning: Optional[str] = None
 
 
 class ToolCallInfo(BaseModel):
@@ -213,7 +218,7 @@ class Provider:
                 ("github-copilot", "flocks.provider.sdk.github_copilot", "GitHubCopilotProvider"),
                 ("github-copilot-enterprise", "flocks.provider.sdk.github_copilot", "GitHubCopilotEnterpriseProvider"),
                 ("vercel", "flocks.provider.sdk.vercel", "VercelProvider"),
-                ("opencode", "flocks.provider.sdk.opencode", "FlocksCompatProvider"),
+                ("opencode", "flocks.provider.sdk.opencode", "OpenCodeProvider"),
                 ("sap-ai-core", "flocks.provider.sdk.sap_ai_core", "SAPAICoreProvider"),
                 ("cloudflare-ai-gateway", "flocks.provider.sdk.cloudflare_gateway", "CloudflareGatewayProvider"),
                 # Added in Batch 7 - Final providers
@@ -229,6 +234,8 @@ class Provider:
                 ("threatbook-cn-llm", "flocks.provider.sdk.threatbook", "ThreatBookCnLLMProvider"),
                 ("threatbook-io-llm", "flocks.provider.sdk.threatbook", "ThreatBookIoLLMProvider"),
                 ("ollama", "flocks.provider.sdk.ollama", "OllamaProvider"),
+                # Client-side tool calling (for backends without --enable-auto-tool-choice)
+                ("cherry", "flocks.provider.sdk.cherry", "CherryProvider"),
             ]
             
             for provider_id, module_name, class_name in providers_to_register:
@@ -289,6 +296,10 @@ class Provider:
                             ENV_API_KEY = [f"{_pid.upper().replace('-', '_')}_API_KEY"]
                             ENV_BASE_URL = f"{_pid.upper().replace('-', '_')}_BASE_URL"
                             CATALOG_ID = ""
+                            # Self-hosted gateways behind this dynamic provider may
+                            # not enforce auth; let _get_client() fall back to a
+                            # sentinel key instead of raising.
+                            ALLOW_NO_API_KEY = True
                             
                             def __init__(self):
                                 super().__init__(
@@ -303,7 +314,27 @@ class Provider:
                                             self._api_key = secret_key
                                     except Exception:
                                         pass
-                        
+                                # OpenAI-compatible gateways (vLLM, internal proxies, etc.)
+                                # may legitimately run without auth. Fall back to a
+                                # sentinel so the OpenAI SDK client still constructs.
+                                if not self._api_key:
+                                    self._api_key = "not-needed"
+
+                            def is_configured(self) -> bool:
+                                """Treat a configured base URL as sufficient — many
+                                self-hosted OpenAI-compatible endpoints don't require
+                                an API key.
+
+                                Requires an explicit ``configure()`` call (i.e.
+                                ``self._config`` populated) to avoid reporting
+                                "ready" purely from constructor defaults.
+                                """
+                                if self._config is None:
+                                    return False
+                                api_key = (self._config.api_key or "").strip()
+                                base_url = (self._config.base_url or "").strip()
+                                return bool(api_key or base_url)
+
                         provider_instance = DynamicOpenAIProvider()
                         cls.register(provider_instance)
                         log.info("provider.dynamic_loaded", {
@@ -314,6 +345,52 @@ class Provider:
                         
                     except Exception as e:
                         log.warning("provider.dynamic_load_failed", {
+                            "provider_id": provider_id,
+                            "error": str(e)
+                        })
+
+                elif npm_package == "@ai-sdk/cherry":
+                    try:
+                        from flocks.provider.sdk.cherry import CherryProvider
+
+                        _pid = provider_id
+                        _cfg = config
+                        _base_url = base_url
+
+                        class DynamicCherryProvider(CherryProvider):
+                            """Dynamically created Cherry provider (client-side tool calling)."""
+
+                            def __init__(self):
+                                super().__init__()
+                                self.id = _pid
+                                self.name = _cfg.get("name", _pid)
+                                if _base_url:
+                                    self._base_url = _base_url
+                                if not self._api_key:
+                                    try:
+                                        from flocks.provider.credential import get_api_key
+                                        secret_key = get_api_key(_pid)
+                                        if secret_key:
+                                            self._api_key = secret_key
+                                    except Exception:
+                                        pass
+                                # Allow no-auth gateways (consistent with the
+                                # OpenAI-compatible dynamic provider above).
+                                # ``is_configured()`` is inherited from
+                                # OpenAICompatibleProvider via CherryProvider.
+                                if not self._api_key:
+                                    self._api_key = "not-needed"
+
+                        provider_instance = DynamicCherryProvider()
+                        cls.register(provider_instance)
+                        log.info("provider.dynamic_cherry_loaded", {
+                            "provider_id": provider_id,
+                            "base_url": base_url,
+                            "configured": provider_instance.is_configured()
+                        })
+
+                    except Exception as e:
+                        log.warning("provider.dynamic_cherry_load_failed", {
                             "provider_id": provider_id,
                             "error": str(e)
                         })

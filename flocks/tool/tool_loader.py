@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import inspect
 import re
 import urllib.parse
 from pathlib import Path
@@ -78,6 +79,30 @@ def _load_provider_config(yaml_path: Path) -> Optional[Dict[str, Any]]:
             "path": str(provider_file), "error": str(e),
         })
         return None
+
+
+def extract_provider_version(provider_cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Extract a provider/service version string from a ``_provider.yaml`` dict.
+
+    Lookup order (first non-null wins):
+    1. top-level ``version``
+    2. ``defaults.product_version``
+    3. ``defaults.version``
+
+    Always coerces the result to ``str`` so YAML-decoded floats like ``9.2``
+    (which would otherwise round-trip lossy) are stable.
+    Returns ``None`` when no version is declared anywhere.
+    """
+    if not isinstance(provider_cfg, dict):
+        return None
+    raw = provider_cfg.get("version")
+    if raw is None:
+        defaults = provider_cfg.get("defaults") or {}
+        if isinstance(defaults, dict):
+            raw = defaults.get("product_version") or defaults.get("version")
+    if raw is None:
+        return None
+    return str(raw)
 
 
 def _merge_provider_defaults(raw: dict, provider: Optional[Dict[str, Any]]) -> dict:
@@ -226,6 +251,7 @@ def _json_schema_to_params(schema: dict) -> List[ToolParameter]:
     result = []
     for name, prop in properties.items():
         json_type = prop.get("type", "string")
+        json_schema = dict(prop) if json_type in {"object", "array"} else None
         result.append(ToolParameter(
             name=name,
             type=_TYPE_MAP.get(json_type, ParameterType.STRING),
@@ -233,6 +259,7 @@ def _json_schema_to_params(schema: dict) -> List[ToolParameter]:
             required=name in required_set,
             default=prop.get("default"),
             enum=prop.get("enum"),
+            json_schema=json_schema,
         ))
     return result
 
@@ -367,10 +394,14 @@ def _build_script_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     user_plugins_root = DEFAULT_PLUGIN_ROOT.resolve()
     project_plugins_root = (Path.cwd() / ".flocks" / "plugins").resolve()
     script_str = str(script_path)
-    if not script_str.startswith(str(user_plugins_root)) and not script_str.startswith(str(project_plugins_root)):
+    allowed_prefixes = (
+        str(user_plugins_root),
+        str(project_plugins_root),
+    )
+    if not any(script_str.startswith(prefix) for prefix in allowed_prefixes):
         raise ValueError(
             f"Script path {script_path} is outside the allowed plugins directories. "
-            f"For security, scripts must be under {user_plugins_root} or {project_plugins_root}."
+            f"For security, scripts must be under one of: {', '.join(allowed_prefixes)}."
         )
 
     if not script_path.is_file():
@@ -395,8 +426,54 @@ def _build_script_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     if not callable(fn):
         raise TypeError(f"'{function_name}' in {script_path} is not callable")
 
+    # Inspect the target function signature once so the wrapper can adapt the
+    # invocation to legacy handlers that either:
+    #   * read parameters from ``ctx.params`` (signature: ``(ctx) -> ...``); or
+    #   * take parameters as explicit keyword arguments / ``**kwargs``.
+    #
+    # Without this adaptation, callers like the test-credentials flow that
+    # invoke ``ToolRegistry.execute(tool_name, **params)`` would either raise
+    # ``TypeError: got an unexpected keyword argument`` or
+    # ``AttributeError: 'ToolContext' object has no attribute 'params'``.
+    fn_sig = inspect.signature(fn)
+    fn_params = fn_sig.parameters
+    fn_has_var_kw = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in fn_params.values()
+    )
+    # Skip the first positional argument (always the ``ctx`` we supply
+    # ourselves) so a user-provided kwarg named ``ctx`` cannot trigger
+    # ``TypeError: got multiple values for argument 'ctx'``.
+    _param_items = list(fn_params.items())
+    if _param_items and _param_items[0][1].kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.POSITIONAL_ONLY,
+    ):
+        _param_items = _param_items[1:]
+    fn_param_names = {
+        name
+        for name, p in _param_items
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+
     async def handler(ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        result = await fn(ctx, **kwargs)
+        # Always expose the raw kwargs on the context so handlers that read
+        # from ``ctx.params`` (e.g. ``params = dict(ctx.params)``) keep working
+        # regardless of whether the caller created a fresh ``ToolContext``.
+        try:
+            ctx.params = kwargs  # type: ignore[attr-defined]
+        except AttributeError:
+            pass
+
+        if fn_has_var_kw:
+            call_kwargs = kwargs
+        else:
+            call_kwargs = {k: v for k, v in kwargs.items() if k in fn_param_names}
+
+        result = await fn(ctx, **call_kwargs)
         if isinstance(result, ToolResult):
             return result
         return ToolResult(success=True, output=result)
@@ -427,29 +504,14 @@ def _build_execution_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     if not code or not code.strip():
         raise ValueError(f"Empty execution code in {yaml_path}")
 
-    code_body = code.rstrip()
-    wrapper_lines = ["async def _tool_exec(**_kw_):", "    import asyncio"]
-    for line in code_body.splitlines():
-        wrapper_lines.append(f"    {line}")
-    wrapper_source = "\n".join(wrapper_lines)
-
-    compiled = compile(wrapper_source, str(yaml_path), "exec")
-
     async def handler(ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        ns: Dict[str, Any] = {}
-        exec(compiled, ns)
-        _tool_exec = ns["_tool_exec"]
-        try:
-            result = await _tool_exec(**kwargs)
-            if isinstance(result, ToolResult):
-                return result
-            if isinstance(result, dict):
-                success = result.pop("success", True)
-                error = result.pop("error", None)
-                return ToolResult(success=success, output=result, error=error)
-            return ToolResult(success=True, output=result)
-        except Exception as e:
-            return ToolResult(success=False, error=str(e))
+        return ToolResult(
+            success=False,
+            error=(
+                "Inline YAML execution is disabled for safety. "
+                "Use handler.type=script for trusted Python tool handlers."
+            ),
+        )
 
     return handler
 
@@ -491,9 +553,22 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     provider_cfg = _load_provider_config(yaml_path)
     raw = _merge_provider_defaults(raw, provider_cfg)
 
-    provider_name = raw.get("provider")
-    if not provider_name and provider_cfg:
-        provider_name = provider_cfg.get("name")
+    service_id = raw.get("provider")
+    if not service_id and provider_cfg:
+        service_id = provider_cfg.get("name")
+
+    provider_version = extract_provider_version(provider_cfg)
+
+    # ``info.provider`` is the lookup key in ``flocks.json`` ``api_services``.
+    # When the plugin declares a version, promote it to a storage key so
+    # multiple versions of the same product can keep credentials side-by-side
+    # (see :mod:`flocks.config.api_versioning`). Without a version
+    # the storage key collapses back to ``service_id`` for full back-compat.
+    if service_id and provider_version:
+        from flocks.config.api_versioning import derive_storage_key
+        storage_key: Optional[str] = derive_storage_key(service_id, provider_version)
+    else:
+        storage_key = service_id
 
     cat_str = raw.get("category", "custom")
     try:
@@ -528,18 +603,23 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         parameters=parameters,
         enabled=raw.get("enabled", True),
         requires_confirmation=requires_confirm,
-        provider=provider_name,
+        provider=storage_key,
+        provider_version=provider_version,
         source=source,
     )
 
     tool = Tool(info=info, handler=handler)
     tool._yaml_path = yaml_path  # type: ignore[attr-defined]
-    tool._provider = provider_name  # type: ignore[attr-defined]
+    tool._provider = storage_key  # type: ignore[attr-defined]
+    tool._service_id = service_id  # type: ignore[attr-defined]
+    tool._provider_version = provider_version  # type: ignore[attr-defined]
     tool._source = source or "yaml_plugin"  # type: ignore[attr-defined]
 
     log.info("tool.yaml.loaded", {
         "name": name,
-        "provider": provider_name,
+        "service_id": service_id,
+        "storage_key": storage_key,
+        "provider_version": provider_version,
         "handler_type": handler_type,
         "path": str(yaml_path),
     })
@@ -552,8 +632,18 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
 # ---------------------------------------------------------------------------
 
 def _yaml_tool_search_roots() -> List[Path]:
-    """Return YAML tool roots for both user-level and project-level plugins."""
-    roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    """Return YAML tool roots: user-level then project-level.
+
+    Bundled flockshub directories are intentionally NOT included — bundled
+    tool plugins must be installed via the Hub flow (which copies them
+    into ``<plugins>/tools/<type>/<id>/``) before this CRUD-oriented
+    helper is expected to find them. This keeps "installed" the single
+    source of truth for editing/listing.
+    """
+    roots = [
+        _TOOLS_SUBDIR,
+        Path.cwd() / ".flocks" / "plugins" / "tools",
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -756,8 +846,16 @@ def delete_yaml_tool(name: str) -> bool:
 
 
 def _python_tool_dirs() -> List[Path]:
-    """Return all plugin python tool directories to search."""
-    dirs = [_TOOLS_SUBDIR / TOOL_TYPE_PYTHON, Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON]
+    """Return user- and project-level python tool directories.
+
+    Bundled flockshub directories are intentionally excluded; python
+    tools must be installed via the Hub flow before being picked up
+    by the discovery layer.
+    """
+    dirs = [
+        _TOOLS_SUBDIR / TOOL_TYPE_PYTHON,
+        Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON,
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for directory in dirs:
@@ -900,7 +998,7 @@ def list_yaml_tools() -> List[Dict[str, Any]]:
             ):
                 _collect(item, depth + 1, max_depth)
 
-    search_roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    search_roots = _yaml_tool_search_roots()
     for root in search_roots:
         _collect(root)
 

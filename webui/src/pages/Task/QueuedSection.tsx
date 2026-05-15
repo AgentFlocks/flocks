@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ListTodo, Play, Pause, RotateCcw, XCircle, Trash2,
+  ListTodo, Play, RotateCcw, XCircle, Trash2,
   ChevronLeft, ChevronRight, GripVertical, X,
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -11,6 +11,7 @@ import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
 import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
+import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 
@@ -36,6 +37,11 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const refresh = useCallback(() => { refetch(); onRefreshGlobal(); }, [refetch, onRefreshGlobal]);
+  const visibleSelectedIds = tasks
+    .filter(task => selectedTasks.has(task.id))
+    .map(task => task.id);
+  const hasVisibleSelection = visibleSelectedIds.length > 0;
+  const allVisibleSelected = tasks.length > 0 && tasks.every(task => selectedTasks.has(task.id));
 
   // Keep detailTask in sync: update from list data when available,
   // but never clear it just because the task left the current page.
@@ -44,6 +50,24 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     const found = tasks.find(t => t.id === selectedId);
     if (found) setDetailTask(found);
   }, [tasks, selectedId]);
+
+  // Selection is scoped to the current visible list so users never batch
+  // operate on hidden rows from a previous page or filter.
+  useEffect(() => {
+    setSelectedTasks(prev => {
+      let changed = false;
+      const visibleIds = new Set(tasks.map(task => task.id));
+      const next = new Set<string>();
+      prev.forEach(id => {
+        if (visibleIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [tasks]);
 
   const markViewedIfNeeded = useCallback(async (task: TaskExecution) => {
     if (task.status !== 'completed' || task.deliveryStatus !== 'unread') {
@@ -60,21 +84,22 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
 
   // When the user selects a task, also fetch it directly to be sure
   // we have the latest data even if it's not on the current page.
-  const fetchDetailTask = useCallback(async (task: TaskExecution) => {
+  const fetchDetailTask = useCallback(async (taskId: string) => {
     try {
-      const res = await taskAPI.getExecution(task.id);
+      const res = await taskAPI.getExecution(taskId);
       const detail = await markViewedIfNeeded(res.data);
       setDetailTask(detail);
     } catch { /* ignore — list sync will cover it */ }
   }, [markViewedIfNeeded]);
 
+  // The detail drawer is intentionally kept open across page/filter changes,
+  // so we must refresh it by ID rather than looking it up in the current page.
   const refreshWithDetail = useCallback(() => {
     refresh();
     if (selectedId) {
-      const selected = tasks.find(t => t.id === selectedId);
-      if (selected) fetchDetailTask(selected);
+      fetchDetailTask(selectedId);
     }
-  }, [refresh, selectedId, fetchDetailTask, tasks]);
+  }, [refresh, selectedId, fetchDetailTask]);
 
   const closeDetail = useCallback(() => {
     setSelectedId(null);
@@ -88,7 +113,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     }
     setSelectedId(task.id);
     setDetailTask(task);
-    fetchDetailTask(task);
+    fetchDetailTask(task.id);
   }, [selectedId, closeDetail, fetchDetailTask]);
 
   const handleAction = async (action: string, taskId: string) => {
@@ -97,8 +122,6 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         case 'cancel':
           await taskAPI.cancelExecution(taskId);
           break;
-        case 'pause':  await taskAPI.pauseExecution(taskId);  break;
-        case 'resume': await taskAPI.resumeExecution(taskId); break;
         case 'retry':  await taskAPI.retryExecution(taskId);  break;
         case 'rerun':
           await taskAPI.rerunExecution(taskId);
@@ -117,8 +140,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       }
       refresh();
       if (selectedId === taskId) {
-        const selected = tasks.find(t => t.id === taskId);
-        if (selected) fetchDetailTask(selected);
+        fetchDetailTask(taskId);
       }
     } catch (err: unknown) {
       toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
@@ -129,36 +151,64 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s; });
 
   const handleBatchCancel = async () => {
-    if (!selectedTasks.size) return;
+    if (!hasVisibleSelection) return;
+    const executionIds = [...new Set(visibleSelectedIds)];
     const ok = await confirm({
-      description: t('queued.confirmBatchCancel', { count: selectedTasks.size }),
+      description: t('queued.confirmBatchCancel', { count: executionIds.length }),
       variant: 'warning',
       confirmText: t('queued.confirmBatchCancelBtn'),
     });
     if (!ok) return;
-    const selectedItems = [...selectedTasks]
-      .map(id => tasks.find(t => t.id === id))
-      .filter((task): task is TaskExecution => !!task);
-    await taskAPI.batchCancelExecutions([...new Set(selectedItems.map(task => task.id))]);
-    setSelectedTasks(new Set());
-    refresh();
+    try {
+      await taskAPI.batchCancelExecutions(executionIds);
+      setSelectedTasks(new Set());
+      refresh();
+    } catch (err: unknown) {
+      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+    }
   };
 
   const handleBatchDelete = async () => {
-    if (!selectedTasks.size) return;
+    if (!hasVisibleSelection) return;
+    const executionIds = [...new Set(visibleSelectedIds)];
     const ok = await confirm({
-      description: t('queued.confirmBatchDelete', { count: selectedTasks.size }),
+      description: t('queued.confirmBatchDelete', { count: executionIds.length }),
       variant: 'danger',
       confirmText: t('common:button.delete'),
     });
     if (!ok) return;
-    const selectedItems = [...selectedTasks]
-      .map(id => tasks.find(t => t.id === id))
-      .filter((task): task is TaskExecution => !!task);
-    await taskAPI.batchDeleteExecutions([...new Set(selectedItems.map(task => task.id))]);
+    try {
+      await taskAPI.batchDeleteExecutions(executionIds);
+      setSelectedTasks(new Set());
+      if (selectedId && selectedTasks.has(selectedId)) closeDetail();
+      refresh();
+    } catch (err: unknown) {
+      toast.error(t('queued.actionFailed'), err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleToggleSelectAll = () => {
+    setSelectedTasks(prev => {
+      const next = new Set(prev);
+      if (allVisibleSelected) {
+        tasks.forEach(task => next.delete(task.id));
+      } else {
+        tasks.forEach(task => next.add(task.id));
+      }
+      return next;
+    });
+  };
+
+  const handleFilterChange = (nextFilterKey: string) => {
+    setFilterKey(nextFilterKey);
+    setPage(0);
     setSelectedTasks(new Set());
-    if (selectedId && selectedTasks.has(selectedId)) closeDetail();
-    refresh();
+    closeDetail();
+  };
+
+  const handlePageChange = (nextPage: number) => {
+    setPage(nextPage);
+    setSelectedTasks(new Set());
   };
 
   if (loading && tasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner /></div>;
@@ -171,7 +221,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
           {QUEUED_FILTERS.map(f => (
             <button
               key={f.key}
-              onClick={() => { setFilterKey(f.key); setPage(0); closeDetail(); }}
+              onClick={() => handleFilterChange(f.key)}
               className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
                 filterKey === f.key ? 'bg-white text-slate-800 shadow-sm font-medium' : 'text-gray-600 hover:text-gray-900'
               }`}
@@ -180,9 +230,9 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
             </button>
           ))}
         </div>
-        {selectedTasks.size > 0 && (
+        {hasVisibleSelection && (
           <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: selectedTasks.size })}</span>
+            <span className="text-sm text-gray-500">{t('queued.selectedCount', { count: visibleSelectedIds.length })}</span>
             <button onClick={handleBatchCancel} className="px-3 py-1.5 text-sm bg-yellow-50 text-yellow-700 rounded-md hover:bg-yellow-100">{t('queued.batchCancel')}</button>
             <button onClick={handleBatchDelete} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-md hover:bg-red-100">{t('queued.batchDelete')}</button>
           </div>
@@ -204,8 +254,8 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                   <th className="w-10 px-3 py-3">
                     <input
                       type="checkbox"
-                      checked={tasks.length > 0 && selectedTasks.size === tasks.length}
-                      onChange={() => selectedTasks.size === tasks.length ? setSelectedTasks(new Set()) : setSelectedTasks(new Set(tasks.map(t => t.id)))}
+                      checked={allVisibleSelected}
+                      onChange={handleToggleSelectAll}
                       className="rounded border-gray-300"
                     />
                   </th>
@@ -253,10 +303,10 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 {t('queued.pagination', { total, page: page + 1, totalPages })}
               </span>
               <div className="flex gap-2">
-                <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                <button onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
                   <ChevronLeft className="w-4 h-4" />
                 </button>
-                <button onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                <button onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>
@@ -284,6 +334,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   const { t } = useTranslation('task');
   const sessionId = task.sessionID;
   const isActive = ['queued', 'running'].includes(task.status);
+  const isWorkflowExecution = task.executionMode === 'workflow';
   const emptyText = ['pending', 'queued'].includes(task.status)
     ? t('queued.detailWaiting')
     : t('queued.detailNoRecord');
@@ -365,12 +416,6 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
           )}
 
           <div className="flex flex-wrap gap-1.5">
-            {(task.status === 'running' || task.status === 'queued') && (
-              <ActionButton icon={<Pause className="w-3 h-3" />} label={t('queued.actionPause')} onClick={() => onAction('pause', task.id)} color="yellow" />
-            )}
-            {task.status === 'paused' && (
-              <ActionButton icon={<Play className="w-3 h-3" />} label={t('queued.actionResume')} onClick={() => onAction('resume', task.id)} color="green" />
-            )}
             {!['completed', 'cancelled', 'failed'].includes(task.status) && (
               <ActionButton icon={<XCircle className="w-3 h-3" />} label={t('queued.actionCancel')} onClick={() => onAction('cancel', task.id)} color="gray" />
             )}
@@ -384,19 +429,384 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
           </div>
         </div>
 
-        <SessionChat
-          sessionId={sessionId}
-          live={isActive}
-          hideInput
-          emptyText={emptyText}
-          className="flex-1 min-h-0"
-          onSSEEvent={(event) => {
-            if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
-              onRefresh?.();
-            }
-          }}
-        />
+        {isWorkflowExecution ? (
+          <QueuedWorkflowDetail task={task} emptyText={emptyText} />
+        ) : (
+          <SessionChat
+            sessionId={sessionId}
+            live={isActive}
+            hideInput
+            emptyText={emptyText}
+            className="flex-1 min-h-0"
+            onSSEEvent={(event) => {
+              if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
+                onRefresh?.();
+              }
+            }}
+          />
+        )}
       </div>
     </>
   );
+}
+
+function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyText: string }) {
+  const { t } = useTranslation('task');
+  const { t: tCommon } = useTranslation('common');
+  const toast = useToast();
+  const inputPayload = getWorkflowInputPayload(task);
+  const parsedResult = parseStructuredResult(task.resultSummary);
+  const hasInputPayload = Object.keys(inputPayload).length > 0;
+  const resultText = task.resultSummary?.trim();
+  const inputText = JSON.stringify(inputPayload, null, 2);
+  const formattedResultText = parsedResult ? JSON.stringify(parsedResult, null, 2) : null;
+  const [showFormattedResult, setShowFormattedResult] = useState(false);
+  const displayedResultText = showFormattedResult && formattedResultText
+    ? formattedResultText
+    : resultText;
+
+  useEffect(() => {
+    setShowFormattedResult(false);
+  }, [task.id, task.resultSummary]);
+
+  const handleCopy = useCallback(async (text: string) => {
+    try {
+      await copyText(text);
+      toast.success(tCommon('clipboard.copySuccessTitle'));
+    } catch (error) {
+      toast.error(
+        tCommon('clipboard.copyFailedTitle'),
+        error instanceof Error ? error.message : tCommon('clipboard.copyFailedDescription'),
+      );
+    }
+  }, [tCommon, toast]);
+
+  return (
+    <div className="flex-1 min-h-0 overflow-hidden">
+      <div className="h-full overflow-y-auto px-6 py-4">
+        <div className="space-y-4 pb-10">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+            <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              {t('queued.workflowId')}
+            </div>
+            <div className="mt-1 break-all font-mono text-sm text-slate-700">
+              {task.workflowID || '--'}
+            </div>
+          </div>
+
+          {hasInputPayload && (
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-gray-700">
+                  {t('queued.workflowInput')}
+                </h4>
+                <button
+                  type="button"
+                  onClick={() => void handleCopy(inputText)}
+                  className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                >
+                  {tCommon('button.copy')}
+                </button>
+              </div>
+              <pre className="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
+                {inputText}
+              </pre>
+            </div>
+          )}
+
+          {displayedResultText && (
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-gray-700">
+                  {t('queued.workflowResult')}
+                </h4>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCopy(displayedResultText)}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
+                  >
+                    {tCommon('button.copy')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowFormattedResult(true)}
+                    disabled={!formattedResultText || showFormattedResult}
+                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white disabled:hover:text-slate-600"
+                  >
+                    {t('queued.workflowJsonFormat')}
+                  </button>
+                </div>
+              </div>
+              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
+                {displayedResultText}
+              </pre>
+            </div>
+          )}
+
+          {task.error && (
+            <div>
+              <h4 className="mb-2 text-sm font-semibold text-red-700">
+                {t('queued.workflowError')}
+              </h4>
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 whitespace-pre-wrap">
+                {task.error}
+              </div>
+            </div>
+          )}
+
+          {!task.error && !resultText && (
+            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+              {emptyText}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getWorkflowInputPayload(task: TaskExecution): Record<string, unknown> {
+  const snapshot = task.executionInputSnapshot ?? {};
+  const context = snapshot.context;
+  if (context && typeof context === 'object' && !Array.isArray(context) && Object.keys(context).length > 0) {
+    return context as Record<string, unknown>;
+  }
+  return snapshot;
+}
+
+function parseStructuredResult(value?: string): unknown | null {
+  if (!value) {
+    return null;
+  }
+  const trimmed = value.trim();
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isStructuredResult(parsed) ? parsed : null;
+  } catch {
+    try {
+      const parsed = parsePythonLikeLiteral(trimmed);
+      return isStructuredResult(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function isStructuredResult(value: unknown): value is Record<string, unknown> | unknown[] {
+  return (Array.isArray(value) || (typeof value === 'object' && value !== null));
+}
+
+function parsePythonLikeLiteral(source: string): unknown {
+  let index = 0;
+
+  const skipWhitespace = () => {
+    while (index < source.length && /\s/.test(source[index])) {
+      index += 1;
+    }
+  };
+
+  const expect = (char: string) => {
+    if (source[index] !== char) {
+      throw new Error(`Expected ${char} at ${index}`);
+    }
+    index += 1;
+  };
+
+  const parseString = (): string => {
+    const quote = source[index];
+    if (quote !== '\'' && quote !== '"') {
+      throw new Error(`Expected string at ${index}`);
+    }
+    index += 1;
+    let result = '';
+    while (index < source.length) {
+      const char = source[index];
+      if (char === quote) {
+        index += 1;
+        return result;
+      }
+      if (char === '\\') {
+        index += 1;
+        if (index >= source.length) {
+          throw new Error('Unterminated escape sequence');
+        }
+        const escaped = source[index];
+        switch (escaped) {
+          case 'n': result += '\n'; break;
+          case 'r': result += '\r'; break;
+          case 't': result += '\t'; break;
+          case 'b': result += '\b'; break;
+          case 'f': result += '\f'; break;
+          case '\\': result += '\\'; break;
+          case '\'': result += '\''; break;
+          case '"': result += '"'; break;
+          case 'u': {
+            const hex = source.slice(index + 1, index + 5);
+            if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+              throw new Error(`Invalid unicode escape at ${index}`);
+            }
+            result += String.fromCharCode(parseInt(hex, 16));
+            index += 4;
+            break;
+          }
+          case 'x': {
+            const hex = source.slice(index + 1, index + 3);
+            if (!/^[0-9a-fA-F]{2}$/.test(hex)) {
+              throw new Error(`Invalid hex escape at ${index}`);
+            }
+            result += String.fromCharCode(parseInt(hex, 16));
+            index += 2;
+            break;
+          }
+          default:
+            result += escaped;
+            break;
+        }
+        index += 1;
+        continue;
+      }
+      result += char;
+      index += 1;
+    }
+    throw new Error('Unterminated string literal');
+  };
+
+  const parseNumber = (): number => {
+    const match = source.slice(index).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+    if (!match) {
+      throw new Error(`Invalid number at ${index}`);
+    }
+    index += match[0].length;
+    return Number(match[0]);
+  };
+
+  const parseArray = (): unknown[] => {
+    const values: unknown[] = [];
+    expect('[');
+    skipWhitespace();
+    if (source[index] === ']') {
+      index += 1;
+      return values;
+    }
+    while (index < source.length) {
+      values.push(parseValue());
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === ']') {
+          index += 1;
+          return values;
+        }
+        continue;
+      }
+      if (source[index] === ']') {
+        index += 1;
+        return values;
+      }
+      throw new Error(`Expected , or ] at ${index}`);
+    }
+    throw new Error('Unterminated array');
+  };
+
+  const parseTuple = (): unknown[] => {
+    const values: unknown[] = [];
+    expect('(');
+    skipWhitespace();
+    if (source[index] === ')') {
+      index += 1;
+      return values;
+    }
+    while (index < source.length) {
+      values.push(parseValue());
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === ')') {
+          index += 1;
+          return values;
+        }
+        continue;
+      }
+      if (source[index] === ')') {
+        index += 1;
+        return values;
+      }
+      throw new Error(`Expected , or ) at ${index}`);
+    }
+    throw new Error('Unterminated tuple');
+  };
+
+  const parseObject = (): Record<string, unknown> => {
+    const obj: Record<string, unknown> = {};
+    expect('{');
+    skipWhitespace();
+    if (source[index] === '}') {
+      index += 1;
+      return obj;
+    }
+    while (index < source.length) {
+      const key = parseValue();
+      skipWhitespace();
+      expect(':');
+      skipWhitespace();
+      obj[String(key)] = parseValue();
+      skipWhitespace();
+      if (source[index] === ',') {
+        index += 1;
+        skipWhitespace();
+        if (source[index] === '}') {
+          index += 1;
+          return obj;
+        }
+        continue;
+      }
+      if (source[index] === '}') {
+        index += 1;
+        return obj;
+      }
+      throw new Error(`Expected , or } at ${index}`);
+    }
+    throw new Error('Unterminated object');
+  };
+
+  const parseIdentifier = (): unknown => {
+    if (source.startsWith('True', index)) {
+      index += 4;
+      return true;
+    }
+    if (source.startsWith('False', index)) {
+      index += 5;
+      return false;
+    }
+    if (source.startsWith('None', index)) {
+      index += 4;
+      return null;
+    }
+    if (source.startsWith('null', index)) {
+      index += 4;
+      return null;
+    }
+    throw new Error(`Unexpected token at ${index}`);
+  };
+
+  const parseValue = (): unknown => {
+    skipWhitespace();
+    const char = source[index];
+    if (char === '{') return parseObject();
+    if (char === '[') return parseArray();
+    if (char === '(') return parseTuple();
+    if (char === '\'' || char === '"') return parseString();
+    if (char === '-' || /\d/.test(char)) return parseNumber();
+    return parseIdentifier();
+  };
+
+  const parsed = parseValue();
+  skipWhitespace();
+  if (index !== source.length) {
+    throw new Error(`Unexpected trailing input at ${index}`);
+  }
+  return parsed;
 }

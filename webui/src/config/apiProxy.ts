@@ -9,10 +9,12 @@ export function createApiProxy(target: string) {
     '/api': {
       target,
       changeOrigin: true,
+      xfwd: true,
     },
     '/event': {
       target,
       changeOrigin: true,
+      xfwd: true,
     },
   };
 }

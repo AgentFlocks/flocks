@@ -28,8 +28,10 @@ class TestIdentifierCompatibility:
             "agent": "agt",
             "subtask": "stk",
             "event": "evt",
+            "tqref": "tqr",
             "task": "tsk",
             "texec": "txe",
+            "chbind": "chb",
         }
         
         assert Identifier._prefixes == expected_prefixes

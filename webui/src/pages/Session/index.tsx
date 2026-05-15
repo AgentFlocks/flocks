@@ -7,6 +7,7 @@ import {
   MoreHorizontal, PencilLine, Download,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import i18n from '@/i18n';
 import { useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
@@ -15,6 +16,8 @@ import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
+import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 
@@ -30,8 +33,6 @@ function sanitizeSessionExportName(value: string) {
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const [searchParams, setSearchParams] = useSearchParams();
-  // Capture params on mount only — avoids re-running when setSearchParams clears the URL.
-  const initialSearchParamsRef = useRef(searchParams);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
@@ -47,6 +48,7 @@ export default function SessionPage() {
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
+  const supportsVision = useDefaultModelVision();
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
@@ -78,28 +80,24 @@ export default function SessionPage() {
     }
   }, [updateSessionTitle, refetchSessions]);
 
-  // Handle ?session=<id>&message=<text> query params (e.g. from onboarding).
-  // We read from the ref captured at mount time so the effect only runs once
-  // and doesn't re-trigger when setSearchParams clears the URL.
+  // Keep the selected session in sync with URL query params (e.g. onboarding
+  // or other in-app navigation to `/sessions?session=...`). Clear the params
+  // after consuming them so refreshes don't re-send the initial message.
   useEffect(() => {
-    const params = initialSearchParamsRef.current;
-    const sessionParam = params.get('session');
-    const messageParam = params.get('message');
-    if (sessionParam) {
+    const sessionParam = searchParams.get('session');
+    const messageParam = searchParams.get('message');
+    if (!sessionParam) return;
+
+    if (sessionParam !== selectedSessionId) {
       setSelectedSessionId(sessionParam);
+    }
+    if (sessionParam) {
       if (messageParam) {
         setPendingInitialMessage(messageParam);
       }
       setSearchParams({}, { replace: true });
     }
-  }, []);
-
-  // Auto select first session
-  useEffect(() => {
-    if (!selectedSessionId && sessions.length > 0) {
-      setSelectedSessionId(sessions[0].id);
-    }
-  }, [sessions, selectedSessionId]);
+  }, [searchParams, selectedSessionId, setSearchParams]);
 
   // Close agent dropdown on outside click
   useEffect(() => {
@@ -162,7 +160,10 @@ export default function SessionPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleCreateSession]);
 
-  const handleCreateAndSend = useCallback(async (text: string) => {
+  const handleCreateAndSend = useCallback(async (
+    text: string,
+    imageParts?: ImagePartData[],
+  ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       const newSessionId = response.data.id;
@@ -170,7 +171,9 @@ export default function SessionPage() {
       addSession(response.data);
       setSelectedSessionId(newSessionId);
 
-      const payload: Record<string, unknown> = { parts: [{ type: 'text', text }] };
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+      };
       if (selectedAgent) payload.agent = selectedAgent;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
@@ -181,6 +184,11 @@ export default function SessionPage() {
   }, [addSession, selectedAgent, toast, t]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (target?.canDelete === false) {
+      toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
+      return;
+    }
     if (!confirm(t('confirmDelete'))) return;
     try {
       await sessionApi.delete(sessionId);
@@ -452,7 +460,9 @@ export default function SessionPage() {
                           data-session-rename-input
                         />
                       ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm">{session.title}</h3>
+                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
+                          <span className="truncate">{session.title}</span>
+                        </h3>
                       )}
                     </div>
                     {session.time?.updated && (
@@ -507,7 +517,8 @@ export default function SessionPage() {
                               setOpenMenuSessionId(null);
                               void handleDeleteSession(session.id);
                             }}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
+                            disabled={session.canDelete === false}
+                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                             <span>{t('deleteAction')}</span>
@@ -609,8 +620,9 @@ export default function SessionPage() {
 
         {/* Chat — powered by unified SessionChat */}
         <SessionChat
+          key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
-          live
+          live={Boolean(selectedSessionId)}
           display={{ compact: false, showActions: true, showTimestamp: false }}
           agentName={selectedAgent}
           className="flex-1 min-h-0"
@@ -622,6 +634,7 @@ export default function SessionPage() {
           onCreateAndSend={handleCreateAndSend}
           onCreateNewSession={handleCreateSession}
           onStreamingDone={() => setPendingInitialMessage(null)}
+          supportsVision={supportsVision}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}

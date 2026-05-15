@@ -33,6 +33,25 @@ def get_log_dir() -> Path:
     return _log_dir()
 
 
+def append_upgrade_text_log(message: str) -> None:
+    """Append timestamped lines to ``update.log`` under the configured log directory.
+
+    Used for upgrade flows so errors remain on disk when the process had no TTY
+    or when structured ``Log`` output went to a different file than ``backend.log``.
+    """
+    try:
+        log_dir = _log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / "update.log"
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        with path.open("a", encoding="utf-8") as handle:
+            for segment in normalized.split("\n"):
+                handle.write(f"{stamp} | {segment}\n")
+    except OSError:
+        return
+
+
 # Log levels - matches TypeScript exactly
 class LogLevel:
     """Log levels"""

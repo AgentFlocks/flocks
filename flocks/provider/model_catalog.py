@@ -145,6 +145,7 @@ def _parse_model_definitions(
 
         limits = ModelLimits(
             context_window=limits_raw.get("context_window", 128000),
+            max_input_tokens=limits_raw.get("max_input_tokens"),
             max_output_tokens=limits_raw.get("max_output_tokens", 4096),
         )
 

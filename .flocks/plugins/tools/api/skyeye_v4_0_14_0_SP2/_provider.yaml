@@ -1,0 +1,36 @@
+name: SkyEye
+service_id: skyeye_api
+version: "4.0.14.0.SP2"
+description: SkyEye monitoring platform API for dashboard views, alarm retrieval, and related downloads.
+description_cn: SkyEye 威胁监测平台接口，提供仪表板视图、告警检索、枚举值查询和相关下载能力。
+auth:
+  type: custom
+  secret: skyeye_api_key
+  description: |
+    此服务使用自定义免密认证流程。
+    `service-credentials` 中保存的是 login_key，不是普通 Bearer Token。
+    另外还需配置 `skyeye_host` 或 `api_services.skyeye_api.base_url`。
+credential_fields:
+  - key: api_key
+    label: API Key
+    storage: secret
+    config_key: apiKey
+    secret_id: skyeye_api_key
+    input_type: password
+    required: true
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "https://{secret:skyeye_host}:443"
+  - key: username
+    label: Username
+    storage: config
+    config_key: username
+    input_type: text
+defaults:
+  base_url: "https://{secret:skyeye_host}:443"
+  timeout: 30
+  category: custom
+  product_version: "4.0.14.0.SP2"

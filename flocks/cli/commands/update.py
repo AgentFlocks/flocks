@@ -9,6 +9,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from flocks.utils.log import append_upgrade_text_log
+
 console = Console()
 
 
@@ -33,14 +35,25 @@ def update_command(
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
-    from flocks.updater import check_update, perform_update, detect_deploy_mode
+    from flocks.updater import build_updated_frontend, check_update, perform_update, detect_deploy_mode
 
-    with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
-        info = await check_update(region=region)
+    if not yes and not check and region is None:
+        use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
+        if use_cn_mirror:
+            region = "cn"
 
-    if info.error:
-        console.print(f"[red]检查失败：{info.error}[/red]")
-        raise typer.Exit(1)
+    async def _load_update_info(selected_region: str | None):
+        with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
+            info = await check_update(region=selected_region)
+
+        if info.error:
+            append_upgrade_text_log(f"ERROR version_check: {info.error}")
+            console.print(f"[red]检查失败：{info.error}[/red]")
+            raise typer.Exit(1)
+
+        return info
+
+    info = await _load_update_info(region)
 
     _print_version_table(info)
 
@@ -76,16 +89,26 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             prompt = "\n当前已是最新版本，是否仍强制重新安装？"
         confirmed = typer.confirm(prompt, default=False)
         if not confirmed:
+            append_upgrade_text_log("INFO update_cancelled user_declined")
             console.print("[yellow]已取消[/yellow]")
             return
 
+    from flocks.cli.service_manager import ServiceError, stop_all
+
+    try:
+        stop_all(console)
+    except ServiceError as error:
+        console.print(f"[red]执行 flocks stop 失败：{error}[/red]")
+        raise typer.Exit(1)
+
+    append_upgrade_text_log(f"OK cli_update_stopped_services_before_upgrade version={version_to_apply}")
+    console.print("[green]✓ 已执行 flocks stop[/green]")
     console.print()
     stage_labels = {
         "fetching":    "下载最新源码包",
         "backing_up":  "备份当前版本",
         "applying":    f"应用 v{info.latest_version}",
         "syncing":     "同步依赖",
-        "building":    "构建前端",
         "restarting":  "重启服务",
         "done":        "完成",
     }
@@ -118,9 +141,6 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
         if progress.stage == "done":
             _finish_active(success=True)
-            step += 1
-            console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
-            console.print("[green]✓[/green]")
             continue
 
         if progress.stage not in seen_stages:
@@ -131,8 +151,23 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
             active_stage = progress.stage
 
+    step += 1
+    console.print(f"[cyan][{step}/{total_steps}] 构建前端...[/cyan]  ", end="")
+    try:
+        await build_updated_frontend(region=region)
+    except Exception as error:
+        console.print("[red]✗[/red]")
+        console.print(f"\n[red]✗ 前端构建失败：{error}[/red]")
+        raise typer.Exit(1)
+    console.print("[green]✓[/green]")
+
+    step += 1
+    console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
+    console.print("[green]✓[/green]")
+
+    append_upgrade_text_log(f"OK cli_update_completed version={version_to_apply}")
     console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
-    console.print("[dim]如有后台服务正在运行，请执行 [bold]flocks restart[/bold] 重启服务[/dim]")
+    console.print("[dim]如需恢复服务，请执行 [bold]flocks start[/bold][/dim]")
 
 
 def _print_version_table(info) -> None:

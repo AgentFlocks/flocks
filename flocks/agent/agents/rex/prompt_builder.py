@@ -176,11 +176,23 @@ Alternative: [your suggestion].
 Should I proceed with your original request, or try the alternative?
 ```
 
-### Image Analysis Limitation
-If the user provides an image, image URL, or local image path and asks you to inspect, interpret, describe, extract, OCR, or analyze the image content:
-- Do NOT claim you can analyze the image
-- Clearly tell the user that Flocks does not support image analysis yet
-- If helpful, ask the user to provide the relevant text or describe the image in words instead
+### Visual / Image Input Handling
+You may receive images as multimodal `image_url` content blocks attached to a user message. When you do:
+- You DO have vision for that turn — describe, OCR, interpret, or analyze the image directly using what you see. Do not refuse or claim Flocks "does not support image analysis"; the image has already been delivered to you.
+- Treat what you see as ground truth alongside the user's text instructions.
+- An `image_url` block always represents *the image the user wants you to look at in **this** turn*.
+- Do NOT confuse the current image(s) with anything from earlier turns. Never reuse a filename, label, or description from a prior turn unless you have just re-confirmed it from the pixels you can see right now.
+
+**Multi-image rule (strict — vision models otherwise drop the last image when N≥4):**
+1. Before drafting your reply, FIRST count the `image_url` blocks in the user's current message — call this number N.
+2. Begin your response with an opener that explicitly states the count, e.g. `您发送了 N 张图片，逐一解读如下：` (or `I will analyze all N images one by one:`). Anchoring N up front prevents the model from stopping early.
+3. Your reply MUST contain EXACTLY N numbered sections, in the order the images appear, using headings such as `图片 1 / 图片 2 / … / 图片 N` (or `Image 1 / Image 2 / …`). Do not skip any image, do not merge "similar" images into one section, and do not pick "the most interesting subset".
+4. After drafting, self-check: count your numbered sections — if it is not N, you missed an image. Add the missing section(s) before finalizing.
+
+If you see the literal placeholder `[earlier image omitted]` in an older user message, it just marks that an image existed in a prior turn but is not re-attached this turn. Treat it as opaque — you cannot re-inspect it. If the user asks about it again, rely only on what you wrote about it in your previous assistant reply, or politely ask the user to re-attach the image.
+
+When the user only mentions an image **by file path or remote URL** without an attached `image_url` block:
+- You cannot fetch external resources, so ask the user to attach the image (drag / paste / `+` button) or paste the relevant text/data inline.
 
 ---
 
@@ -483,7 +495,7 @@ def _build_slash_commands_section() -> str:
     try:
         from flocks.command.command import Command
 
-        commands = Command.list()
+        commands = Command.list_for_surfaces(("webui", "tui"))
         if not commands:
             return ""
 
@@ -507,7 +519,7 @@ When it would help the user, you may suggest these commands proactively.
 - Suggest `/plan` when the user wants to design before implementing
 - Suggest `/ask` when the user wants read-only analysis without changes
 - Suggest `/tools` or `/skills` when the user asks what capabilities are available
-- Suggest `/clear` or `/restart` when the user wants a fresh start
+- Suggest `/clear` when the user wants to clear the current UI output
 </Slash_Commands>"""
     except Exception:
         return ""

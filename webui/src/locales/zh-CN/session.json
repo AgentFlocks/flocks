@@ -67,6 +67,20 @@
     "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
+    "compactionStage": {
+      "load": "加载消息（{{count}} 条）",
+      "strategyGeneric": "选择压缩策略",
+      "strategy_single_pass": "单次压缩（短对话）",
+      "strategy_preemptive": "预分块并行压缩",
+      "strategy_oversize": "超量分块压缩",
+      "strategyChunked": "分 {{count}} 块并行压缩",
+      "overallProgressLabel": "会话消息压缩进度",
+      "mergeStarted": "合并 {{count}} 段摘要…",
+      "mergeDone": "合并完成（{{seconds}}s）",
+      "mergeFailed": "合并失败",
+      "summarizeDone": "生成摘要 {{chars}} 字",
+      "complete": "压缩完成"
+    },
     "removeNodeRef": "移除节点引用",
     "errors": {
       "saveFailed": "保存消息失败",
@@ -75,12 +89,15 @@
     },
     "upload": {
       "select": "上传文档",
+      "selectWithImage": "上传文件或图片",
       "remove": "移除文件",
       "retry": "重试上传",
       "dropHint": "松开以上传文档文件",
       "waiting": "文件上传中，请等待完成后发送",
-      "invalidType": "仅支持 txt、md、json、yaml、yml、xml、csv、pdf、doc、docx",
-      "errorGeneric": "上传失败，请重试"
+      "invalidType": "仅支持 txt、md、json、yaml、yml、xml、csv、pdf、doc、docx、html、htm、ppt、pptx、xls、xlsx",
+      "errorGeneric": "上传失败，请重试",
+      "imageNotSupported": "当前模型不支持图片分析，请在模型配置中选择支持视觉的模型",
+      "imageNotSupportedBanner": "当前模型不支持图片分析"
     },
     "tool": {
       "pending": "等待中",

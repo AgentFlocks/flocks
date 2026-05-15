@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.4.15"
+version = "v2026.5.14"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
@@ -68,6 +68,8 @@ dependencies = [
     "wecom-aibot-sdk>=1.0.0",
     # Feishu / Lark (WebSocket long-connection + Open API)
     "lark-oapi>=1.3.0",
+    # DingTalk Stream Mode (WebSocket long-connection)
+    "dingtalk-stream>=0.20",
     "python-socks>=2.8.1",
     "pytz>=2026.1.post1",
     # docs parser
@@ -77,7 +79,11 @@ dependencies = [
     "olefile>=0.47",
     "defusedxml>=0.7.1",
     "markdown>=3.10.2",
-    "jinja2>=3.1.6"
+    "jinja2>=3.1.6",
+    # browser
+    "cdp-use>=1.4.5",
+    "pillow>=12.2.0",
+    "datasketch>=1.10.0",
 ]
 
 [dependency-groups]
@@ -99,6 +105,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["flocks"]
+
+[tool.hatch.build.targets.wheel.force-include]
+".flocks/flockshub" = ".flocks/flockshub"
 
 [tool.ruff]
 line-length = 120

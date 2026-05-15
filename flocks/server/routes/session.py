@@ -10,20 +10,30 @@ import asyncio
 import json
 import time
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.auth.context import get_current_auth_user
+from flocks.server.routes._timing import log_route_timing
 from flocks.session.session import Session, SessionInfo as SessionModel
+from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
-
+from flocks.server.auth import require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
 
 # Default agent name constant
 DEFAULT_AGENT = "rex"
+
+# File extensions that are safe to persist when materialising data-URL uploads.
+# Intentionally narrow: any extension outside this set is rejected to prevent
+# OS tools (Finder, ``open``) from misidentifying content based on the
+# extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
+# ".exe").
+_UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
 
 # Import monitor for metrics endpoint
 from flocks.utils.monitor import get_monitor
@@ -97,13 +107,14 @@ class SessionResponse(BaseModel):
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
-    share: Optional[Dict[str, Any]] = Field(None, description="Share information")
     title: str = Field(..., description="Session title")
     version: str = Field("1.0.0", description="Session version")
     time: SessionTime = Field(..., description="Session timestamps")
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    ownerUserID: Optional[str] = Field(None, description="Session owner user id")
+    canDelete: bool = Field(False, description="Whether current user can delete this session")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -113,6 +124,9 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     Note: agent/model/provider are NOT included at session level.
     They are retrieved from the latest user message in the session.
     """
+    current_user = get_current_auth_user()
+    can_delete = SessionPolicy.can_delete(session, current_user)
+
     return SessionResponse(
         id=session.id,
         slug=session.slug,
@@ -128,10 +142,11 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
             archived=session.time.archived,
         ),
         summary=session.summary.model_dump() if session.summary else None,
-        share=session.share.model_dump() if session.share else None,
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        ownerUserID=session.owner_user_id,
+        canDelete=can_delete,
     )
 
 
@@ -183,6 +198,7 @@ async def get_session_status() -> Dict[str, Any]:
     description="Get a list of all sessions, sorted by most recently updated",
 )
 async def list_sessions(
+    request: Request,
     directory: Optional[str] = Query(None, description="Filter by project directory"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
@@ -191,6 +207,8 @@ async def list_sessions(
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
 ) -> List[SessionResponse]:
     """List all sessions with optional filters"""
+    started_at = time.perf_counter()
+    _current_user = require_user(request)
     all_sessions = await Session.list_all()
     
     filtered = []
@@ -219,7 +237,15 @@ async def list_sessions(
         if limit is not None and len(filtered) >= limit:
             break
     
-    return [_session_to_response(s) for s in filtered]
+    response = [_session_to_response(s) for s in filtered]
+    log_route_timing(log, "session.list.complete", started_at=started_at, extra={
+        "count": len(response),
+        "roots": roots,
+        "limit": limit,
+        "search": bool(search),
+        "category": category,
+    })
+    return response
 
 
 @router.post(
@@ -229,8 +255,9 @@ async def list_sessions(
     summary="Create session",
     description="Create a new session",
 )
-async def create_session(request: Optional[SessionCreateRequest] = None) -> SessionResponse:
+async def create_session(http_request: Request, request: Optional[SessionCreateRequest] = None) -> SessionResponse:
     """Create a new session"""
+    current_user = require_user(http_request)
     import os
     
     if request is None:
@@ -293,9 +320,10 @@ async def create_session(request: Optional[SessionCreateRequest] = None) -> Sess
         title=request.title,
         parent_id=request.parentID,
         permission=permission,
+        owner_user_id=current_user.id,
         **({"category": request.category} if request.category else {}),
     )
-    
+
     log.info("session.created", {"session_id": session.id})
     return _session_to_response(session)
 
@@ -308,8 +336,9 @@ async def create_session(request: Optional[SessionCreateRequest] = None) -> Sess
     summary="Get session",
     description="Get session by ID",
 )
-async def get_session(sessionID: str) -> SessionResponse:
+async def get_session(sessionID: str, request: Request) -> SessionResponse:
     """Get session by ID"""
+    _current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -356,10 +385,17 @@ class TodoInfo(BaseModel):
     summary="Get session todos",
     description="Get the todo list for a session",
 )
-async def get_session_todos(sessionID: str) -> List[TodoInfo]:
+async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     """Get session todos"""
     from flocks.storage.storage import Storage
-    
+    _current_user = require_user(request)
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found"
+        )
+
     try:
         todos = await Storage.read(["todo", sessionID])
         if todos is None:
@@ -376,11 +412,18 @@ async def get_session_todos(sessionID: str) -> List[TodoInfo]:
     summary="Update session todos",
     description="Update the todo list for a session",
 )
-async def update_session_todos(sessionID: str, todos: List[TodoInfo]) -> List[TodoInfo]:
+async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: Request) -> List[TodoInfo]:
     """Update session todos"""
     from flocks.storage.storage import Storage
     from flocks.server.routes.event import publish_event
-    
+    _current_user = require_user(request)
+    session = await Session.get_by_id(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found"
+        )
+
     try:
         await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
         
@@ -401,8 +444,9 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo]) -> List[To
     summary="Delete session",
     description="Delete session by ID",
 )
-async def delete_session(sessionID: str) -> bool:
+async def delete_session(sessionID: str, request: Request) -> bool:
     """Delete session by ID (returns true)"""
+    current_user = require_user(request)
     session = await Session.get_by_id(sessionID)
     
     if not session:
@@ -411,7 +455,35 @@ async def delete_session(sessionID: str) -> bool:
             detail=f"Session {sessionID} not found"
         )
     
+    if not SessionPolicy.can_delete(session, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
+
     await Session.delete(session.project_id, sessionID)
+
+    # Best-effort cleanup of any image/file uploads materialised for this
+    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
+    # The session DB row is gone, so the on-disk bytes are now orphaned —
+    # remove them to keep the workspace tidy. We deliberately swallow any
+    # filesystem errors: deletion of the session record is the contract,
+    # the upload cleanup is incidental.
+    try:
+        import shutil
+        from flocks.workspace.manager import WorkspaceManager
+
+        ws = WorkspaceManager.get_instance()
+        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
+        if uploads_root.exists() and uploads_root.is_dir():
+            shutil.rmtree(uploads_root, ignore_errors=True)
+            log.info("session.uploads.cleaned", {
+                "session_id": sessionID,
+                "path": str(uploads_root),
+            })
+    except Exception as exc:
+        log.warn("session.uploads.cleanup_failed", {
+            "session_id": sessionID,
+            "error": str(exc),
+        })
+
     log.info("session.deleted", {"session_id": sessionID})
     return True
 
@@ -597,28 +669,6 @@ async def fork_session(sessionID: str, request: Optional[ForkRequest] = None) ->
     return _session_to_response(forked)
 
 
-@router.post(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Share session",
-    description="Create a shareable link for the session",
-)
-async def share_session(sessionID: str) -> SessionResponse:
-    """Share session"""
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    await Session.share(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    
-    log.info("session.shared", {"session_id": sessionID})
-    return _session_to_response(updated)
-
-
 @router.get(
     "/{sessionID}/diff",
     response_model=List[FileDiff],
@@ -647,28 +697,6 @@ async def get_session_diff(
     except Exception as e:
         log.warn("session.diff.read_error", {"sessionID": sessionID, "error": str(e)})
         return []
-
-
-@router.delete(
-    "/{sessionID}/share",
-    response_model=SessionResponse,
-    summary="Unshare session",
-    description="Remove the shareable link for the session",
-)
-async def unshare_session(sessionID: str) -> SessionResponse:
-    """Unshare session"""
-    session = await Session.get_by_id(sessionID)
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
-        )
-    
-    await Session.unshare(session.project_id, sessionID)
-    updated = await Session.get_by_id(sessionID)
-    
-    log.info("session.unshared", {"session_id": sessionID})
-    return _session_to_response(updated)
 
 
 class SummarizeRequest(BaseModel):
@@ -947,6 +975,10 @@ class MessagePartInfo(BaseModel):
     state: Optional[Dict[str, Any]] = None
     callID: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    # File / image attachment fields (populated when ``type == "file"``).
+    url: Optional[str] = None
+    mime: Optional[str] = None
+    filename: Optional[str] = None
 
 
 class MessageWithParts(BaseModel):
@@ -1068,7 +1100,7 @@ async def get_session_messages(
                             state_value = raw_state.model_dump()
                         elif isinstance(raw_state, dict):
                             state_value = raw_state
-                
+
                 part_info = MessagePartInfo(
                     id=part.id if hasattr(part, 'id') else f"{msg.id}_part_{i}",
                     messageID=msg.id,
@@ -1080,6 +1112,9 @@ async def get_session_messages(
                     state=state_value,
                     callID=getattr(part, 'callID', None) if part.type == "tool" else None,
                     metadata=getattr(part, 'metadata', None),
+                    url=getattr(part, 'url', None) if part.type == "file" else None,
+                    mime=getattr(part, 'mime', None) if part.type == "file" else None,
+                    filename=getattr(part, 'filename', None) if part.type == "file" else None,
                 )
                 parts.append(part_info)
             result.append(MessageWithParts(info=info, parts=parts))
@@ -1171,6 +1206,9 @@ async def get_message(sessionID: str, messageID: str) -> MessageWithParts:
                 state=getattr(part, 'state', None) if part.type == "tool" else None,
                 callID=getattr(part, 'callID', None) if part.type == "tool" else None,
                 metadata=getattr(part, 'metadata', None),
+                url=getattr(part, 'url', None) if part.type == "file" else None,
+                mime=getattr(part, 'mime', None) if part.type == "file" else None,
+                filename=getattr(part, 'filename', None) if part.type == "file" else None,
             )
             parts.append(part_info)
         return MessageWithParts(info=info, parts=parts)
@@ -1879,9 +1917,18 @@ async def _run_session_compaction(
     parent_message_id: Optional[str] = None,
     auto: bool = False,
     event_publish_callback=None,
+    focus_instruction: Optional[str] = None,
 ) -> tuple[str, str, str]:
-    """Execute session compaction directly without routing through the LLM loop."""
+    """Execute session compaction directly without routing through the LLM loop.
+
+    ``focus_instruction`` is forwarded verbatim to ``run_compaction`` so
+    manual ``/compact <focus>`` invocations can bias what the
+    summariser preserves.  ``None``/empty leaves the default behaviour.
+    """
     from flocks.session.lifecycle.compaction import run_compaction
+    from flocks.session.lifecycle.compaction.compaction import (
+        pop_last_compaction_error,
+    )
     from flocks.session.lifecycle.revert import SessionRevert
     from flocks.session.message import Message, MessageRole
 
@@ -1907,6 +1954,23 @@ async def _run_session_compaction(
     if not parent_message_id:
         raise ValueError(f"Session {session_id} has no user message to compact")
 
+    progress_callback = None
+    if event_publish_callback is not None:
+        # Adapter that bridges ``ProgressCallback(stage, data)`` from the
+        # compaction pipeline onto the existing ``publish_event`` SSE
+        # channel.  We use a dedicated event type
+        # (``session.compaction_progress``) rather than overloading
+        # ``session.status`` so the front-end dispatcher stays
+        # explicit and unrelated consumers do not need to filter on a
+        # nested ``stage`` field.  ``sessionID`` is closed over from
+        # the enclosing scope.
+        async def progress_callback(stage: str, data: dict) -> None:
+            await event_publish_callback("session.compaction_progress", {
+                "sessionID": session_id,
+                "stage": stage,
+                "data": data,
+            })
+
     result = await run_compaction(
         session_id,
         parent_message_id=parent_message_id,
@@ -1916,9 +1980,18 @@ async def _run_session_compaction(
         auto=auto,
         event_publish_callback=event_publish_callback,
         status_after="idle",
+        focus_instruction=focus_instruction,
+        progress_callback=progress_callback,
     )
     if result == "stop":
-        raise RuntimeError("Compaction failed")
+        # ``SessionCompaction.process`` swallows the underlying provider
+        # exception (so the loop path stays simple) but stashes the
+        # user-facing message via ``_record_compaction_error``.  Surface
+        # it verbatim here so the SSE ``session.error`` payload — and
+        # therefore the front-end toast — shows e.g. "Error code: 529
+        # — 模型服务暂时不可用" instead of an opaque "Compaction failed".
+        detail = pop_last_compaction_error(session_id) or "Compaction failed"
+        raise RuntimeError(detail)
     return agent_name, provider_id, model_id
 
 
@@ -1985,19 +2058,25 @@ async def _process_session_message(
     # 1. Extract text content
     # ------------------------------------------------------------------
     text_content = ""
+    has_non_text_parts = False
     for part in request.parts:
-        if part.get("type") == "text":
+        part_type = part.get("type")
+        if part_type == "text":
             text_content += part.get("text", "")
-    
-    if not text_content:
+        elif part_type:
+            has_non_text_parts = True
+
+    # Allow messages that only contain attachments (e.g. an image with no caption)
+    if not text_content and not has_non_text_parts:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No text content in message"
+            detail="Message must contain text or at least one attachment"
         )
-    
+
     log.info("session.message.received", {
         "sessionID": sessionID,
         "content_length": len(text_content),
+        "has_non_text_parts": has_non_text_parts,
     })
     
     # ------------------------------------------------------------------
@@ -2015,6 +2094,19 @@ async def _process_session_message(
         "model_id": model_id,
         "source": model_source,
     })
+
+    if request.model:
+        pinned_session = await Session.update(
+            session.project_id,
+            sessionID,
+            **Session.explicit_model_updates(provider_id, model_id),
+        )
+        if pinned_session is not None:
+            session = pinned_session
+        else:
+            session.provider = provider_id
+            session.model = model_id
+            session.model_pinned = True
     
     # Ensure providers are initialized and configured
     Provider._ensure_initialized()
@@ -2079,6 +2171,104 @@ async def _process_session_message(
     if _is_no_reply:
         _part_event["synthetic"] = True
     await publish_event("message.part.updated", {"part": _part_event})
+
+    # ------------------------------------------------------------------
+    # 3a. Persist any non-text parts (file/image attachments) so the
+    #     SessionLoop sees them when building the LLM request. Without
+    #     this, file parts sent from clients would be silently dropped.
+    #
+    #     For ``data:`` URLs we materialize the bytes to disk and store
+    #     a ``file://`` reference instead. Keeping the raw base64 string
+    #     in the message database is dangerous: any code path that later
+    #     stringifies the part (legacy LLM adapters, logging, compaction)
+    #     would tokenize hundreds of KB of base64 and blow past the
+    #     model's context window.
+    # ------------------------------------------------------------------
+    from flocks.session.message import FilePart
+
+    def _materialize_data_url_to_disk(
+        data_url: str, mime_hint: str, filename_hint: Optional[str]
+    ) -> str:
+        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
+
+        Returns a ``file://`` URL pointing at the persisted file. On failure
+        the original ``data:`` URL is returned unchanged (older code paths
+        still cope with that, just with the now-known token-cost penalty).
+        """
+        try:
+            import base64
+            from flocks.workspace.manager import WorkspaceManager
+
+            header, _, encoded = data_url.partition(",")
+            if not encoded:
+                return data_url
+            raw_bytes = base64.b64decode(encoded)
+
+            ws = WorkspaceManager.get_instance()
+            # Use resolve_workspace_path to guard against path traversal if
+            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
+            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
+            uploads_root.mkdir(parents=True, exist_ok=True)
+
+            ext_map = {
+                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
+                "application/pdf": ".pdf",
+            }
+            ext = ext_map.get(mime_hint, "")
+            if not ext and filename_hint:
+                _, _, tail = filename_hint.rpartition(".")
+                if tail.lower() in _UPLOAD_SAFE_EXTS:
+                    ext = "." + tail.lower()
+            unique_name = f"{Identifier.create('upload')}{ext}"
+            target = uploads_root / unique_name
+            target.write_bytes(raw_bytes)
+            return f"file://{target.resolve()}"
+        except Exception as exc:
+            log.warn("session.message.file_part.materialize_failed", {
+                "sessionID": sessionID,
+                "error": str(exc),
+            })
+            return data_url
+
+    for raw_part in request.parts or []:
+        part_type = raw_part.get("type")
+        if part_type == "text":
+            continue  # Already stored as the message's TextPart above
+        if part_type == "file":
+            url = raw_part.get("url") or ""
+            mime = raw_part.get("mime") or ""
+            if not url or not mime:
+                log.warn("session.message.file_part.skipped", {
+                    "sessionID": sessionID,
+                    "reason": "missing url or mime",
+                })
+                continue
+            # Materialize ``data:`` URLs to disk before persisting the part.
+            if url.startswith("data:"):
+                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+            file_part_id = raw_part.get("id") or Identifier.create("part")
+            file_part = FilePart(
+                id=file_part_id,
+                sessionID=sessionID,
+                messageID=user_message_id,
+                mime=mime,
+                filename=raw_part.get("filename"),
+                url=url,
+            )
+            await Message.add_part(sessionID, user_message_id, file_part)
+            await publish_event("message.part.updated", {
+                "part": {
+                    "id": file_part_id,
+                    "messageID": user_message_id,
+                    "sessionID": sessionID,
+                    "type": "file",
+                    "mime": mime,
+                    "filename": raw_part.get("filename"),
+                    "url": url,
+                    "time": {"start": now_ms},
+                }
+            })
 
     # ------------------------------------------------------------------
     # noReply: store message only, skip AI loop
@@ -2279,13 +2469,17 @@ async def _process_session_message(
 
 async def _resolve_model(request, agent, sessionID: str):
     """
-    Resolve model with 5-level priority:
+    Resolve model using the same explicit-pinning semantics as SessionLoop.
+
+    Priority:
     1. request.model (explicit in request)
-    2. agent model override (storage) or agent.model (AgentInfo field)
-    3. config model (flocks.json)
-    4. lastModel(sessionID) (last used model)
-    5. environment variables (final fallback)
-    
+    2. session pinned model
+    3. agent model override (storage) or agent.model (AgentInfo field)
+    4. parent session pinned model
+    5. config model (flocks.json)
+    6. lastModel(sessionID) (last used model)
+    7. environment variables (final fallback)
+
     Returns (provider_id, model_id, source).
     """
     import os
@@ -2299,8 +2493,17 @@ async def _resolve_model(request, agent, sessionID: str):
         provider_id = request.model.providerID
         model_id = request.model.modelID
         source = "request"
-    
-    # Priority 2: Agent model (override from storage, then AgentInfo.model)
+
+    # Priority 2: Session explicit pin
+    session = None
+    if not provider_id or not model_id:
+        session = await Session.get_by_id(sessionID)
+        if Session.has_pinned_model(session):
+            provider_id = session.provider
+            model_id = session.model
+            source = "session"
+
+    # Priority 3: Agent model (override from storage, then AgentInfo.model)
     if not provider_id or not model_id:
         # 2a: Check model overrides from storage (set via UI for native agents)
         from flocks.storage.storage import Storage
@@ -2331,8 +2534,20 @@ async def _resolve_model(request, agent, sessionID: str):
                     model_id = getattr(agent.model, 'model_id', None) or getattr(agent.model, 'modelID', None)
                 if provider_id and model_id:
                     source = "agent"
-    
-    # Priority 3: System default from config (default_models.llm -> config.model fallback)
+
+    # Priority 4: Parent session explicit model
+    if not provider_id or not model_id:
+        if session is None:
+            session = await Session.get_by_id(sessionID)
+        parent_id = getattr(session, "parent_id", None) if session else None
+        if parent_id:
+            parent = await Session.get_by_id(parent_id)
+            if Session.has_pinned_model(parent):
+                provider_id = parent.provider
+                model_id = parent.model
+                source = "parent_session"
+
+    # Priority 5: System default from config (default_models.llm -> config.model fallback)
     if not provider_id or not model_id:
         try:
             from flocks.config.config import Config
@@ -2343,8 +2558,8 @@ async def _resolve_model(request, agent, sessionID: str):
                 source = "config"
         except Exception:
             pass
-    
-    # Priority 4: Last model used in session
+
+    # Priority 6: Last model used in session
     if not provider_id or not model_id:
         last_model = await _get_last_model(sessionID)
         if last_model:
@@ -2354,14 +2569,219 @@ async def _resolve_model(request, agent, sessionID: str):
                 provider_id = last_provider
                 model_id = last_model_id
                 source = "lastModel"
-    
-    # Priority 5: Fallback to environment variables
+
+    # Priority 7: Fallback to environment variables
     if not provider_id or not model_id:
         provider_id = os.environ.get("LLM_PROVIDER", "openai")
         model_id = os.environ.get("LLM_MODEL", "gpt-4-turbo-preview")
         source = "env_default"
     
     return provider_id, model_id, source
+
+
+def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
+    return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
+
+
+def _replace_text_parts(parts: Optional[List[Dict[str, Any]]], text: str) -> List[Dict[str, Any]]:
+    updated_parts: List[Dict[str, Any]] = []
+    replaced = False
+    for part in parts or []:
+        if part.get("type") == "text" and not replaced:
+            next_part = dict(part)
+            next_part["text"] = text
+            updated_parts.append(next_part)
+            replaced = True
+            continue
+        if part.get("type") == "text":
+            continue
+        updated_parts.append(dict(part))
+
+    if not replaced:
+        updated_parts.insert(0, {"type": "text", "text": text})
+    return updated_parts
+
+
+def _coerce_model_for_prompt_request(model: Any):
+    import types
+
+    if not model:
+        return None
+    if isinstance(model, str):
+        if "/" not in model:
+            return None
+        provider_id, model_id = model.split("/", 1)
+        return types.SimpleNamespace(providerID=provider_id, modelID=model_id)
+    if isinstance(model, dict):
+        provider_id = model.get("providerID") or model.get("provider_id")
+        model_id = model.get("modelID") or model.get("model_id")
+        if provider_id and model_id:
+            return types.SimpleNamespace(providerID=provider_id, modelID=model_id)
+        return None
+    return model
+
+
+def _build_prompt_request_from_event(event, prompt_text: str, display_text: Optional[str] = None):
+    import types
+
+    return types.SimpleNamespace(
+        parts=_replace_text_parts(event.parts, prompt_text),
+        display_text=display_text,
+        agent=event.agent,
+        model=_coerce_model_for_prompt_request(event.model),
+        variant=event.variant,
+        messageID=event.message_id,
+        mockReply=event.mock_reply,
+        noReply=event.no_reply,
+        tools=event.tools,
+        system=event.system,
+    )
+
+
+async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
+    import time as _time
+
+    from flocks.input.dispatcher import dispatch_user_input
+    from flocks.input.output import SSEOutputSink
+    from flocks.server.routes.event import publish_event
+    from flocks.session.message import Message, MessageRole
+    from flocks.utils.id import Identifier
+
+    agent_name = event.agent or "rex"
+
+    async def _create_user_message(
+        user_text: str,
+        model_info: Optional[Dict[str, str]] = None,
+        *,
+        agent_override: Optional[str] = None,
+    ) -> str:
+        now_ms = int(_time.time() * 1000)
+        user_msg_id = event.message_id or Identifier.create("message")
+        user_part_id = Identifier.create("part")
+        message_agent = agent_override or agent_name
+        await Message.create(
+            session_id=sessionID,
+            role=MessageRole.USER,
+            content=user_text,
+            id=user_msg_id,
+            time={"created": now_ms},
+            agent=message_agent,
+            **({"model": model_info} if model_info else {}),
+            part_id=user_part_id,
+        )
+        await publish_event("message.updated", {
+            "info": {
+                "id": user_msg_id,
+                "sessionID": sessionID,
+                "role": "user",
+                "time": {"created": now_ms},
+                "agent": message_agent,
+                **({"model": model_info} if model_info else {}),
+            }
+        })
+        await publish_event("message.part.updated", {
+            "part": {
+                "id": user_part_id,
+                "messageID": user_msg_id,
+                "sessionID": sessionID,
+                "type": "text",
+                "text": user_text,
+                "time": {"start": now_ms},
+            }
+        })
+        return user_msg_id
+
+    async def _publish_direct_response(output_event, text: str) -> None:
+        user_text = output_event.user_visible_text
+        parent_msg_id = await _create_user_message(user_text)
+        asst_now = int(_time.time() * 1000)
+        asst_msg_id = Identifier.ascending("message")
+        asst_part_id = Identifier.ascending("part")
+        await Message.create(
+            session_id=sessionID,
+            role=MessageRole.ASSISTANT,
+            content=text,
+            id=asst_msg_id,
+            time={"created": asst_now, "completed": asst_now},
+            parentID=parent_msg_id,
+            modelID="command",
+            providerID="builtin",
+            agent=agent_name,
+            finish="stop",
+            part_id=asst_part_id,
+        )
+        await publish_event("message.updated", {
+            "info": {
+                "id": asst_msg_id,
+                "sessionID": sessionID,
+                "role": "assistant",
+                "time": {"created": asst_now, "completed": asst_now},
+                "parentID": parent_msg_id,
+                "modelID": "command",
+                "providerID": "builtin",
+                "agent": agent_name,
+                "mode": agent_name,
+                "finish": "stop",
+                "tokens": {
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
+            }
+        })
+        await publish_event("message.part.updated", {
+            "part": {
+                "id": asst_part_id,
+                "messageID": asst_msg_id,
+                "sessionID": sessionID,
+                "type": "text",
+                "text": text,
+                "time": {"start": asst_now, "end": asst_now},
+            }
+        })
+
+    async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+        request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
+        await _process_session_message(sessionID, session, request, working_directory)
+
+    async def _run_session_control(output_event, parsed) -> bool:
+        if parsed.canonical_name != "compact":
+            return False
+
+        focus_instruction = parsed.args.strip() or None
+        compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
+            sessionID,
+            requested_agent=output_event.agent,
+            requested_model=output_event.model,
+        )
+        parent_msg_id = await _create_user_message(
+            output_event.user_visible_text,
+            {
+                "providerID": compact_provider_id,
+                "modelID": compact_model_id,
+            },
+            agent_override=compact_agent,
+        )
+        await _run_session_compaction(
+            sessionID,
+            requested_agent=compact_agent,
+            explicit_provider_id=compact_provider_id,
+            explicit_model_id=compact_model_id,
+            parent_message_id=parent_msg_id,
+            auto=False,
+            event_publish_callback=publish_event,
+            focus_instruction=focus_instruction,
+        )
+        return True
+
+    sink = SSEOutputSink(
+        "webui",
+        direct_response=_publish_direct_response,
+        run_llm=_run_llm,
+        session_control=_run_session_control,
+    )
+    await dispatch_user_input(event, sink)
 
 
 @router.post(
@@ -2376,7 +2796,8 @@ async def send_session_message_async(
 ):
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
-    
+    from flocks.input.events import UserInputEvent
+
     session = await Session.get_by_id(sessionID)
     if not session:
         raise HTTPException(
@@ -2390,6 +2811,23 @@ async def send_session_message_async(
         "sessionID": sessionID,
         "directory": working_directory,
     })
+
+    event = UserInputEvent(
+        source_type="webui",
+        sessionID=sessionID,
+        text=_extract_text_from_parts(request.parts),
+        parts=[dict(part) for part in request.parts],
+        agent=request.agent,
+        model=request.model.model_dump(by_alias=True) if request.model else None,
+        variant=request.variant,
+        display_text=None,
+        messageID=request.messageID,
+        noReply=request.noReply,
+        mockReply=request.mockReply,
+        tools=request.tools,
+        system=request.system,
+        working_directory=working_directory,
+    )
     
     # Use the same synchronous processing path as send_session_message
     # but run it as a background task via asyncio.ensure_future
@@ -2409,9 +2847,7 @@ async def send_session_message_async(
             await Instance.provide(
                 directory=working_directory,
                 init=instance_bootstrap,
-                fn=lambda: _process_session_message(
-                    sessionID, session, request, working_directory
-                ),
+                fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
             )
             log.info("session.prompt_async.processing_complete", {
                 "sessionID": sessionID,
@@ -2473,7 +2909,7 @@ async def send_session_command(sessionID: str, request: CommandRequest):
     """
     Execute a slash command.
 
-    Direct commands (/tools, /skills, /help, /mcp, /clear, /restart) are handled
+    Direct commands (/tools, /skills, /help, /mcp, /clear) are handled
     without calling the LLM.  Their output is pushed as an assistant message
     directly via SSE.
 
@@ -2486,12 +2922,9 @@ async def send_session_command(sessionID: str, request: CommandRequest):
     that is replaced as soon as the real SSE event arrives.
     """
     import asyncio
-    import time as _time
     import os
-    from flocks.session.message import Message, MessageRole
-    from flocks.server.routes.event import publish_event
-    from flocks.utils.id import Identifier
-    from flocks.command.handler import handle_slash_command
+
+    from flocks.input.events import UserInputEvent
 
     session = await Session.get_by_id(sessionID)
     if not session:
@@ -2501,223 +2934,41 @@ async def send_session_command(sessionID: str, request: CommandRequest):
         )
 
     working_directory = session.directory or os.getcwd()
-    agent_name = request.agent or "rex"
 
     # The text the user typed, shown verbatim in the chat bubble
     slash_text = f"/{request.command}"
     if request.arguments:
         slash_text += f" {request.arguments}"
 
-    # ── Helper: create user message + publish SSE ───────────────────────────
-    async def _create_user_message(
-        model_info: Optional[Dict[str, str]] = None,
-        *,
-        agent_override: Optional[str] = None,
-    ) -> str:
-        now_ms = int(_time.time() * 1000)
-        user_msg_id = Identifier.create("message")
-        user_part_id = Identifier.create("part")
-        message_agent = agent_override or agent_name
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.USER,
-            content=slash_text,
-            id=user_msg_id,
-            time={"created": now_ms},
-            agent=message_agent,
-            **({"model": model_info} if model_info else {}),
-            part_id=user_part_id,
-        )
-        await publish_event("message.updated", {
-            "info": {
-                "id": user_msg_id,
-                "sessionID": sessionID,
-                "role": "user",
-                "time": {"created": now_ms},
-                "agent": message_agent,
-                **({"model": model_info} if model_info else {}),
-            }
-        })
-        await publish_event("message.part.updated", {
-            "part": {
-                "id": user_part_id,
-                "messageID": user_msg_id,
-                "sessionID": sessionID,
-                "type": "text",
-                "text": slash_text,
-                "time": {"start": now_ms},
-            }
-        })
-        return user_msg_id
-
-    # ── Helper: publish a direct (non-LLM) assistant message ────────────────
-    async def _publish_direct_response(text: str, parent_msg_id: str) -> None:
-        asst_now = int(_time.time() * 1000)
-        asst_msg_id = Identifier.ascending("message")
-        asst_part_id = Identifier.ascending("part")
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.ASSISTANT,
-            content=text,
-            id=asst_msg_id,
-            time={"created": asst_now, "completed": asst_now},
-            parentID=parent_msg_id,
-            modelID="command",
-            providerID="builtin",
-            agent=agent_name,
-            finish="stop",
-            part_id=asst_part_id,
-        )
-        await publish_event("message.updated", {
-            "info": {
-                "id": asst_msg_id,
-                "sessionID": sessionID,
-                "role": "assistant",
-                "time": {"created": asst_now, "completed": asst_now},
-                "parentID": parent_msg_id,
-                "modelID": "command",
-                "providerID": "builtin",
-                "agent": agent_name,
-                "mode": agent_name,
-                "finish": "stop",
-                "tokens": {"input": 0, "output": 0, "reasoning": 0,
-                           "cache": {"read": 0, "write": 0}},
-            }
-        })
-        await publish_event("message.part.updated", {
-            "part": {
-                "id": asst_part_id,
-                "messageID": asst_msg_id,
-                "sessionID": sessionID,
-                "type": "text",
-                "text": text,
-                "time": {"start": asst_now, "end": asst_now},
-            }
-        })
-
-    # ── Helper: run a prompt through the LLM (session loop) ─────────────────
-    async def _run_via_llm(prompt_text: str, display_text: str | None = None) -> None:
-        """
-        Route a prompt through the LLM pipeline via _process_session_message.
-        This creates its own user message, so call ONLY when no user message
-        has been created yet for this command invocation.
-
-        display_text: optional override for the user-visible message bubble.
-        When provided (e.g. "/tools create foo"), the user message stored in
-        the DB and shown in the chat shows display_text, while the LLM still
-        receives the full prompt_text (e.g. the tool-builder skill content).
-        """
-        import types
-        from flocks.project.instance import Instance
-        from flocks.project.bootstrap import instance_bootstrap
-
-        cmd_request = types.SimpleNamespace(
-            parts=[{"type": "text", "text": prompt_text}],
-            display_text=display_text,
+    # ── Background task ──────────────────────────────────────────────────────
+    async def _handle_command() -> None:
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID=sessionID,
+            text=slash_text,
+            parts=[dict(part) for part in (request.parts or [])],
             agent=request.agent,
             model=request.model,
             variant=request.variant,
-            messageID=None,
-            mockReply=None,
-            noReply=False,
+            display_text=slash_text,
+            messageID=request.messageID,
+            working_directory=working_directory,
         )
-
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _process_session_message(
-                sessionID, session, cmd_request, working_directory
-            ),
-        )
-
-    async def _run_compaction_command(
-        parent_msg_id: str,
-        *,
-        agent_for_compaction: Optional[str],
-        provider_id: str,
-        model_id: str,
-    ) -> None:
-        from flocks.project.bootstrap import instance_bootstrap
-        from flocks.project.instance import Instance
-
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _run_session_compaction(
-                sessionID,
-                requested_agent=agent_for_compaction,
-                explicit_provider_id=provider_id,
-                explicit_model_id=model_id,
-                parent_message_id=parent_msg_id,
-                auto=False,
-                event_publish_callback=publish_event,
-            ),
-        )
-
-    # ── Background task ──────────────────────────────────────────────────────
-    async def _handle_command() -> None:
-        result_texts: list[str] = []
-        llm_prompts: list[str] = []
-
-        async def _send_text(text: str) -> None:
-            result_texts.append(text)
-
-        async def _send_prompt(prompt: str) -> None:
-            llm_prompts.append(prompt)
 
         try:
-            if request.command.lower() == "compact":
-                if request.arguments.strip():
-                    user_msg_id = await _create_user_message()
-                    await _publish_direct_response("Usage: /compact", user_msg_id)
-                    return
-                compact_agent, compact_provider_id, compact_model_id = await _resolve_compaction_context(
-                    sessionID,
-                    requested_agent=request.agent,
-                    requested_model=request.model,
-                )
-                user_msg_id = await _create_user_message(
-                    {
-                        "providerID": compact_provider_id,
-                        "modelID": compact_model_id,
-                    },
-                    agent_override=compact_agent,
-                )
-                await _run_compaction_command(
-                    user_msg_id,
-                    agent_for_compaction=compact_agent,
-                    provider_id=compact_provider_id,
-                    model_id=compact_model_id,
-                )
-                return
+            from flocks.project.instance import Instance
+            from flocks.project.bootstrap import instance_bootstrap
 
-            handled = await handle_slash_command(
-                slash_text,
-                send_text=_send_text,
-                send_prompt=_send_prompt,
+            await Instance.provide(
+                directory=working_directory,
+                init=instance_bootstrap,
+                fn=lambda: _dispatch_sse_input(sessionID, session, event, working_directory),
             )
-
-            if handled:
-                if llm_prompts:
-                    # Command collected a prompt to run through LLM
-                    # (e.g., "/tools create <requirement>" → tool-builder skill).
-                    # display_text=slash_text ensures the user bubble shows the
-                    # original slash command, while the LLM receives the full
-                    # skill/tool prompt.
-                    await _run_via_llm(llm_prompts[0], display_text=slash_text)
-                elif result_texts:
-                    # Direct text response — create the user+assistant pair now
-                    user_msg_id = await _create_user_message()
-                    await _publish_direct_response("\n".join(result_texts), user_msg_id)
-                # else: handled but produced nothing (rare edge case)
-            else:
-                # Not handled directly (e.g. /plan, /ask, /init, /compact …)
-                # _process_session_message creates the user message; pass the raw
-                # slash text so Rex can interpret it via its slash-command knowledge.
-                await _run_via_llm(slash_text)
 
         except Exception as exc:
             import traceback
+            from flocks.server.routes.event import publish_event
+
             log.error("session.command.error", {
                 "sessionID": sessionID,
                 "command": request.command,

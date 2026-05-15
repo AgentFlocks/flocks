@@ -130,6 +130,57 @@ async def test_execute_host_unix_still_uses_subprocess_shell(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bash_tool_windows_falls_back_from_invalid_default_cwd(tmp_path, monkeypatch):
+    """Windows should recover when the inherited default cwd is invalid."""
+    ctx = _make_ctx()
+    captured = {}
+
+    async def fake_execute_host(**kwargs):
+        captured["cwd"] = kwargs["cwd"]
+        return ToolResult(success=True, output="ok", metadata={})
+
+    monkeypatch.setattr(bash_module.sys, "platform", "win32")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(bash_module.Instance, "get_directory", lambda: "/invalid/session/cwd")
+    monkeypatch.setattr(bash_module, "_get_sandbox_config_from_ctx", lambda _ctx: None)
+    monkeypatch.setattr(bash_module, "_execute_host", fake_execute_host)
+
+    result = await bash_module.bash_tool(
+        ctx=ctx,
+        command="echo hi",
+    )
+
+    assert result.success is True
+    assert captured["cwd"] == str(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_windows_does_not_fallback_explicit_workdir(tmp_path, monkeypatch):
+    """Explicit workdir should keep existing error semantics on Windows."""
+    ctx = _make_ctx()
+    captured = {}
+
+    async def fake_execute_host(**kwargs):
+        captured["cwd"] = kwargs["cwd"]
+        return ToolResult(success=True, output="ok", metadata={})
+
+    monkeypatch.setattr(bash_module.sys, "platform", "win32")
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(bash_module.Instance, "get_directory", lambda: "/invalid/session/cwd")
+    monkeypatch.setattr(bash_module, "_get_sandbox_config_from_ctx", lambda _ctx: None)
+    monkeypatch.setattr(bash_module, "_execute_host", fake_execute_host)
+
+    result = await bash_module.bash_tool(
+        ctx=ctx,
+        command="echo hi",
+        workdir="/explicit/invalid/workdir",
+    )
+
+    assert result.success is True
+    assert captured["cwd"] == "/explicit/invalid/workdir"
+
+
+@pytest.mark.asyncio
 async def test_write_tool_uses_absolute_path_when_relpath_fails(tmp_path, monkeypatch):
     """Cross-drive relpath errors should fall back to the absolute path."""
     requests = []

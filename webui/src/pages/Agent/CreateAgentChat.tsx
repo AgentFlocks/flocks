@@ -1,8 +1,9 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect } from 'react';
 import { X, Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import SessionChat from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
+import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 
 const SUGGESTIONS = [
   '创建一个威胁情报分析 Agent，能够查询 IP/域名/哈希的信誉并输出分析报告',
@@ -47,6 +48,7 @@ interface CreateAgentChatProps {
 
 export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps) {
   const { t } = useTranslation(['agent', 'common']);
+  const supportsVision = useDefaultModelVision();
 
   const { sessionId, createAndSend, reset } = useSessionChat({
     title: t('agent:chat.createTitle'),
@@ -59,12 +61,6 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
     if (!open) reset();
   }, [open, reset]);
 
-  const handleCreateAndSend = useCallback(
-    async (text: string) => {
-      await createAndSend(text);
-    },
-    [createAndSend],
-  );
 
   if (!open) return null;
 
@@ -100,7 +96,8 @@ export default function CreateAgentChat({ open, onClose }: CreateAgentChatProps)
           placeholder={t('agent:chat.placeholder')}
           className="flex-1 min-h-0"
           suggestions={SUGGESTIONS}
-          onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
+          supportsVision={supportsVision}
+          onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">
               <Bot className="w-10 h-10 text-purple-500 mx-auto mb-3" />

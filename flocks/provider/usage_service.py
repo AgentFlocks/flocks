@@ -270,7 +270,7 @@ async def _get_existing_usage_record(
 async def usage_record_exists(*, session_id: str, message_id: str) -> bool:
     """Check whether a usage row already exists for a message."""
     await Storage._ensure_init()
-    async with aiosqlite.connect(Storage._db_path) as db:
+    async with Storage.connect(Storage._db_path) as db:
         async with db.execute(
             "SELECT 1 FROM usage_records WHERE session_id = ? AND message_id = ? LIMIT 1",
             (session_id, message_id),
@@ -282,7 +282,7 @@ async def usage_record_exists(*, session_id: str, message_id: str) -> bool:
 async def _get_recorded_message_ids(session_id: str) -> set[str]:
     """Return all assistant message ids already present in usage_records."""
     await Storage._ensure_init()
-    async with aiosqlite.connect(Storage._db_path) as db:
+    async with Storage.connect(Storage._db_path) as db:
         async with db.execute(
             "SELECT message_id FROM usage_records WHERE session_id = ? AND message_id IS NOT NULL",
             (session_id,),
@@ -334,7 +334,7 @@ async def record_usage(req: RecordUsageRequest) -> UsageRecord:
         total_cost = 0.0
         currency = "USD"
 
-    async with aiosqlite.connect(Storage._db_path) as db:
+    async with Storage.connect(Storage._db_path) as db:
         db.row_factory = aiosqlite.Row
         existing = await _get_existing_usage_record(
             db,
@@ -419,7 +419,7 @@ async def get_usage_records(
         model_id=model_id,
         session_ids=session_ids,
     )
-    async with aiosqlite.connect(Storage._db_path) as db:
+    async with Storage.connect(Storage._db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"""SELECT id, provider_id, model_id, credential_id, session_id, message_id,
@@ -453,7 +453,7 @@ async def get_usage_stats(
         session_ids=session_ids,
     )
 
-    async with aiosqlite.connect(Storage._db_path) as db:
+    async with Storage.connect(Storage._db_path) as db:
         db.row_factory = aiosqlite.Row
 
         async with db.execute(

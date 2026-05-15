@@ -24,7 +24,6 @@ const LANG_COLORS: Record<string, string> = {
   c: 'bg-gray-100 text-gray-700',
 };
 const INSTALL_BUTTON_CLASS = 'flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors';
-const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors';
 
 function formatDuration(connectedAt: number, t: (key: string, options?: Record<string, unknown>) => string): string {
   const now = Date.now() / 1000;
@@ -70,8 +69,9 @@ export default function MCPTabContent({
   const [selectedToolFromMCP, setSelectedToolFromMCP] = useState<Tool | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [installing, setInstalling] = useState<string | null>(null);
-  const [credModalEntry, setCredModalEntry] = useState<MCPCatalogEntry | null>(null);
-  const [credValues, setCredValues] = useState<Record<string, string>>({});
+  const [setupEntry, setSetupEntry] = useState<MCPCatalogEntry | null>(null);
+  const [setupCredentials, setSetupCredentials] = useState<Record<string, string>>({});
+  const [setupEnvOverrides, setSetupEnvOverrides] = useState<Record<string, string>>({});
 
   const fetchServers = useCallback(async () => {
     try {
@@ -227,66 +227,43 @@ export default function MCPTabContent({
     return counts;
   }, [catalogEntries]);
 
-  const openCredModal = (entry: MCPCatalogEntry) => {
-    const initial: Record<string, string> = {};
-    for (const [key, spec] of Object.entries(entry.env_vars)) {
-      if (spec.secret) initial[key] = '';
-    }
-    setCredValues(initial);
-    setCredModalEntry(entry);
-  };
+  const requiresSetupBeforeInstall = useCallback((entry: MCPCatalogEntry) => (
+    Object.values(entry.env_vars || {}).some((spec) => spec.secret || spec.required)
+  ), []);
 
-  const handleCredSubmit = async () => {
-    if (!credModalEntry) return;
-    const hasEmpty = Object.entries(credValues).some(([, value]) => !value.trim());
-    if (hasEmpty) {
-      alert(t('alert.fillAllRequired'));
-      return;
-    }
-    const entryId = credModalEntry.id;
-    const entryName = credModalEntry.name;
-    let shouldConnect = false;
-    let installRes: Awaited<ReturnType<typeof mcpAPI.catalogInstall>> | null = null;
-    try {
-      setInstalling(entryId);
-      installRes = await mcpAPI.catalogInstall(entryId, { credentials: credValues });
-      shouldConnect = installRes.data?.config?.enabled !== false;
-      onConfiguredChange(entryId);
-      setCredModalEntry(null);
-    } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
-      setInstalling(null);
-      return;
-    }
-    try {
-      if (shouldConnect) {
-        await mcpAPI.connect(entryId);
+  const openSetupModal = useCallback((entry: MCPCatalogEntry) => {
+    const nextCredentials: Record<string, string> = {};
+    const nextEnvOverrides: Record<string, string> = {};
+    for (const [key, spec] of Object.entries(entry.env_vars || {})) {
+      if (spec.secret) {
+        nextCredentials[key] = '';
+      } else {
+        nextEnvOverrides[key] = spec.default || '';
       }
-      await fetchServers();
-      await onRefreshTools();
-      if (!shouldConnect) {
-        alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
-      }
-    } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
-    } finally {
-      setInstalling(null);
     }
-  };
+    setSetupCredentials(nextCredentials);
+    setSetupEnvOverrides(nextEnvOverrides);
+    setSetupEntry(entry);
+  }, []);
 
-  const handleInstallNoAuth = async (entry: MCPCatalogEntry, e?: React.MouseEvent) => {
-    e?.stopPropagation();
+  const installCatalogEntry = useCallback(async (
+    entry: MCPCatalogEntry,
+    options?: {
+      credentials?: Record<string, string>;
+      env_overrides?: Record<string, string>;
+    },
+  ) => {
     let shouldConnect = false;
     let installRes: Awaited<ReturnType<typeof mcpAPI.catalogInstall>> | null = null;
     try {
       setInstalling(entry.id);
-      installRes = await mcpAPI.catalogInstall(entry.id);
+      installRes = await mcpAPI.catalogInstall(entry.id, options);
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
       alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
       setInstalling(null);
-      return;
+      return false;
     }
     try {
       if (shouldConnect) {
@@ -294,6 +271,7 @@ export default function MCPTabContent({
       }
       await fetchServers();
       await onRefreshTools();
+      setSelectedCard(entry.id);
       if (!shouldConnect) {
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
@@ -301,6 +279,40 @@ export default function MCPTabContent({
       alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
     } finally {
       setInstalling(null);
+    }
+    return true;
+  }, [fetchServers, onConfiguredChange, onRefreshTools, setSelectedCard, t]);
+
+  const handleInstallNoAuth = async (entry: MCPCatalogEntry, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    return installCatalogEntry(entry);
+  };
+
+  const handleSetupSubmit = async () => {
+    if (!setupEntry) return;
+
+    const missingRequired = Object.entries(setupEntry.env_vars || {}).some(([key, spec]) => {
+      const value = spec.secret ? setupCredentials[key] : setupEnvOverrides[key];
+      return spec.required && !String(value || '').trim();
+    });
+    if (missingRequired) {
+      alert(t('alert.fillAllRequired'));
+      return;
+    }
+
+    const credentials = Object.fromEntries(
+      Object.entries(setupCredentials).filter(([, value]) => String(value || '').trim()),
+    );
+    const envOverrides = Object.fromEntries(
+      Object.entries(setupEnvOverrides).filter(([, value]) => String(value || '').trim()),
+    );
+
+    const success = await installCatalogEntry(setupEntry, {
+      credentials: Object.keys(credentials).length ? credentials : undefined,
+      env_overrides: Object.keys(envOverrides).length ? envOverrides : undefined,
+    });
+    if (success) {
+      setSetupEntry(null);
     }
   };
 
@@ -537,10 +549,12 @@ export default function MCPTabContent({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (entry?.requires_auth && !configured) {
-                            openCredModal(entry);
-                          } else if (entry) {
-                            handleInstallNoAuth(entry, e);
+                          if (entry) {
+                            if (requiresSetupBeforeInstall(entry)) {
+                              openSetupModal(entry);
+                            } else {
+                              handleInstallNoAuth(entry, e);
+                            }
                           }
                         }}
                         disabled={!entry || installing === id}
@@ -569,40 +583,58 @@ export default function MCPTabContent({
         </div>
       )}
 
-      {credModalEntry && (
+      {setupEntry && (
         <>
-          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSetupEntry(null)} />
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
-                <p className="text-sm text-gray-500 mt-1">{t('credentials.configNote')}</p>
+            <div
+              className="w-full max-w-lg rounded-2xl bg-white shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="border-b border-gray-200 px-6 py-4">
+                <h3 className="text-lg font-semibold text-gray-900">{setupEntry.name}</h3>
+                <p className="mt-1 text-sm text-gray-500">{t('credentials.configNote')}</p>
               </div>
-              <div className="px-6 py-4 space-y-4">
-                {Object.entries(credModalEntry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
-                  <div key={key}>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">{key}</label>
-                    <p className="text-xs text-gray-500 mb-1.5">{spec.description}</p>
-                    <input
-                      type="password"
-                      value={credValues[key] || ''}
-                      onChange={(e) => setCredValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder={t('credentials.enterField', { field: key })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                    />
-                  </div>
-                ))}
+              <div className="max-h-[70vh] space-y-4 overflow-y-auto px-6 py-4">
+                {Object.entries(setupEntry.env_vars || {}).map(([key, spec]) => {
+                  const value = spec.secret ? setupCredentials[key] || '' : setupEnvOverrides[key] || '';
+                  return (
+                    <div key={key}>
+                      <label className="mb-1 block text-sm font-medium text-gray-700">
+                        {key}{spec.required ? <span className="text-red-500"> *</span> : null}
+                      </label>
+                      <p className="mb-1.5 text-xs text-gray-500">{spec.description || key}</p>
+                      <input
+                        type={spec.secret ? 'password' : 'text'}
+                        value={value}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          if (spec.secret) {
+                            setSetupCredentials((prev) => ({ ...prev, [key]: nextValue }));
+                          } else {
+                            setSetupEnvOverrides((prev) => ({ ...prev, [key]: nextValue }));
+                          }
+                        }}
+                        placeholder={spec.default || t('credentials.enterField', { field: key })}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-red-500"
+                      />
+                    </div>
+                  );
+                })}
               </div>
-              <div className="px-6 py-4 border-t border-gray-200 flex gap-3 justify-end">
-                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+              <div className="flex justify-end gap-3 border-t border-gray-200 px-6 py-4">
+                <button
+                  onClick={() => setSetupEntry(null)}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50"
+                >
                   {t('button.cancel')}
                 </button>
                 <button
-                  onClick={handleCredSubmit}
-                  disabled={installing === credModalEntry.id}
-                  className={INSTALL_CONFIRM_BUTTON_CLASS}
+                  onClick={handleSetupSubmit}
+                  disabled={installing === setupEntry.id}
+                  className="rounded-lg bg-green-600 px-4 py-2 text-sm text-white transition-colors hover:bg-green-700 disabled:opacity-50"
                 >
-                  {installing === credModalEntry.id ? t('mcp.configuring') : t('button.confirmConfig')}
+                  {installing === setupEntry.id ? t('mcp.configuring') : t('button.confirmConfig')}
                 </button>
               </div>
             </div>

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { QRCodeSVG } from 'qrcode.react';
 import {
   Radio,
   Save,
@@ -109,7 +110,6 @@ interface DingTalkChannelConfig {
   clientId?: string;
   clientSecret?: string;
   defaultAgent?: string;
-  gatewayToken?: string;
   debug?: boolean;
   allowFrom?: string[];
 }
@@ -129,7 +129,22 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
-type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig;
+interface WeixinChannelConfig {
+  enabled: boolean;
+  token?: string;
+  accountId?: string;
+  baseUrl?: string;
+  cdnBaseUrl?: string;
+  defaultAgent?: string;
+  dmPolicy?: string;
+  allowFrom?: string[];
+  groupPolicy?: string;
+  groupAllowFrom?: string[];
+  sendChunkDelay?: number;
+  dataDir?: string;
+}
+
+type ChannelConfig = FeishuChannelConfig | WeComChannelConfig | DingTalkChannelConfig | TelegramChannelConfig | WeixinChannelConfig;
 
 function defaultFeishuConfig(): FeishuChannelConfig {
   return {
@@ -173,6 +188,15 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultWeixinConfig(): WeixinChannelConfig {
+  return {
+    enabled: false,
+    dmPolicy: 'open',
+    groupPolicy: 'all',
+    sendChunkDelay: 1.5,
   };
 }
 
@@ -431,12 +455,15 @@ const CHANNEL_ICON_SRC: Record<string, string> = {
   wecom: '/channel-wecom.png',
   dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
+  weixin: '/channel-weixin.png',
 };
 
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
 const FEISHU_GUIDE_PDF_FILENAME = 'feishu-bot-guide.pdf';
 const WECOM_GUIDE_PDF_URL = '/wecom-bot-guide.pdf';
-const WECOM_GUIDE_PDF_FILENAME = '企业微信配置指引.pdf';
+const WECOM_GUIDE_PDF_FILENAME = 'wecom-bot-guide.pdf';
+const DINGTALK_GUIDE_PDF_URL = '/dingtalk-channel-guide.pdf';
+const DINGTALK_GUIDE_PDF_FILENAME = 'dingtalk-channel-guide.pdf';
 
 function getChannelIcon(id: string, size: 'sm' | 'md' = 'sm') {
   const dim = size === 'md' ? 'w-10 h-10' : 'w-9 h-9';
@@ -615,6 +642,7 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'feishu' && 'WebSocket'}
           {channelId === 'wecom' && 'WebSocket'}
           {channelId === 'dingtalk' && 'Stream'}
+          {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
         </span>
       </div>
@@ -1105,6 +1133,11 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
   return (
     <>
       <Section title={t('dingtalk.credentials')} description={t('dingtalk.credentialsDesc')}>
+        <GuideDownloadButton
+          href={DINGTALK_GUIDE_PDF_URL}
+          download={DINGTALK_GUIDE_PDF_FILENAME}
+          label={t('dingtalk.downloadGuide')}
+        />
         <FieldRow label="Client ID" required hint={t('dingtalk.clientIdHint')}>
           <TextInput
             value={config.clientId ?? ''}
@@ -1117,13 +1150,6 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
             value={config.clientSecret ?? ''}
             onChange={(v) => set('clientSecret', v || undefined)}
             placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxx"
-          />
-        </FieldRow>
-        <FieldRow label={t('dingtalk.gatewayToken')} hint={t('dingtalk.gatewayTokenHint')}>
-          <SecretInput
-            value={config.gatewayToken ?? ''}
-            onChange={(v) => set('gatewayToken', v || undefined)}
-            placeholder={t('dingtalk.optional')}
           />
         </FieldRow>
       </Section>
@@ -1371,6 +1397,354 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 }
 
 // ============================================================================
+// Weixin Config Panel
+// ============================================================================
+
+interface WeixinPanelProps {
+  config: WeixinChannelConfig;
+  onChange: (c: WeixinChannelConfig) => void;
+  /** Persist QR-obtained credentials to flocks.json + restart the channel.
+   *  Called automatically when the QR login flow completes. */
+  onQrLoginSuccess?: (creds: { token: string; accountId: string; baseUrl?: string }) => Promise<void> | void;
+}
+
+type QrPhase =
+  | 'idle'           // initial / closed
+  | 'loading'        // fetching QR from backend
+  | 'scanning'       // QR shown, waiting for phone scan
+  | 'scaned'         // phone scanned, waiting for confirmation tap
+  | 'confirmed'      // login complete — credentials filled
+  | 'expired'        // QR expired, allow restart
+  | 'error';         // network / API error
+
+function WeixinPanel({ config, onChange, onQrLoginSuccess }: WeixinPanelProps) {
+  const { t } = useTranslation('channel');
+  const toast = useToast();
+  const set = useCallback(
+    <K extends keyof WeixinChannelConfig>(key: K, value: WeixinChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+
+  // ── QR login state ──────────────────────────────────────────────────────
+  const [qrPhase, setQrPhase] = useState<QrPhase>('idle');
+  const [qrUrl, setQrUrl] = useState('');          // URL to encode into QR SVG
+  const [qrValue, setQrValue] = useState('');      // hex token used for polling
+  const [qrError, setQrError] = useState('');
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Guard: multiple in-flight requests may all resolve with "confirmed".
+  // Only the first one should act; the rest are no-ops.
+  const confirmedRef = useRef(false);
+  // Tracks the current polling base_url; may change on scaned_but_redirect.
+  const currentBaseUrlRef = useRef<string | undefined>(undefined);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
+
+  // Cleanup on unmount
+  useEffect(() => () => stopPolling(), []);
+
+  const startQrLogin = async () => {
+    stopPolling();
+    confirmedRef.current = false;
+    currentBaseUrlRef.current = config.baseUrl?.trim() || undefined;
+    setQrError('');
+    setQrPhase('loading');
+    try {
+      const baseUrl = config.baseUrl?.trim() || undefined;
+      const res = await client.post('/api/channel/weixin/qr-login/start', { baseUrl: baseUrl ?? null });
+      const { qrcode_value, qrcode_url } = res.data;
+      setQrValue(qrcode_value);
+      setQrUrl(qrcode_url);
+      setQrPhase('scanning');
+
+      // Poll status every 2 s.
+      // NOTE: each tick is an async call; multiple ticks can be in-flight
+      // simultaneously. confirmedRef prevents duplicate side-effects.
+      // currentBaseUrlRef tracks regional redirects (scaned_but_redirect).
+      pollRef.current = setInterval(async () => {
+        try {
+          const statusRes = await client.get('/api/channel/weixin/qr-login/status', {
+            params: { qrcode: qrcode_value, baseUrl: currentBaseUrlRef.current ?? undefined },
+          });
+          const { status, account_id, token, base_url, redirect_base_url } = statusRes.data;
+          if (status === 'scaned') {
+            setQrPhase('scaned');
+          } else if (status === 'redirect') {
+            // iLink is routing this account to a different regional node.
+            // Update base_url so subsequent polls hit the correct host.
+            if (redirect_base_url) currentBaseUrlRef.current = redirect_base_url;
+            setQrPhase('scaned');
+          } else if (status === 'confirmed') {
+            if (confirmedRef.current) return;   // already handled
+            confirmedRef.current = true;
+            stopPolling();
+            setQrPhase('confirmed');
+            // Auto-fill credentials including the canonical base_url for this
+            // account — it may differ from the default when iLink redirected.
+            const newConfig: WeixinChannelConfig = {
+              ...config,
+              accountId: account_id,
+              token,
+              ...(base_url ? { baseUrl: base_url } : {}),
+            };
+            onChange(newConfig);
+            // Persist immediately — without this the gateway keeps trying to
+            // start with the (still empty) on-disk config and the channel never
+            // actually connects to WeChat.
+            if (onQrLoginSuccess) {
+              try {
+                await onQrLoginSuccess({
+                  token,
+                  accountId: account_id,
+                  ...(base_url ? { baseUrl: base_url } : {}),
+                });
+              } catch (err: any) {
+                toast.error(t('weixin.qrError'), err?.message ?? '');
+              }
+            }
+            toast.success(t('weixin.qrSuccess'));
+          } else if (status === 'expired') {
+            stopPolling();
+            setQrPhase('expired');
+          }
+          // 'waiting' → keep polling
+        } catch {
+          // transient network error — keep polling
+        }
+      }, 2000);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail ?? err?.message ?? '';
+      setQrError(detail);
+      setQrPhase('error');
+    }
+  };
+
+  const closeQrModal = () => {
+    stopPolling();
+    setQrPhase('idle');
+    setQrUrl('');
+    setQrValue('');
+    setQrError('');
+  };
+
+  const showModal = qrPhase !== 'idle';
+
+  return (
+    <>
+      <Section title={t('weixin.credentials')} description={t('weixin.credentialsDesc')}>
+        {/* QR login launcher */}
+        <div className="mb-3">
+          <button
+            type="button"
+            onClick={startQrLogin}
+            disabled={qrPhase === 'loading'}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-sm"
+          >
+            {qrPhase === 'loading' ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <span className="text-base leading-none">▣</span>
+            )}
+            {qrPhase === 'loading' ? t('weixin.qrLoading') : t('weixin.qrLoginButton')}
+          </button>
+          {config.token && config.accountId && (
+            <p className="mt-1.5 text-xs text-gray-500 flex items-center gap-1">
+              <CheckCircle className="w-3 h-3 text-green-500" />
+              {t('weixin.qrAlreadyLinked')}
+            </p>
+          )}
+        </div>
+
+        {/* QR modal overlay */}
+        {showModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 w-80 flex flex-col items-center gap-4 relative">
+              {/* Close button */}
+              <button
+                type="button"
+                onClick={closeQrModal}
+                className="absolute top-3 right-3 text-gray-400 hover:text-gray-600 text-xl leading-none"
+              >
+                ✕
+              </button>
+
+              <h3 className="text-base font-semibold text-gray-800">{t('weixin.qrModalTitle')}</h3>
+
+              {/* QR code display area */}
+              {qrPhase === 'loading' && (
+                <div className="w-48 h-48 flex items-center justify-center">
+                  <Loader2 className="w-10 h-10 animate-spin text-green-500" />
+                </div>
+              )}
+              {(qrPhase === 'scanning' || qrPhase === 'scaned') && qrUrl && (
+                <div className="relative">
+                  <div className={`transition-opacity ${qrPhase === 'scaned' ? 'opacity-40' : 'opacity-100'}`}>
+                    <QRCodeSVG value={qrUrl} size={192} />
+                  </div>
+                  {qrPhase === 'scaned' && (
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="bg-white/90 rounded-xl px-3 py-2 text-center shadow">
+                        <CheckCircle className="w-6 h-6 text-green-500 mx-auto mb-1" />
+                        <p className="text-xs font-medium text-gray-700">{t('weixin.qrScaned')}</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+              {qrPhase === 'confirmed' && (
+                <div className="w-48 h-48 flex flex-col items-center justify-center gap-2">
+                  <CheckCircle className="w-14 h-14 text-green-500" />
+                  <p className="text-sm font-medium text-green-700">{t('weixin.qrConfirmed')}</p>
+                </div>
+              )}
+              {qrPhase === 'expired' && (
+                <div className="w-48 h-48 flex flex-col items-center justify-center gap-3">
+                  <AlertTriangle className="w-10 h-10 text-amber-500" />
+                  <p className="text-sm text-gray-600 text-center">{t('weixin.qrExpired')}</p>
+                  <button
+                    type="button"
+                    onClick={startQrLogin}
+                    className="px-4 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    {t('weixin.qrRefresh')}
+                  </button>
+                </div>
+              )}
+              {qrPhase === 'error' && (
+                <div className="w-48 flex flex-col items-center gap-3">
+                  <XCircle className="w-10 h-10 text-red-500" />
+                  <p className="text-xs text-red-600 text-center break-all">{qrError || t('weixin.qrError')}</p>
+                  <button
+                    type="button"
+                    onClick={startQrLogin}
+                    className="px-4 py-1.5 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                  >
+                    {t('weixin.qrRetry')}
+                  </button>
+                </div>
+              )}
+
+              {/* Status hint */}
+              <p className="text-xs text-gray-500 text-center leading-relaxed">
+                {qrPhase === 'scanning' && t('weixin.qrHintScanning')}
+                {qrPhase === 'scaned' && t('weixin.qrHintScaned')}
+                {qrPhase === 'confirmed' && t('weixin.qrHintConfirmed')}
+                {qrPhase === 'expired' && ''}
+                {qrPhase === 'error' && ''}
+              </p>
+
+              {qrPhase === 'confirmed' && (
+                <button
+                  type="button"
+                  onClick={closeQrModal}
+                  className="w-full py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  {t('weixin.qrDone')}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="my-2 border-t border-gray-100" />
+
+        <FieldRow label="Token" required hint={t('weixin.tokenHint')}>
+          <SecretInput
+            value={config.token ?? ''}
+            onChange={(v) => set('token', v || undefined)}
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          />
+        </FieldRow>
+        <FieldRow label="Account ID" required hint={t('weixin.accountIdHint')}>
+          <TextInput
+            value={config.accountId ?? ''}
+            onChange={(v) => set('accountId', v || undefined)}
+            placeholder="xxxxxxxxxxxxxxxxx@im.bot"
+          />
+        </FieldRow>
+        <FieldRow label={t('weixin.baseUrl')} hint={t('weixin.baseUrlHint')}>
+          <TextInput
+            value={config.baseUrl ?? ''}
+            onChange={(v) => set('baseUrl', v || undefined)}
+            placeholder={t('weixin.optional')}
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('weixin.behavior')} description={t('weixin.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('weixin.defaultAgent')} hint={t('weixin.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('weixin.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('weixin.dmPolicy')} hint={t('weixin.dmPolicyHint')}>
+          <Select
+            value={config.dmPolicy ?? 'open'}
+            onChange={(v) => set('dmPolicy', v)}
+            options={[
+              { value: 'open', label: t('weixin.dmPolicyOpen') },
+              { value: 'allowlist', label: t('weixin.dmPolicyAllowlist') },
+              { value: 'disabled', label: t('weixin.dmPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('weixin.allowFrom')} hint={t('weixin.allowFromHint')}>
+          <TagsInput
+            value={config.allowFrom ?? []}
+            onChange={(v) => set('allowFrom', v.length ? v : undefined)}
+            placeholder={t('weixin.allowFromPlaceholder')}
+          />
+        </FieldRow>
+        <FieldRow label={t('weixin.groupPolicy')} hint={t('weixin.groupPolicyHint')}>
+          <Select
+            value={config.groupPolicy ?? 'all'}
+            onChange={(v) => set('groupPolicy', v)}
+            options={[
+              { value: 'all', label: t('weixin.groupPolicyAll') },
+              { value: 'allowlist', label: t('weixin.groupPolicyAllowlist') },
+              { value: 'disabled', label: t('weixin.groupPolicyDisabled') },
+            ]}
+          />
+        </FieldRow>
+        {(config.groupPolicy ?? 'all') === 'allowlist' && (
+          <FieldRow label={t('weixin.groupAllowFrom')} hint={t('weixin.groupAllowFromHint')}>
+            <TagsInput
+              value={config.groupAllowFrom ?? []}
+              onChange={(v) => set('groupAllowFrom', v.length ? v : undefined)}
+              placeholder={t('weixin.groupAllowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+      </Section>
+
+      <Section title={t('weixin.advanced')} description={t('weixin.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('weixin.sendChunkDelay')} hint={t('weixin.sendChunkDelayHint')}>
+          <NumberInput
+            value={config.sendChunkDelay ?? 1.5}
+            onChange={(v) => set('sendChunkDelay', v)}
+            min={0}
+          />
+        </FieldRow>
+        <FieldRow label={t('weixin.dataDir')} hint={t('weixin.dataDirHint')}>
+          <TextInput
+            value={config.dataDir ?? ''}
+            onChange={(v) => set('dataDir', v || undefined)}
+            placeholder={t('weixin.optional')}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
 // Detail Panel Header
 // ============================================================================
 
@@ -1582,6 +1956,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
+        } else if (ch.id === 'weixin') {
+          configs[ch.id] = { ...defaultWeixinConfig(), ...saved };
         } else {
           configs[ch.id] = { enabled: false, ...saved };
         }
@@ -1668,6 +2044,50 @@ export default function ChannelPage() {
     } finally {
       setSavePhase('idle');
     }
+  };
+
+  // Persist credentials obtained via WeChat QR login + auto-enable + restart.
+  // The user explicitly initiated the QR scan, so we treat that as consent to
+  // enable the channel — no extra "save & enable" click required.
+  // Mirrors handleToggleEnabled's single-field update pattern so that any
+  // other unsaved channel edits are not flushed prematurely.
+  const handleWeixinQrSuccess = async (
+    creds: { token: string; accountId: string; baseUrl?: string }
+  ) => {
+    const channelId = 'weixin';
+    const savedChannelCfg = (fullConfig.channels?.[channelId] ?? {}) as Record<string, any>;
+    const updatedChannelCfg: Record<string, any> = {
+      ...savedChannelCfg,
+      enabled: true,
+      token: creds.token,
+      accountId: creds.accountId,
+    };
+    if (creds.baseUrl) updatedChannelCfg.baseUrl = creds.baseUrl;
+
+    const updatedChannels = { ...(fullConfig.channels ?? {}), [channelId]: updatedChannelCfg };
+    const updated = { ...fullConfig, channels: updatedChannels };
+
+    await client.patch('/api/config/', updated);
+    setFullConfig(updated);
+
+    // Sync the in-memory editor state so the UI immediately reflects the
+    // newly-saved values (token + accountId fields, enabled toggle, baseUrl).
+    setChannelConfigs((prev) => ({
+      ...prev,
+      [channelId]: { ...prev[channelId], ...updatedChannelCfg } as ChannelConfig,
+    }));
+    originalConfigsRef.current = {
+      ...originalConfigsRef.current,
+      [channelId]: { ...originalConfigsRef.current[channelId], ...updatedChannelCfg },
+    };
+
+    // Restart the channel so the new credentials take effect immediately.
+    // Fire-and-forget — server may take time to disconnect WebSocket.
+    client.post(`/api/channel/${channelId}/restart`, {}, { timeout: 5000 }).catch(() => {});
+
+    // Sync UI state after the connection has had time to come up.
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 3000);
+    setTimeout(() => { fetchAll(); fetchStatuses(true); }, 8000);
   };
 
   // Manual restart — useful when connection drops and user wants to reconnect
@@ -1859,6 +2279,13 @@ export default function ChannelPage() {
                       config={selectedConfig as TelegramChannelConfig}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
+                    />
+                  )}
+                  {selectedId === 'weixin' && (
+                    <WeixinPanel
+                      config={selectedConfig as WeixinChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('weixin', cfg)}
+                      onQrLoginSuccess={handleWeixinQrSuccess}
                     />
                   )}
                 </div>
