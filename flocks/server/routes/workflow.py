@@ -1436,7 +1436,7 @@ class SyslogConfigRequest(BaseModel):
     enabled: bool = False
     protocol: str = "udp"
     host: str = "0.0.0.0"
-    port: int = 5140
+    port: int = Field(5140, ge=1, le=65535, description="Listener port (1-65535)")
     msg_format: str = Field("auto", alias="format")
     input_key: str = Field("syslog_message", alias="inputKey")
 

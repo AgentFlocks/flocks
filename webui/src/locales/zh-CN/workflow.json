@@ -214,6 +214,7 @@
       "syslogFormat": "解析格式",
       "syslogInputKey": "Inputs 键名",
       "syslogHint": "开启后 Flocks 在指定地址/端口接收 syslog，解析结果写入工作流 inputs（默认键名 syslog_message）。",
+      "syslogPortError": "端口范围无效，请输入 1 ~ 65535 之间的整数",
       "syslogActive": "监听中",
       "historySection": "执行历史",
       "noHistory": "暂无执行记录",
