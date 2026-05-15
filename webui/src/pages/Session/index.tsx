@@ -386,16 +386,18 @@ export default function SessionPage() {
       >
         {/* Header：始终显示新建 + 搜索 */}
         <div className="px-3 pt-3 pb-2 flex-shrink-0 space-y-2">
-          <button
-            onClick={handleCreateSession}
-            disabled={creating}
-            className="w-full flex items-center gap-2 px-3 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium"
-          >
+          <div className="relative">
             {creating
-              ? <Loader2 className="w-4 h-4 animate-spin text-gray-400 flex-shrink-0" />
-              : <Plus className="w-4 h-4 text-gray-500 flex-shrink-0" />}
-            <span>{t('newSession')}</span>
-          </button>
+              ? <Loader2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-gray-400 pointer-events-none" />
+              : <Plus className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />}
+            <button
+              onClick={handleCreateSession}
+              disabled={creating}
+              className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium"
+            >
+              {t('newSession')}
+            </button>
+          </div>
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
             <input
