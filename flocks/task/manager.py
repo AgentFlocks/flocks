@@ -177,7 +177,7 @@ class TaskManager:
         created_by: str = "rex",
         dedup_key: Optional[str] = None,
     ) -> TaskScheduler:
-        trigger = trigger or TaskTrigger()
+        trigger = trigger.model_copy(deep=True) if trigger is not None else TaskTrigger()
         if trigger.cron:
             trigger.cron = validate_cron_expression(trigger.cron)
         source = source or TaskSource()
@@ -289,7 +289,8 @@ class TaskManager:
                 run_once = scheduler.mode == SchedulerMode.ONCE
             if run_once:
                 scheduler.mode = SchedulerMode.ONCE
-                scheduler.trigger.cron = normalized_cron
+                if cron is not None:
+                    scheduler.trigger.cron = normalized_cron
                 scheduler.trigger.timezone = tz
                 scheduler.trigger.cron_description = cron_description or scheduler.trigger.cron_description
                 scheduler.trigger.run_at = datetime.fromisoformat(run_at) if run_at else scheduler.trigger.run_at

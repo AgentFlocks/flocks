@@ -11,11 +11,13 @@ import pytest
 from flocks.cli.commands import task as task_cli_commands
 import flocks.task.background as background_module
 import flocks.task.manager as task_manager_module
+import flocks.task.plugin_sync as plugin_sync_module
 from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
 from flocks.task.executor import TaskExecutor
+from flocks.task.formatting import format_task_datetime
 from flocks.task.manager import TaskManager
 from flocks.task.models import (
     DeliveryStatus,
@@ -158,7 +160,49 @@ async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron():
+async def test_create_scheduler_rejects_out_of_range_five_field_cron(tmp_path: Path):
+    with pytest.raises(ValueError, match="not a valid 5-field cron"):
+        await TaskManager.create_scheduler(
+            title="越界 cron",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="70 6 * * *",
+                timezone="Asia/Shanghai",
+            ),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_scheduler_does_not_mutate_trigger_argument(tmp_path: Path):
+    trigger = TaskTrigger(
+        cron="  0 6 * * *  ",
+        timezone="Asia/Shanghai",
+    )
+
+    scheduler = await TaskManager.create_scheduler(
+        title="不修改调用方 trigger",
+        mode=SchedulerMode.CRON,
+        trigger=trigger,
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+
+    assert trigger.cron == "  0 6 * * *  "
+    assert scheduler.trigger.cron == "0 6 * * *"
+
+
+@pytest.mark.asyncio
+async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    warn_calls: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        plugin_sync_module.log,
+        "warn",
+        lambda event, props=None: warn_calls.append((event, props or {})),
+    )
+
     created = await upsert_task_specs(
         [
             TaskSpec(
@@ -174,6 +218,24 @@ async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron():
 
     assert created == 0
     assert scheduler is None
+    assert warn_calls == [
+        (
+            "task.plugin.invalid_cron",
+            {
+                "action": "skipped_entire_spec",
+                "dedup_key": "builtin:invalid-cron-new",
+                "cron": "0 0 6 * * *",
+                "error": (
+                    "Invalid cron expression: only 5-field cron is supported "
+                    "(`minute hour day month weekday`). "
+                    "Example: use `0 6 * * *` for daily 06:00 in Asia/Shanghai. "
+                    "6-field cron (e.g. Quartz format with leading seconds, "
+                    "such as `0 0 6 * * *`) and shortcuts such as `@daily` "
+                    "are not supported."
+                ),
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -210,6 +272,34 @@ async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_si
     assert unchanged.title == "原始内置任务"
     assert unchanged.trigger.cron == "*/5 * * * *"
     assert unchanged.status == SchedulerStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_update_scheduler_with_trigger_run_once_preserves_existing_cron_when_omitted(
+    tmp_path: Path,
+):
+    scheduler = await TaskManager.create_scheduler(
+        title="切成单次任务时保留旧 cron",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="*/5 * * * *",
+            timezone="Asia/Shanghai",
+        ),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+
+    updated = await TaskManager.update_scheduler_with_trigger(
+        scheduler.id,
+        fields={},
+        run_once=True,
+        run_at="2026-05-16T06:00:00+08:00",
+    )
+
+    assert updated is not None
+    assert updated.mode == SchedulerMode.ONCE
+    assert updated.trigger.cron == "*/5 * * * *"
+    assert updated.trigger.run_at is not None
+    assert updated.trigger.run_at.isoformat() == "2026-05-16T06:00:00+08:00"
 
 
 @pytest.mark.asyncio
@@ -800,6 +890,16 @@ async def test_cli_show_formats_scheduler_times_in_schedule_timezone(
     panel = rendered[0]
     assert "Created:  2026-05-15 09:53:08+08:00 (Asia/Shanghai)" in panel.renderable
     assert "Next run: 2026-05-16 06:00:00+08:00 (Asia/Shanghai)" in panel.renderable
+
+
+@pytest.mark.asyncio
+async def test_format_task_datetime_uses_utc_label_when_timezone_not_found():
+    rendered = format_task_datetime(
+        datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+        "Mars/Base",
+    )
+
+    assert rendered == '2026-05-15 01:53:08+00:00 (UTC ("Mars/Base" not found))'
 
 
 @pytest.mark.asyncio

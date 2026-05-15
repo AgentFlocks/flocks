@@ -44,9 +44,12 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
             try:
                 normalized_cron = validate_cron_expression(spec.cron)
             except ValueError as exc:
+                # On invalid cron, skip the whole spec to avoid partial updates
+                # where title/tags change but trigger settings stay stale.
                 log.warn(
                     "task.plugin.invalid_cron",
                     {
+                        "action": "skipped_entire_spec",
                         "dedup_key": spec.dedup_key,
                         "cron": spec.cron,
                         "error": str(exc),

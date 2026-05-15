@@ -18,7 +18,7 @@ def format_task_datetime(dt: datetime, tz_name: Optional[str] = None) -> str:
         try:
             normalized = normalized.astimezone(ZoneInfo(tz_name))
         except ZoneInfoNotFoundError:
-            label = f"{tz_name} (invalid timezone)"
+            label = f'UTC ("{tz_name}" not found)'
     if not label:
         label = normalized.tzname() or "UTC"
     return f"{normalized.isoformat(sep=' ', timespec='seconds')} ({label})"
