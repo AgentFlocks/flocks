@@ -373,10 +373,7 @@ export default function Layout() {
               </div>
             ) : (
               <>
-                <div className="flex items-center flex-1 min-w-0 gap-1.5">
-                  <span className="text-xl font-bold text-gray-900 whitespace-nowrap">Flocks</span>
-                  <span className="text-xs text-gray-400 whitespace-nowrap self-end mb-1">{currentVersion ? `| v${currentVersion}` : ''}</span>
-                </div>
+                <span className="flex-1 min-w-0 text-xl font-bold text-gray-900 whitespace-nowrap">Flocks</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
                   className="lg:hidden p-1 text-gray-400 hover:text-gray-600 rounded flex-shrink-0"

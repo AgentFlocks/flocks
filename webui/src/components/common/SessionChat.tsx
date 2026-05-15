@@ -1985,17 +1985,7 @@ function ChatMessageBubbleInner({
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
 
-  const bubbleClass = compact
-    ? `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
-        isUser
-          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-          : 'bg-white border border-gray-200 shadow-sm'
-      }`
-    : `${isUser ? 'max-w-2xl w-auto' : 'max-w-2xl w-full'} px-6 py-4 rounded-2xl text-sm break-words ${
-        isUser
-          ? 'bg-gradient-to-br from-slate-50 to-gray-100 border border-slate-200 text-gray-900 shadow-sm'
-          : 'bg-white border border-gray-200 shadow-sm hover:shadow-md transition-shadow duration-200'
-      }`;
+  const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
   const actionBarClass = `absolute bottom-0 z-10 flex items-center gap-1.5 transition-all duration-150 ${
     isUser ? 'right-3 translate-x-0.5 translate-y-1/2' : 'left-3 -translate-x-0.5 translate-y-1/2'
   } ${
