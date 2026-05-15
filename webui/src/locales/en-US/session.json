@@ -109,5 +109,12 @@
       "errorLabel": "Error",
       "elapsed": "Elapsed"
     }
-  }
+  },
+  "groupToday": "Today",
+  "groupYesterday": "Yesterday",
+  "groupThisWeek": "This Week",
+  "groupLastWeek": "Last Week",
+  "groupEarlier": "Earlier",
+  "filterConversations": "Filter conversations...",
+  "noResults": "No conversations found"
 }
