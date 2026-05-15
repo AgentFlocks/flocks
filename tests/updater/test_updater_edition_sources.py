@@ -1,5 +1,6 @@
 import pytest
 
+from flocks.updater import updater
 from flocks.updater.updater import _resolve_sources_for_edition
 
 
@@ -28,3 +29,20 @@ async def test_console_session_does_not_change_oss_sources(monkeypatch):
 
     sources = await _resolve_sources_for_edition(["github", "gitee"])
     assert sources == ["github", "gitee"]
+
+
+def test_flockspro_license_active_uses_runtime_capability(monkeypatch):
+    monkeypatch.setattr(updater.importlib.util, "find_spec", lambda name: object() if name == "flockspro" else None)
+
+    import types
+    import sys
+
+    runtime_module = types.ModuleType("flockspro.license.runtime")
+    runtime_module.is_pro_feature_enabled = lambda: True
+    license_module = types.ModuleType("flockspro.license")
+    flockspro_module = types.ModuleType("flockspro")
+    monkeypatch.setitem(sys.modules, "flockspro", flockspro_module)
+    monkeypatch.setitem(sys.modules, "flockspro.license", license_module)
+    monkeypatch.setitem(sys.modules, "flockspro.license.runtime", runtime_module)
+
+    assert updater._is_flockspro_license_active() is True

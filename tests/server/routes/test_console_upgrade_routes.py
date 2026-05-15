@@ -193,7 +193,9 @@ async def test_sync_console_license_revocations_imports_into_checker(
     flockspro_module = ModuleType("flockspro")
     license_module = ModuleType("flockspro.license")
     runtime_module.get_license_checker = lambda: _Checker()  # type: ignore[attr-defined]
+    runtime_module.get_pro_capability_status = lambda: {"pro_enabled": False, "active": False}  # type: ignore[attr-defined]
     monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
     monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
     monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
     monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
@@ -321,7 +323,12 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
     flockspro_module = ModuleType("flockspro")
     license_module = ModuleType("flockspro.license")
     runtime_module.get_license_checker = lambda: checker  # type: ignore[attr-defined]
+    runtime_module.get_pro_capability_status = lambda: {  # type: ignore[attr-defined]
+        **checker.status(),
+        "pro_enabled": checker.active,
+    }
     monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
     monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
     monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
     monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
@@ -609,6 +616,7 @@ async def test_start_approved_request_streams_upgrade_and_marks_activated(
     monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
     monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
     monkeypatch.setattr(console_routes, "_mark_console_upgrade_activated", _noop)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
@@ -644,6 +652,7 @@ async def test_auto_activate_reports_already_latest_install(
     monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
     monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
     monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",
@@ -664,6 +673,43 @@ async def test_auto_activate_reports_already_latest_install(
     assert payload["details"]["auto_install_result"] == "already_latest"
     assert payload["details"]["auto_install_version"] == "v2026.5.9"
     assert reported == [("success", None)]
+
+
+async def test_auto_activate_does_not_mark_activated_when_license_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        return None
+
+    async def _noop(_record: dict):
+        return None
+
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(
+        console_routes,
+        "_get_pro_capability_status",
+        lambda: {"pro_enabled": False, "active": False, "license_status": "expired", "inactive_reason": "expired"},
+    )
+    monkeypatch.setattr(console_routes, "_read_pro_bundle_install_marker", lambda: {"installed_version": "v2026.5.9"})
+
+    record = {
+        "request_id": "req_auto_inactive",
+        "status": "approved",
+        "activate_key": "key_auto",
+        "details": {},
+        "created_at": "2026-05-08T08:00:00+00:00",
+        "updated_at": "2026-05-08T08:00:00+00:00",
+    }
+
+    payload = await console_routes._maybe_auto_activate_upgrade(record)
+    assert payload["status"] == "approved"
+    assert payload["details"]["auto_install_result"] == "license_inactive"
+    assert payload["details"]["runtime_license_inactive_reason"] == "expired"
 
 
 async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
@@ -693,6 +739,7 @@ async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
     monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
     monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
     monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: installed)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
     monkeypatch.setattr(
         console_routes,
         "_read_pro_bundle_install_marker",

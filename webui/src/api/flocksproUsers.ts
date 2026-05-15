@@ -6,6 +6,8 @@ export interface FlocksproUserQuota {
   max_members: number;
   admin_count: number;
   member_count: number;
+  pro_enabled?: boolean | null;
+  license_status?: string | null;
 }
 
 export interface FlocksproCreateUserResult {
@@ -23,16 +25,19 @@ export interface FlocksproResetPasswordResult {
 export interface FlocksproLicenseStatus {
   activated?: boolean;
   active?: boolean;
+  pro_enabled?: boolean;
   license_id?: string | null;
   status?: string | null;
   license_status?: string | null;
+  inactive_reason?: string | null;
+  reapply_allowed?: boolean | null;
 }
 
 export const flocksproUsersApi = {
   hasCapability: async (): Promise<boolean> => {
     try {
-      await client.get('/api/flockspro/license/status');
-      return true;
+      const response = await client.get('/api/flockspro/license/status');
+      return response.data?.pro_enabled === true;
     } catch (err: any) {
       const status = err?.response?.status;
       if (status === 404 || status === 405 || status === 501) {

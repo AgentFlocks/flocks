@@ -198,19 +198,24 @@ export default function Layout() {
         cancelled = true;
       };
     }
-    void flocksproUsersApi.hasCapability()
-      .then((ok) => {
-        if (!cancelled) {
-          setHasFlocksproCapability(ok);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setHasFlocksproCapability(false);
-        }
-      });
+    const refreshCapability = () => {
+      void flocksproUsersApi.hasCapability()
+        .then((ok) => {
+          if (!cancelled) {
+            setHasFlocksproCapability(ok);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setHasFlocksproCapability(false);
+          }
+        });
+    };
+    refreshCapability();
+    window.addEventListener('flockspro-license-status-changed', refreshCapability);
     return () => {
       cancelled = true;
+      window.removeEventListener('flockspro-license-status-changed', refreshCapability);
     };
   }, [user?.id, user?.role]);
 
@@ -225,33 +230,38 @@ export default function Layout() {
         cancelled = true;
       };
     }
-    void Promise.all([
-      flocksproUsersApi.getLicenseStatus(),
-      consoleUpgradeApi.getProPackageStatus().catch(() => null),
-    ])
-      .then(([licenseStatus, packageStatus]) => {
-        if (cancelled) return;
-        const runtimeStatus = String(licenseStatus.license_status || licenseStatus.status || '').toLowerCase();
-        const active = licenseStatus.active === true && !['revoked', 'expired'].includes(runtimeStatus);
-        setIsFlocksproActive(active);
-        const version = active
-          ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
-          : null;
-        setFlocksproVersion(version);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setIsFlocksproActive(false);
-          setFlocksproVersion(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setFlocksproStatusReady(true);
-        }
-      });
+    const refreshFlocksproStatus = () => {
+      setFlocksproStatusReady(false);
+      void Promise.all([
+        flocksproUsersApi.getLicenseStatus(),
+        consoleUpgradeApi.getProPackageStatus().catch(() => null),
+      ])
+        .then(([licenseStatus, packageStatus]) => {
+          if (cancelled) return;
+          const active = licenseStatus.pro_enabled === true;
+          setIsFlocksproActive(active);
+          const version = active
+            ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
+            : null;
+          setFlocksproVersion(version);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setIsFlocksproActive(false);
+            setFlocksproVersion(null);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setFlocksproStatusReady(true);
+          }
+        });
+    };
+    refreshFlocksproStatus();
+    window.addEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
     return () => {
       cancelled = true;
+      window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
     };
   }, [user?.id, user?.role]);
 
@@ -401,7 +411,9 @@ export default function Layout() {
         ...(hasFlocksproCapability && user?.role === 'admin'
           ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
           : []),
-        { name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle },
+        ...(user?.role === 'admin'
+          ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+          : []),
       ],
     },
   ];

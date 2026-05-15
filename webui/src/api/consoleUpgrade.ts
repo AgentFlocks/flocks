@@ -65,6 +65,9 @@ export interface ProPackageStatus {
   flockspro_component_version?: string | null;
   build_id?: string | null;
   installed_at?: string | null;
+  pro_enabled?: boolean | null;
+  license_status?: string | null;
+  inactive_reason?: string | null;
 }
 
 export const consoleUpgradeApi = {

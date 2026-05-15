@@ -228,6 +228,7 @@ export default function FlocksproUpgradePage() {
   );
   const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
   const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
+  const isProPackageInstalled = proPackageStatus?.installed === true;
   const licenseReapplyAllowed =
     licenseStatus?.reapply_allowed === true ||
     ['revoked', 'expired'].includes(String(licenseStatus?.license_status || '').toLowerCase());
@@ -250,10 +251,13 @@ export default function FlocksproUpgradePage() {
         if (status === 'rejected') {
           return !dismissedRejectedRequestIds.has(item.request_id);
         }
+        if (status === 'approved') {
+          return !requestHasIssuedLicense(item) || !isProPackageInstalled;
+        }
         return currentStatuses.includes(status);
       });
     },
-    [accountScopedRequests, dismissedRejectedRequestIds],
+    [accountScopedRequests, dismissedRejectedRequestIds, isProPackageInstalled],
   );
 
   const activeRequest = useMemo(
@@ -294,8 +298,9 @@ export default function FlocksproUpgradePage() {
       latestActivatedRequest?.details?.auto_install_version ||
       latestActivatedRequest?.details?.auto_install_target,
   );
-  const isProPackageInstalled = licenseStatus !== null || proPackageStatus?.installed === true;
-  const isProLoaded = licenseStatus?.activated === true;
+  const isProRuntimeActive = licenseStatus?.pro_enabled === true || proPackageStatus?.pro_enabled === true;
+  const canUseProFeatures = isProPackageInstalled && isProRuntimeActive;
+  const isProLoaded = canUseProFeatures;
   const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
   const preferRequestLicense =
@@ -567,6 +572,7 @@ export default function FlocksproUpgradePage() {
       setProPackageStatus(packageStatus);
       const status = await refreshFlocksproLicenseStatus();
       setLicenseStatus(status);
+      window.dispatchEvent(new Event('flockspro-license-status-changed'));
     } catch (err) {
       setRequestError(extractErrorMessage(err, t('errors.refreshRequest')));
     } finally {
@@ -659,6 +665,7 @@ export default function FlocksproUpgradePage() {
         setProPackageStatus(packageStatus);
         const status = await refreshFlocksproLicenseStatus();
         setLicenseStatus(status);
+        window.dispatchEvent(new Event('flockspro-license-status-changed'));
       }
     } catch (err) {
       if (!sawRestarting) {

@@ -313,6 +313,7 @@ describe('Layout onboarding entry', () => {
   it('skips GitHub-backed update checks when Flocks Pro is active', async () => {
     vi.useFakeTimers();
     flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
       active: true,
       status: 'active',
       license_status: 'active',

@@ -189,7 +189,41 @@ async def _latest_usable_issued_record(
 
 
 def _is_pro_component_installed() -> bool:
-    return importlib.util.find_spec("flockspro") is not None
+    try:
+        return importlib.util.find_spec("flockspro") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _get_pro_capability_status() -> dict[str, Any]:
+    if not _is_pro_component_installed():
+        return {
+            "active": False,
+            "pro_enabled": False,
+            "license_status": "uninstalled",
+            "inactive_reason": "flockspro_not_installed",
+        }
+    try:
+        from flockspro.license.runtime import get_pro_capability_status  # type: ignore[import-not-found]
+
+        status_data = get_pro_capability_status()
+        return status_data if isinstance(status_data, dict) else {}
+    except Exception as exc:
+        return {
+            "active": False,
+            "pro_enabled": False,
+            "license_status": "unknown",
+            "inactive_reason": "capability_check_failed",
+            "error": str(exc),
+        }
+
+
+def _record_pro_capability(details: dict[str, Any]) -> dict[str, Any]:
+    capability = _get_pro_capability_status()
+    details["pro_enabled"] = bool(capability.get("pro_enabled"))
+    details["runtime_license_status"] = capability.get("license_status")
+    details["runtime_license_inactive_reason"] = capability.get("inactive_reason")
+    return capability
 
 
 def _decode_jwt_payload_unverified(token: str) -> dict[str, Any]:
@@ -268,7 +302,7 @@ async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = F
     if details.get("license_activated_at") and not force:
         return
     try:
-        from flockspro.license.runtime import get_license_checker
+        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
         checker = get_license_checker()
         activate_fn = getattr(checker, "activate", None)
@@ -295,8 +329,8 @@ def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str,
         details["license_effective_expires_at"] = payload["expires_at"]
         details["license_duration_days"] = max(1, round(duration_seconds / 86400))
     try:
-        from flockspro.license.cloud_checker import _machine_fingerprint
-        from flockspro.license.runtime import get_license_checker
+        from flockspro.license.cloud_checker import _machine_fingerprint  # type: ignore[import-not-found]
+        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
         checker = get_license_checker()
         load_install_id = getattr(checker, "_load_or_create_install_id", None)
@@ -336,7 +370,7 @@ def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str,
 async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
     details = record.setdefault("details", {})
     try:
-        from flockspro.license.runtime import get_license_checker
+        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
         checker = get_license_checker()
         refresh_fn = getattr(checker, "refresh", None)
@@ -356,6 +390,7 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
         details["auto_install_result"] = "already_latest"
         details["auto_install_version"] = marker.get("installed_version")
         details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
+        _record_pro_capability(details)
         await _report_pro_bundle_installation(record, install_result="success")
         return record
 
@@ -369,8 +404,11 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
 
     await _maybe_activate_pro_license(record)
     await _maybe_refresh_pro_license(record)
+    capability = _record_pro_capability(details)
     marker = _read_pro_bundle_install_marker()
-    details["auto_install_result"] = "done" if final_stage == "done" else "unknown"
+    details["auto_install_result"] = (
+        "done" if final_stage == "done" and capability.get("pro_enabled") else "license_inactive"
+    )
     details["auto_install_version"] = marker.get("installed_version")
     details["auto_install_pro_version"] = marker.get("flockspro_component_version")
     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
@@ -460,7 +498,11 @@ async def _maybe_auto_activate_upgrade(record: dict[str, Any]) -> dict[str, Any]
         await _maybe_activate_pro_license(record)
         await _maybe_refresh_pro_license(record)
         await _run_auto_upgrade_install(record)
-        record["status"] = "activated"
+        capability = _record_pro_capability(details)
+        if capability.get("pro_enabled"):
+            record["status"] = "activated"
+        else:
+            details["auto_install_result"] = "license_inactive"
     except Exception as exc:
         details["auto_install_result"] = "failed"
         details["auto_install_error"] = str(exc)
@@ -619,12 +661,16 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
 async def get_pro_package_status(request: Request) -> dict[str, Any]:
     require_admin(request)
     marker = _read_pro_bundle_install_marker()
+    capability = _get_pro_capability_status()
     return {
         "installed": _is_pro_component_installed(),
         "installed_version": marker.get("installed_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
         "installed_at": marker.get("installed_at"),
+        "pro_enabled": bool(capability.get("pro_enabled")),
+        "license_status": capability.get("license_status"),
+        "inactive_reason": capability.get("inactive_reason"),
     }
 
 
@@ -678,7 +724,7 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
     activated_license_id: str | None = None
     refreshed_license_id: str | None = None
     try:
-        from flockspro.license.runtime import get_license_checker
+        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
         checker = get_license_checker()
         import_fn = getattr(checker, "import_revocation", None)
@@ -686,12 +732,12 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
             import_fn([str(item) for item in revoked_license_ids])
             imported = True
 
-        current_status = checker.status() if hasattr(checker, "status") else {}
+        current_status = _get_pro_capability_status()
         current_license_id = str(current_status.get("license_id") or "")
         current_inactive = (
             current_license_id in {str(item) for item in revoked_license_ids}
             or str(current_status.get("license_status") or "").lower() in _INACTIVE_LICENSE_STATUSES
-            or current_status.get("active") is False
+            or not current_status.get("pro_enabled")
         )
         if current_inactive:
             target = await _latest_usable_issued_record(
@@ -796,17 +842,23 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
                     marker = _read_pro_bundle_install_marker()
                     await _maybe_activate_pro_license(raw)
                     await _maybe_refresh_pro_license(raw)
-                    details["auto_install_result"] = "restarting" if progress.stage == "restarting" else "done"
+                    capability = _record_pro_capability(details)
+                    if capability.get("pro_enabled"):
+                        details["auto_install_result"] = "restarting" if progress.stage == "restarting" else "done"
+                    else:
+                        details["auto_install_result"] = "license_inactive"
                     details["auto_install_version"] = marker.get("installed_version")
                     details["auto_install_pro_version"] = marker.get("flockspro_component_version")
                     details["auto_install_completed_at"] = datetime.now(UTC).isoformat()
                     details["auto_install_message"] = progress.message
                     _enrich_record_from_install_marker(raw)
-                    raw["status"] = "activated"
+                    if capability.get("pro_enabled"):
+                        raw["status"] = "activated"
                     raw["updated_at"] = datetime.now(UTC).isoformat()
                     await Storage.set(_request_key(request_id), raw, "json")
                     await _report_pro_bundle_installation(raw, install_result="success")
-                    await _mark_console_upgrade_activated(raw)
+                    if capability.get("pro_enabled"):
+                        await _mark_console_upgrade_activated(raw)
                 yield f"data: {progress.model_dump_json()}\n\n"
                 await asyncio.sleep(0)
                 if progress.stage == "error":

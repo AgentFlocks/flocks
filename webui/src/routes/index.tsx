@@ -37,6 +37,14 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
   );
 }
 
+function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (user?.role !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+}
+
 export function Routes() {
   const { t } = useTranslation('auth');
   const { loading, bootstrapped, error, user, refresh } = useAuth();
@@ -119,8 +127,14 @@ export function Routes() {
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
         <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
         <Route path="admin/users" element={<Navigate to="/config" replace />} />
-        <Route path="flockspro-upgrade" element={<LazyRoute><FlocksproUpgradePage /></LazyRoute>} />
-        <Route path="flockspro-upgrade/callback" element={<LazyRoute><FlocksproUpgradeCallbackPage /></LazyRoute>} />
+        <Route
+          path="flockspro-upgrade"
+          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradePage /></LazyRoute></AdminOnlyRoute>}
+        />
+        <Route
+          path="flockspro-upgrade/callback"
+          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradeCallbackPage /></LazyRoute></AdminOnlyRoute>}
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>

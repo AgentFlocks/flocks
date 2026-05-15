@@ -711,17 +711,12 @@ async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[st
 
 
 def _is_flockspro_license_active() -> bool:
-    if importlib.util.find_spec("flockspro") is None:
-        return False
     try:
-        from flockspro.license.runtime import get_license_checker, get_license_status
+        if importlib.util.find_spec("flockspro") is None:
+            return False
+        from flockspro.license.runtime import is_pro_feature_enabled  # type: ignore[import-not-found]
 
-        checker = get_license_checker()
-        is_active = getattr(checker, "is_active", None)
-        if callable(is_active):
-            return bool(is_active())
-        status = get_license_status()
-        return bool(status.get("active") or status.get("activated"))
+        return bool(is_pro_feature_enabled())
     except Exception:
         return False
 
