@@ -12,10 +12,10 @@ def test_bash_installer_prefers_explicit_browser_configuration() -> None:
     assert "AGENT_BROWSER_EXECUTABLE_PATH" in script
     assert "get_chrome_for_testing_dir()" in script
     assert "resolve_chrome_for_testing_path_from_dir()" in script
-    assert 'npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
+    assert '"$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
     assert 'Downloading Chrome for Testing.' in script
     assert 'If browser installation fails, Flocks can still start and you can reinstall it later.' in script
-    assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" "$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2' in script
     assert '"$browser_dir"/**/"Google Chrome for Testing"' in script
     assert '"$browser_dir"/**/chrome.exe' in script
     assert '"$browser_dir"/**/chrome' in script
