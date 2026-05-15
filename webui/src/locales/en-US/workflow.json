@@ -214,6 +214,7 @@
       "syslogFormat": "Parse format",
       "syslogInputKey": "Inputs key",
       "syslogHint": "When enabled, Flocks listens for syslog on the given address/port and passes parsed payloads to workflow inputs (default key: syslog_message).",
+      "syslogPortError": "Invalid port: must be an integer between 1 and 65535",
       "syslogActive": "Listening",
       "historySection": "Execution History",
       "noHistory": "No execution records",
