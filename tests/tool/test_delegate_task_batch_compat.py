@@ -117,22 +117,3 @@ class TestDelegateTaskTolerance:
         assert result.metadata["emptyOutput"] is True
         assert "without producing a final assistant message" in (result.output or "")
 
-
-class TestBatchCompatibility:
-    def test_batch_schema_allows_legacy_commands_alias(self):
-        schema = ToolRegistry.get_schema("batch")
-        assert schema is not None
-        assert "tool_calls" not in schema.required
-        assert "commands" in schema.properties
-
-    @pytest.mark.asyncio
-    async def test_batch_accepts_legacy_commands_args(self):
-        result = await ToolRegistry.execute(
-            "batch",
-            ctx=_make_ctx(),
-            commands=[{"tool": "echo", "args": {"message": "hello"}}],
-        )
-
-        assert result.success is True
-        assert result.metadata["tools"] == ["echo"]
-        assert result.metadata["successful"] == 1

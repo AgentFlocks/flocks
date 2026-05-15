@@ -275,7 +275,6 @@ class ExperimentalConfig(BaseModel):
     
     chat_max_retries: Optional[int] = Field(None, alias="chatMaxRetries")
     disable_paste_summary: Optional[bool] = None
-    batch_tool: Optional[bool] = None
     open_telemetry: Optional[bool] = Field(None, alias="openTelemetry")
     primary_tools: Optional[List[str]] = None
     continue_loop_on_deny: Optional[bool] = None

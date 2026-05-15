@@ -5,7 +5,7 @@ Tests cover:
 - Tool registration and discovery
 - P0 Core tools (6): read, write, edit, bash, grep, glob
 - P1 tools (6): webfetch, todoread, todowrite, question, plan_enter, plan_exit
-- P2 tools (7): multiedit, task, batch, lsp, skill, background_output, background_cancel
+- P2 tools (6): multiedit, task, lsp, skill, background_output, background_cancel
 - P3 tools (2): websearch, apply_patch
 - Permission system integration
 - Error handling
@@ -131,8 +131,8 @@ class TestToolRegistry:
             "read", "write", "edit", "bash", "grep", "glob",
             # P1 tools (6)
             "webfetch", "todoread", "todowrite", "question", "plan_enter", "plan_exit",
-            # P2 tools (7)
-            "multiedit", "task", "batch", "lsp", "skill",
+            # P2 tools (6)
+            "multiedit", "task", "lsp", "skill",
             "background_output", "background_cancel",
             # P3 tools (2)
             "websearch", "apply_patch",
@@ -650,15 +650,9 @@ class TestTaskTool:
         assert tool is not None
 
 
-class TestBatchTool:
-    """Test the batch tool"""
-    
-    @pytest.mark.asyncio
-    async def test_batch_exists(self):
-        """Test that batch tool is registered"""
-        tool = ToolRegistry.get("batch")
-        assert tool is not None
-    
+class TestBatchExecution:
+    """Test registry batch execution helpers"""
+
     @pytest.mark.asyncio
     async def test_batch_execute_multiple(self, tool_context, temp_dir, test_files):
         """Test batch execution of multiple tools"""

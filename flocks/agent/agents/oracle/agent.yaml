@@ -14,15 +14,9 @@ tools:
   - glob
   - webfetch
   - websearch
-  - lsp_diagnostics
-  - lsp_find_references
-  - lsp_hover
-  - lsp_goto_definition
-  - lsp_completion
-  - lsp_rename
+  - lsp
   - question
   - memory_search
-  - ast_grep_search
 prompt_metadata:
   category: advisor
   cost: EXPENSIVE

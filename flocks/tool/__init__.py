@@ -20,7 +20,6 @@ P1 Tools:
 P2 Tools:
 - multiedit: Batch file edits
 - task: Subagent execution
-- batch: Parallel tool calls
 - lsp: LSP operations
 - skill: Load skills
 

@@ -96,7 +96,7 @@ __ANTI_PATTERNS__
 
 A task is COMPLETE when ALL of the following are TRUE:
 1. All requested functionality implemented exactly as specified
-2. `lsp_diagnostics` returns zero errors on ALL modified files
+2. Symbol-aware checks using `lsp` pass on modified files when applicable
 3. Build command exits with code 0 (if applicable)
 4. Tests pass (or pre-existing failures documented)
 5. No temporary/debug code remains
@@ -215,7 +215,7 @@ __TODO_DISCIPLINE__
 
 ### Verification
 
-1. `lsp_diagnostics` on changed files.
+1. `lsp` on changed files when symbol-aware checks are useful.
 2. Run related tests if present.
 3. Build commands if applicable.
 

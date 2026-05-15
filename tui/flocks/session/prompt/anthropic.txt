@@ -73,7 +73,6 @@ The user will primarily request you perform SecOps tasks. This includes security
 
 
 # Tool usage policy
-- When doing file search, prefer to use the Task tool in order to reduce context usage.
 - You should proactively use the Task tool with specialized agents when the task at hand matches the agent's description.
 
 - When WebFetch returns a message about a redirect to a different host, you should immediately make a new WebFetch request with the redirect URL provided in the response.

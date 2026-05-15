@@ -61,7 +61,7 @@ def build_dynamic_rex_prompt(
     security_priority = _build_security_priority_section(available_agents)
     im_send_section = _build_im_send_section()
     anti_patterns = _build_rex_anti_patterns_section()
-    slash_commands_section = _build_slash_commands_section()
+    command_guidance_section = _build_command_guidance_section()
     task_management_section = _task_management_section(use_task_system)
     todo_hook_note = (
         "YOUR TASK CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TASK CONTINUATION])"
@@ -89,8 +89,6 @@ __KEY_TRIGGERS__
 
 __SECURITY_PRIORITY__
 
-__IM_SEND_SECTION__
-
 ### Request Classification
 
 | Type | Signal | Default Action |
@@ -111,13 +109,12 @@ __IM_SEND_SECTION__
 | Missing critical file, error, or environment context | Ask |
 | User approach seems flawed | Raise the concern before implementing |
 
-### Available Specialists
-
 __AGENT_SELECTION__
 
 __SKILLS_SECTION__
 
 __WORKFLOWS_SECTION__
+
 </Routing>
 
 <Workflow>
@@ -154,7 +151,7 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 
 ## 5. Verify
 
-- Run `lsp_diagnostics` on changed files before considering the work complete.
+ - Use `lsp` for symbol-aware checks when useful, and run relevant tests on changed files before considering the work complete.
 - Run relevant build or test commands before finalizing when the affected area has them.
 - Verification evidence is mandatory: clean diagnostics, successful commands, or an explicit note about pre-existing failures.
 - Verify delegated work against expected behavior, codebase patterns, and any `must-do` / `must-not-do` requirements.
@@ -173,6 +170,8 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 </Workflow>
 
 __TASK_MANAGEMENT_SECTION__
+
+__IM_SEND_SECTION__
 
 <Communication>
 ## Style
@@ -194,7 +193,7 @@ __ANTI_PATTERNS__
 - If a user query matches a skill and the relevant tools, load the skill first and follow its guidance.
 </Constraints>
 
-__SLASH_COMMANDS__
+__COMMAND_GUIDANCE__
 """
 
     prompt = template
@@ -205,7 +204,7 @@ __SLASH_COMMANDS__
     prompt = prompt.replace("__SECURITY_PRIORITY__", security_priority)
     prompt = prompt.replace("__IM_SEND_SECTION__", im_send_section)
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
-    prompt = prompt.replace("__SLASH_COMMANDS__", slash_commands_section)
+    prompt = prompt.replace("__COMMAND_GUIDANCE__", command_guidance_section)
     prompt = prompt.replace("__TASK_MANAGEMENT_SECTION__", task_management_section)
     prompt = prompt.replace("__TODO_HOOK_NOTE__", todo_hook_note)
     return prompt
@@ -246,39 +245,14 @@ def _build_rex_anti_patterns_section() -> str:
     return base_section + "\n" + "\n".join(hard_block_rows)
 
 
-def _build_slash_commands_section() -> str:
-    """Build a section describing available slash commands for Rex."""
-    try:
-        from flocks.command.command import Command
+def _build_command_guidance_section() -> str:
+    """Build a lightweight CLI and slash-command guidance section for Rex."""
+    return """<Command_Guidance>
+## CLI And Slash Command Guidance
 
-        commands = Command.list_for_surfaces(("webui", "tui"))
-        if not commands:
-            return ""
-
-        rows = "\n".join(
-            f"| `/{cmd.name}` | {cmd.description} |"
-            for cmd in commands
-        )
-
-        return f"""<Slash_Commands>
-## Slash Commands Available to Users
-
-Users can run slash commands in the WebUI or TUI by typing `/command_name` in the chat input.
-When it would help the user, you may suggest these commands proactively.
-
-| Command | Description |
-|---------|-------------|
-{rows}
-
-**Usage guidance**:
-- Suggest `/compact` when the conversation history is very long
-- Suggest `/plan` when the user wants to design before implementing
-- Suggest `/ask` when the user wants read-only analysis without changes
-- Suggest `/tools` or `/skills` when the user asks what capabilities are available
-- Suggest `/clear` when the user wants to clear the current UI output
-</Slash_Commands>"""
-    except Exception:
-        return ""
+Use `flocks --help` to inspect Flocks CLI commands and usage.
+`flocks/command/command.py` is the source of truth for supported slash commands.
+</Command_Guidance>"""
 
 
 def _build_clarification_protocol() -> str:
@@ -429,7 +403,26 @@ Available security specialists: {agent_names}
 - Direct path: exactly one IOC, basic reputation or TI facts only, and no attribution, correlation, batching, or formal assessment needed.
 - Delegate path: multiple indicators, alert context, attribution, campaign analysis, expert judgment, or structured security output required.
 - If a direct lookup tool is not obvious, use `tool_search` first and then execute the shortest valid tool path.
-- If two security specialists both seem plausible, choose the more specific one and note the assumption briefly."""
+- If two security specialists both seem plausible, choose the more specific one and note the assumption briefly.
+
+**Lightweight direct lookup rules (Rex handles directly):**
+- Single IOC basic lookup only: one IP, domain, URL, or hash
+- User intent is direct querying, checking reputation, or fetching basic TI facts
+- No batching, attribution, multi-indicator correlation, campaign analysis, or expert report required
+- Prefer: `tool_search` if needed -> direct TI query tool -> answer
+
+**Mandatory delegation rules (use the specialist):**
+- The request needs attribution, correlation, deep analysis, or expert judgment
+- The user provides multiple IOCs, alert context, evidence, or asks for a structured security assessment
+- The request matches one of the above specialist domains beyond a single direct lookup
+- When ambiguous between two security agents, pick the more specific one and add a brief note
+
+**Decision examples:**
+- "查询 8.8.8.8 的情报" -> Rex should directly query TI tools
+- "分析这些 IOC 是否属于同一攻击活动" -> delegate to the appropriate specialist
+- "结合告警上下文研判这批指标" -> delegate to the appropriate specialist
+
+Security sub-agents still have dedicated toolsets and should be preferred for non-trivial security analysis."""
 
 
 def _build_im_send_section() -> str:

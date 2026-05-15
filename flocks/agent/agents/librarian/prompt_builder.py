@@ -134,7 +134,7 @@ Step 2: Get commit SHA for permalinks
         cd ${{TMPDIR:-/tmp}}/repo-name && git rev-parse HEAD
 
 Step 3: Find the implementation
-        - grep/ast_grep_search for function/class
+        - grep or lsp for function/class
         - read the specific file
         - git blame for context if needed
 

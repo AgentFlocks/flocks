@@ -128,24 +128,10 @@ def _model_dict(provider: Optional[str], model: Optional[str]) -> Optional[Dict[
 
 DESCRIPTION = """Launch a new agent to handle complex, multi-step tasks autonomously.
 
-Use this tool when:
-- The task requires multiple steps or research
-- You need to explore code in parallel
-- The task can be delegated to a specialized agent
-
-Available subagent types:
-- hephaestus: Autonomous deep worker for goal-oriented, end-to-end task execution
-- explore: Fast code exploration agent for quick searches
-- librarian: Specialized codebase understanding, remote codebases, official documentation
-- hephaestus: Autonomous deep worker for goal-oriented execution
-- oracle: Read-only consultation, debugging hard problems, architecture design
-
-Usage notes:
-- Provide a clear description (3-5 words)
-- Provide detailed prompt with context
-- run_in_background=true: returns task_id immediately, collect results later with background_output
-- run_in_background=false: waits for completion and returns results inline
-- Pass session_id to continue a previous agent with full context"""
+Routing (important):
+- If the user did NOT explicitly request the `task` tool, prefer `delegate_task` for spawning sub-agents (category or subagent_type). 
+- Use `task` only when the user clearly asks to use the `task` tool.
+"""
 
 
 @ToolRegistry.register_function(

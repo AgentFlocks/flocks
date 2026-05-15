@@ -342,6 +342,8 @@ class TestRexPromptAwareness:
         assert "### Security Routing" in prompt
         assert "Direct path: exactly one IOC" in prompt
         assert "Delegate path: multiple indicators" in prompt
+        assert "**Lightweight direct lookup rules (Rex handles directly):**" in prompt
+        assert '"查询 8.8.8.8 的情报" -> Rex should directly query TI tools' in prompt
         assert "`tool_search` first" in prompt
 
 

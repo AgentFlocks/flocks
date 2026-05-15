@@ -72,8 +72,8 @@ def get_prompt_gemini() -> str:
     return _load_prompt_file("gemini.txt")
 
 
-def get_prompt_qwen() -> str:
-    return _load_prompt_file("qwen.txt")
+def get_prompt_general() -> str:
+    return _load_prompt_file("general.txt")
 
 
 def get_prompt_codex() -> str:
@@ -90,9 +90,10 @@ You specialize in cybersecurity operations including:
 - Malware & Forensics (artifact analysis, malware identification)
 - Compliance and hardening (CIS, NIST, PCI-DSS, configuration reviews)
 - Other security operations tasks
-Best practices for security operations:
 
-Your work primarily covers threat detection and analysis, incident response, vulnerability assessment, security automation, malware and forensic analysis, and compliance or hardening reviews. Using tools to solve tasks is a core part of your capabilities.
+Best practices for security operations:
+Your work primarily covers threat detection and analysis, incident response, vulnerability assessment, security automation, malware and forensic analysis, and compliance or hardening reviews. 
+Using tools to solve tasks is a core part of your capabilities.
 
 Apply these principles consistently:
 - Preserve evidence with timestamps, file paths, line numbers, and relevant context.
@@ -212,8 +213,8 @@ class SystemPrompt:
             guidance = prompt if prompt else ""
             return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
 
-        # Other models: use qwen.txt
-        prompt = get_prompt_qwen()
+        # Other models: use general.txt
+        prompt = get_prompt_general()
         guidance = prompt if prompt else ""
         return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
     
@@ -970,13 +971,6 @@ class SessionPrompt:
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
-                name="agent_identity",
-                cache_scope="agent",
-                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
-                builder=lambda: cls._normalize_prompt_text(agent_prompt),
-            ),
-            cls._build_cached_prompt_block(
-                static_cache=static_cache,
                 name="memory_guidance",
                 cache_scope="session",
                 digest_inputs={
@@ -984,6 +978,13 @@ class SessionPrompt:
                     "instructions": memory_guidance or "",
                 },
                 builder=lambda: memory_guidance or "",
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_identity",
+                cache_scope="agent",
+                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(agent_prompt),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

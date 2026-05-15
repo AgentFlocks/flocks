@@ -142,7 +142,6 @@ def build_agent_selection_table(agents: List[AvailableAgent]) -> str:
             )
 
     rows.append("")
-    rows.append("**Default flow**: direct tools first → `explore` / `librarian` for research → `oracle` if required")
     return "\n".join(rows)
 
 

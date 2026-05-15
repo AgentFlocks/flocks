@@ -59,7 +59,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "background_cancel": ["background-task", "process"],
     "memory": ["memory", "context"],
     "model_config": ["model", "configuration"],
-    "batch": ["batch", "orchestration"],
     "slash_command": ["slash-command", "orchestration"],
     "plan_enter": ["planning", "mode"],
     "plan_exit": ["planning", "mode"],

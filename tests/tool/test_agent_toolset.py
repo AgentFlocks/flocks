@@ -1,4 +1,7 @@
+from pathlib import Path
 from types import SimpleNamespace
+
+import yaml
 
 from flocks.agent.toolset import (
     agent_declares_tool,
@@ -84,3 +87,70 @@ def test_resolve_agent_initial_tools_keeps_empty_non_rex_tools_empty() -> None:
 
     assert tools == []
     assert permission == []
+
+
+def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
+    available_tool_names = [
+        "apply_patch",
+        "background_cancel",
+        "background_output",
+        "bash",
+        "channel_message",
+        "delegate_task",
+        "edit",
+        "glob",
+        "grep",
+        "lsp",
+        "memory_search",
+        "multiedit",
+        "plan_exit",
+        "question",
+        "read",
+        "run_workflow",
+        "run_workflow_node",
+        "session_list",
+        "skill",
+        "task",
+        "todoread",
+        "todowrite",
+        "tool_search",
+        "webfetch",
+        "websearch",
+        "write",
+    ]
+    agent_root = Path(__file__).resolve().parents[2] / "flocks" / "agent" / "agents"
+
+    for agent_name in (
+        "explore",
+        "hephaestus",
+        "librarian",
+        "metis",
+        "momus",
+        "multimodal_looker",
+        "oracle",
+        "plan",
+        "rex_junior",
+        "self_enhance",
+    ):
+        agent_yaml = agent_root / agent_name / "agent.yaml"
+        raw_tools = yaml.safe_load(agent_yaml.read_text(encoding="utf-8"))["tools"]
+
+        assert normalize_declared_tool_names(raw_tools, available_tool_names) == raw_tools
+
+
+def test_agent_prompt_sources_do_not_reference_retired_tool_names() -> None:
+    retired_tool_names = (
+        "ast_grep_search",
+        "lsp_completion",
+        "lsp_diagnostics",
+        "lsp_find_references",
+        "lsp_goto_definition",
+        "lsp_hover",
+        "lsp_rename",
+    )
+    agent_root = Path(__file__).resolve().parents[2] / "flocks" / "agent" / "agents"
+
+    for prompt_path in list(agent_root.glob("*/prompt.md")) + list(agent_root.glob("*/prompt_builder.py")):
+        content = prompt_path.read_text(encoding="utf-8")
+        for retired_tool_name in retired_tool_names:
+            assert retired_tool_name not in content, f"{prompt_path} still references {retired_tool_name}"

@@ -51,7 +51,7 @@ No todos on multi-step work = INCOMPLETE WORK.
 
 <Verification>
 Task NOT complete without:
-- lsp_diagnostics clean on changed files
+- use `lsp` for symbol-aware checks on changed files when useful
 - Build passes (if applicable)
 - All todos marked completed
 </Verification>

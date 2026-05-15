@@ -37,10 +37,9 @@ Confirm:
 **Your Mission**: Ensure zero regressions, behavior preservation.
 
 **Tool Guidance** (recommend to Prometheus):
-- `lsp_find_references`: Map all usages before changes
-- `lsp_rename` / `lsp_prepare_rename`: Safe symbol renames
-- `ast_grep_search`: Find structural patterns to preserve
-- `ast_grep_replace(dryRun=true)`: Preview transformations
+- `lsp`: Use `findReferences` / `goToDefinition` to map impact before changes
+- `grep`: Find repeated patterns that must be preserved
+- `read`: Inspect exact examples before proposing refactors
 
 **Plan Must Include**:
 - Regression test strategy (new or existing)
