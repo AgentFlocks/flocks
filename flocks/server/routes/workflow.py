@@ -46,6 +46,8 @@ from flocks.workflow.fs_store import (
 )
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.workflow.execution_store import (
+    compact_history_for_storage,
+    compact_outputs_for_storage,
     create_execution_record,
     normalize_execution_status as _normalize_execution_status,
     record_execution_result as _record_execution_result,
@@ -499,7 +501,15 @@ async def _run_workflow_execution_task(
         return step_index
 
     def _on_step_complete(step_result) -> None:
+        # Compact each step's outputs *before* appending so the running
+        # ``step_history`` (and every subsequent ``_write_progress`` snapshot
+        # that ships it to SQLite) stays bounded, even when a workflow node
+        # returns tens of thousands of alerts that are already persisted to
+        # JSONL on disk.
         step_dict = step_result.model_dump(mode="json")
+        raw_outputs = step_dict.get("outputs")
+        if isinstance(raw_outputs, dict):
+            step_dict["outputs"] = compact_outputs_for_storage(raw_outputs)
         step_history.append(step_dict)
         _write_progress({
             "executionLog": list(step_history),
@@ -530,12 +540,17 @@ async def _run_workflow_execution_task(
             # status write still succeeds rather than blowing up.
             current_data = {"id": exec_id, "workflowId": workflow_id}
         status_value, error_message = _resolve_execution_outcome(result)
+        # ``result.history`` is the engine-side authoritative history (not
+        # yet compacted), while ``step_history`` was already compacted in
+        # ``_on_step_complete``.  Prefer the former when available, then
+        # run it through ``compact_history_for_storage`` so the persisted
+        # row stays small in either branch.
         current_data.update({
-            "outputResults": result.outputs,
+            "outputResults": compact_outputs_for_storage(result.outputs),
             "status": status_value,
             "finishedAt": int(time.time() * 1000),
             "duration": duration,
-            "executionLog": result.history or list(step_history),
+            "executionLog": compact_history_for_storage(result.history) or list(step_history),
             "errorMessage": error_message,
             "currentNodeId": result.last_node_id,
             "currentNodeType": current_data.get("currentNodeType"),
@@ -1072,8 +1087,15 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
         raw_status = result.get("status", "SUCCEEDED") if isinstance(result, dict) else "SUCCEEDED"
         status_value = _normalize_execution_status(raw_status)
         success = status_value == "success"
+        # workflow_center_invoke proxies to an external published service; no
+        # step callbacks run locally so executionLog stays as the empty list
+        # set by create_execution_record.  We still run compact_history here
+        # as a forward-compatible guard in case a future code path populates it.
         exec_data.update({
-            "outputResults": result.get("outputs", {}) if isinstance(result, dict) else {},
+            "outputResults": compact_outputs_for_storage(
+                result.get("outputs", {}) if isinstance(result, dict) else {}
+            ),
+            "executionLog": compact_history_for_storage(exec_data.get("executionLog")),
             "status": status_value,
             "finishedAt": int(time.time() * 1000),
             "duration": duration,

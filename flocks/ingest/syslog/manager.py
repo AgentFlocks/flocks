@@ -9,6 +9,8 @@ from typing import Any, Dict, List
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
+    compact_history_for_storage,
+    compact_outputs_for_storage,
     create_execution_record,
     record_execution_result,
     resolve_execution_outcome,
@@ -20,6 +22,7 @@ from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.ingest.syslog.listener import run_tcp_syslog_server, run_udp_syslog_server
 
 log = Log.create(service="syslog.manager")
+
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and SQLite write contention
 _MAX_CONCURRENT_EXECUTIONS = 8
@@ -468,11 +471,11 @@ class SyslogManager:
             duration = time.time() - start_time
             exec_data.update({
                 "status": status,
-                "outputResults": result.outputs if isinstance(result.outputs, dict) else {},
+                "outputResults": compact_outputs_for_storage(result.outputs),
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "errorMessage": error_msg,
-                "executionLog": list(result.history or []),
+                "executionLog": compact_history_for_storage(result.history),
                 "currentNodeId": result.last_node_id,
                 "currentPhase": status,
                 "currentStepIndex": result.steps,
