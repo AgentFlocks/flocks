@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import LanguageSwitcher from '@/components/common/LanguageSwitcher';
 import OnboardingModal, { isOnboardingDismissed } from '@/components/common/OnboardingModal';
 import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
 import NotificationModal from '@/components/common/NotificationModal';

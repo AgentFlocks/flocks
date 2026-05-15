@@ -32,6 +32,7 @@ import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQue
 import { sessionApi } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
+import { useToast } from './Toast';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import {
@@ -358,6 +359,7 @@ export default function SessionChat({
   supportsVision,
 }: SessionChatProps) {
   const { t } = useTranslation('session');
+  const toast = useToast();
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
@@ -781,7 +783,19 @@ export default function SessionChat({
       const serverCommands = res.data ?? [];
       // Merge client-side /new command into the autocomplete list
       setCommands([
-        { name: 'new', description: 'Create a new session', template: '', hidden: false },
+        {
+          name: 'new',
+          canonical_name: 'new',
+          description: 'Create a new session',
+          template: '',
+          hidden: false,
+          aliases: [],
+          visible_surfaces: [],
+          execution_kind: 'session_control',
+          allow_attachments: false,
+          requires_existing_session: false,
+          channel_safe: false,
+        } satisfies Command,
         ...serverCommands,
       ]);
     } catch {
