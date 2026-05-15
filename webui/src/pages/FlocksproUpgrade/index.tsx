@@ -971,18 +971,18 @@ export default function FlocksproUpgradePage() {
             </div>
             <div className="mt-3 grid gap-2 md:grid-cols-4">
               <div className="rounded-lg bg-white/70 px-3 py-2">
-                <div className="text-xs text-slate-500">{t('upgrade.expiresAt')}</div>
-                <div className="mt-1 font-semibold text-slate-900">{formatDateTimeValue(displayedExpiresAt)}</div>
+                <div className="text-xs text-slate-500">{t('upgrade.remainingDays')}</div>
+                <div className={`mt-1 font-semibold ${currentLicenseInvalid ? 'text-red-700' : 'text-emerald-700'}`}>
+                  {remainingDays === null ? '-' : t('upgrade.remainingDaysValue', { count: remainingDays })}
+                </div>
               </div>
               <div className="rounded-lg bg-white/70 px-3 py-2">
                 <div className="text-xs text-slate-500">{t('upgrade.quota')}</div>
                 <div className="mt-1 font-semibold text-slate-900">{licenseQuotaText}</div>
               </div>
               <div className="rounded-lg bg-white/70 px-3 py-2">
-                <div className="text-xs text-slate-500">{t('upgrade.remainingDays')}</div>
-                <div className={`mt-1 font-semibold ${currentLicenseInvalid ? 'text-red-700' : 'text-emerald-700'}`}>
-                  {remainingDays === null ? '-' : t('upgrade.remainingDaysValue', { count: remainingDays })}
-                </div>
+                <div className="text-xs text-slate-500">{t('upgrade.expiresAt')}</div>
+                <div className="mt-1 font-semibold text-slate-900">{formatDateTimeValue(displayedExpiresAt)}</div>
               </div>
               <div className="rounded-lg bg-white/70 px-3 py-2">
                 <div className="text-xs text-slate-500">{t('upgrade.lastSyncedAt')}</div>
