@@ -4,10 +4,19 @@ from flocks.updater.updater import _resolve_sources_for_edition
 
 
 @pytest.mark.asyncio
-async def test_flockspro_env_adds_console_manifest(monkeypatch):
+async def test_flockspro_env_with_active_license_uses_console_manifest(monkeypatch):
     monkeypatch.setenv("FLOCKS_EDITION", "flockspro")
+    monkeypatch.setattr("flocks.updater.updater._is_flockspro_license_active", lambda: True)
     sources = await _resolve_sources_for_edition(["github", "gitee"])
     assert sources == ["console-manifest"]
+
+
+@pytest.mark.asyncio
+async def test_flockspro_env_without_active_license_keeps_oss_sources(monkeypatch):
+    monkeypatch.setenv("FLOCKS_EDITION", "flockspro")
+    monkeypatch.setattr("flocks.updater.updater._is_flockspro_license_active", lambda: False)
+    sources = await _resolve_sources_for_edition(["github", "gitee"])
+    assert sources == ["github", "gitee"]
 
 
 @pytest.mark.asyncio

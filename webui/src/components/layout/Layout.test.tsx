@@ -18,6 +18,7 @@ const {
   ackNotification,
   getNotificationAckStatus,
   flocksproUsersApi,
+  consoleUpgradeApi,
   useAuth,
   useStats,
 } = vi.hoisted(() => ({
@@ -46,6 +47,10 @@ const {
   getNotificationAckStatus: vi.fn(),
   flocksproUsersApi: {
     hasCapability: vi.fn(),
+    getLicenseStatus: vi.fn(),
+  },
+  consoleUpgradeApi: {
+    getProPackageStatus: vi.fn(),
   },
   useAuth: vi.fn(),
   useStats: vi.fn(),
@@ -81,6 +86,10 @@ vi.mock('@/api/notifications', () => ({
 
 vi.mock('@/api/flocksproUsers', () => ({
   flocksproUsersApi,
+}));
+
+vi.mock('@/api/consoleUpgrade', () => ({
+  consoleUpgradeApi,
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -246,6 +255,12 @@ describe('Layout onboarding entry', () => {
       data: { has_credential: false },
     });
     flocksproUsersApi.hasCapability.mockResolvedValue(false);
+    flocksproUsersApi.getLicenseStatus.mockRejectedValue(new Error('Flocks Pro unavailable'));
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: false,
+      installed_version: null,
+      flockspro_component_version: null,
+    });
 
     mcpAPI.getCredentials.mockResolvedValue({
       data: { has_credential: false },
@@ -293,6 +308,30 @@ describe('Layout onboarding entry', () => {
       await vi.advanceTimersByTimeAsync(1);
     });
     expect(checkUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips GitHub-backed update checks when Flocks Pro is active', async () => {
+    vi.useFakeTimers();
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      installed_version: '2026.05.13-3',
+      flockspro_component_version: '2026.05.13-3',
+    });
+
+    renderHomeWithLayout();
+
+    await flushEffects();
+    expect(checkUpdate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_600_000);
+    });
+    expect(checkUpdate).not.toHaveBeenCalled();
   });
 
   it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {

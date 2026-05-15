@@ -4,6 +4,7 @@ import type { UpdateProgress } from './update';
 export interface UpgradeRequestCreatePayload {
   product: string;
   license_type: 'trial_30d' | 'poc' | 'commercial';
+  request_kind?: 'new' | 'trial_extension' | 'license_change';
   company: string;
   applicant_name: string;
   applicant_email?: string;
@@ -18,7 +19,16 @@ export interface UpgradeRequestDetails {
   expires_at?: number | string | null;
   license_effective_expires_at?: number | string | null;
   license_duration_days?: number | null;
+  license_id?: string | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  request_kind?: 'new' | 'trial_extension' | 'license_change' | string;
+  console_account_name?: string | null;
+  passport_uid?: string | null;
+  cloud_account?: string | null;
+  account?: string | null;
   company?: string;
+  enterprise_name?: string;
   applicant_name?: string;
   applicant_email?: string | null;
   applicant_phone?: string | null;
@@ -39,9 +49,22 @@ export interface UpgradeRequestStatus {
   suggestion?: string | null;
   activate_key?: string | null;
   manifest_url?: string | null;
+  license_id?: string | null;
+  license_status?: string | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  expires_at?: number | string | null;
   details?: UpgradeRequestDetails;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProPackageStatus {
+  installed: boolean;
+  installed_version?: string | null;
+  flockspro_component_version?: string | null;
+  build_id?: string | null;
+  installed_at?: string | null;
 }
 
 export const consoleUpgradeApi = {
@@ -52,6 +75,22 @@ export const consoleUpgradeApi = {
 
   listRequests: async (): Promise<UpgradeRequestStatus[]> => {
     const response = await client.get('/api/console/upgrade-requests');
+    return response.data;
+  },
+
+  getProPackageStatus: async (): Promise<ProPackageStatus> => {
+    const response = await client.get('/api/console/pro-package-status');
+    return response.data;
+  },
+
+  syncRevocations: async (): Promise<{
+    revoked_license_ids: string[];
+    imported: boolean;
+    synced_license_ids?: string[];
+    activated_license_id?: string | null;
+    refreshed_license_id?: string | null;
+  }> => {
+    const response = await client.post('/api/console/licenses/sync-revocations');
     return response.data;
   },
 

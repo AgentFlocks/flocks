@@ -89,6 +89,8 @@ export default function Layout() {
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
   const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
+  const [isFlocksproActive, setIsFlocksproActive] = useState(false);
+  const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
@@ -106,6 +108,15 @@ export default function Layout() {
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (force = false) => {
+    if (!flocksproStatusReady) return;
+    if (isFlocksproActive) {
+      setUpdateInfo(null);
+      setHasUpdate(false);
+      setLatestVersion(null);
+      setHasCompletedUpdateCheck(true);
+      return;
+    }
+
     const now = Date.now();
     if (checkingUpdateRef.current) return;
     if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
@@ -145,9 +156,11 @@ export default function Layout() {
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [i18n.language]);
+  }, [flocksproStatusReady, i18n.language, isFlocksproActive]);
 
   useEffect(() => {
+    if (!flocksproStatusReady) return undefined;
+
     refreshUpdateStatus(true);
 
     const intervalId = window.setInterval(() => {
@@ -174,7 +187,7 @@ export default function Layout() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [refreshUpdateStatus]);
+  }, [flocksproStatusReady, refreshUpdateStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -203,30 +216,38 @@ export default function Layout() {
 
   useEffect(() => {
     let cancelled = false;
+    setFlocksproStatusReady(false);
     if (!user?.id || user.role !== 'admin') {
+      setIsFlocksproActive(false);
       setFlocksproVersion(null);
+      setFlocksproStatusReady(true);
       return () => {
         cancelled = true;
       };
     }
-    void consoleUpgradeApi.listRequests()
-      .then((items) => {
+    void Promise.all([
+      flocksproUsersApi.getLicenseStatus(),
+      consoleUpgradeApi.getProPackageStatus().catch(() => null),
+    ])
+      .then(([licenseStatus, packageStatus]) => {
         if (cancelled) return;
-        const activated = items.find((item) => {
-          const status = (item.status || '').toLowerCase();
-          const installResult = (item.details?.auto_install_result || '').toLowerCase();
-          return status === 'activated' || ['done', 'already_latest', 'restarting'].includes(installResult);
-        });
-        const version = formatProVersion(
-          activated?.details?.auto_install_pro_version ||
-            activated?.details?.flockspro_component_version ||
-            activated?.details?.auto_install_version,
-        );
+        const runtimeStatus = String(licenseStatus.license_status || licenseStatus.status || '').toLowerCase();
+        const active = licenseStatus.active === true && !['revoked', 'expired'].includes(runtimeStatus);
+        setIsFlocksproActive(active);
+        const version = active
+          ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
+          : null;
         setFlocksproVersion(version);
       })
       .catch(() => {
         if (!cancelled) {
+          setIsFlocksproActive(false);
           setFlocksproVersion(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setFlocksproStatusReady(true);
         }
       });
     return () => {
@@ -390,10 +411,12 @@ export default function Layout() {
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
     matchPath('/sessions', location.pathname);
-  const productName = flocksproVersion ? 'Flocks Pro' : 'Flocks';
-  const displayVersion = flocksproVersion || (currentVersion ? `v${currentVersion}` : null);
-  const currentVersionLabel = flocksproVersion
-    ? t('currentProductVersionLabel', { version: flocksproVersion })
+  const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
+  const displayVersion = isFlocksproActive
+    ? flocksproVersion || (currentVersion ? `v${currentVersion}` : null)
+    : currentVersion ? `v${currentVersion}` : null;
+  const currentVersionLabel = isFlocksproActive
+    ? t('currentProductVersionLabel', { version: displayVersion || productName })
     : currentVersion
     ? t('currentVersionLabel', { version: currentVersion })
     : productName;

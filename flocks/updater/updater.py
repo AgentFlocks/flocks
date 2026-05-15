@@ -696,17 +696,34 @@ async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[st
     """
     Resolve effective sources by runtime edition state.
 
-    Flocks Pro mode is explicitly selected by the runtime edition. A bound
-    console account alone is still valid OSS state and must keep OSS sources.
+    Flocks Pro mode is explicitly selected by the runtime edition and an
+    active Pro license. A bound console account or inactive Pro package alone
+    is still valid OSS state and must keep OSS sources.
     """
     sources = list(configured_sources)
     edition = (os.getenv("FLOCKS_EDITION") or "").strip().lower()
 
-    if edition == "flockspro":
+    if edition == "flockspro" and _is_flockspro_license_active():
         # Pro edition is hard-locked to console manifest bundle channel.
         return ["console-manifest"]
 
     return sources
+
+
+def _is_flockspro_license_active() -> bool:
+    if importlib.util.find_spec("flockspro") is None:
+        return False
+    try:
+        from flockspro.license.runtime import get_license_checker, get_license_status
+
+        checker = get_license_checker()
+        is_active = getattr(checker, "is_active", None)
+        if callable(is_active):
+            return bool(is_active())
+        status = get_license_status()
+        return bool(status.get("active") or status.get("activated"))
+    except Exception:
+        return False
 
 
 # ------------------------------------------------------------------ #
@@ -1338,6 +1355,35 @@ def _current_service_config():
         no_browser=True,
         skip_frontend_build=True,
     )
+
+
+def _build_service_restart_argv(install_root: Path | None = None) -> list[str]:
+    repo_root = install_root or _get_repo_root()
+    if sys.platform == "win32":
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = repo_root / ".venv" / "bin" / "python"
+
+    if not venv_python.exists():
+        raise FileNotFoundError(f"Restart runtime is missing: {venv_python}")
+
+    config = _current_service_config()
+    return [
+        str(venv_python),
+        "-m",
+        "flocks.cli.main",
+        "restart",
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        str(config.backend_host),
+        "--server-port",
+        str(config.backend_port),
+        "--webui-host",
+        str(config.frontend_host),
+        "--webui-port",
+        str(config.frontend_port),
+    ]
 
 
 def _spawn_detached_process(
@@ -2205,35 +2251,28 @@ async def perform_pro_bundle_install(
             )
             return
 
-        yield UpdateProgress(stage="restarting", message="Restarting service...")
-        log.info("updater.pro_bundle.restart", {"version": manifest_info.version})
-        await asyncio.sleep(0.8)
-
-        if "--reload" in sys.argv:
-            sys.exit(3)
-
         try:
-            restart_argv = _build_restart_argv(install_root)
+            restart_argv = _build_service_restart_argv(install_root)
         except Exception as exc:
             log.error("updater.pro_bundle.restart.build_argv_failed", {"error": str(exc)})
             yield UpdateProgress(stage="error", message=f"Failed to build restart command: {exc}", success=False)
             return
 
-        if sys.platform == "win32":
+        def _restart_process() -> None:
+            log.info("updater.pro_bundle.restart.spawn", {"argv": restart_argv})
             try:
-                subprocess.Popen(restart_argv, cwd=install_root, close_fds=True)
-                os._exit(0)
+                _spawn_detached_process(
+                    restart_argv,
+                    cwd=install_root,
+                    log_path=_upgrade_log_dir() / "restart.log",
+                )
             except OSError as exc:
-                log.error("updater.pro_bundle.restart.spawn_failed", {"error": str(exc)})
-                yield UpdateProgress(stage="error", message=f"Failed to restart service: {exc}", success=False)
-                return
+                log.error("updater.pro_bundle.restart.failed", {"error": str(exc)})
 
-        try:
-            os.execv(restart_argv[0], restart_argv)
-        except OSError as exc:
-            log.error("updater.pro_bundle.restart.execv_failed", {"error": str(exc)})
-            yield UpdateProgress(stage="error", message=f"Failed to restart service: {exc}", success=False)
-            return
+        log.info("updater.pro_bundle.restart", {"version": manifest_info.version})
+        asyncio.get_running_loop().call_later(0.8, _restart_process)
+        yield UpdateProgress(stage="restarting", message="Restarting service...")
+        await asyncio.sleep(2)
     except Exception as exc:
         log.error("updater.pro_bundle.failed", {"error": str(exc)})
         yield UpdateProgress(stage="error", message=f"Flocks Pro upgrade failed: {exc}", success=False)

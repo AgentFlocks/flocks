@@ -40,6 +40,7 @@ def _console_base_url() -> str:
 class UpgradeRequestCreate(BaseModel):
     product: str = Field(default="Flocks Pro", pattern="^Flocks Pro$")
     license_type: Literal["trial_30d", "poc", "commercial"]
+    request_kind: Literal["new", "trial_extension", "license_change"] = "new"
     company: str = Field(min_length=1)
     applicant_name: str = Field(min_length=1)
     applicant_email: Optional[str] = None
@@ -55,6 +56,11 @@ class UpgradeRequestStatus(BaseModel):
     suggestion: Optional[str] = None
     activate_key: Optional[str] = None
     manifest_url: Optional[str] = None
+    license_id: Optional[str] = None
+    license_status: Optional[str] = None
+    max_admins: Optional[int] = None
+    max_members: Optional[int] = None
+    expires_at: Optional[int] = None
     details: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str
@@ -78,8 +84,108 @@ async def _push_request_id(request_id: str) -> None:
         await Storage.set("console:upgrade_request_ids", ids, "json")
 
 
+_INACTIVE_LICENSE_STATUSES = {"revoked", "expired", "superseded"}
+
+
 def _is_approved(record: dict[str, Any]) -> bool:
     return str(record.get("status", "")).strip().lower() == "approved"
+
+
+def _record_license_id(record: dict[str, Any]) -> str:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    return str(record.get("license_id") or details.get("license_id") or "").strip()
+
+
+def _record_license_status(record: dict[str, Any]) -> str:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    return str(record.get("license_status") or details.get("license_status") or "").strip().lower()
+
+
+def _apply_console_license_data(record: dict[str, Any], data: dict[str, Any]) -> None:
+    if not data:
+        return
+    details = record.setdefault("details", {})
+    effective_status = str(
+        data.get("effective_status")
+        or data.get("license_status")
+        or data.get("status")
+        or record.get("license_status")
+        or ""
+    ).strip()
+    if data.get("revoked"):
+        effective_status = "revoked"
+    effective_expires_at = data.get("effective_expires_at", data.get("expires_at"))
+    effective_max_admins = data.get("effective_max_admins", data.get("max_admins"))
+    effective_max_members = data.get("effective_max_members", data.get("max_members"))
+
+    for key, value in {
+        "license_id": data.get("license_id"),
+        "license_status": effective_status or None,
+        "max_admins": effective_max_admins,
+        "max_members": effective_max_members,
+        "expires_at": effective_expires_at,
+        "activate_key": data.get("activate_key"),
+        "manifest_url": data.get("manifest_url"),
+    }.items():
+        if value is not None:
+            record[key] = value
+            details[key] = value
+    if effective_expires_at is not None:
+        details["license_effective_expires_at"] = effective_expires_at
+    latest_patch = data.get("latest_patch") or data.get("latest_change")
+    if latest_patch:
+        details["latest_license_patch"] = latest_patch
+    record["updated_at"] = datetime.now(UTC).isoformat()
+
+
+def _record_account_key(record: dict[str, Any]) -> str:
+    details = record.get("details") if isinstance(record.get("details"), dict) else {}
+    return str(
+        details.get("console_account_name")
+        or details.get("cloud_account")
+        or details.get("passport_uid")
+        or details.get("account")
+        or ""
+    ).strip().lower()
+
+
+def _console_session_account_key(console_session: dict[str, Any]) -> str:
+    return str(
+        console_session.get("user_display")
+        or console_session.get("user_email")
+        or console_session.get("passport_uid")
+        or ""
+    ).strip().lower()
+
+
+async def _latest_usable_issued_record(
+    revoked_license_ids: set[str],
+    *,
+    account_key: str = "",
+) -> dict[str, Any] | None:
+    candidates: list[tuple[dict[str, Any], bool]] = []
+    for request_id in await _list_request_ids():
+        raw = await Storage.get(_request_key(request_id))
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status", "")).strip().lower()
+        license_id = _record_license_id(raw)
+        if status not in {"approved", "activated"} or not license_id or not raw.get("activate_key"):
+            continue
+        record_account_key = _record_account_key(raw)
+        if account_key and record_account_key and record_account_key != account_key:
+            continue
+        usable = license_id not in revoked_license_ids and _record_license_status(raw) not in _INACTIVE_LICENSE_STATUSES
+        candidates.append((raw, usable))
+    candidates.sort(
+        key=lambda item: _parse_dt(item[0].get("created_at") or item[0].get("updated_at"))
+        or datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
+    if not candidates:
+        return None
+    latest, usable = candidates[0]
+    return latest if usable else None
 
 
 def _is_pro_component_installed() -> bool:
@@ -154,12 +260,12 @@ def _enrich_record_from_install_marker(record: dict[str, Any]) -> dict[str, Any]
     return record
 
 
-async def _maybe_activate_pro_license(record: dict[str, Any]) -> None:
+async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = False) -> None:
     activate_key = str(record.get("activate_key") or "").strip()
     if not activate_key:
         return
     details = record.setdefault("details", {})
-    if details.get("license_activated_at"):
+    if details.get("license_activated_at") and not force:
         return
     try:
         from flockspro.license.runtime import get_license_checker
@@ -189,7 +295,8 @@ def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str,
         details["license_effective_expires_at"] = payload["expires_at"]
         details["license_duration_days"] = max(1, round(duration_seconds / 86400))
     try:
-        from flockspro.license.cloud_checker import _machine_fingerprint, get_license_checker
+        from flockspro.license.cloud_checker import _machine_fingerprint
+        from flockspro.license.runtime import get_license_checker
 
         checker = get_license_checker()
         load_install_id = getattr(checker, "_load_or_create_install_id", None)
@@ -417,11 +524,21 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
     details = {
         "product": normalized_product,
         "license_type": payload.license_type,
+        "request_kind": payload.request_kind,
         "company": payload.company.strip(),
+        "enterprise_name": payload.company.strip(),
         "applicant_name": payload.applicant_name.strip(),
         "applicant_email": (payload.applicant_email or "").strip() or None,
         "applicant_phone": (payload.applicant_phone or "").strip() or None,
         "notes": (payload.notes or "").strip() or None,
+        "idempotency_key": request_id,
+        "console_account_name": console_session.get("user_display")
+        or console_session.get("user_email")
+        or console_session.get("passport_uid"),
+        "cloud_account": console_session.get("user_display")
+        or console_session.get("user_email")
+        or console_session.get("passport_uid"),
+        "passport_uid": console_session.get("passport_uid"),
     }
     record = {
         "request_id": request_id,
@@ -431,6 +548,11 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
         "suggestion": None,
         "activate_key": None,
         "manifest_url": None,
+        "license_id": None,
+        "license_status": None,
+        "max_admins": None,
+        "max_members": None,
+        "expires_at": None,
         "details": details,
         "created_at": now,
         "updated_at": now,
@@ -445,7 +567,9 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
             "install_id": console_session.get("install_id"),
             "passport_uid": console_session.get("passport_uid"),
             "company_name": details["company"],
+            "enterprise_name": details["enterprise_name"],
             "contact_email": details["applicant_email"] or "",
+            "idempotency_key": request_id,
             "form_data": details,
         }
         headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
@@ -465,6 +589,11 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
                     "suggestion": data.get("suggestion"),
                     "activate_key": data.get("activate_key"),
                     "manifest_url": data.get("manifest_url"),
+                    "license_id": data.get("license_id"),
+                    "license_status": data.get("license_status"),
+                    "max_admins": data.get("max_admins"),
+                    "max_members": data.get("max_members"),
+                    "expires_at": data.get("expires_at"),
                     "details": data.get("form_data", details),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }
@@ -484,6 +613,108 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
         if raw:
             result.append(UpgradeRequestStatus(**_enrich_record_from_install_marker(raw)))
     return result
+
+
+@router.get("/pro-package-status")
+async def get_pro_package_status(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    marker = _read_pro_bundle_install_marker()
+    return {
+        "installed": _is_pro_component_installed(),
+        "installed_version": marker.get("installed_version"),
+        "flockspro_component_version": marker.get("flockspro_component_version"),
+        "build_id": marker.get("build_id"),
+        "installed_at": marker.get("installed_at"),
+    }
+
+
+@router.post("/licenses/sync-revocations")
+async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
+    require_admin(request)
+    console_base = _console_base_url()
+    if not console_base:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="FLOCKS_CONSOLE_BASE_URL 未配置")
+    try:
+        console_session = await ConsoleLoginService.require_console_session()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
+    account_key = _console_session_account_key(console_session)
+    synced_license_ids: list[str] = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"{console_base}/v1/licenses/revocations", headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+            for request_id in await _list_request_ids():
+                raw = await Storage.get(_request_key(request_id))
+                if not isinstance(raw, dict):
+                    continue
+                record_account_key = _record_account_key(raw)
+                if account_key and record_account_key and record_account_key != account_key:
+                    continue
+                license_id = _record_license_id(raw)
+                if not license_id:
+                    continue
+                license_resp = await client.get(f"{console_base}/v1/licenses/{license_id}", headers=headers)
+                if license_resp.status_code == status.HTTP_404_NOT_FOUND:
+                    continue
+                license_resp.raise_for_status()
+                license_data = license_resp.json()
+                if isinstance(license_data, dict):
+                    _apply_console_license_data(raw, license_data)
+                    synced_license_ids.append(license_id)
+                    await Storage.set(_request_key(request_id), raw, "json")
+    except httpx.HTTPError as exc:
+        _raise_console_service_error(exc)
+
+    revoked_license_ids = data.get("revoked_license_ids", [])
+    if not isinstance(revoked_license_ids, list):
+        revoked_license_ids = []
+
+    imported = False
+    activated_license_id: str | None = None
+    refreshed_license_id: str | None = None
+    try:
+        from flockspro.license.runtime import get_license_checker
+
+        checker = get_license_checker()
+        import_fn = getattr(checker, "import_revocation", None)
+        if callable(import_fn):
+            import_fn([str(item) for item in revoked_license_ids])
+            imported = True
+
+        current_status = checker.status() if hasattr(checker, "status") else {}
+        current_license_id = str(current_status.get("license_id") or "")
+        current_inactive = (
+            current_license_id in {str(item) for item in revoked_license_ids}
+            or str(current_status.get("license_status") or "").lower() in _INACTIVE_LICENSE_STATUSES
+            or current_status.get("active") is False
+        )
+        if current_inactive:
+            target = await _latest_usable_issued_record(
+                {str(item) for item in revoked_license_ids},
+                account_key=_console_session_account_key(console_session),
+            )
+            target_license_id = _record_license_id(target) if target else ""
+            if target and target_license_id and target_license_id != current_license_id:
+                await _maybe_activate_pro_license(target, force=True)
+                await _maybe_refresh_pro_license(target)
+                activated_license_id = target_license_id
+                refreshed_license_id = target_license_id
+                await Storage.set(_request_key(str(target["request_id"])), target, "json")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
+
+    return {
+        "revoked_license_ids": [str(item) for item in revoked_license_ids],
+        "imported": imported,
+        "synced_license_ids": synced_license_ids,
+        "activated_license_id": activated_license_id,
+        "refreshed_license_id": refreshed_license_id,
+    }
 
 
 @router.get("/upgrade-requests/{request_id}", response_model=UpgradeRequestStatus)
@@ -519,6 +750,11 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
                     "suggestion": data.get("suggestion", raw.get("suggestion")),
                     "activate_key": data.get("activate_key", raw.get("activate_key")),
                     "manifest_url": data.get("manifest_url", raw.get("manifest_url")),
+                    "license_id": data.get("license_id", raw.get("license_id")),
+                    "license_status": data.get("license_status", raw.get("license_status")),
+                    "max_admins": data.get("max_admins", raw.get("max_admins")),
+                    "max_members": data.get("max_members", raw.get("max_members")),
+                    "expires_at": data.get("expires_at", raw.get("expires_at")),
                     "details": data.get("form_data", raw.get("details", {})),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }
@@ -638,6 +874,11 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
                     "suggestion": data.get("suggestion", raw.get("suggestion")),
                     "activate_key": data.get("activate_key", raw.get("activate_key")),
                     "manifest_url": data.get("manifest_url", raw.get("manifest_url")),
+                    "license_id": data.get("license_id", raw.get("license_id")),
+                    "license_status": data.get("license_status", raw.get("license_status")),
+                    "max_admins": data.get("max_admins", raw.get("max_admins")),
+                    "max_members": data.get("max_members", raw.get("max_members")),
+                    "expires_at": data.get("expires_at", raw.get("expires_at")),
                     "details": data.get("form_data", raw.get("details", {})),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }

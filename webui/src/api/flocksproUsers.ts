@@ -20,6 +20,14 @@ export interface FlocksproResetPasswordResult {
   must_reset_password: boolean;
 }
 
+export interface FlocksproLicenseStatus {
+  activated?: boolean;
+  active?: boolean;
+  license_id?: string | null;
+  status?: string | null;
+  license_status?: string | null;
+}
+
 export const flocksproUsersApi = {
   hasCapability: async (): Promise<boolean> => {
     try {
@@ -32,6 +40,11 @@ export const flocksproUsersApi = {
       }
       return false;
     }
+  },
+
+  getLicenseStatus: async (): Promise<FlocksproLicenseStatus> => {
+    const response = await client.get('/api/flockspro/license/status');
+    return response.data;
   },
 
   listUsers: async (): Promise<LocalUser[]> => {

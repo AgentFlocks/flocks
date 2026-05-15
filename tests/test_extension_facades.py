@@ -7,6 +7,7 @@ from flocks.license import (
     assert_license_active,
     get_checker,
     is_license_active,
+    license_status,
     register_checker,
 )
 
@@ -29,6 +30,7 @@ async def test_oss_default_facades_remain_noop_and_local():
 
     assert AuthService.get_backend() is LocalAuthBackend
     assert await is_license_active(feature="session_create") is True
+    assert (await license_status())["status"] == "oss"
     await assert_license_active(feature="session_create")
     await emit_audit_event("test_event", {"ok": True})
 

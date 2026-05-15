@@ -7,10 +7,11 @@ import { authApi, type ConsoleLoginSessionStatus } from '@/api/auth';
 import client from '@/api/client';
 import {
   consoleUpgradeApi,
+  type ProPackageStatus,
   type UpgradeRequestCreatePayload,
   type UpgradeRequestStatus,
 } from '@/api/consoleUpgrade';
-import { checkUpdate, type UpdateProgress } from '@/api/update';
+import { type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
 
 interface UpgradeApplyFormState {
@@ -28,14 +29,14 @@ interface FlocksproLicenseStatus {
   active: boolean;
   license_id?: string | null;
   status?: string | null;
+  license_status?: string | null;
+  inactive_reason?: string | null;
+  reapply_allowed?: boolean | null;
   expires_at?: number | string | null;
   max_admins?: number | null;
   max_members?: number | null;
   fingerprint?: string | null;
   install_id?: string | null;
-  last_heartbeat_ok_at?: number | string | null;
-  active_patch_serial?: number | string | null;
-  has_patches?: boolean | null;
   [key: string]: string | number | boolean | null | undefined;
 }
 
@@ -56,6 +57,11 @@ const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 async function getFlocksproLicenseStatus(): Promise<FlocksproLicenseStatus> {
   const response = await client.get('/api/flockspro/license/status');
   return response.data;
+}
+
+async function refreshFlocksproLicenseStatus(): Promise<FlocksproLicenseStatus> {
+  await client.post('/api/flockspro/license/refresh').catch(() => undefined);
+  return getFlocksproLicenseStatus();
 }
 
 function formatProVersion(version?: string | null): string {
@@ -99,6 +105,101 @@ function formatLicenseValue(key: string, value: string | number | boolean | null
   return String(value);
 }
 
+function compactIdentifier(value?: string | null, head = 10, tail = 8): string {
+  if (!value) {
+    return '-';
+  }
+  if (value.length <= head + tail + 3) {
+    return value;
+  }
+  return `${value.slice(0, head)}...${value.slice(-tail)}`;
+}
+
+function normalizeLicenseType(value?: string | null): 'trial' | 'test' | 'commercial' | null {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (['trial', 'trial_30d'].includes(normalized)) {
+    return 'trial';
+  }
+  if (['test', 'poc'].includes(normalized)) {
+    return 'test';
+  }
+  if (normalized === 'commercial') {
+    return 'commercial';
+  }
+  return null;
+}
+
+function requestAccountKey(item: UpgradeRequestStatus): string {
+  return String(
+    item.details?.console_account_name ||
+      item.details?.cloud_account ||
+      item.details?.passport_uid ||
+      item.details?.account ||
+      '',
+  ).trim().toLowerCase();
+}
+
+function isRequestForCurrentAccount(item: UpgradeRequestStatus, currentAccountKey: string): boolean {
+  if (!currentAccountKey) {
+    return true;
+  }
+  const accountKey = requestAccountKey(item);
+  return !accountKey || accountKey === currentAccountKey;
+}
+
+function requestLicenseId(item: UpgradeRequestStatus): string {
+  return String(item.license_id || item.details?.license_id || item.activate_key || item.request_id || '-');
+}
+
+function requestHasIssuedLicense(item: UpgradeRequestStatus): boolean {
+  return Boolean(item.license_id || item.details?.license_id || item.activate_key);
+}
+
+function requestExpiresAt(item: UpgradeRequestStatus): string | number | null | undefined {
+  return item.expires_at || item.details?.license_effective_expires_at || item.details?.expires_at;
+}
+
+function requestLicenseStatus(item: UpgradeRequestStatus): string {
+  return (
+    item.license_status ||
+    item.details?.license_status ||
+    normalizeLicenseType(item.details?.license_type)?.toString() ||
+    item.status ||
+    '-'
+  );
+}
+
+function isInactiveLicenseStatus(value?: string | null): boolean {
+  return ['revoked', 'expired', 'superseded'].includes(String(value || '').trim().toLowerCase());
+}
+
+function requestMaxAdmins(item: UpgradeRequestStatus): number | null | undefined {
+  return item.max_admins ?? (typeof item.details?.max_admins === 'number' ? item.details.max_admins : null);
+}
+
+function requestMaxMembers(item: UpgradeRequestStatus): number | null | undefined {
+  return item.max_members ?? (typeof item.details?.max_members === 'number' ? item.details.max_members : null);
+}
+
+function requestCreatedTime(item: UpgradeRequestStatus): number {
+  const created = new Date(item.created_at || item.updated_at).getTime();
+  return Number.isNaN(created) ? 0 : created;
+}
+
+function requestDurationDays(item: UpgradeRequestStatus): number | null {
+  if (typeof item.details?.license_duration_days === 'number') {
+    return item.details.license_duration_days;
+  }
+  const expiresAt = requestExpiresAt(item);
+  const createdAt = new Date(item.created_at);
+  const expiresDate =
+    typeof expiresAt === 'number' ? new Date(expiresAt * 1000) : expiresAt ? new Date(expiresAt) : null;
+  if (!expiresDate || Number.isNaN(expiresDate.getTime()) || Number.isNaN(createdAt.getTime())) {
+    return null;
+  }
+  return Math.max(1, Math.ceil((expiresDate.getTime() - createdAt.getTime()) / 86400000));
+}
+
 export default function FlocksproUpgradePage() {
   const { t } = useTranslation('flockspro');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -121,27 +222,56 @@ export default function FlocksproUpgradePage() {
   const [refreshingInstalled, setRefreshingInstalled] = useState(false);
   const [showLicenseDetails, setShowLicenseDetails] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
-  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+  const [proPackageStatus, setProPackageStatus] = useState<ProPackageStatus | null>(null);
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
+  const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
+  const licenseReapplyAllowed =
+    licenseStatus?.reapply_allowed === true ||
+    ['revoked', 'expired'].includes(String(licenseStatus?.license_status || '').toLowerCase());
+  const runtimeLicenseInvalid =
+    licenseReapplyAllowed ||
+    licenseStatus?.active === false ||
+    isInactiveLicenseStatus(licenseStatus?.license_status);
+  const invalidRuntimeLicenseId =
+    runtimeLicenseInvalid && licenseStatus?.license_id ? String(licenseStatus.license_id) : '';
+  const accountScopedRequests = useMemo(
+    () => requests.filter((item) => isRequestForCurrentAccount(item, currentConsoleAccountKey)),
+    [currentConsoleAccountKey, requests],
+  );
 
   const visibleRequests = useMemo(
-    () =>
-      requests.filter((item) => {
+    () => {
+      const currentStatuses = ['pending', 'reviewing', 'approved'];
+      return accountScopedRequests.filter((item) => {
         const status = (item.status || '').toLowerCase();
         if (status === 'rejected') {
           return !dismissedRejectedRequestIds.has(item.request_id);
         }
-        return ['pending', 'reviewing', 'approved'].includes(status);
-      }),
-    [dismissedRejectedRequestIds, requests],
+        return currentStatuses.includes(status);
+      });
+    },
+    [accountScopedRequests, dismissedRejectedRequestIds],
   );
 
   const activeRequest = useMemo(
     () =>
       visibleRequests.find((item) => item.request_id === activeRequestId) ?? visibleRequests[0] ?? null,
     [activeRequestId, visibleRequests],
+  );
+
+  const currentIssuedRequest = useMemo(
+    () => {
+      const issued = accountScopedRequests.filter((item) => {
+        const status = (item.status || '').toLowerCase();
+        return ['approved', 'activated'].includes(status) && requestHasIssuedLicense(item);
+      });
+      issued.sort((a, b) => requestCreatedTime(b) - requestCreatedTime(a));
+      return issued[0] ?? null;
+    },
+    [accountScopedRequests],
   );
 
   const latestActivatedRequest = useMemo(
@@ -159,72 +289,71 @@ export default function FlocksproUpgradePage() {
     latestActivatedRequest?.details?.flockspro_component_version;
   const proVersion = formatProVersion(
     proComponentVersion ||
+      proPackageStatus?.flockspro_component_version ||
+      proPackageStatus?.installed_version ||
       latestActivatedRequest?.details?.auto_install_version ||
-      latestActivatedRequest?.details?.auto_install_target ||
-      currentVersion,
+      latestActivatedRequest?.details?.auto_install_target,
   );
+  const isProPackageInstalled = licenseStatus !== null || proPackageStatus?.installed === true;
   const isProLoaded = licenseStatus?.activated === true;
-  const displayedLicenseStatus = latestActivatedRequest?.details?.license_status || licenseStatus?.status || '-';
-  const displayedExpiresAt = latestActivatedRequest?.details?.license_effective_expires_at ||
-    latestActivatedRequest?.details?.expires_at ||
-    licenseStatus?.expires_at;
+  const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
+  const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
+  const preferRequestLicense =
+    Boolean(currentIssuedRequest) &&
+    (!runtimeLicenseUsable ||
+      requestLicenseId(currentIssuedRequest as UpgradeRequestStatus) !== licenseStatus?.license_id);
+  const currentDisplayLicenseId = preferRequestLicense
+    ? requestLicenseId(currentIssuedRequest as UpgradeRequestStatus)
+    : runtimeLicenseUsable
+    ? licenseStatus?.license_id
+    : undefined;
+  const showCurrentLicenseCard = Boolean(currentDisplayLicenseId);
+  const displayedLicenseStatus = (preferRequestLicense
+    ? requestLicenseStatus(currentIssuedRequest as UpgradeRequestStatus)
+    : licenseStatus?.license_status) ||
+    licenseStatus?.status ||
+    '-';
+  const displayedLicenseInactive = isInactiveLicenseStatus(String(displayedLicenseStatus));
+  const currentLicenseInvalid =
+    Boolean(currentDisplayLicenseId) && (displayedLicenseInactive || (!preferRequestLicense && runtimeLicenseInvalid));
+  const displayedExpiresAt =
+    (preferRequestLicense && currentIssuedRequest ? requestExpiresAt(currentIssuedRequest) : licenseStatus?.expires_at) ||
+    (!preferRequestLicense
+      ? latestActivatedRequest?.details?.license_effective_expires_at || latestActivatedRequest?.details?.expires_at
+      : undefined);
   const remainingDays = daysRemaining(displayedExpiresAt);
+  const displayedMaxAdmins = preferRequestLicense && currentIssuedRequest
+    ? requestMaxAdmins(currentIssuedRequest)
+    : licenseStatus?.max_admins;
+  const displayedMaxMembers = preferRequestLicense && currentIssuedRequest
+    ? requestMaxMembers(currentIssuedRequest)
+    : licenseStatus?.max_members;
+  const displayedLastSyncedAt =
+    preferRequestLicense && currentIssuedRequest ? currentIssuedRequest.updated_at : latestActivatedRequest?.updated_at;
+  const licenseQuotaText = [
+    displayedMaxAdmins
+      ? t('upgrade.adminQuotaValue', { count: displayedMaxAdmins })
+      : null,
+    displayedMaxMembers
+      ? t('upgrade.memberQuotaValue', { count: displayedMaxMembers })
+      : null,
+  ].filter(Boolean).join(' / ') || '-';
   const licenseDetailRows = useMemo(() => {
-    if (!licenseStatus) {
+    if (!licenseStatus && !currentDisplayLicenseId) {
       return [];
     }
-    const preferredOrder = [
-      'activated',
-      'active',
-      'license_id',
-      'status',
-      'expires_at',
-      'max_admins',
-      'max_members',
-      'fingerprint',
-      'install_id',
-      'last_heartbeat_ok_at',
-      'active_patch_serial',
-      'has_patches',
-    ];
-    const entries = Object.entries(licenseStatus)
-      .filter(([, value]) => value !== undefined)
-      .sort(([left], [right]) => {
-        const leftIndex = preferredOrder.indexOf(left);
-        const rightIndex = preferredOrder.indexOf(right);
-        if (leftIndex !== -1 || rightIndex !== -1) {
-          return (leftIndex === -1 ? preferredOrder.length : leftIndex) -
-            (rightIndex === -1 ? preferredOrder.length : rightIndex);
-        }
-        return left.localeCompare(right);
-      });
-    const rows = entries.map(([key, value]) => ({
-      key,
-      value: formatLicenseValue(key, value),
-    }));
-    if (latestActivatedRequest?.details?.license_effective_expires_at) {
-      rows.push({
-        key: 'effective_expires_at',
-        value: formatLicenseValue(
-          'effective_expires_at',
-          latestActivatedRequest.details.license_effective_expires_at,
-        ),
-      });
-    }
-    if (latestActivatedRequest?.details?.license_duration_days) {
-      rows.push({
-        key: 'duration_days',
-        value: String(latestActivatedRequest.details.license_duration_days),
-      });
-    }
-    if (remainingDays !== null) {
-      rows.push({
-        key: 'remaining_days',
-        value: String(remainingDays),
-      });
-    }
-    return rows;
-  }, [latestActivatedRequest, licenseStatus, remainingDays]);
+    return [
+      ['license_id', currentDisplayLicenseId],
+      ['install_id', preferRequestLicense ? undefined : licenseStatus?.install_id],
+      ['fingerprint', preferRequestLicense ? undefined : licenseStatus?.fingerprint],
+    ]
+      .filter(([, value]) => value !== undefined && value !== null && value !== '')
+      .map(([key, value]) => ({
+        key: String(key),
+        label: t(`upgrade.licenseFieldLabels.${key}`),
+        value: formatLicenseValue(String(key), value),
+      }));
+  }, [currentDisplayLicenseId, licenseStatus, preferRequestLicense, t]);
 
   const refreshConsoleLoginStatus = useCallback(async () => {
     setConsoleLoginLoading(true);
@@ -244,12 +373,16 @@ export default function FlocksproUpgradePage() {
     try {
       const data = await consoleUpgradeApi.listRequests();
       setRequests(data);
+      const currentStatuses = ['pending', 'reviewing', 'approved'];
       const nextVisible = data.filter((item) => {
+        if (!isRequestForCurrentAccount(item, currentConsoleAccountKey)) {
+          return false;
+        }
         const status = (item.status || '').toLowerCase();
         if (status === 'rejected') {
           return !dismissedRejectedRequestIds.has(item.request_id);
         }
-        return ['pending', 'reviewing', 'approved'].includes(status);
+        return currentStatuses.includes(status);
       });
       setActiveRequestId((prev) => {
         if (prev && nextVisible.some((item) => item.request_id === prev)) {
@@ -260,7 +393,7 @@ export default function FlocksproUpgradePage() {
     } catch (err) {
       setRequestError(extractErrorMessage(err, t('errors.fetchRequests')));
     }
-  }, [dismissedRejectedRequestIds, t]);
+  }, [currentConsoleAccountKey, dismissedRejectedRequestIds, t]);
 
   useEffect(() => {
     if (!activeRequestId) {
@@ -278,16 +411,7 @@ export default function FlocksproUpgradePage() {
 
   useEffect(() => {
     let cancelled = false;
-    void checkUpdate()
-      .then((info) => {
-        if (!cancelled && info.current_version) {
-          setCurrentVersion(info.current_version);
-        }
-      })
-      .catch(() => {
-        // Version is auxiliary on this page.
-      });
-    void getFlocksproLicenseStatus()
+    void refreshFlocksproLicenseStatus()
       .then((status) => {
         if (!cancelled) {
           setLicenseStatus(status);
@@ -296,6 +420,17 @@ export default function FlocksproUpgradePage() {
       .catch(() => {
         if (!cancelled) {
           setLicenseStatus(null);
+        }
+      });
+    void consoleUpgradeApi.getProPackageStatus()
+      .then((status) => {
+        if (!cancelled) {
+          setProPackageStatus(status);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setProPackageStatus(null);
         }
       });
     return () => {
@@ -382,6 +517,7 @@ export default function FlocksproUpgradePage() {
       const payload: UpgradeRequestCreatePayload = {
         product: applyForm.product,
         license_type: applyForm.licenseType,
+        request_kind: 'new',
         company,
         applicant_name: applicantName,
         applicant_email: applyForm.applicantEmail.trim() || undefined,
@@ -425,8 +561,11 @@ export default function FlocksproUpgradePage() {
     setRefreshingInstalled(true);
     setRequestError(null);
     try {
+      await consoleUpgradeApi.syncRevocations().catch(() => undefined);
       await refreshRequests();
-      const status = await getFlocksproLicenseStatus();
+      const packageStatus = await consoleUpgradeApi.getProPackageStatus();
+      setProPackageStatus(packageStatus);
+      const status = await refreshFlocksproLicenseStatus();
       setLicenseStatus(status);
     } catch (err) {
       setRequestError(extractErrorMessage(err, t('errors.refreshRequest')));
@@ -471,13 +610,13 @@ export default function FlocksproUpgradePage() {
         return;
       }
       try {
-        const rootResponse = await fetch('/', { cache: 'no-store' });
-        const rootHtml = await rootResponse.text();
-        const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
-        if (rootResponse.ok && !stillShowingUpgradePage) {
-          const healthResponse = await fetch('/api/health', { cache: 'no-store' });
-          if (healthResponse.ok) {
-            window.location.reload();
+        const healthResponse = await fetch('/api/health', { cache: 'no-store' });
+        if (healthResponse.ok) {
+          const rootResponse = await fetch('/', { cache: 'no-store' });
+          const rootHtml = await rootResponse.text();
+          const stillShowingUpgradePage = rootHtml.includes(UPGRADE_PAGE_MARKER);
+          if (rootResponse.ok && !stillShowingUpgradePage) {
+            window.location.assign(`${window.location.pathname}${window.location.search}`);
             return;
           }
         }
@@ -508,6 +647,7 @@ export default function FlocksproUpgradePage() {
         upsertUpgradeStep(progress);
         if (progress.stage === 'restarting') {
           sawRestarting = true;
+          setProUpgrading(false);
           setProRestarting(true);
           pollUntilReady();
         }
@@ -515,7 +655,9 @@ export default function FlocksproUpgradePage() {
       if (!sawRestarting) {
         setProUpgrading(false);
         await refreshRequests();
-        const status = await getFlocksproLicenseStatus();
+        const packageStatus = await consoleUpgradeApi.getProPackageStatus();
+        setProPackageStatus(packageStatus);
+        const status = await refreshFlocksproLicenseStatus();
         setLicenseStatus(status);
       }
     } catch (err) {
@@ -527,17 +669,35 @@ export default function FlocksproUpgradePage() {
   };
 
   const canApplyUpgrade = consoleLoginStatus?.logged_in === true;
-  const hasOpenRequest = requests.some((item) =>
-    ['pending', 'reviewing', 'approved'].includes((item.status || '').toLowerCase()),
-  );
+  const hasOpenRequest = accountScopedRequests.some((item) => {
+    const status = (item.status || '').toLowerCase();
+    if (['pending', 'reviewing'].includes(status)) {
+      return true;
+    }
+    return status === 'approved' && (!requestHasIssuedLicense(item) || !isProPackageInstalled);
+  });
   const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest;
-  const showApprovedActions = activeRequest?.status === 'approved';
+  const showApprovedActions = activeRequest?.status === 'approved' && !isProPackageInstalled;
   const showRejectedFeedback = activeRequest?.status === 'rejected';
   const canCancel =
     activeRequest?.status === 'pending' ||
     activeRequest?.status === 'reviewing' ||
     activeRequest?.status === 'approved';
-  const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
+  const primaryActionLabel = t('upgrade.applyNewLicenseAction');
+  const activeRequestIsCurrentLicense =
+    Boolean(activeRequest && currentIssuedRequest) &&
+    activeRequest?.request_id === currentIssuedRequest?.request_id &&
+    showCurrentLicenseCard;
+  const showActiveRequestCard = Boolean(activeRequest) && !(activeRequestIsCurrentLicense && isProPackageInstalled);
+  const historyRequests = accountScopedRequests.filter((item) => {
+    if (item.request_id === currentIssuedRequest?.request_id) {
+      return false;
+    }
+    if (showActiveRequestCard && item.request_id === activeRequest?.request_id) {
+      return false;
+    }
+    return true;
+  });
 
   const dismissRejectedRequest = (requestId: string) => {
     setDismissedRejectedRequestIds((prev) => {
@@ -620,14 +780,32 @@ export default function FlocksproUpgradePage() {
             </p>
           </div>
           {isProLoaded ? (
-            <button
-              type="button"
-              onClick={() => void refreshInstalledStatus()}
-              disabled={refreshingInstalled}
-              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
-            >
-              {refreshingInstalled ? t('upgrade.refreshing') : t('actions.refresh')}
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!canOpenApplyDialog) {
+                    return;
+                  }
+                  setApplyFormError(null);
+                  setShowApplyDialog(true);
+                }}
+                disabled={!canOpenApplyDialog}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:bg-gray-300 disabled:cursor-not-allowed"
+              >
+                {primaryActionLabel}
+              </button>
+              {!showCurrentLicenseCard && (
+                <button
+                  type="button"
+                  onClick={() => void refreshInstalledStatus()}
+                  disabled={refreshingInstalled}
+                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
+                >
+                  {refreshingInstalled ? t('upgrade.syncingLicense') : t('upgrade.syncLicenseAction')}
+                </button>
+              )}
+            </div>
           ) : (
             <button
               type="button"
@@ -644,7 +822,7 @@ export default function FlocksproUpgradePage() {
               disabled={!canOpenApplyDialog}
               className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:bg-gray-300 disabled:cursor-not-allowed"
             >
-              {t('upgrade.applyAction')}
+              {primaryActionLabel}
             </button>
           )}
         </div>
@@ -660,56 +838,7 @@ export default function FlocksproUpgradePage() {
           </div>
         )}
 
-        {isProLoaded && (
-          <div className="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
-            <div className="grid gap-3 md:grid-cols-4">
-              <div>
-                <div className="text-xs text-emerald-700">{t('upgrade.installedVersion')}</div>
-                <div className="mt-1 font-semibold">{proVersion}</div>
-              </div>
-              <div>
-                <div className="text-xs text-emerald-700">{t('upgrade.licenseStatus')}</div>
-                <div className="mt-1 font-semibold">{displayedLicenseStatus}</div>
-              </div>
-              <div>
-                <div className="text-xs text-emerald-700">{t('upgrade.expiresAt')}</div>
-                <div className="mt-1 font-semibold">{formatDateTimeValue(displayedExpiresAt)}</div>
-              </div>
-              <div>
-                <div className="text-xs text-emerald-700">{t('upgrade.remainingDays')}</div>
-                <div className="mt-1 font-semibold">
-                  {remainingDays === null ? '-' : t('upgrade.remainingDaysValue', { count: remainingDays })}
-                </div>
-              </div>
-            </div>
-            {licenseDetailRows.length > 0 && (
-              <div className="border-t border-emerald-200 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowLicenseDetails((prev) => !prev)}
-                  className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-900"
-                >
-                  <ChevronDown
-                    className={`h-3.5 w-3.5 transition-transform ${showLicenseDetails ? 'rotate-180' : ''}`}
-                  />
-                  {showLicenseDetails ? t('upgrade.hideLicenseDetails') : t('upgrade.showLicenseDetails')}
-                </button>
-                {showLicenseDetails && (
-                  <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                    {licenseDetailRows.map((item) => (
-                      <div key={item.key} className="min-w-0 rounded border border-emerald-100 bg-white/60 px-3 py-2">
-                        <div className="text-xs text-emerald-700">{item.key}</div>
-                        <div className="mt-1 break-all font-medium text-emerald-950">{item.value}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeRequest ? (
+        {showActiveRequestCard && activeRequest ? (
           <div
             className={`rounded-lg border p-3 space-y-2 ${
               showRejectedFeedback ? 'border-red-200 bg-red-50/30' : 'border-gray-200'
@@ -734,7 +863,9 @@ export default function FlocksproUpgradePage() {
             </div>
             <div className="flex items-center justify-between">
               <div className="text-xs text-gray-500">{t('upgrade.status')}</div>
-              <div className="text-sm font-semibold text-slate-700">{activeRequest.status}</div>
+              <div className="text-sm font-semibold text-slate-700">
+                {t(`upgrade.statusLabels.${activeRequest.status}`, { defaultValue: activeRequest.status })}
+              </div>
             </div>
             <div className="flex items-center justify-between">
               <div className="text-xs text-gray-500">{t('upgrade.updatedAt')}</div>
@@ -786,12 +917,179 @@ export default function FlocksproUpgradePage() {
               </div>
             )}
           </div>
-        ) : !isProLoaded ? (
+        ) : !isProLoaded && !showCurrentLicenseCard ? (
           <div className="rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
             {t('upgrade.noRequest')}
           </div>
         ) : (
           null
+        )}
+
+        {showCurrentLicenseCard && (
+          <div
+            className={`rounded-xl border p-4 text-sm ${
+              currentLicenseInvalid
+                ? 'border-red-200 bg-red-50 text-red-900'
+                : 'border-emerald-200 bg-emerald-50 text-emerald-950'
+            }`}
+          >
+            {currentLicenseInvalid && (
+              <div className="mb-3 rounded-lg border border-red-200 bg-white/70 px-3 py-2 text-sm text-red-800">
+                {t('upgrade.revokedOrExpiredHint')}
+              </div>
+            )}
+            <div className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3 ${
+              currentLicenseInvalid ? 'border-red-200' : 'border-emerald-100'
+            }`}>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-base font-semibold">{proVersion}</span>
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                      currentLicenseInvalid ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
+                    }`}
+                  >
+                    {t(`upgrade.licenseStatusLabels.${displayedLicenseStatus}`, { defaultValue: displayedLicenseStatus })}
+                  </span>
+                </div>
+                <div className="mt-1 truncate text-xs text-slate-500" title={currentDisplayLicenseId || undefined}>
+                  {t('upgrade.licenseId')}: {compactIdentifier(currentDisplayLicenseId)}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshInstalledStatus()}
+                disabled={refreshingInstalled}
+                className={`rounded-lg border bg-white/70 px-3 py-2 text-xs font-medium disabled:cursor-not-allowed disabled:border-gray-200 disabled:bg-white/50 disabled:text-gray-400 ${
+                  currentLicenseInvalid
+                    ? 'border-red-300 text-red-700 hover:bg-red-50'
+                    : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'
+                }`}
+              >
+                {refreshingInstalled ? t('upgrade.syncingLicense') : t('upgrade.syncLicenseAction')}
+              </button>
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-4">
+              <div className="rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs text-slate-500">{t('upgrade.expiresAt')}</div>
+                <div className="mt-1 font-semibold text-slate-900">{formatDateTimeValue(displayedExpiresAt)}</div>
+              </div>
+              <div className="rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs text-slate-500">{t('upgrade.quota')}</div>
+                <div className="mt-1 font-semibold text-slate-900">{licenseQuotaText}</div>
+              </div>
+              <div className="rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs text-slate-500">{t('upgrade.remainingDays')}</div>
+                <div className={`mt-1 font-semibold ${currentLicenseInvalid ? 'text-red-700' : 'text-emerald-700'}`}>
+                  {remainingDays === null ? '-' : t('upgrade.remainingDaysValue', { count: remainingDays })}
+                </div>
+              </div>
+              <div className="rounded-lg bg-white/70 px-3 py-2">
+                <div className="text-xs text-slate-500">{t('upgrade.lastSyncedAt')}</div>
+                <div className="mt-1 font-semibold text-slate-900">
+                  {formatDateTimeValue(displayedLastSyncedAt)}
+                </div>
+              </div>
+            </div>
+            {licenseDetailRows.length > 0 && (
+              <div className={`mt-3 border-t pt-3 ${currentLicenseInvalid ? 'border-red-200' : 'border-emerald-100'}`}>
+                <button
+                  type="button"
+                  onClick={() => setShowLicenseDetails((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 text-xs font-medium ${
+                    currentLicenseInvalid ? 'text-red-700 hover:text-red-900' : 'text-emerald-700 hover:text-emerald-900'
+                  }`}
+                >
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 transition-transform ${showLicenseDetails ? 'rotate-180' : ''}`}
+                  />
+                  {showLicenseDetails ? t('upgrade.hideLicenseDetails') : t('upgrade.showLicenseDetails')}
+                </button>
+                {showLicenseDetails && (
+                  <div className="mt-2 grid gap-2 md:grid-cols-2">
+                    {licenseDetailRows.map((item) => (
+                      <div
+                        key={item.key}
+                        className="grid min-w-0 grid-cols-[150px_1fr] gap-3 rounded-lg bg-white/70 px-3 py-2"
+                      >
+                        <div className="text-xs text-slate-500">{item.label}</div>
+                        <div className="break-all font-medium text-slate-900">{item.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {historyRequests.length > 0 && (
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white text-sm text-gray-700">
+            <div className="border-b border-gray-200 bg-gray-50 px-4 py-3 font-medium text-gray-900">
+              {t('upgrade.licenseHistory')}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    {[
+                      t('upgrade.historyColumns.licenseId'),
+                      t('upgrade.historyColumns.licenseType'),
+                      t('upgrade.historyColumns.status'),
+                      t('upgrade.historyColumns.appliedAt'),
+                      t('upgrade.historyColumns.expiresAt'),
+                      t('upgrade.historyColumns.durationDays'),
+                      t('upgrade.historyColumns.account'),
+                    ].map((header) => (
+                      <th key={header} className="px-4 py-2 text-left text-xs font-semibold text-gray-500">
+                        {header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100 bg-white">
+                  {historyRequests.map((item) => {
+                    const expiresAt = requestExpiresAt(item);
+                    const duration = requestDurationDays(item);
+                    const account = requestAccountKey(item) || '-';
+                    const itemLicenseId = requestLicenseId(item);
+                    const historyLicenseType =
+                      normalizeLicenseType(item.details?.license_type) ||
+                      normalizeLicenseType(item.license_status) ||
+                      normalizeLicenseType(item.details?.license_status);
+                    const rawLicenseStatus = item.license_status || item.details?.license_status || '';
+                    const licenseStatusIsType = Boolean(normalizeLicenseType(rawLicenseStatus));
+                    const historyStatus = itemLicenseId === invalidRuntimeLicenseId
+                      ? 'revoked'
+                      : licenseStatusIsType
+                      ? item.status
+                      : rawLicenseStatus || item.status;
+                    const historyStatusLabelGroup =
+                      isInactiveLicenseStatus(historyStatus) || historyStatus === 'active'
+                        ? 'licenseStatusLabels'
+                        : 'statusLabels';
+                    return (
+                      <tr key={item.request_id}>
+                        <td className="px-4 py-2 font-medium text-gray-900">{compactIdentifier(itemLicenseId)}</td>
+                        <td className="px-4 py-2">
+                          {historyLicenseType
+                            ? t(`upgrade.licenseTypeLabels.${historyLicenseType}`, { defaultValue: historyLicenseType })
+                            : '-'}
+                        </td>
+                        <td className="px-4 py-2">
+                          {t(`upgrade.${historyStatusLabelGroup}.${historyStatus}`, { defaultValue: historyStatus })}
+                        </td>
+                        <td className="px-4 py-2">{formatDateTime(item.created_at)}</td>
+                        <td className="px-4 py-2">{formatDateTimeValue(expiresAt)}</td>
+                        <td className="px-4 py-2">{duration ?? '-'}</td>
+                        <td className="px-4 py-2">{account}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
 
       </div>
@@ -910,7 +1208,7 @@ export default function FlocksproUpgradePage() {
               <div className="space-y-2">
                 {upgradeSteps.map((step) => {
                   const isError = step.stage === 'error';
-                  const isRunning = step.stage === 'restarting' || (step.stage === 'syncing' && proUpgrading);
+                  const isRunning = step.stage === 'restarting' && proRestarting;
                   return (
                     <div key={step.stage} className="flex items-start gap-2 text-sm">
                       {isError ? (
