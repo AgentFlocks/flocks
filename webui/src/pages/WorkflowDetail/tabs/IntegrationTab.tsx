@@ -322,6 +322,7 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
   // falsely showing the listener as active.
   const [listener, setListener] = useState<SyslogListenerStatus | null>(null);
   const [saveError, setSaveError] = useState<string>('');
+  const [portError, setPortError] = useState<string>('');
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -387,7 +388,32 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
     return () => window.clearInterval(handle);
   }, [isBinding, refreshStatus]);
 
+  const validatePort = (value: string): boolean => {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      setPortError(t('detail.run.syslogPortError'));
+      return false;
+    }
+    const num = Number.parseInt(trimmed, 10);
+    if (num < 1 || num > 65535) {
+      setPortError(t('detail.run.syslogPortError'));
+      return false;
+    }
+    setPortError('');
+    return true;
+  };
+
+  const handlePortChange = (value: string) => {
+    setPort(value);
+    if (value !== '') {
+      validatePort(value);
+    } else {
+      setPortError('');
+    }
+  };
+
   const handleSave = async () => {
+    if (!validatePort(port)) return;
     setSaving(true);
     setSaved(false);
     setSaveError('');
@@ -466,7 +492,19 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
               </select>
             </div>
             {inputField(t('detail.run.syslogHost'), host, setHost, '0.0.0.0')}
-            {inputField(t('detail.run.syslogPort'), port, setPort, '5140')}
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">{t('detail.run.syslogPort')}</label>
+              <input
+                type="text"
+                value={port}
+                onChange={e => handlePortChange(e.target.value)}
+                placeholder="5140"
+                className={`w-full text-xs border rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 ${portError ? 'border-red-400 focus:ring-red-500' : 'border-gray-200 focus:ring-red-500'}`}
+              />
+              {portError && (
+                <p className="text-xs text-red-500 mt-1">{portError}</p>
+              )}
+            </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">{t('detail.run.syslogFormat')}</label>
               <select
@@ -484,7 +522,7 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
           <button
             type="button"
             onClick={handleSave}
-            disabled={saving}
+            disabled={saving || !!portError}
             className="w-full flex items-center justify-center gap-2 py-2 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
           >
             {saving ? (
