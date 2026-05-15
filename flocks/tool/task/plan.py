@@ -6,12 +6,12 @@ Provides tools for entering and exiting plan mode:
 - plan_exit: Switch back to build agent after planning is complete
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional
 
 from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+    ToolRegistry, ToolCategory, ToolResult, ToolContext
 )
-from flocks.tool.system.question import set_question_handler, QuestionRejectedError
+from flocks.tool.system.question import QuestionRejectedError
 from flocks.utils.log import Log
 
 
@@ -34,18 +34,16 @@ In plan mode:
 - You will operate as the "plan" agent
 - Focus on research, analysis, and creating a plan document
 - Changes to non-plan files are restricted
-- Use plan_exit when the plan is complete and approved"""
+- Use plan_exit when the plan is complete and you're ready to return to build mode"""
 
 
 PLAN_EXIT_DESCRIPTION = """Exit plan mode and return to build mode.
 
 Use this tool when:
 - The plan document is complete
-- The user has approved the plan
 - You're ready to start implementing
 
 This will:
-- Ask user for confirmation
 - Switch to the "rex" agent
 - Allow full file editing capabilities"""
 
@@ -78,7 +76,12 @@ async def _ask_user(ctx: ToolContext, question: str, header: str, options: list)
     Returns:
         Selected option label
     """
-    from flocks.tool.system.question import _question_handler, default_question_handler, _current_message_id
+    from flocks.tool.system.question import (
+        _question_handler,
+        default_question_handler,
+        _current_call_id,
+        _current_message_id,
+    )
     
     handler = _question_handler or default_question_handler
     
@@ -90,6 +93,7 @@ async def _ask_user(ctx: ToolContext, question: str, header: str, options: list)
     
     # Set message_id in context for handler to use
     _current_message_id.set(ctx.message_id)
+    _current_call_id.set(ctx.call_id)
     
     answers = await handler(ctx.session_id, questions)
     
@@ -180,27 +184,6 @@ async def plan_exit_tool(
     """
     plan_file = DEFAULT_PLAN_FILE
     
-    # Ask user for confirmation
-    try:
-        answer = await _ask_user(
-            ctx,
-            question=f"Plan at {plan_file} is complete. Would you like to switch to the build agent and start implementing?",
-            header="Build Agent",
-            options=[
-                {"label": "Yes", "description": "Switch to build agent and start implementing the plan"},
-                {"label": "No", "description": "Stay with plan agent to continue refining the plan"}
-            ]
-        )
-        
-        if answer == "No":
-            raise QuestionRejectedError()
-            
-    except QuestionRejectedError:
-        return ToolResult(
-            success=False,
-            error="User declined to exit plan mode"
-        )
-    
     # Notify agent switch
     if _agent_switch_callback:
         try:
@@ -208,14 +191,14 @@ async def plan_exit_tool(
                 ctx.session_id,
                 ctx.agent,
                 "rex",
-                f"The plan at {plan_file} has been approved, you can now edit files. Execute the plan"
+                f"The plan at {plan_file} is complete. Switch back to build mode and execute it."
             )
         except Exception as e:
             log.warn("plan_exit.callback_failed", {"error": str(e)})
     
     return ToolResult(
         success=True,
-        output="User approved switching to rex agent. Wait for further instructions.",
+        output="Exited plan mode and switched back to rex agent. Continue by executing the plan.",
         title="Switching to rex agent",
         metadata={}
     )

@@ -23,25 +23,6 @@ export const PlanExitTool = Tool.define("plan_exit", {
   async execute(_params, ctx) {
     const session = await Session.get(ctx.sessionID)
     const plan = path.relative(Instance.worktree, Session.plan(session))
-    const answers = await Question.ask({
-      sessionID: ctx.sessionID,
-      questions: [
-        {
-          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
-          header: "Build Agent",
-          custom: false,
-          options: [
-            { label: "Yes", description: "Switch to build agent and start implementing the plan" },
-            { label: "No", description: "Stay with plan agent to continue refining the plan" },
-          ],
-        },
-      ],
-      tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
-    })
-
-    const answer = answers[0]?.[0]
-    if (answer === "No") throw new Question.RejectedError()
-
     const model = await getLastModel(ctx.sessionID)
 
     const userMsg: MessageV2.User = {
@@ -60,13 +41,13 @@ export const PlanExitTool = Tool.define("plan_exit", {
       messageID: userMsg.id,
       sessionID: ctx.sessionID,
       type: "text",
-      text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
+      text: `The plan at ${plan} is complete. Switch back to build mode and execute it.`,
       synthetic: true,
     } satisfies MessageV2.TextPart)
 
     return {
       title: "Switching to build agent",
-      output: "User approved switching to build agent. Wait for further instructions.",
+      output: "Exited plan mode and switched back to build agent. Continue by executing the plan.",
       metadata: {},
     }
   },

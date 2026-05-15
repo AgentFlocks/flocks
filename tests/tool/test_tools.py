@@ -33,6 +33,8 @@ from flocks.tool import (
     ParameterType,
 )
 from flocks.tool.code import bash as bash_module
+import flocks.tool.task.plan as plan_module
+import flocks.tool.system.question as question_module
 
 
 # =============================================================================
@@ -606,6 +608,82 @@ class TestPlanTools:
         """Test that plan_exit tool is registered"""
         tool = ToolRegistry.get("plan_exit")
         assert tool is not None
+
+    @pytest.mark.asyncio
+    async def test_plan_enter_sets_call_id_for_question_handler(self, monkeypatch):
+        """plan_enter should attach the current tool call id to question context."""
+        seen: Dict[str, Any] = {}
+        switch_calls: List[Dict[str, str]] = []
+
+        async def fake_handler(session_id: str, questions: List[Dict[str, Any]]) -> List[List[str]]:
+            seen["session_id"] = session_id
+            seen["message_id"] = question_module.get_current_message_id()
+            seen["call_id"] = question_module.get_current_call_id()
+            seen["questions"] = questions
+            return [["Yes"]]
+
+        async def fake_switch(session_id: str, from_agent: str, to_agent: str, message: str) -> None:
+            switch_calls.append({
+                "session_id": session_id,
+                "from_agent": from_agent,
+                "to_agent": to_agent,
+                "message": message,
+            })
+
+        monkeypatch.setattr(question_module, "_question_handler", fake_handler)
+        monkeypatch.setattr(plan_module, "_agent_switch_callback", fake_switch)
+
+        result = await ToolRegistry.execute(
+            "plan_enter",
+            ctx=ToolContext(
+                session_id="test-session-001",
+                message_id="test-message-001",
+                agent="test",
+                call_id="call-plan-enter-001",
+            ),
+        )
+
+        assert result.success
+        assert seen["session_id"] == "test-session-001"
+        assert seen["message_id"] == "test-message-001"
+        assert seen["call_id"] == "call-plan-enter-001"
+        assert len(switch_calls) == 1
+        assert switch_calls[0]["to_agent"] == "plan"
+
+    @pytest.mark.asyncio
+    async def test_plan_exit_skips_question_confirmation(self, monkeypatch):
+        """plan_exit should switch modes directly without opening a question."""
+        switch_calls: List[Dict[str, str]] = []
+
+        async def fail_handler(session_id: str, questions: List[Dict[str, Any]]) -> List[List[str]]:
+            pytest.fail("plan_exit should not invoke the question handler")
+
+        async def fake_switch(session_id: str, from_agent: str, to_agent: str, message: str) -> None:
+            switch_calls.append({
+                "session_id": session_id,
+                "from_agent": from_agent,
+                "to_agent": to_agent,
+                "message": message,
+            })
+
+        monkeypatch.setattr(question_module, "_question_handler", fail_handler)
+        monkeypatch.setattr(plan_module, "_agent_switch_callback", fake_switch)
+
+        result = await ToolRegistry.execute(
+            "plan_exit",
+            ctx=ToolContext(
+                session_id="test-session-002",
+                message_id="test-message-002",
+                agent="plan",
+                call_id="call-plan-exit-001",
+            ),
+        )
+
+        assert result.success
+        assert "switched back to rex agent" in result.output
+        assert len(switch_calls) == 1
+        assert switch_calls[0]["to_agent"] == "rex"
+        assert "complete" in switch_calls[0]["message"]
 
 
 class TestWebFetchTool:
