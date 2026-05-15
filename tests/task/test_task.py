@@ -29,6 +29,8 @@ from flocks.task.models import (
     TaskStatus,
     TaskTrigger,
 )
+from flocks.task.plugin_models import TaskSpec
+from flocks.task.plugin_sync import upsert_task_specs
 from flocks.task.queue import TaskQueue
 from flocks.task.scheduler import TaskScheduler as SchedulerLoop
 from flocks.task.store import TaskStore
@@ -153,6 +155,61 @@ async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
             ),
             workspace_directory=str(tmp_path / "workspace"),
         )
+
+
+@pytest.mark.asyncio
+async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron():
+    created = await upsert_task_specs(
+        [
+            TaskSpec(
+                dedup_key="builtin:invalid-cron-new",
+                title="无效 cron 新任务",
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+            )
+        ]
+    )
+
+    scheduler = await TaskStore.get_scheduler_by_dedup_key("builtin:invalid-cron-new")
+
+    assert created == 0
+    assert scheduler is None
+
+
+@pytest.mark.asyncio
+async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_six_field_cron(
+    tmp_path: Path,
+):
+    scheduler = await TaskManager.create_scheduler(
+        title="原始内置任务",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="*/5 * * * *",
+            timezone="Asia/Shanghai",
+        ),
+        workspace_directory=str(tmp_path / "workspace"),
+        dedup_key="builtin:invalid-cron-existing",
+    )
+
+    created = await upsert_task_specs(
+        [
+            TaskSpec(
+                dedup_key="builtin:invalid-cron-existing",
+                title="被拒绝的更新",
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+                enabled=False,
+            )
+        ]
+    )
+
+    unchanged = await TaskManager.get_scheduler(scheduler.id)
+
+    assert created == 0
+    assert unchanged is not None
+    assert unchanged.title == "原始内置任务"
+    assert unchanged.trigger.cron == "*/5 * * * *"
+    assert unchanged.status == SchedulerStatus.ACTIVE
 
 
 @pytest.mark.asyncio
