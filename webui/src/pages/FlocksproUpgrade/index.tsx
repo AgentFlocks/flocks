@@ -51,8 +51,36 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
 };
 
 const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
+const DISMISSED_REJECTED_REQUESTS_KEY = 'flockspro-dismissed-rejected-requests';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+
+function loadDismissedRejectedRequestIds(): Set<string> {
+  if (typeof window === 'undefined') {
+    return new Set();
+  }
+  try {
+    const raw = window.localStorage.getItem(DISMISSED_REJECTED_REQUESTS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((item): item is string => typeof item === 'string' && item.length > 0));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDismissedRejectedRequestIds(ids: Set<string>): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(DISMISSED_REJECTED_REQUESTS_KEY, JSON.stringify([...ids].slice(-200)));
+  } catch {
+    // Ignore storage failures; the dismissal still applies for the current page session.
+  }
+}
 
 async function getFlocksproLicenseStatus(): Promise<FlocksproLicenseStatus> {
   const response = await client.get('/api/flockspro/license/status');
@@ -224,7 +252,7 @@ export default function FlocksproUpgradePage() {
   const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
   const [proPackageStatus, setProPackageStatus] = useState<ProPackageStatus | null>(null);
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
-    () => new Set(),
+    loadDismissedRejectedRequestIds,
   );
   const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
   const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
@@ -535,6 +563,7 @@ export default function FlocksproUpgradePage() {
         requests
           .filter((item) => (item.status || '').toLowerCase() === 'rejected')
           .forEach((item) => next.add(item.request_id));
+        saveDismissedRejectedRequestIds(next);
         return next;
       });
       setRequests((prev) => [created, ...prev]);
@@ -710,6 +739,7 @@ export default function FlocksproUpgradePage() {
     setDismissedRejectedRequestIds((prev) => {
       const next = new Set(prev);
       next.add(requestId);
+      saveDismissedRejectedRequestIds(next);
       return next;
     });
     setActiveRequestId((prev) => (prev === requestId ? null : prev));

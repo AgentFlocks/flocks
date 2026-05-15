@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi import status
 import httpx
@@ -127,6 +129,33 @@ async def test_create_upgrade_request_requires_console_login(
     assert "云账号未登录" in resp.text
 
 
+async def test_fallback_license_state_does_not_mark_license_activated(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: True)
+    monkeypatch.setattr(console_routes, "_machine_fingerprint", lambda install_id: f"fp_{install_id}", raising=False)
+
+    record = {
+        "request_id": "req_fallback",
+        "license_id": "lic_fallback",
+        "activate_key": "signed.token.value",
+        "details": {"activation_receipt": "signed.receipt.value"},
+    }
+
+    console_routes._fallback_write_pro_license_state(record, "signed.token.value", "missing license public key")
+
+    state = json.loads((tmp_path / "flockspro" / "license.json").read_text(encoding="utf-8"))
+    assert state["key"] == "signed.token.value"
+    assert state["payload"] == {}
+    assert state["activation_receipt"] == "signed.receipt.value"
+    assert "license_activated_at" not in record["details"]
+    assert record["details"]["license_activate_fallback_saved_at"]
+
+
 async def test_pro_package_status_reports_installed_marker(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -152,6 +181,82 @@ async def test_pro_package_status_reports_installed_marker(
     payload = resp.json()
     assert payload["installed"] is True
     assert payload["flockspro_component_version"] == "1.2.3"
+
+
+async def test_sync_console_license_revocations_without_pro_package_only_syncs_console_records(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: False)
+    await _set_bound_console_session()
+    await Storage.set("console:upgrade_request_ids", ["req_install"], "json")
+    await Storage.set(
+        "console:upgrade_request:req_install",
+        {
+            "request_id": "req_install",
+            "status": "approved",
+            "activate_key": "install_token",
+            "license_id": "lic_install",
+            "license_status": "trial",
+            "details": {"console_account_name": "alice", "license_id": "lic_install"},
+            "created_at": "2026-05-15T10:00:00+00:00",
+            "updated_at": "2026-05-15T10:00:00+00:00",
+        },
+        "json",
+    )
+
+    class _FakeResponse:
+        def __init__(self, payload: dict, status_code: int = status.HTTP_200_OK) -> None:
+            self._payload = payload
+            self.status_code = status_code
+
+        def json(self) -> dict:
+            return self._payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            assert headers == {"Authorization": "Bearer token_abc"}
+            if url == "http://console.local/v1/licenses/revocations":
+                return _FakeResponse({"revoked_license_ids": ["lic_revoked"]})
+            if url == "http://console.local/v1/licenses/lic_install":
+                return _FakeResponse(
+                    {
+                        "license_id": "lic_install",
+                        "license_status": "trial",
+                        "effective_status": "trial",
+                        "effective_expires_at": 1781417933,
+                        "effective_max_admins": 3,
+                        "effective_max_members": 9,
+                    }
+                )
+            raise AssertionError(url)
+
+    monkeypatch.setattr(console_routes.httpx, "AsyncClient", lambda timeout=10: _FakeClient())
+
+    resp = await client.post("/api/console/licenses/sync-revocations")
+
+    assert resp.status_code == status.HTTP_200_OK
+    payload = resp.json()
+    assert payload["imported"] is False
+    assert payload["inactive_reason"] == "flockspro_not_installed"
+    assert payload["synced_license_ids"] == ["lic_install"]
+    stored = await Storage.get("console:upgrade_request:req_install")
+    assert stored["max_admins"] == 3
+    assert stored["max_members"] == 9
 
 
 async def test_sync_console_license_revocations_imports_into_checker(
@@ -217,7 +322,7 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "http://console.local")
     monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
     await _set_bound_console_session()
-    await Storage.set("console:upgrade_request_ids", ["req_old", "req_new"], "json")
+    await Storage.set("console:upgrade_request_ids", ["req_old", "req_new", "req_later_revoked"], "json")
     await Storage.set(
         "console:upgrade_request:req_old",
         {
@@ -243,6 +348,20 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
             "details": {"license_id": "lic_new"},
             "created_at": "2026-05-15T11:00:00+00:00",
             "updated_at": "2026-05-15T11:00:00+00:00",
+        },
+        "json",
+    )
+    await Storage.set(
+        "console:upgrade_request:req_later_revoked",
+        {
+            "request_id": "req_later_revoked",
+            "status": "approved",
+            "activate_key": "later_revoked_token",
+            "license_id": "lic_later_revoked",
+            "license_status": "revoked",
+            "details": {"license_id": "lic_later_revoked"},
+            "created_at": "2026-05-15T12:00:00+00:00",
+            "updated_at": "2026-05-15T12:00:00+00:00",
         },
         "json",
     )
@@ -287,6 +406,16 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
                         "effective_expires_at": 1781417933,
                         "effective_max_admins": 2,
                         "effective_max_members": 6,
+                    }
+                )
+            if url == "http://console.local/v1/licenses/lic_later_revoked":
+                return _FakeResponse(
+                    {
+                        "license_id": "lic_later_revoked",
+                        "revoked": True,
+                        "license_status": "revoked",
+                        "effective_status": "revoked",
+                        "effective_expires_at": 1781417933,
                     }
                 )
             raise AssertionError(url)

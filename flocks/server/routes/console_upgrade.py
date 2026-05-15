@@ -184,8 +184,10 @@ async def _latest_usable_issued_record(
     )
     if not candidates:
         return None
-    latest, usable = candidates[0]
-    return latest if usable else None
+    for record, usable in candidates:
+        if usable:
+            return record
+    return None
 
 
 def _is_pro_component_installed() -> bool:
@@ -307,7 +309,11 @@ async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = F
         checker = get_license_checker()
         activate_fn = getattr(checker, "activate", None)
         if callable(activate_fn):
-            activate_fn(activate_key)
+            activation_receipt = details.get("activation_receipt") or record.get("activation_receipt")
+            if activation_receipt:
+                activate_fn(activate_key, activation_receipt)
+            else:
+                activate_fn(activate_key)
             details["license_activated_at"] = datetime.now(UTC).isoformat()
             details.pop("license_activate_error", None)
     except Exception as exc:
@@ -318,16 +324,8 @@ async def _maybe_activate_pro_license(record: dict[str, Any], *, force: bool = F
 
 
 def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str, reason: str) -> None:
-    payload = _decode_jwt_payload_unverified(activate_key)
-    if not payload:
-        return
     details = record.setdefault("details", {})
     now = int(time.time())
-    duration_seconds = _license_duration_seconds(record)
-    if duration_seconds:
-        payload["expires_at"] = now + duration_seconds
-        details["license_effective_expires_at"] = payload["expires_at"]
-        details["license_duration_days"] = max(1, round(duration_seconds / 86400))
     try:
         from flockspro.license.cloud_checker import _machine_fingerprint  # type: ignore[import-not-found]
         from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
@@ -342,14 +340,15 @@ def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str,
 
     license_path = Path(os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))) / "flockspro" / "license.json"
     license_path.parent.mkdir(parents=True, exist_ok=True)
+    activation_receipt = details.get("activation_receipt") or record.get("activation_receipt")
     license_path.write_text(
         json.dumps(
             {
-                "license_id": payload.get("license_id"),
+                "license_id": record.get("license_id"),
                 "key": activate_key,
-                "payload": payload,
+                "payload": {},
                 "bound_fingerprint": fingerprint,
-                "activation_receipt": None,
+                "activation_receipt": activation_receipt,
                 "patches": [],
                 "activated_at": now,
                 "install_id": install_id,
@@ -362,9 +361,8 @@ def _fallback_write_pro_license_state(record: dict[str, Any], activate_key: str,
         ),
         encoding="utf-8",
     )
-    details["license_activated_at"] = datetime.now(UTC).isoformat()
+    details["license_activate_fallback_saved_at"] = datetime.now(UTC).isoformat()
     details["license_activate_fallback_reason"] = reason
-    details.pop("license_activate_error", None)
 
 
 async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
@@ -662,8 +660,9 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     require_admin(request)
     marker = _read_pro_bundle_install_marker()
     capability = _get_pro_capability_status()
+    installed = _is_pro_component_installed()
     return {
-        "installed": _is_pro_component_installed(),
+        "installed": installed,
         "installed_version": marker.get("installed_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),
@@ -723,6 +722,15 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
     imported = False
     activated_license_id: str | None = None
     refreshed_license_id: str | None = None
+    if not _is_pro_component_installed():
+        return {
+            "revoked_license_ids": [str(item) for item in revoked_license_ids],
+            "imported": imported,
+            "synced_license_ids": synced_license_ids,
+            "activated_license_id": activated_license_id,
+            "refreshed_license_id": refreshed_license_id,
+            "inactive_reason": "flockspro_not_installed",
+        }
     try:
         from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
 
