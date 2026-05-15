@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-import pytest
-
 from flocks.workflow.execution_store import (
     DEFAULT_COMPACT_SIZE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
@@ -94,6 +92,21 @@ def test_compact_outputs_accepts_custom_keys_and_threshold() -> None:
     assert compacted["_custom_payload_count"] == 150
     # Default key is no longer in the override set so its list is kept.
     assert compacted["enriched_alerts"] == _make_alerts(50)
+
+
+def test_compact_outputs_compacts_tuple_sequences() -> None:
+    """``tuple`` values whose key is in the default set must be compacted just
+    like ``list`` values, since some serialisation paths (e.g. ``exec()``
+    return values) may produce tuples instead of lists.
+    """
+    big_tuple = tuple(_make_alerts(5_000))
+    outputs = {"enriched_alerts": big_tuple, "dedup_key": "x"}
+
+    compacted = compact_outputs_for_storage(outputs)
+
+    assert compacted["_enriched_alerts_count"] == 5_000
+    assert "enriched_alerts" not in compacted
+    assert compacted["dedup_key"] == "x"
 
 
 def test_compact_outputs_handles_non_dict_input() -> None:

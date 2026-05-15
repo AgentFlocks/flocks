@@ -43,12 +43,20 @@ def compact_outputs_for_storage(
 ) -> Dict[str, Any]:
     """Return a copy of *outputs* with large alert lists replaced by counts.
 
-    Only list values whose key is in *keys* AND whose length exceeds
-    *size_threshold* are compacted; everything else is passed through.
-    This prevents megabytes of alert data from being serialised into the
-    ``workflow_execution`` SQLite row on every invocation, while still
-    keeping small lists (e.g. error details, short configuration arrays)
-    fully inspectable in the execution-history UI.
+    Only **list or tuple** values whose key is in *keys* AND whose length
+    exceeds *size_threshold* are compacted to ``_<key>_count``; everything
+    else is passed through unchanged.  This prevents megabytes of alert data
+    from being serialised into the ``workflow_execution`` SQLite row on every
+    invocation, while still keeping small sequences (e.g. error details, short
+    configuration arrays) fully inspectable in the execution-history UI.
+
+    **Keys that are compacted by default** (see ``DEFAULT_LARGE_LIST_KEYS``):
+    ``enriched_alerts``, ``unique_alerts``, ``raw_alerts``,
+    ``normalized_alerts``, ``filtered_alerts``.  Keys outside this set — such
+    as a generic ``alerts`` parameter — are *not* compacted unless the caller
+    passes a custom *keys* argument.  Callers who depend on inspecting the
+    full list contents of compacted keys must read the data from the JSONL
+    files written by the workflow itself.
     """
     if not isinstance(outputs, dict):
         return {}
@@ -57,7 +65,7 @@ def compact_outputs_for_storage(
     for k, v in outputs.items():
         if (
             k in key_set
-            and isinstance(v, list)
+            and isinstance(v, (list, tuple))
             and len(v) > size_threshold
         ):
             compacted[f"_{k}_count"] = len(v)
@@ -237,10 +245,12 @@ async def create_execution_record(
 ) -> Dict[str, Any]:
     """Create and persist a running workflow execution record.
 
-    *input_params* is compacted with the same policy as outputResults so that
-    batch HTTP calls passing large alert lists (e.g. ``{"alerts": [...10k...]}``
-    ) don't bloat the SQLite row with data that is already persisted to disk by
-    the workflow itself.
+    *input_params* is passed through ``compact_outputs_for_storage`` before
+    writing to SQLite so that batch HTTP calls whose inputs contain a key in
+    ``DEFAULT_LARGE_LIST_KEYS`` (e.g. ``{"raw_alerts": [...10k items...]}``
+    ) don't bloat the row.  Keys outside the default set — such as a generic
+    ``alerts`` parameter — are stored verbatim; pass a custom *keys* argument
+    to ``compact_outputs_for_storage`` directly if you need broader coverage.
     """
     compacted_params = compact_outputs_for_storage(input_params or {})
     exec_data = build_initial_execution_record(

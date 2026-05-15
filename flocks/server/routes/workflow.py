@@ -1087,10 +1087,15 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
         raw_status = result.get("status", "SUCCEEDED") if isinstance(result, dict) else "SUCCEEDED"
         status_value = _normalize_execution_status(raw_status)
         success = status_value == "success"
+        # workflow_center_invoke proxies to an external published service; no
+        # step callbacks run locally so executionLog stays as the empty list
+        # set by create_execution_record.  We still run compact_history here
+        # as a forward-compatible guard in case a future code path populates it.
         exec_data.update({
             "outputResults": compact_outputs_for_storage(
                 result.get("outputs", {}) if isinstance(result, dict) else {}
             ),
+            "executionLog": compact_history_for_storage(exec_data.get("executionLog")),
             "status": status_value,
             "finishedAt": int(time.time() * 1000),
             "duration": duration,
