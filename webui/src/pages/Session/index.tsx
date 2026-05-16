@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  MessageSquare, Plus, Trash2, Wifi, WifiOff,
+  MessageSquare, Plus, Trash2,
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
@@ -44,6 +44,7 @@ export default function SessionPage() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
@@ -165,8 +166,9 @@ export default function SessionPage() {
     if (!openMenuSessionId) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest('[data-session-actions]')) {
+      if (!target.closest('[data-session-actions]') && !target.closest('[data-session-menu-portal]')) {
         setOpenMenuSessionId(null);
+        setMenuAnchor(null);
       }
     };
     document.addEventListener('mousedown', handle);
@@ -496,13 +498,20 @@ export default function SessionPage() {
                       </p>
                     )}
 
-                    {/* Three-dot menu */}
+                    {/* Three-dot menu trigger */}
                     {!selectMode && (
                       <div className="absolute right-1.5 top-2" data-session-actions>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setOpenMenuSessionId(prev => prev === session.id ? null : session.id);
+                            if (openMenuSessionId === session.id) {
+                              setOpenMenuSessionId(null);
+                              setMenuAnchor(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                              setOpenMenuSessionId(session.id);
+                            }
                           }}
                           title={t('moreActions')}
                           aria-label={t('moreActions')}
@@ -513,34 +522,6 @@ export default function SessionPage() {
                         >
                           <MoreHorizontal className="w-3.5 h-3.5" />
                         </button>
-                        {openMenuSessionId === session.id && (
-                          <div className="absolute right-0 top-full z-20 mt-1 w-32 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-md">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); }}
-                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors"
-                            >
-                              <PencilLine className="w-3.5 h-3.5" />
-                              <span>{t('rename')}</span>
-                            </button>
-                            <button
-                              onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); }}
-                              disabled={downloadingSessionId === session.id}
-                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                              <span>{t('downloadJson')}</span>
-                            </button>
-                            <div className="mx-2.5 my-1 border-t border-gray-100" />
-                            <button
-                              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); void handleDeleteSession(session.id); }}
-                              disabled={session.canDelete === false}
-                              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>{t('deleteAction')}</span>
-                            </button>
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>
@@ -612,7 +593,7 @@ export default function SessionPage() {
       {/* ── Main area ── */}
       <div className="flex-1 flex flex-col overflow-hidden h-full min-w-0">
         {/* Header */}
-        <div className="px-6 h-16 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative">
+        <div className="px-6 h-12 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative">
           <div className="absolute left-4 top-1/2 -translate-y-1/2">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -624,73 +605,11 @@ export default function SessionPage() {
           </div>
 
           <div className="flex items-center gap-3 ml-14">
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-base font-semibold text-gray-900">
               {selectedSession?.title || t('newSession')}
             </h2>
-            {selectedSessionId && (
-              <span className="inline-flex items-center">
-                {sseStatus === 'connected' ? (
-                  <span title={t('realTimeOk')}><Wifi className="w-4 h-4 text-green-500" /></span>
-                ) : sseStatus === 'reconnecting' ? (
-                  <span title={t('reconnecting')}><WifiOff className="w-4 h-4 text-yellow-500 animate-pulse" /></span>
-                ) : sseStatus === 'failed' ? (
-                  <span title={t('connectionFailed')}><WifiOff className="w-4 h-4 text-red-500" /></span>
-                ) : (
-                  <span title={t('notConnected')}><WifiOff className="w-4 h-4 text-gray-400" /></span>
-                )}
-              </span>
-            )}
           </div>
 
-          {/* Agent Selector */}
-          <div className="relative" data-agent-selector>
-            <button
-              onClick={() => setShowAgentOptions(!showAgentOptions)}
-              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
-            >
-              <Bot className="w-4 h-4 text-purple-600" />
-              <span className="font-medium text-purple-600">
-                {selectedAgent.charAt(0).toUpperCase() + selectedAgent.slice(1)}
-              </span>
-              <ChevronDown className={`w-4 h-4 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
-            </button>
-
-            {showAgentOptions && (
-              <div className="absolute right-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-xl shadow-lg z-50 overflow-hidden">
-                <div className="p-2 space-y-1 max-h-80 overflow-y-auto">
-                  {loadingAgents ? (
-                    <div className="p-4 text-center text-sm text-gray-500">{t('loading')}</div>
-                  ) : rexAgents.length > 0 ? (
-                    rexAgents.map((agent) => (
-                      <button
-                        key={agent.name}
-                        onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                        className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
-                          selectedAgent === agent.name
-                            ? 'bg-purple-50 text-purple-900 border border-purple-200'
-                            : 'hover:bg-gray-50'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Bot className="w-4 h-4 text-purple-600" />
-                          <div className="flex-1">
-                            <div className="font-medium text-sm">
-                              {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
-                            </div>
-                            <div className="text-xs text-gray-500 mt-0.5">
-                              {getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant')}
-                            </div>
-                          </div>
-                        </div>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="p-4 text-center text-sm text-gray-500">{t('noAgents')}</div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Chat — powered by unified SessionChat */}
@@ -698,7 +617,7 @@ export default function SessionPage() {
           key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
           live={Boolean(selectedSessionId)}
-          display={{ compact: false, showActions: true, showTimestamp: false }}
+          display={{ compact: false, showActions: true, showTimestamp: true }}
           agentName={selectedAgent}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
@@ -713,8 +632,97 @@ export default function SessionPage() {
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}
+          toolbarSlot={
+            <div className="relative" data-agent-selector>
+              <button
+                onClick={() => setShowAgentOptions(!showAgentOptions)}
+                className="flex items-center gap-1.5 h-8 px-2 rounded-lg text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 transition-colors text-sm"
+              >
+                <Bot className="w-4 h-4 flex-shrink-0" />
+                <span className="font-medium">
+                  {selectedAgent.charAt(0).toUpperCase() + selectedAgent.slice(1)}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
+              </button>
+              {showAgentOptions && (
+                <div className="absolute left-0 bottom-full mb-2 w-72 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                  <div className="p-1.5 space-y-0.5 max-h-72 overflow-y-auto">
+                    {loadingAgents ? (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('loading')}</div>
+                    ) : rexAgents.length > 0 ? (
+                      rexAgents.map((agent) => (
+                        <button
+                          key={agent.name}
+                          onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
+                          className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
+                            selectedAgent === agent.name
+                              ? 'bg-zinc-100 text-zinc-900'
+                              : 'hover:bg-zinc-50 text-zinc-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Bot className="w-4 h-4 text-zinc-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium text-sm">
+                                {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
+                              </div>
+                              <div className="text-xs text-zinc-400 mt-0.5 leading-snug whitespace-normal break-words">
+                                {getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant')}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('noAgents')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          }
         />
       </div>
+
+      {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
+      {openMenuSessionId && menuAnchor && (() => {
+        const sid = openMenuSessionId;
+        const session = sessions.find(s => s.id === sid);
+        if (!session) return null;
+        return (
+          <div
+            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            data-session-menu-portal
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              <PencilLine className="w-3.5 h-3.5" />
+              <span>{t('rename')}</span>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
+              disabled={downloadingSessionId === session.id}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{t('downloadJson')}</span>
+            </button>
+            <div className="mx-2.5 my-1 border-t border-gray-100" />
+            <button
+              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
+              disabled={session.canDelete === false}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{t('deleteAction')}</span>
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
