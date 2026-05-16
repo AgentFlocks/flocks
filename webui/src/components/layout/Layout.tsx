@@ -358,7 +358,7 @@ export default function Layout() {
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-          ${collapsed ? 'w-16' : 'w-48'}
+          ${collapsed ? 'w-16' : 'w-52'}
         `}
       >
         <div className="flex flex-col h-full overflow-hidden">
@@ -519,7 +519,7 @@ export default function Layout() {
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-48'}`}
+        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
         <main className="flex-1 overflow-hidden bg-gray-50">
           {isFullScreenPage ? (
