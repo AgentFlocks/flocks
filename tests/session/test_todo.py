@@ -38,12 +38,14 @@ async def test_create_todo():
     todo = TodoInfo(
         id="1",
         content="Implement feature X",
+        activeForm="Implementing feature X",
         status="in_progress",
         priority="high"
     )
     
     assert todo.id == "1"
     assert todo.content == "Implement feature X"
+    assert todo.activeForm == "Implementing feature X"
     assert todo.status == "in_progress"
     assert todo.priority == "high"
 
@@ -64,7 +66,7 @@ async def test_update_todos():
     
     todos = [
         TodoInfo(id="1", content="Task 1", status="pending"),
-        TodoInfo(id="2", content="Task 2", status="in_progress"),
+        TodoInfo(id="2", content="Task 2", activeForm="Working on task 2", status="in_progress"),
     ]
     
     # Update
@@ -75,6 +77,7 @@ async def test_update_todos():
     assert len(retrieved) == 2
     assert retrieved[0].id == "1"
     assert retrieved[1].id == "2"
+    assert retrieved[1].activeForm == "Working on task 2"
 
 
 @pytest.mark.asyncio

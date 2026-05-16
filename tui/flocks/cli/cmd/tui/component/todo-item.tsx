@@ -3,10 +3,12 @@ import { useTheme } from "../context/theme"
 export interface TodoItemProps {
   status: string
   content: string
+  activeForm?: string
 }
 
 export function TodoItem(props: TodoItemProps) {
   const { theme } = useTheme()
+  const displayText = props.status === "in_progress" ? (props.activeForm || props.content) : props.content
 
   return (
     <box flexDirection="row" gap={0}>
@@ -25,7 +27,7 @@ export function TodoItem(props: TodoItemProps) {
           fg: props.status === "in_progress" ? theme.warning : theme.textMuted,
         }}
       >
-        {props.content}
+        {displayText}
       </text>
     </box>
   )

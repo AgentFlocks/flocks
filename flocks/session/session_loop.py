@@ -595,10 +595,17 @@ class SessionLoop:
                 await callbacks.on_step_start(ctx.step)
             
             # Get messages via SessionContext interface
+            messages_started_at = asyncio.get_event_loop().time()
             if ctx.session_ctx:
                 messages = await ctx.session_ctx.get_messages()
             else:
                 messages = await Message.list(ctx.session.id)
+            log.debug("loop.messages_loaded", {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "message_count": len(messages),
+                "duration_ms": int((asyncio.get_event_loop().time() - messages_started_at) * 1000),
+            })
             if not messages:
                 log.info("loop.no_messages", {"session_id": ctx.session.id})
                 break
@@ -609,6 +616,7 @@ class SessionLoop:
             last_finished: Optional[MessageInfo] = None
             tasks: List[tuple[str, Any]] = []  # (type, part) - compaction or subtask
             
+            scan_started_at = asyncio.get_event_loop().time()
             for msg in reversed(messages):
                 # Find lastUser
                 if not last_user and msg.role == MessageRole.USER:
@@ -634,6 +642,12 @@ class SessionLoop:
                             tasks.append(("compaction", part))
                         elif part.type == "subtask":
                             tasks.append(("subtask", part))
+            log.debug("loop.message_scan_complete", {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "task_count": len(tasks),
+                "duration_ms": int((asyncio.get_event_loop().time() - scan_started_at) * 1000),
+            })
             
             # Check if we have a user message
             if not last_user:
@@ -1082,6 +1096,7 @@ class SessionLoop:
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(runner._process_step(messages, last_user))
             ctx._current_step_task = step_task
+            step_started_at = asyncio.get_event_loop().time()
             try:
                 step_result = await step_task
             except asyncio.CancelledError:
@@ -1089,6 +1104,11 @@ class SessionLoop:
                 break
             finally:
                 ctx._current_step_task = None
+                log.debug("loop.step_complete", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "duration_ms": int((asyncio.get_event_loop().time() - step_started_at) * 1000),
+                })
             
             # Callback: step end
             if callbacks.on_step_end:
@@ -1148,14 +1168,34 @@ class SessionLoop:
                 break
             
             elif step_result.action == "continue":
+                if ctx.session_ctx:
+                    post_messages = await ctx.session_ctx.get_messages()
+                else:
+                    post_messages = await Message.list(ctx.session.id)
+                last_assistant_after_step = next(
+                    (
+                        msg for msg in reversed(post_messages)
+                        if msg.role == MessageRole.ASSISTANT
+                    ),
+                    None,
+                )
+                queued_user = await cls._detect_queued_user_message(
+                    ctx.session.id,
+                    post_messages,
+                    last_user.id,
+                    last_assistant_after_step,
+                )
                 turn_state = set_turn_state(
                     ctx.session.id,
                     step=ctx.step,
                     status="continued",
-                    continue_reason="tool_calls",
-                    queued_message_detected=False,
+                    continue_reason="queued_message" if queued_user is not None else "tool_calls",
+                    queued_message_detected=queued_user is not None,
                 )
-                await cls._publish_runtime_event(callbacks, "turn.continued", turn_state.model_dump(by_alias=True))
+                payload = turn_state.model_dump(by_alias=True)
+                if queued_user is not None:
+                    payload["queuedUserMessageID"] = queued_user.id
+                await cls._publish_runtime_event(callbacks, "turn.continued", payload)
                 # Continue to next iteration
                 continue
             

@@ -308,6 +308,7 @@ def _todo_discipline_section(use_task_system: bool) -> str:
 2. **Before each step**: Mark `in_progress` (ONE at a time)
 3. **After each step**: Mark `completed` IMMEDIATELY (NEVER batch)
 4. **Scope changes**: Update todos BEFORE proceeding
+5. **Todo payload shape**: `todowrite` must receive structured objects with `id`, `content`, and `status`, never a string array
 
 ### Why This Matters
 

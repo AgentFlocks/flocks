@@ -13,6 +13,7 @@ oh-my-opencode's lifecycle stages:
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
 from flocks.utils.log import Log
@@ -267,12 +268,19 @@ class HookPipeline:
         input_data: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Return True when at least one hook can handle the stage."""
+        started_at = time.perf_counter()
         project_dir = await cls._resolve_project_dir(input_data or {})
         await cls.ensure_initialized(project_dir)
-        return any(
+        has_handlers = any(
             cls._resolve_handler(entry.hook, stage) is not None
             for entry in cls._hooks
         )
+        log.debug("hook.stage_probe", {
+            "stage": stage,
+            "has_handlers": has_handlers,
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        })
+        return has_handlers
 
     @classmethod
     async def _run_stage(
@@ -281,13 +289,16 @@ class HookPipeline:
         input_data: Dict[str, Any],
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
+        started_at = time.perf_counter()
         project_dir = await cls._resolve_project_dir(input_data)
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
+        handler_count = 0
         for entry in cls._hooks:
             handler = cls._resolve_handler(entry.hook, stage)
             if not handler:
                 continue
+            handler_count += 1
             try:
                 result = handler(ctx)
                 if isinstance(result, Awaitable):
@@ -298,6 +309,11 @@ class HookPipeline:
                     "hook": entry.name,
                     "error": str(exc),
                 })
+        log.debug("hook.stage_complete", {
+            "stage": stage,
+            "handler_count": handler_count,
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        })
         return ctx
 
     @classmethod

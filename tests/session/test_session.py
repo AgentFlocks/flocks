@@ -400,7 +400,7 @@ async def test_agent_list():
     
     assert len(agents) >= 3
     assert any(a.name == "rex" for a in agents)
-    assert any(a.name == "plan" for a in agents)
+    assert any(a.name == "explore" for a in agents)
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,10 @@ class TodoInfo(BaseModel):
     """
     id: str = Field(..., description="Unique identifier for the todo item")
     content: str = Field(..., description="Brief description of the task")
+    activeForm: Optional[str] = Field(
+        None,
+        description="Optional active/progressive form used while the task is in progress",
+    )
     status: TodoStatus = Field(
         "pending",
         description="Current status of the task: pending, in_progress, completed, cancelled"
@@ -90,7 +94,7 @@ class Todo:
         # Store in storage
         await Storage.set(
             f"todo:{session_id}",
-            [todo.model_dump() for todo in validated_todos],
+            [todo.model_dump(exclude_none=True) for todo in validated_todos],
             "todo"
         )
         

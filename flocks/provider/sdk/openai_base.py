@@ -164,7 +164,12 @@ def format_openai_content(content: Any) -> Any:
     return formatted
 
 
-def format_openai_messages(messages: List["ChatMessage"]) -> list:
+def format_openai_messages(
+    messages: List["ChatMessage"],
+    *,
+    include_reasoning: bool = False,
+    reasoning_field: str = "reasoning_content",
+) -> list:
     """Convert a ``ChatMessage`` list to the OpenAI chat-completions wire format.
 
     Shared by all three OpenAI-style providers (``OpenAIProvider``,
@@ -193,6 +198,8 @@ def format_openai_messages(messages: List["ChatMessage"]) -> list:
             d["content"] = content
         if m.tool_calls:
             d["tool_calls"] = m.tool_calls
+        if include_reasoning and role == "assistant" and m.reasoning:
+            d[reasoning_field] = m.reasoning
         if m.tool_call_id:
             d["tool_call_id"] = m.tool_call_id
         if m.name:

@@ -22,8 +22,9 @@ class _ProviderStub:
         )
 
 
-@pytest.mark.asyncio
-async def test_call_llm_trims_duplicate_hook_payload_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+async def _run_call_llm_with_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict, dict]:
     session = await Session.create(project_id="test_project_hook_payloads", directory="/test/hooks")
     user_msg = await Message.create(
         session_id=session.id,
@@ -89,7 +90,16 @@ async def test_call_llm_trims_duplicate_hook_payload_fields(monkeypatch: pytest.
     assert result.content == "hook payload ok"
 
     assert len(captured_before) == 1
-    before_input = captured_before[0]
+    assert len(captured_after) == 1
+    return captured_before[0], captured_after[0]
+
+
+@pytest.mark.asyncio
+async def test_call_llm_uses_full_hook_payloads_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_input, after_capture = await _run_call_llm_with_hooks(monkeypatch)
+
     assert set(before_input) == {
         "sessionID",
         "messageID",
@@ -99,13 +109,14 @@ async def test_call_llm_trims_duplicate_hook_payload_fields(monkeypatch: pytest.
         "model",
         "request",
     }
-    assert "messageSummaries" not in before_input["request"]
-    assert "toolSummaries" not in before_input["request"]
+    assert before_input["request"]["messages"][0]["role"] == "system"
+    assert before_input["request"]["tools"][0]["function"]["name"] == "read"
     assert before_input["request"]["messageCount"] == 2
     assert before_input["request"]["toolCount"] == 1
+    assert "messageSummaries" not in before_input["request"]
+    assert "toolSummaries" not in before_input["request"]
 
-    assert len(captured_after) == 1
-    after_input = captured_after[0]["input"]
+    after_input = after_capture["input"]
     assert set(after_input) == {
         "sessionID",
         "messageID",

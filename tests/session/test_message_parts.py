@@ -481,6 +481,49 @@ class TestMessageStoreAndParts:
         await asyncio.sleep(0.02)
         persist_mock.assert_awaited_once_with(sid, message_id=msg.id)
 
+    @pytest.mark.asyncio
+    async def test_store_completed_tool_part_caches_prompt_output_and_revision(self):
+        sid = SID + "_completed_cache"
+        msg = await Message.create(sid, MessageRole.ASSISTANT, "")
+        tool_part = ToolPart(
+            sessionID=sid,
+            messageID=msg.id,
+            callID="call_completed",
+            tool="bash",
+            state=ToolStateCompleted(
+                input={"cmd": "echo hi"},
+                output={"stdout": "hello", "exit_code": 0},
+                title="bash",
+                metadata={},
+                time={"start": 1, "end": 2},
+            ),
+        )
+
+        assert Message.get_parts_revision(sid, msg.id) == 0
+        stored_part = await Message.store_part(sid, msg.id, tool_part)
+
+        assert Message.get_parts_revision(sid, msg.id) == 1
+        assert isinstance(stored_part.state.output, str)
+        assert stored_part.state.metadata["llm_output_text"] == stored_part.state.output
+        assert stored_part.state.metadata["llm_output_len"] == len(stored_part.state.output)
+
+        updated = await Message.update_part(
+            sid,
+            msg.id,
+            stored_part.id,
+            state={
+                "status": "completed",
+                "input": {"cmd": "echo hi"},
+                "output": {"stdout": "hello again"},
+                "title": "bash",
+                "metadata": {},
+                "time": {"start": 1, "end": 3},
+            },
+        )
+        assert updated is not None
+        assert Message.get_parts_revision(sid, msg.id) == 2
+        assert updated.state.metadata["llm_output_text"].startswith("{")
+
 
 @pytest.mark.asyncio
 async def test_list_with_parts_keeps_message_info_separate():

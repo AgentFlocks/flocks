@@ -284,7 +284,6 @@ class SystemPrompt:
 
         lines = [
             "## Runtime Metadata",
-            f"Workspace outputs directory: {outputs_dir}",
             f"Today's date: {now.strftime('%A %b %d, %Y')}",
             f"Platform hint: {platform.system().lower()}",
         ]

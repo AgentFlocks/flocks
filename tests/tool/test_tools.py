@@ -13,9 +13,11 @@ Tests cover:
 
 import pytest
 import asyncio
+import json
 import os
 import tempfile
 import shutil
+import uuid
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -76,6 +78,23 @@ def tool_context_with_permission():
     )
     ctx._permissions_requested = permissions_requested
     return ctx
+
+
+@pytest.fixture
+async def clean_todo_storage():
+    """Clear persistent todo storage before and after todo tool tests."""
+    from flocks.storage.storage import Storage
+
+    await Storage.init()
+    keys = await Storage.list_keys(prefix="todo:")
+    for key in keys:
+        await Storage.delete(key)
+
+    yield
+
+    keys = await Storage.list_keys(prefix="todo:")
+    for key in keys:
+        await Storage.delete(key)
 
 
 @pytest.fixture
@@ -554,6 +573,7 @@ class TestGlobTool:
 # P1 Tools Tests
 # =============================================================================
 
+@pytest.mark.usefixtures("clean_todo_storage")
 class TestTodoTools:
     """Test the todo tools"""
     
@@ -562,7 +582,7 @@ class TestTodoTools:
         """Test creating todos"""
         todos = [
             {"id": "1", "content": "First task", "status": "pending"},
-            {"id": "2", "content": "Second task", "status": "in_progress"},
+            {"id": "2", "content": "Second task", "activeForm": "Working on second task", "status": "in_progress"},
         ]
         
         result = await ToolRegistry.execute(
@@ -572,8 +592,21 @@ class TestTodoTools:
         )
         
         assert result.success
-        assert "First task" in result.output
-        assert "Second task" in result.output
+        payload = json.loads(result.output)
+        assert payload["oldTodos"] == []
+        assert payload["newTodos"][0]["content"] == "First task"
+        assert payload["newTodos"][1]["activeForm"] == "Working on second task"
+        assert payload["verificationNudgeNeeded"] is False
+
+    def test_todowrite_schema_requires_structured_items(self):
+        """Tool schema should expose object items, not string arrays."""
+        schema = ToolRegistry.get_schema("todowrite")
+
+        assert schema is not None
+        assert schema.properties["todos"]["type"] == "array"
+        assert schema.properties["todos"]["items"]["type"] == "object"
+        assert schema.properties["todos"]["items"]["required"] == ["id", "content", "status"]
+        assert "activeForm" in schema.properties["todos"]["items"]["properties"]
     
     @pytest.mark.asyncio
     async def test_todoread_get_todos(self, tool_context):
@@ -595,7 +628,94 @@ class TestTodoTools:
         )
         
         assert result.success
-        assert "Test task" in result.output
+        payload = json.loads(result.output)
+        assert payload[0]["content"] == "Test task"
+
+    @pytest.mark.asyncio
+    async def test_todowrite_rejects_string_arrays(self, tool_context):
+        """Invalid todo payloads should fail loudly instead of returning []."""
+        result = await ToolRegistry.execute(
+            "todowrite",
+            ctx=tool_context,
+            todos=[
+                "1. First task",
+                "2. Second task",
+            ],
+        )
+
+        assert not result.success
+        assert "todos[0] must be an object" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_todowrite_persists_to_session_todo_store(self, clean_todo_storage):
+        """todo tools should use the shared session todo store."""
+        from flocks.session.features.todo import Todo
+
+        session_id = f"test-session-{uuid.uuid4()}"
+        ctx = ToolContext(
+            session_id=session_id,
+            message_id="test-message-persist",
+            agent="test",
+        )
+        todos = [
+            {"id": "persist", "content": "Persist todo", "status": "pending"},
+        ]
+
+        result = await ToolRegistry.execute("todowrite", ctx=ctx, todos=todos)
+
+        assert result.success
+        stored = await Todo.get(session_id)
+        assert len(stored) == 1
+        assert stored[0].id == "persist"
+        assert stored[0].content == "Persist todo"
+
+    @pytest.mark.asyncio
+    async def test_todowrite_clears_storage_when_all_todos_are_terminal(self, clean_todo_storage):
+        """Completed/cancelled-only todo lists should be cleared from persistence."""
+        from flocks.session.features.todo import Todo
+
+        session_id = f"test-session-{uuid.uuid4()}"
+        ctx = ToolContext(
+            session_id=session_id,
+            message_id="test-message-terminal",
+            agent="test",
+        )
+
+        await ToolRegistry.execute(
+            "todowrite",
+            ctx=ctx,
+            todos=[{"id": "1", "content": "Still open", "status": "in_progress"}],
+        )
+
+        result = await ToolRegistry.execute(
+            "todowrite",
+            ctx=ctx,
+            todos=[
+                {"id": "1", "content": "Done task", "status": "completed"},
+                {"id": "2", "content": "Cancelled task", "status": "cancelled"},
+            ],
+        )
+
+        payload = json.loads(result.output)
+        assert payload["newTodos"][0]["status"] == "completed"
+        assert payload["newTodos"][1]["status"] == "cancelled"
+        assert await Todo.get(session_id) == []
+
+    @pytest.mark.asyncio
+    async def test_todowrite_sets_verification_nudge_for_completed_batches(self, tool_context):
+        """Large completed batches without verification work should return a nudge."""
+        result = await ToolRegistry.execute(
+            "todowrite",
+            ctx=tool_context,
+            todos=[
+                {"id": "1", "content": "Implement feature", "status": "completed"},
+                {"id": "2", "content": "Fix bug", "status": "completed"},
+                {"id": "3", "content": "Ship branch", "status": "completed"},
+            ],
+        )
+
+        payload = json.loads(result.output)
+        assert payload["verificationNudgeNeeded"] is True
 
 
 class TestQuestionTool:
@@ -1552,6 +1672,7 @@ class TestGlobToolAdvanced:
         assert result.success
 
 
+@pytest.mark.usefixtures("clean_todo_storage")
 class TestTodoToolsAdvanced:
     """Advanced tests for todo tools"""
     

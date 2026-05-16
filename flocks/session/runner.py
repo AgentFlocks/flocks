@@ -271,6 +271,19 @@ class SessionRunner:
         names.discard("")
         return tuple(sorted(names))
 
+    async def _get_prompt_tool_names(
+        self,
+        agent: AgentInfo,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        messages: Optional[List[MessageInfo]] = None,
+    ) -> Tuple[str, ...]:
+        """Compatibility shim for tests and older call sites."""
+        tool_schema = tools
+        if tool_schema is None:
+            tool_schema = await self._build_callable_tool_schema(agent, messages)
+        return self._get_prompt_tool_names_from_schema(tool_schema)
+
     async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
         if not self.callbacks.event_publish_callback:
             return
@@ -282,6 +295,38 @@ class SessionRunner:
             })
         except Exception as exc:
             log.debug("runner.turn_tools_selected.publish_failed", {"error": str(exc)})
+
+    def _log_perf(self, event: str, started_at: float, **extra: Any) -> None:
+        payload = {
+            "session_id": self.session.id,
+            "step": self._step,
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+        payload.update(extra)
+        log.debug(event, payload)
+
+    def _provider_capability_key(self) -> str:
+        return (
+            f"{self.provider_id}:{self.model_id}:"
+            f"vision={int(self._model_supports_vision())}"
+        )
+
+    def _tool_schema_cache_key(
+        self,
+        agent: AgentInfo,
+        selected_tool_infos: List[Any],
+        *,
+        text_tool_call_mode: bool,
+    ) -> Tuple[Any, ...]:
+        return (
+            ToolRegistry.revision(),
+            getattr(agent, "name", ""),
+            tuple(sorted(getattr(agent, "tools", None) or ())),
+            tuple(tool_info.name for tool_info in selected_tool_infos),
+            text_tool_call_mode,
+            self.provider_id,
+            self.model_id,
+        )
 
     def _tool_compact_placeholder(self, tool_name: str, text: str) -> Tuple[str, str]:
         normalized = " ".join(text.split())
@@ -856,7 +901,9 @@ class SessionRunner:
             return StepResult(action="stop", error=error)
         
         # Build prompts and tools
+        tools_started_at = time.perf_counter()
         tools = await self._build_callable_tool_schema(agent, messages)
+        self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
         async def sandbox_prompt_factory() -> Optional[str]:
@@ -865,6 +912,7 @@ class SessionRunner:
         async def channel_context_prompt_factory() -> Optional[str]:
             return await self._build_channel_context_prompt()
 
+        prompts_started_at = time.perf_counter()
         system_prompts = await SessionPrompt.build_system_prompts(
             session_id=self.session.id,
             session_directory=self.session.directory,
@@ -881,6 +929,7 @@ class SessionRunner:
             tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
+        self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -962,7 +1011,14 @@ class SessionRunner:
         
         # Convert messages to chat format with error handling
         try:
+            chat_messages_started_at = time.perf_counter()
             chat_messages = await self._to_chat_messages(messages, system_prompts)
+            self._log_perf(
+                "runner.process_step.chat_messages_ready",
+                chat_messages_started_at,
+                source_message_count=len(messages),
+                chat_message_count=len(chat_messages),
+            )
         except Exception as e:
             log.error("runner.to_chat_messages.error", {
                 "error": str(e),
@@ -1533,8 +1589,26 @@ class SessionRunner:
         messages: Optional[List[MessageInfo]] = None,
     ) -> List[Dict[str, Any]]:
         """Build tool definitions for LLM."""
+        started_at = time.perf_counter()
         selected_tool_infos, selection_metadata = await self._list_callable_tool_infos_for_turn(agent, messages or [])
         await self._publish_turn_tools_event(selection_metadata)
+
+        text_tool_call_mode = self._should_use_text_tool_call_mode()
+        cache_key = self._tool_schema_cache_key(
+            agent,
+            selected_tool_infos,
+            text_tool_call_mode=text_tool_call_mode,
+        )
+        schema_cache = self._static_cache.setdefault("tool_schema_cache", {})
+        cached_tools = schema_cache.get(cache_key)
+        if cached_tools is not None:
+            self._log_perf(
+                "runner.tools_schema_cached",
+                started_at,
+                selected=len(cached_tools),
+                enabled=selection_metadata.get("enabledToolCount"),
+            )
+            return copy.deepcopy(cached_tools)
 
         tools = []
         for tool_info in selected_tool_infos:
@@ -1555,12 +1629,20 @@ class SessionRunner:
             }
             tools.append(tool_def)
 
+        schema_cache[cache_key] = copy.deepcopy(tools)
+
         log.info("runner.tools_selected", {
             "session_id": self.session.id,
             "step": self._step,
             "selected": len(tools),
             "enabled": selection_metadata.get("enabledToolCount"),
         })
+        self._log_perf(
+            "runner.tools_schema_built",
+            started_at,
+            selected=len(tools),
+            enabled=selection_metadata.get("enabledToolCount"),
+        )
         return tools
     
     def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
@@ -1623,6 +1705,69 @@ class SessionRunner:
             pass
         return 128_000
 
+    def _message_conversion_cache_key(
+        self,
+        msg: MessageInfo,
+        parts: List[Any],
+        *,
+        is_latest_user_turn: bool,
+    ) -> Tuple[Any, ...]:
+        role = msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
+        has_file_part = any(getattr(part, "type", None) == "file" for part in parts)
+        latest_user_marker = msg.id if (role == "user" and has_file_part and is_latest_user_turn) else (
+            "stale-file-user" if role == "user" and has_file_part else None
+        )
+        return (
+            msg.id,
+            role,
+            bool(getattr(msg, "compacted", None)),
+            getattr(msg, "finish", None),
+            json.dumps(getattr(msg, "error", None), ensure_ascii=False, sort_keys=True, default=str),
+            Message.get_parts_revision(self.session.id, msg.id),
+            latest_user_marker,
+            self._provider_capability_key(),
+        )
+
+    @staticmethod
+    def _clone_cached_chat_messages(payloads: List[Dict[str, Any]]) -> List[ChatMessage]:
+        return [ChatMessage.model_validate(copy.deepcopy(payload)) for payload in payloads]
+
+    def _build_tool_output_text(self, part: Any, tool_name: str, ctx_window_tokens: int) -> Tuple[str, bool, bool]:
+        state = getattr(part, "state", None)
+        metadata = dict(getattr(state, "metadata", None) or {}) if state is not None else {}
+        persisted_placeholder = self._get_persisted_tool_placeholder(part, tool_name)
+        if persisted_placeholder:
+            return persisted_placeholder, False, True
+
+        cached_output_text = metadata.get("llm_output_text")
+        if isinstance(cached_output_text, str):
+            tool_output_str = cached_output_text
+        else:
+            tool_output = getattr(state, "output", "") if state is not None else ""
+            if hasattr(state, "get_output_str"):
+                tool_output_str = state.get_output_str()
+            elif isinstance(tool_output, str):
+                tool_output_str = tool_output
+            else:
+                try:
+                    tool_output_str = json.dumps(tool_output, ensure_ascii=False, indent=2)
+                except (TypeError, ValueError):
+                    tool_output_str = str(tool_output)
+
+        from flocks.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
+        already_truncated = (
+            metadata.get("truncated")
+            and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
+        )
+        if already_truncated:
+            return tool_output_str, False, False
+
+        tool_output_str, was_dyn_truncated = truncate_tool_result_dynamic(
+            tool_output_str,
+            ctx_window_tokens,
+        )
+        return tool_output_str, was_dyn_truncated, False
+
     def _build_system_message_content(
         self,
         system_prompts: List[str],
@@ -1665,7 +1810,8 @@ class SessionRunner:
         - Include tool calls and results
         - Format tool results as user messages
         """
-        chat_messages = []
+        started_at = time.perf_counter()
+        chat_messages: List[ChatMessage] = []
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
@@ -1683,20 +1829,63 @@ class SessionRunner:
             if _role == "user":
                 last_user_msg_id = _msg.id
 
+        preloaded_parts: List[List[Any]] = []
+        message_signatures: List[Tuple[Any, ...]] = []
+        for msg in messages:
+            parts = await Message.parts(msg.id, self.session.id)
+            preloaded_parts.append(parts)
+            message_signatures.append(
+                self._message_conversion_cache_key(
+                    msg,
+                    parts,
+                    is_latest_user_turn=(msg.id == last_user_msg_id),
+                )
+            )
+
+        system_content = self._build_system_message_content(system_prompts) if system_prompts else None
+        system_cache_key = json.dumps(system_content, ensure_ascii=False, sort_keys=True, default=str)
+        context_cache = self._static_cache.setdefault("chat_context_cache", {})
+        cached_context = context_cache.get("latest")
+        resume_message_index = 0
+        if cached_context and cached_context.get("system_cache_key") == system_cache_key:
+            cached_signatures = list(cached_context.get("message_signatures") or [])
+            if len(cached_signatures) <= len(message_signatures):
+                prefix_matches = True
+                for idx, cached_signature in enumerate(cached_signatures):
+                    if cached_signature != message_signatures[idx]:
+                        prefix_matches = False
+                        break
+                if prefix_matches:
+                    chat_messages = self._clone_cached_chat_messages(cached_context.get("chat_messages") or [])
+                    resume_message_index = len(cached_signatures)
+                    turn_index = sum(
+                        1
+                        for msg in messages[:resume_message_index]
+                        if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user")
+                    )
+                    self._log_perf(
+                        "runner.to_chat_messages.cache_hit",
+                        started_at,
+                        reused_messages=resume_message_index,
+                        total_messages=len(messages),
+                    )
+
         # Add system prompts
-        if system_prompts:
+        if system_prompts and not chat_messages:
             chat_messages.append(ChatMessage(
                 role="system",
-                content=self._build_system_message_content(system_prompts),
+                content=system_content,
             ))
         
         # Convert each message with parts
-        for msg in messages:
+        for idx, msg in enumerate(messages):
+            if idx < resume_message_index:
+                continue
             if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
                 turn_index += 1
             is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
-            parts = await Message.parts(msg.id, self.session.id)
+            parts = preloaded_parts[idx]
             
             if not parts:
                 # Fallback: use text content only
@@ -1803,6 +1992,7 @@ class SessionRunner:
                         continue
                 
                 assistant_content_parts = []
+                assistant_reasoning_parts = []
                 # Structured tool calls for the assistant message (OpenAI format)
                 structured_tool_calls: List[Dict[str, Any]] = []
                 # Corresponding tool-result messages (role="tool")
@@ -1815,6 +2005,8 @@ class SessionRunner:
                     # Text parts
                     if part.type == "text" and hasattr(part, 'text'):
                         assistant_content_parts.append(part.text)
+                    elif part.type == "reasoning" and hasattr(part, 'text'):
+                        assistant_reasoning_parts.append(part.text)
                     
                     # Tool parts - use structured OpenAI function-calling format
                     elif part.type == "tool" and hasattr(part, 'state'):
@@ -1823,40 +2015,18 @@ class SessionRunner:
                         tool_input = getattr(part.state, 'input', {})
                         
                         if part.state.status == "completed":
-                            persisted_placeholder = self._get_persisted_tool_placeholder(part, tool_name)
-                            if persisted_placeholder:
-                                tool_output_str = persisted_placeholder
-                            else:
-                                tool_output = getattr(part.state, 'output', '')
-                                if hasattr(part.state, 'get_output_str'):
-                                    tool_output_str = part.state.get_output_str()
-                                elif isinstance(tool_output, str):
-                                    tool_output_str = tool_output
-                                else:
-                                    try:
-                                        tool_output_str = json.dumps(tool_output, ensure_ascii=False, indent=2)
-                                    except (TypeError, ValueError):
-                                        tool_output_str = str(tool_output)
-
-                                from flocks.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
-                                already_truncated = (
-                                    isinstance(getattr(part.state, 'metadata', None), dict)
-                                    and part.state.metadata.get("truncated")
-                                    and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
-                                )
-                                if not already_truncated:
-                                    tool_output_str, was_dyn_truncated = truncate_tool_result_dynamic(
-                                        tool_output_str, ctx_window_tokens,
-                                    )
-                                else:
-                                    was_dyn_truncated = False
-                                if was_dyn_truncated:
-                                    log.info("runner.tool_result_dynamic_truncated", {
-                                        "tool_name": tool_name,
-                                        "call_id": call_id,
-                                        "context_window": ctx_window_tokens,
-                                        "truncated_len": len(tool_output_str),
-                                    })
+                            tool_output_str, was_dyn_truncated, persisted_placeholder = self._build_tool_output_text(
+                                part,
+                                tool_name,
+                                ctx_window_tokens,
+                            )
+                            if was_dyn_truncated:
+                                log.info("runner.tool_result_dynamic_truncated", {
+                                    "tool_name": tool_name,
+                                    "call_id": call_id,
+                                    "context_window": ctx_window_tokens,
+                                    "truncated_len": len(tool_output_str),
+                                })
                             
                             # Build structured tool call for assistant message
                             args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
@@ -1942,6 +2112,7 @@ class SessionRunner:
                     chat_messages.append(ChatMessage(
                         role="assistant",
                         content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
+                        reasoning="".join(assistant_reasoning_parts) if assistant_reasoning_parts else None,
                         tool_calls=structured_tool_calls if structured_tool_calls else None,
                     ))
                     # Append tool-result messages immediately after the assistant message
@@ -1968,6 +2139,20 @@ class SessionRunner:
             "total_messages": len(chat_messages),
             "roles": [m.role for m in chat_messages],
         })
+        context_cache["latest"] = {
+            "system_cache_key": system_cache_key,
+            "message_signatures": list(message_signatures),
+            "chat_messages": [
+                message.model_dump(exclude_none=True)
+                for message in chat_messages
+            ],
+        }
+        self._log_perf(
+            "runner.to_chat_messages.complete",
+            started_at,
+            source_message_count=len(messages),
+            chat_message_count=len(chat_messages),
+        )
         
         return chat_messages
     
@@ -2170,25 +2355,31 @@ class SessionRunner:
             log.debug("runner.hook.stage_probe.error", {"error": str(exc)})
 
         if llm_before_enabled:
-            serialized_messages = [_serialize_message(message) for message in messages]
-            available_tools = copy.deepcopy(tools)
             llm_before_hook_input = {
                 **llm_hook_metadata,
                 "request": {
                     "messageCount": len(messages),
-                    "messages": serialized_messages,
+                    "messages": [_serialize_message(message) for message in messages],
                     "toolCount": len(tools),
-                    "tools": available_tools,
+                    "tools": copy.deepcopy(tools),
                     "providerOptions": dict(provider_options),
-                    "providerToolsEnabled": provider_tools is not None
+                    "providerToolsEnabled": provider_tools is not None,
                 },
             }
             try:
+                hook_started_at = time.perf_counter()
                 await HookPipeline.run_llm_before(llm_before_hook_input)
+                self._log_perf(
+                    "runner.hook.llm_before.complete",
+                    hook_started_at,
+                    message_count=len(messages),
+                    tool_count=len(tools),
+                )
             except Exception as exc:
                 log.debug("runner.hook.llm_before.error", {"error": str(exc)})
 
         llm_call_started_at = time.perf_counter()
+        first_chunk_logged = False
         try:
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
@@ -2206,6 +2397,14 @@ class SessionRunner:
                 ongoing_chunk_timeout_s=LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S,
             ):
                 chunk_counts["total"] += 1
+                if not first_chunk_logged:
+                    first_chunk_logged = True
+                    self._log_perf(
+                        "runner.llm.first_chunk",
+                        llm_call_started_at,
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                    )
                 
                 chunk_finish = getattr(chunk, 'finish_reason', None)
                 if chunk_finish:
@@ -2393,6 +2592,7 @@ class SessionRunner:
         )
         if llm_after_enabled:
             try:
+                hook_started_at = time.perf_counter()
                 await HookPipeline.run_llm_after(
                     llm_hook_metadata,
                     {
@@ -2410,6 +2610,12 @@ class SessionRunner:
                         "chunkCounts": dict(chunk_counts),
                         "action": result_action,
                     },
+                )
+                self._log_perf(
+                    "runner.hook.llm_after.complete",
+                    hook_started_at,
+                    action=result_action,
+                    tool_call_count=len(tool_calls_for_result),
                 )
             except Exception as exc:
                 log.debug("runner.hook.llm_after.error", {"error": str(exc)})

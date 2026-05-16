@@ -15,7 +15,15 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import flocks.session.runner as runner_mod
-from flocks.session.message import UserMessageInfo
+from flocks.session.message import (
+    Message,
+    MessageRole,
+    PartTime,
+    ReasoningPart,
+    ToolPart,
+    ToolStateRunning,
+    UserMessageInfo,
+)
 from flocks.session.runner import (
     RunnerCallbacks,
     SessionRunner,
@@ -23,7 +31,7 @@ from flocks.session.runner import (
     ToolCall,
 )
 from flocks.session.prompt import SessionPrompt
-from flocks.session.session import SessionInfo
+from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
 
 
@@ -257,6 +265,42 @@ class TestBuildTools:
 
         tool_names = [t["function"]["name"] for t in tools]
         assert "invalid" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_build_callable_tool_schema_reuses_cached_schema(self):
+        runner = _make_runner("ses_runner_cache")
+        agent = _make_agent(name="rex")
+        schema_calls = 0
+
+        class _Schema:
+            def to_json_schema(self):
+                nonlocal schema_calls
+                schema_calls += 1
+                return {"type": "object", "properties": {"path": {"type": "string"}}}
+
+        tool_info = SimpleNamespace(
+            name="read",
+            description="Read a file",
+            get_schema=lambda: _Schema(),
+            provider_version=None,
+        )
+
+        with patch.object(
+            runner,
+            "_list_callable_tool_infos_for_turn",
+            new=AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
+        ), patch.object(
+            runner,
+            "_publish_turn_tools_event",
+            new=AsyncMock(),
+        ):
+            tools_first = await runner._build_callable_tool_schema(agent)
+            tools_second = await runner._build_callable_tool_schema(agent)
+
+        assert schema_calls == 1
+        assert tools_first == tools_second
+        assert tools_first is not tools_second
+        assert tools_first[0]["function"]["name"] == "read"
 
     @pytest.mark.asyncio
     async def test_excludes_noop_tool(self):
@@ -1131,6 +1175,100 @@ async def test_to_chat_messages_keeps_joined_system_prompt_for_openai(monkeypatc
 
     assert chat_messages[0].role == "system"
     assert chat_messages[0].content == "provider prompt\n\nagent prompt"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_change():
+    session = await Session.create(
+        project_id="test_runner_chat_cache_invalidation",
+        directory="/tmp/runner-cache",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="starting",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    first_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(first_messages) == 1
+    assert first_messages[0].role == "assistant"
+    assert first_messages[0].tool_calls is None
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_cache_fix",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    second_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(second_messages) == 2
+    assert second_messages[0].role == "assistant"
+    assert second_messages[0].tool_calls is not None
+    assert second_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert second_messages[1].role == "tool"
+    assert second_messages[1].tool_call_id == "call_cache_fix"
+    assert second_messages[1].content == "Error: Tool execution was interrupted"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
+    session = await Session.create(
+        project_id="test_runner_reasoning_replay",
+        directory="/tmp/runner-reasoning",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to call the tool first.",
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_reasoning_replay",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].role == "assistant"
+    assert chat_messages[0].reasoning == "Need to call the tool first."
+    assert chat_messages[0].tool_calls is not None
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[1].role == "tool"
+    assert chat_messages[1].tool_call_id == "call_reasoning_replay"
 
 
 @pytest.mark.asyncio

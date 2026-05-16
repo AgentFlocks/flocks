@@ -32,6 +32,35 @@ import { LoadAPIKeyError } from "ai"
 import type { Event, FlocksClient, SessionMessageResponse } from "@flocks-ai/sdk/v2"
 import { applyPatch } from "diff"
 
+const LegacyTodoWriteOutput = z.array(Todo.Info)
+
+function parseTodoWriteEntries(rawOutput: string, rawMetadata: unknown): Todo.Info[] | undefined {
+  try {
+    const parsed = JSON.parse(rawOutput)
+    const structured = Todo.WriteOutput.safeParse(parsed)
+    if (structured.success) return structured.data.newTodos
+
+    const legacy = LegacyTodoWriteOutput.safeParse(parsed)
+    if (legacy.success) return legacy.data
+  } catch {
+    // Fall through to metadata-based parsing below.
+  }
+
+  if (!rawMetadata || typeof rawMetadata !== "object") return undefined
+  const metadata = rawMetadata as Record<string, unknown>
+
+  const structuredMetadata = Todo.WriteOutput.safeParse(metadata)
+  if (structuredMetadata.success) return structuredMetadata.data.newTodos
+
+  const explicitNewTodos = LegacyTodoWriteOutput.safeParse(metadata["newTodos"])
+  if (explicitNewTodos.success) return explicitNewTodos.data
+
+  const legacyMetadata = LegacyTodoWriteOutput.safeParse(metadata["todos"])
+  if (legacyMetadata.success) return legacyMetadata.data
+
+  return undefined
+}
+
 export namespace ACP {
   const log = Log.create({ service: "acp-agent" })
 
@@ -272,14 +301,14 @@ export namespace ACP {
                 }
 
                 if (part.tool === "todowrite") {
-                  const parsedTodos = z.array(Todo.Info).safeParse(JSON.parse(part.state.output))
-                  if (parsedTodos.success) {
+                  const parsedTodos = parseTodoWriteEntries(part.state.output, part.state.metadata)
+                  if (parsedTodos) {
                     await this.connection
                       .sessionUpdate({
                         sessionId,
                         update: {
                           sessionUpdate: "plan",
-                          entries: parsedTodos.data.map((todo) => {
+                          entries: parsedTodos.map((todo) => {
                             const status: PlanEntry["status"] =
                               todo.status === "cancelled" ? "completed" : (todo.status as PlanEntry["status"])
                             return {
@@ -294,7 +323,7 @@ export namespace ACP {
                         log.error("failed to send session update for todo", { error })
                       })
                   } else {
-                    log.error("failed to parse todo output", { error: parsedTodos.error })
+                    log.error("failed to parse todo output", { output: part.state.output, metadata: part.state.metadata })
                   }
                 }
 

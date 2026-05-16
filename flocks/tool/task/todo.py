@@ -1,34 +1,57 @@
-"""
-Todo Tools - TODO list management
-
-Provides tools for reading and writing TODO lists:
-- todoread: Read current todo list
-- todowrite: Update todo list with new items
-"""
+"""Todo tools backed by the session todo store."""
 
 import json
-from typing import List, Dict, Any, Optional
-from enum import Enum
+from typing import Any, Dict, List
 
+from pydantic import ValidationError
+
+from flocks.session.features.todo import Todo, TodoInfo
 from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
 )
 from flocks.utils.log import Log
 
 
 log = Log.create(service="tool.todo")
 
+ACTIVE_TODO_STATUSES = {"pending", "in_progress"}
+TERMINAL_TODO_STATUSES = {"completed", "cancelled"}
+VERIFICATION_KEYWORDS = ("verif", "verify", "validation", "test", "check", "验证", "测试", "检查")
 
-# In-memory todo storage (per session)
-# In production, this would be persisted to storage
-_todo_storage: Dict[str, List[Dict[str, Any]]] = {}
-
-
-class TodoStatus(str, Enum):
-    """Todo item status"""
-    PENDING = "pending"
-    IN_PROGRESS = "in_progress"
-    COMPLETED = "completed"
+TODO_ITEM_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "Unique identifier for the todo item",
+        },
+        "content": {
+            "type": "string",
+            "description": "Brief description of the task",
+        },
+        "activeForm": {
+            "type": "string",
+            "description": "Optional active/progressive form used while the task is in progress",
+        },
+        "status": {
+            "type": "string",
+            "description": "Current status of the task",
+            "enum": ["pending", "in_progress", "completed", "cancelled"],
+        },
+        "priority": {
+            "type": "string",
+            "description": "Priority level of the task",
+            "enum": ["high", "medium", "low"],
+        },
+    },
+    "required": ["id", "content", "status"],
+    "additionalProperties": False,
+}
 
 
 TODOWRITE_DESCRIPTION = """Use this tool to create and manage a structured task list for your current SecOps session. This helps track progress, organize complex tasks, and demonstrate thoroughness.
@@ -54,7 +77,20 @@ Usage:
 - Break complex tasks into manageable steps
 - Update status in real-time
 - Mark complete IMMEDIATELY after finishing
-- Only ONE task in_progress at a time"""
+- Only ONE task in_progress at a time
+
+Valid input example:
+{
+  "todos": [
+    {"id": "investigate", "content": "Investigate the alert", "activeForm": "Investigating the alert", "status": "in_progress"},
+    {"id": "verify", "content": "Verify the fix", "status": "pending"}
+  ]
+}
+
+Invalid input example:
+{
+  "todos": ["1. Investigate the alert", "2. Verify the fix"]
+}"""
 
 
 TODOREAD_DESCRIPTION = """Use this tool to read your current todo list.
@@ -62,14 +98,61 @@ TODOREAD_DESCRIPTION = """Use this tool to read your current todo list.
 Returns the current state of all todo items for this session."""
 
 
-def get_todos(session_id: str) -> List[Dict[str, Any]]:
-    """Get todos for a session"""
-    return _todo_storage.get(session_id, [])
+def _validation_error_message(index: int, error: ValidationError) -> str:
+    """Return a concise validation message for a todo item."""
+    issues: List[str] = []
+    for item in error.errors():
+        location = ".".join(str(part) for part in item.get("loc", ()))
+        suffix = f".{location}" if location else ""
+        issues.append(f"todos[{index}]{suffix}: {item.get('msg', 'invalid value')}")
+    return "; ".join(issues) if issues else f"todos[{index}] is invalid"
 
 
-def set_todos(session_id: str, todos: List[Dict[str, Any]]) -> None:
-    """Set todos for a session"""
-    _todo_storage[session_id] = todos
+def _normalize_todos(raw_todos: Any) -> List[TodoInfo]:
+    """Validate todo payloads strictly so malformed tool calls fail loudly."""
+    if not isinstance(raw_todos, list):
+        raise ValueError("todos must be an array of structured todo objects")
+    if not raw_todos:
+        raise ValueError("todos must not be empty")
+
+    normalized: List[TodoInfo] = []
+    for index, todo in enumerate(raw_todos):
+        if not isinstance(todo, dict):
+            raise ValueError(
+                f"todos[{index}] must be an object with id, content, status"
+            )
+        try:
+            item = TodoInfo(**todo)
+        except ValidationError as exc:
+            raise ValueError(_validation_error_message(index, exc)) from exc
+
+        if not item.id.strip():
+            raise ValueError(f"todos[{index}].id must not be empty")
+        if not item.content.strip():
+            raise ValueError(f"todos[{index}].content must not be empty")
+        if item.activeForm is not None:
+            item.activeForm = item.activeForm.strip() or item.content
+        normalized.append(item)
+
+    return normalized
+
+
+def _serialize_todos(todos: List[TodoInfo]) -> List[Dict[str, Any]]:
+    return [todo.model_dump(exclude_none=True) for todo in todos]
+
+
+def _all_terminal(todos: List[TodoInfo]) -> bool:
+    return bool(todos) and all(todo.status in TERMINAL_TODO_STATUSES for todo in todos)
+
+
+def _verification_nudge_needed(todos: List[TodoInfo]) -> bool:
+    if len(todos) < 3 or not _all_terminal(todos):
+        return False
+    for todo in todos:
+        haystack = f"{todo.content} {todo.activeForm or ''}".lower()
+        if any(keyword in haystack for keyword in VERIFICATION_KEYWORDS):
+            return False
+    return True
 
 
 @ToolRegistry.register_function(
@@ -81,7 +164,12 @@ def set_todos(session_id: str, todos: List[Dict[str, Any]]) -> None:
             name="todos",
             type=ParameterType.ARRAY,
             description="Array of todo items with id, content, and status fields",
-            required=True
+            required=True,
+            json_schema={
+                "type": "array",
+                "items": TODO_ITEM_JSON_SCHEMA,
+                "minItems": 1,
+            },
         ),
     ]
 )
@@ -107,37 +195,34 @@ async def todowrite_tool(
         metadata={}
     )
     
-    # Validate and normalize todos
-    normalized_todos = []
-    for todo in todos:
-        # Ensure required fields
-        if not isinstance(todo, dict):
-            continue
-        
-        normalized = {
-            "id": str(todo.get("id", len(normalized_todos) + 1)),
-            "content": str(todo.get("content", "")),
-            "status": todo.get("status", TodoStatus.PENDING.value)
-        }
-        
-        # Validate status
-        if normalized["status"] not in [s.value for s in TodoStatus]:
-            normalized["status"] = TodoStatus.PENDING.value
-        
-        normalized_todos.append(normalized)
-    
-    # Store todos
-    set_todos(ctx.session_id, normalized_todos)
-    
-    # Count pending todos
-    pending_count = len([t for t in normalized_todos if t["status"] != TodoStatus.COMPLETED.value])
+    old_todos = await Todo.get(ctx.session_id)
+    normalized_todos = _normalize_todos(todos)
+    if _all_terminal(normalized_todos):
+        await Todo.update(ctx.session_id, [])
+    else:
+        await Todo.update(ctx.session_id, normalized_todos)
+
+    old_serialized = _serialize_todos(old_todos)
+    new_serialized = _serialize_todos(normalized_todos)
+    verification_nudge_needed = _verification_nudge_needed(normalized_todos)
+    pending_count = sum(
+        1 for todo in normalized_todos if todo.status in ACTIVE_TODO_STATUSES
+    )
+    output_payload = {
+        "oldTodos": old_serialized,
+        "newTodos": new_serialized,
+        "verificationNudgeNeeded": verification_nudge_needed,
+    }
     
     return ToolResult(
         success=True,
-        output=json.dumps(normalized_todos, indent=2),
+        output=json.dumps(output_payload, ensure_ascii=False, indent=2),
         title=f"{pending_count} todos",
         metadata={
-            "todos": normalized_todos
+            "todos": new_serialized,
+            "oldTodos": old_serialized,
+            "newTodos": new_serialized,
+            "verificationNudgeNeeded": verification_nudge_needed,
         }
     )
 
@@ -168,17 +253,15 @@ async def todoread_tool(
         metadata={}
     )
     
-    # Get todos
-    todos = get_todos(ctx.session_id)
-    
-    # Count pending todos
-    pending_count = len([t for t in todos if t.get("status") != TodoStatus.COMPLETED.value])
+    todos = await Todo.get(ctx.session_id)
+    serialized_todos = _serialize_todos(todos)
+    pending_count = sum(1 for todo in todos if todo.status in ACTIVE_TODO_STATUSES)
     
     return ToolResult(
         success=True,
-        output=json.dumps(todos, indent=2),
+        output=json.dumps(serialized_todos, ensure_ascii=False, indent=2),
         title=f"{pending_count} todos",
         metadata={
-            "todos": todos
+            "todos": serialized_todos
         }
     )

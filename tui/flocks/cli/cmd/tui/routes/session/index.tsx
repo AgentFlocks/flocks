@@ -2185,13 +2185,14 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
 }
 
 function TodoWrite(props: ToolProps<typeof TodoWriteTool>) {
+  const todos = () => props.metadata.newTodos ?? props.metadata.todos ?? props.input.todos ?? []
   return (
     <Switch>
-      <Match when={props.metadata.todos?.length}>
+      <Match when={todos().length}>
         <BlockTool title="# Todos" part={props.part}>
           <box>
-            <For each={props.input.todos ?? []}>
-              {(todo) => <TodoItem status={todo.status} content={todo.content} />}
+            <For each={todos()}>
+              {(todo) => <TodoItem status={todo.status} content={todo.content} activeForm={todo.activeForm} />}
             </For>
           </box>
         </BlockTool>

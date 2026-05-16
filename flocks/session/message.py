@@ -434,6 +434,7 @@ class Message:
     _messages_cache: Dict[str, List[MessageInfo]] = {}
     _msg_id_index: Dict[str, Dict[str, int]] = {}  # session_id -> {message_id -> list index}
     _parts_cache: Dict[str, Dict[str, List[PartType]]] = {}  # session_id -> message_id -> parts
+    _parts_revision_cache: Dict[str, Dict[str, int]] = {}
     _parts_serialized_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     _parts_flush_tasks: Dict[str, asyncio.Task] = {}
     _lru: OrderedDict[str, bool] = OrderedDict()  # LRU tracker: move_to_end() is O(1)
@@ -463,6 +464,55 @@ class Message:
             cls._parts_cache.get(session_id, {}).get(message_id, [])
         )
         return serialized
+
+    @classmethod
+    def _touch_parts_revision(cls, session_id: str, message_id: str) -> int:
+        revisions = cls._parts_revision_cache.setdefault(session_id, {})
+        next_revision = int(revisions.get(message_id, 0)) + 1
+        revisions[message_id] = next_revision
+        return next_revision
+
+    @classmethod
+    def get_parts_revision(cls, session_id: str, message_id: str) -> int:
+        """Return the current in-memory parts revision for a message."""
+        return int(cls._parts_revision_cache.get(session_id, {}).get(message_id, 0))
+
+    @classmethod
+    def _prepare_tool_output_cache(cls, part: PartType) -> PartType:
+        """Cache a stable prompt-facing string for completed tool results."""
+        if not isinstance(part, ToolPart):
+            return part
+        state = part.state
+        if not hasattr(state, "status") or state.status != "completed":
+            return part
+
+        metadata = dict(getattr(state, "metadata", None) or {})
+        placeholder = metadata.get("context_compact_placeholder")
+        if placeholder:
+            output_text = str(placeholder)
+            source = "context_compact_placeholder"
+        else:
+            output = getattr(state, "output", None)
+            if output is None:
+                output_text = ""
+                source = "empty"
+            elif isinstance(output, str):
+                output_text = output
+                source = "state.output"
+            else:
+                import json as _json
+                try:
+                    output_text = _json.dumps(output, ensure_ascii=False, indent=2)
+                except (TypeError, ValueError):
+                    output_text = str(output)
+                state.output = output_text
+                source = "state.output"
+
+        metadata["llm_output_text"] = output_text
+        metadata["llm_output_len"] = len(output_text)
+        metadata["llm_output_source"] = source
+        state.metadata = metadata
+        return part
 
     @classmethod
     def _should_debounce_part_persist(cls, part: PartType) -> bool:
@@ -517,6 +567,7 @@ class Message:
                 cls._messages_cache.pop(evict_id, None)
                 cls._msg_id_index.pop(evict_id, None)
                 cls._parts_cache.pop(evict_id, None)
+                cls._parts_revision_cache.pop(evict_id, None)
                 cls._parts_serialized_cache.pop(evict_id, None)
                 _session_locks.discard(evict_id)
                 log.debug("message.cache.evicted", {"session_id": evict_id})
@@ -541,16 +592,19 @@ class Message:
             
             if stored_parts:
                 cls._parts_cache[session_id] = {}
+                cls._parts_revision_cache[session_id] = {}
                 for msg_id, parts_data in stored_parts.items():
                     cls._parts_cache[session_id][msg_id] = [
                         cls.deserialize_part(p) for p in parts_data
                     ]
+                    cls._parts_revision_cache[session_id][msg_id] = 0
                 cls._parts_serialized_cache[session_id] = {
                     msg_id: list(parts_data)
                     for msg_id, parts_data in stored_parts.items()
                 }
             else:
                 cls._parts_cache[session_id] = {}
+                cls._parts_revision_cache[session_id] = {}
                 cls._parts_serialized_cache[session_id] = {}
             
             cls._rebuild_id_index(session_id)
@@ -902,8 +956,10 @@ class Message:
         Returns:
             The stored part
         """
-        # Cap oversized tool results before they reach storage
+        # Cap oversized tool results before they reach storage and cache a
+        # stable prompt-facing string for subsequent continuation steps.
         part = cls._cap_tool_part_output(part)
+        part = cls._prepare_tool_output_cache(part)
 
         await cls._ensure_cache(session_id)
         
@@ -924,6 +980,8 @@ class Message:
             
             if not updated:
                 parts_list.append(part)
+
+            cls._touch_parts_revision(session_id, message_id)
 
             if cls._should_debounce_part_persist(part):
                 cls._sync_serialized_parts_for_message(session_id, message_id)
@@ -1185,6 +1243,7 @@ class Message:
             cls._messages_cache.pop(session_id, None)
             cls._msg_id_index.pop(session_id, None)
             cls._parts_cache.pop(session_id, None)
+            cls._parts_revision_cache.pop(session_id, None)
             cls._parts_serialized_cache.pop(session_id, None)
             _session_locks.discard(session_id)
         else:
@@ -1194,6 +1253,7 @@ class Message:
             cls._messages_cache.clear()
             cls._msg_id_index.clear()
             cls._parts_cache.clear()
+            cls._parts_revision_cache.clear()
             cls._parts_serialized_cache.clear()
             _session_locks.clear()
         log.debug("message.cache.invalidated", {"session_id": session_id})
@@ -1517,6 +1577,7 @@ class Message:
                 cls._parts_cache[session_id][message_id] = []
             
             cls._parts_cache[session_id][message_id].append(part)
+            cls._touch_parts_revision(session_id, message_id)
             
             cls._cancel_parts_flush_task(session_id)
             await cls._persist_parts(session_id, message_id=message_id)
@@ -1556,7 +1617,10 @@ class Message:
                             part_data[key] = value
                     
                     updated_part = cls.deserialize_part(part_data)
+                    updated_part = cls._cap_tool_part_output(updated_part)
+                    updated_part = cls._prepare_tool_output_cache(updated_part)
                     parts[i] = updated_part
+                    cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
                     await cls._persist_parts(session_id, message_id=message_id)
@@ -1591,6 +1655,7 @@ class Message:
             for i, part in enumerate(parts):
                 if part.id == part_id:
                     parts.pop(i)
+                    cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
                     await cls._persist_parts(session_id, message_id=message_id)
