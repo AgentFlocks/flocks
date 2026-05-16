@@ -5,7 +5,7 @@ Tests cover:
 - Tool registration and discovery
 - P0 Core tools (6): read, write, edit, bash, grep, glob
 - P1 tools (6): webfetch, todoread, todowrite, question, plan_enter, plan_exit
-- P2 tools (6): multiedit, task, lsp, skill, background_output, background_cancel
+- P2 tools (5): task, lsp, skill, background_output, background_cancel
 - P3 tools (2): websearch, apply_patch
 - Permission system integration
 - Error handling
@@ -133,8 +133,8 @@ class TestToolRegistry:
             "read", "write", "edit", "bash", "grep", "glob",
             # P1 tools (6)
             "webfetch", "todoread", "todowrite", "question", "plan_enter", "plan_exit",
-            # P2 tools (6)
-            "multiedit", "task", "lsp", "skill",
+            # P2 tools (5)
+            "task", "lsp", "skill",
             "background_output", "background_cancel",
             # P3 tools (2)
             "websearch", "apply_patch",
@@ -220,7 +220,7 @@ class TestReadTool:
         )
         
         assert not result.success
-        assert "not found" in result.error.lower()
+        assert "could not find" in result.error.lower()
     
     @pytest.mark.asyncio
     async def test_read_permission_requested(self, tool_context_with_permission, test_files):
@@ -362,6 +362,21 @@ class TestEditTool:
             content = f.read()
             assert "foo" not in content
             assert content.count("qux") == 3
+
+    def test_edit_schema_supports_batch_edits(self):
+        """Test edit schema exposes pi-style edits[] plus legacy compatibility."""
+        tool = ToolRegistry.get("edit")
+        assert tool is not None
+
+        schema = tool.info.get_schema()
+        edits_prop = schema.properties["edits"]
+
+        assert edits_prop["type"] == "array"
+        assert edits_prop["items"]["type"] == "object"
+        assert edits_prop["items"]["required"] == ["oldString", "newString"]
+        assert "oldString" in edits_prop["items"]["properties"]
+        assert "newString" in edits_prop["items"]["properties"]
+        assert schema.required == ["filePath"]
 
 
 class TestBashTool:
@@ -708,16 +723,6 @@ class TestWebFetchTool:
 # P2 Tools Tests
 # =============================================================================
 
-class TestMultiEditTool:
-    """Test the multiedit tool"""
-    
-    @pytest.mark.asyncio
-    async def test_multiedit_exists(self):
-        """Test that multiedit tool is registered"""
-        tool = ToolRegistry.get("multiedit")
-        assert tool is not None
-
-
 class TestTaskTool:
     """Test the task tool"""
     
@@ -998,7 +1003,7 @@ class TestErrorHandling:
         )
         
         assert not result.success
-        assert "not found" in result.error.lower()
+        assert "could not find" in result.error.lower()
 
     @pytest.mark.asyncio
     async def test_builtin_tool_rejects_unknown_parameter(self, tool_context, temp_dir):
@@ -1312,7 +1317,7 @@ class TestEditToolAdvanced:
         )
         
         assert not result.success
-        assert "not found" in result.error.lower()
+        assert "could not find" in result.error.lower()
     
     @pytest.mark.asyncio
     async def test_edit_create_new_file(self, tool_context, temp_dir):
@@ -1333,6 +1338,111 @@ class TestEditToolAdvanced:
         
         with open(filepath, 'r') as f:
             assert f.read() == content
+
+    @pytest.mark.asyncio
+    async def test_edit_multi_snapshot_semantics(self, tool_context, temp_dir):
+        """Test edits[] are matched against the original file, not incrementally."""
+        filepath = os.path.join(temp_dir, "edit_multi_snapshot.txt")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("foo\nbar\nbaz\n")
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            edits=[
+                {"oldString": "foo\n", "newString": "foo bar\n"},
+                {"oldString": "bar\n", "newString": "BAR\n"},
+            ],
+        )
+
+        assert result.success
+        with open(filepath, "r", encoding="utf-8") as f:
+            assert f.read() == "foo bar\nBAR\nbaz\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_multi_overlap_fails(self, tool_context, temp_dir):
+        """Test overlapping edits are rejected."""
+        filepath = os.path.join(temp_dir, "edit_overlap.txt")
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write("one\ntwo\nthree\n")
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            edits=[
+                {"oldString": "one\ntwo\n", "newString": "ONE\nTWO\n"},
+                {"oldString": "two\nthree\n", "newString": "TWO\nTHREE\n"},
+            ],
+        )
+
+        assert not result.success
+        assert "overlap" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_edit_multi_failure_is_not_partial(self, tool_context, temp_dir):
+        """Test edit does not partially apply batch edits when one fails."""
+        filepath = os.path.join(temp_dir, "edit_no_partial.txt")
+        original = "alpha\nbeta\ngamma\n"
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            edits=[
+                {"oldString": "alpha\n", "newString": "ALPHA\n"},
+                {"oldString": "missing\n", "newString": "MISSING\n"},
+            ],
+        )
+
+        assert not result.success
+        with open(filepath, "r", encoding="utf-8") as f:
+            assert f.read() == original
+
+    @pytest.mark.asyncio
+    async def test_edit_multi_preserves_bom_and_crlf(self, tool_context, temp_dir):
+        """Test batch edit preserves UTF-8 BOM and CRLF line endings."""
+        filepath = os.path.join(temp_dir, "edit_bom_crlf.txt")
+        original = "\ufefffirst\r\nsecond\r\nthird\r\nfourth\r\n"
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            f.write(original)
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            edits=[
+                {"oldString": "second\n", "newString": "SECOND\n"},
+                {"oldString": "fourth\n", "newString": "FOURTH\n"},
+            ],
+        )
+
+        assert result.success
+        with open(filepath, "r", encoding="utf-8", newline="") as f:
+            assert f.read() == "\ufefffirst\r\nSECOND\r\nthird\r\nFOURTH\r\n"
+
+    @pytest.mark.asyncio
+    async def test_edit_fuzzy_match_preserves_unedited_unicode(self, tool_context, temp_dir):
+        """Fuzzy edits must not normalize unrelated Unicode elsewhere in the file."""
+        filepath = os.path.join(temp_dir, "edit_fuzzy_unicode.txt")
+        original = 'title = "Don’t stop"\nother = "keep — dash"\n'
+        with open(filepath, "w", encoding="utf-8", newline="") as f:
+            f.write(original)
+
+        result = await ToolRegistry.execute(
+            "edit",
+            ctx=tool_context,
+            filePath=filepath,
+            oldString="Don't stop",
+            newString="Do not stop",
+        )
+
+        assert result.success
+        with open(filepath, "r", encoding="utf-8", newline="") as f:
+            assert f.read() == 'title = "Do not stop"\nother = "keep — dash"\n'
 
 
 class TestBashToolAdvanced:

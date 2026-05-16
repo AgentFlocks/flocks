@@ -26,11 +26,11 @@ _COMMAND_DESCRIPTIONS = {
     "skills":    "List all available skills with descriptions",
     "workflows": "List all available workflows with descriptions and file paths",
     "help":      "Show available commands",
-    "tasks":     "Show task center overview",
-    "queue":     "Show task queue status",
+    "tasks":     "Show scheduled task center overview",
+    "queue":     "Show running and pending task queue status",
     "compact":   "Summarize the conversation",
     "plan":      "Create a plan for a task",
-    "ask":       "Ask a question without making changes",
+    "ask":       "Ask a question without making changes (read-only analysis)",
 }
 
 _TOOL_DESCRIPTION = (

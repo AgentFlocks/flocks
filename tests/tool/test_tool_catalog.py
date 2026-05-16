@@ -1,4 +1,5 @@
 from flocks.tool.catalog import (
+    TOOL_TAGS,
     apply_tool_catalog_defaults,
     canonical_tool_token,
     get_tool_catalog_metadata,
@@ -47,6 +48,41 @@ def test_catalog_marks_tool_search_as_always_load() -> None:
     metadata = get_tool_catalog_metadata("tool_search", info)
 
     assert metadata.always_load is True
+
+
+def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
+    assert "read_file" not in TOOL_TAGS
+    assert "memory" not in TOOL_TAGS
+    assert "model_config" not in TOOL_TAGS
+    assert "slash_command" not in TOOL_TAGS
+
+    for name in [
+        "doc_parser",
+        "lsp",
+        "todoread",
+        "todowrite",
+        "memory_search",
+        "memory_get",
+        "memory_write",
+        "list_providers",
+        "add_provider",
+        "add_model",
+        "run_slash_command",
+        "ssh_host_cmd",
+        "ssh_run_script",
+        "flocks_mcp",
+        "flocks_skills",
+        "get_time",
+    ]:
+        assert name in TOOL_TAGS
+
+
+def test_task_tool_tags_reflect_agent_delegation() -> None:
+    metadata = get_tool_catalog_metadata("task")
+
+    assert "agent" in metadata.tags
+    assert "delegation" in metadata.tags
+    assert "planning" not in metadata.tags
 
 
 def test_explicit_tags_are_merged_with_defaults() -> None:

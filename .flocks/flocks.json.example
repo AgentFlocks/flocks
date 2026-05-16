@@ -2,6 +2,7 @@
   "provider": {},
   "mcp": {},
   "channels": {},
+  "plugin": [],
   "api_services": {
     "greynoise": {
       "enabled": false

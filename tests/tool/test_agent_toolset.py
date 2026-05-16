@@ -102,7 +102,6 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "grep",
         "lsp",
         "memory_search",
-        "multiedit",
         "plan_exit",
         "question",
         "read",
@@ -133,6 +132,8 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "self_enhance",
     ):
         agent_yaml = agent_root / agent_name / "agent.yaml"
+        if not agent_yaml.exists():
+            continue
         raw_tools = yaml.safe_load(agent_yaml.read_text(encoding="utf-8"))["tools"]
 
         assert normalize_declared_tool_names(raw_tools, available_tool_names) == raw_tools

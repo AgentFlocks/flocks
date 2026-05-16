@@ -1,483 +1,446 @@
 """
-Edit Tool - File editing with string replacement
+Edit Tool - File editing with batch exact replacements
 
-Performs exact string replacements in files with multiple fallback strategies:
-- Simple exact match
-- Line-trimmed matching
-- Block anchor matching (for multi-line blocks)
-- Whitespace normalized matching
-- Indentation flexible matching
-- Escape normalized matching
-- Context-aware matching
-
-Ported from original edit.ts implementation.
+Supports both legacy single-edit arguments and pi-style edits[] batch edits.
+All edits in one call are matched against the same original file snapshot.
 """
 
 import os
-import re
-from pathlib import Path
-from typing import Optional, Generator, List
+import unicodedata
+from dataclasses import dataclass
 from difflib import unified_diff
+from typing import Any, Dict, List, Optional
 
 from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 
 
 log = Log.create(service="tool.edit")
 
 
-async def _resolve_sandbox_file_path(
-    ctx: ToolContext,
-    filepath: str,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-    """
-    Resolve file path under sandbox workspace when sandbox is enabled.
-
-    Returns:
-        (resolved_path, error_message, sandbox_dict)
-    """
-    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
-    if not isinstance(sandbox, dict):
-        return filepath, None, None
-
-    workspace_root = sandbox.get("workspace_dir")
-    if not workspace_root:
-        return filepath, None, sandbox
-
-    if not os.path.isabs(filepath):
-        filepath = os.path.join(workspace_root, filepath)
-
-    try:
-        from flocks.sandbox.paths import assert_sandbox_path
-
-        resolved = await assert_sandbox_path(
-            file_path=filepath,
-            cwd=workspace_root,
-            root=workspace_root,
-        )
-        return resolved.resolved, None, sandbox
-    except Exception:
-        return None, (
-            f"Path escapes sandbox workspace: {filepath}. "
-            "Use paths inside sandbox workspace only."
-        ), sandbox
-
-
-# Description matching Flocks' edit.txt
-DESCRIPTION = """Performs exact string replacements in files. 
+DESCRIPTION = """Edit a single file using exact text replacement.
 
 Usage:
-- You must use your `Read` tool at least once before editing a file. CRITICAL: After each successful edit, the file content changes. You MUST re-read the file with `Read` before making any further edits to that file, otherwise oldString will not match the updated content and the edit will fail.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: NNNNN| (5-digit zero-padded line number, then pipe, then a single space). Everything after that "| " is the actual file content to match. Never include any part of the line number prefix in the oldString or newString. For example, if Read outputs "00042|     return x", the actual content to use in oldString is "    return x" (4 spaces + "return x").
-- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
-- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
-- The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
-- The edit will FAIL if `oldString` is found multiple times in the file with an error "oldString found multiple times and requires more code context to uniquely identify the intended match". Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`. 
-- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."""
-
-
-# Similarity thresholds for block anchor fallback matching
-SINGLE_CANDIDATE_SIMILARITY_THRESHOLD = 0.0
-MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD = 0.3
-
-
-def levenshtein(a: str, b: str) -> int:
-    """
-    Calculate Levenshtein distance between two strings
-    
-    Args:
-        a: First string
-        b: Second string
-        
-    Returns:
-        Edit distance
-    """
-    if not a or not b:
-        return max(len(a), len(b))
-    
-    # Use dynamic programming
-    m, n = len(a), len(b)
-    matrix = [[0] * (n + 1) for _ in range(m + 1)]
-    
-    for i in range(m + 1):
-        matrix[i][0] = i
-    for j in range(n + 1):
-        matrix[0][j] = j
-    
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            cost = 0 if a[i-1] == b[j-1] else 1
-            matrix[i][j] = min(
-                matrix[i-1][j] + 1,      # deletion
-                matrix[i][j-1] + 1,      # insertion
-                matrix[i-1][j-1] + cost  # substitution
-            )
-    
-    return matrix[m][n]
+- Prefer `edits` for one or more disjoint replacements in the same file.
+- Every `edits[].oldString` is matched against the original file content, not after earlier edits are applied.
+- Do not use overlapping or nested edits. Merge nearby changes into one edit.
+- Legacy `oldString`/`newString`/`replaceAll` is still supported for single-edit callers.
+- Use `replaceAll` only with legacy single-edit arguments when you want to replace every occurrence in the file.
+- CRITICAL: match text exactly including whitespace and newlines.
+- The tool preserves the file's existing encoding and dominant line-ending style."""
 
 
 def normalize_line_endings(text: str) -> str:
-    """Normalize line endings to Unix style"""
-    return text.replace("\r\n", "\n")
+    """Normalize all line endings to LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def detect_line_ending(text: str) -> str:
+    """Return the dominant line ending for the file."""
+    crlf_idx = text.find("\r\n")
+    lf_idx = text.find("\n")
+    if lf_idx == -1:
+        return "\n"
+    if crlf_idx == -1:
+        return "\n"
+    return "\r\n" if crlf_idx < lf_idx else "\n"
+
+
+def restore_line_endings(text: str, ending: str) -> str:
+    """Restore LF-normalized text to the original line-ending style."""
+    return text.replace("\n", "\r\n") if ending == "\r\n" else text
+
+
+def strip_bom(text: str) -> tuple[str, str]:
+    """Split a UTF-8 BOM prefix from the file body."""
+    if text.startswith("\ufeff"):
+        return "\ufeff", text[1:]
+    return "", text
+
+
+def normalize_for_fuzzy_match(text: str) -> str:
+    """Normalize text for fuzzy matching, mirroring pi semantics."""
+    return (
+        unicodedata.normalize("NFKC", text)
+        .replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201a", "'")
+        .replace("\u201b", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u201e", '"')
+        .replace("\u201f", '"')
+        .replace("\u2010", "-")
+        .replace("\u2011", "-")
+        .replace("\u2012", "-")
+        .replace("\u2013", "-")
+        .replace("\u2014", "-")
+        .replace("\u2015", "-")
+        .replace("\u2212", "-")
+        .replace("\u00a0", " ")
+        .replace("\u2002", " ")
+        .replace("\u2003", " ")
+        .replace("\u2004", " ")
+        .replace("\u2005", " ")
+        .replace("\u2006", " ")
+        .replace("\u2007", " ")
+        .replace("\u2008", " ")
+        .replace("\u2009", " ")
+        .replace("\u200a", " ")
+        .replace("\u202f", " ")
+        .replace("\u205f", " ")
+        .replace("\u3000", " ")
+    )
+
+
+def _normalize_fuzzy_lines(text: str) -> str:
+    """Apply fuzzy normalization plus trailing-space trimming per line."""
+    normalized = normalize_for_fuzzy_match(text)
+    return "\n".join(line.rstrip() for line in normalized.split("\n"))
+
+
+@dataclass(frozen=True)
+class FuzzyTextIndex:
+    """Normalized fuzzy-search view plus original-content span mapping."""
+
+    normalized_text: str
+    spans: List[tuple[int, int]]
+
+
+def _build_fuzzy_text_index(text: str) -> FuzzyTextIndex:
+    """Build a fuzzy-normalized shadow string mapped back to original offsets."""
+    if not text:
+        return FuzzyTextIndex(normalized_text="", spans=[])
+
+    normalized_chars: List[str] = []
+    spans: List[tuple[int, int]] = []
+    line_start = 0
+    text_length = len(text)
+
+    while line_start < text_length:
+        newline_index = text.find("\n", line_start)
+        has_newline = newline_index != -1
+        line_end = newline_index if has_newline else text_length
+
+        line_chars: List[str] = []
+        line_spans: List[tuple[int, int]] = []
+        for absolute_index in range(line_start, line_end):
+            normalized_char = normalize_for_fuzzy_match(text[absolute_index])
+            for output_char in normalized_char:
+                line_chars.append(output_char)
+                line_spans.append((absolute_index, absolute_index + 1))
+
+        keep_count = len("".join(line_chars).rstrip())
+        normalized_chars.extend(line_chars[:keep_count])
+        spans.extend(line_spans[:keep_count])
+
+        if not has_newline:
+            break
+
+        normalized_chars.append("\n")
+        spans.append((line_end, line_end + 1))
+        line_start = line_end + 1
+
+    return FuzzyTextIndex(
+        normalized_text="".join(normalized_chars),
+        spans=spans,
+    )
+
+
+def _find_fuzzy_spans(content_index: FuzzyTextIndex, old_string: str) -> List[tuple[int, int]]:
+    """Return original-content spans for all fuzzy matches of old_string."""
+    normalized_old = _normalize_fuzzy_lines(old_string)
+    if not normalized_old:
+        return []
+
+    matches: List[tuple[int, int]] = []
+    search_start = 0
+    while True:
+        normalized_index = content_index.normalized_text.find(normalized_old, search_start)
+        if normalized_index == -1:
+            break
+
+        match_end_index = normalized_index + len(normalized_old) - 1
+        matches.append(
+            (
+                content_index.spans[normalized_index][0],
+                content_index.spans[match_end_index][1],
+            )
+        )
+        search_start = normalized_index + len(normalized_old)
+
+    return matches
 
 
 def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
-    """Generate unified diff between old and new content"""
+    """Generate a unified diff between old and new content."""
     old_lines = normalize_line_endings(old_content).splitlines(keepends=True)
     new_lines = normalize_line_endings(new_content).splitlines(keepends=True)
-    
-    diff_lines = list(unified_diff(
-        old_lines,
-        new_lines,
-        fromfile=filepath,
-        tofile=filepath,
-        lineterm=""
-    ))
-    
+    diff_lines = list(
+        unified_diff(
+            old_lines,
+            new_lines,
+            fromfile=filepath,
+            tofile=filepath,
+            lineterm="",
+        )
+    )
     return "".join(diff_lines)
 
 
 def trim_diff(diff: str) -> str:
-    """Trim indentation from diff content lines"""
+    """Trim common indentation from diff content lines."""
     if not diff:
         return diff
-    
+
     lines = diff.split("\n")
-    
     content_lines = [
-        line for line in lines
+        line
+        for line in lines
         if (line.startswith("+") or line.startswith("-") or line.startswith(" "))
         and not line.startswith("---")
         and not line.startswith("+++")
     ]
-    
     if not content_lines:
         return diff
-    
-    min_indent = float('inf')
+
+    min_indent = float("inf")
     for line in content_lines:
         content = line[1:]
         if content.strip():
             indent = len(content) - len(content.lstrip())
             min_indent = min(min_indent, indent)
-    
-    if min_indent == float('inf') or min_indent == 0:
+
+    if min_indent in (float("inf"), 0):
         return diff
-    
+
     trimmed_lines = []
     for line in lines:
-        if (line.startswith("+") or line.startswith("-") or line.startswith(" ")) \
-           and not line.startswith("---") and not line.startswith("+++"):
-            prefix = line[0]
-            content = line[1:]
-            trimmed_lines.append(prefix + content[int(min_indent):])
+        if (
+            (line.startswith("+") or line.startswith("-") or line.startswith(" "))
+            and not line.startswith("---")
+            and not line.startswith("+++")
+        ):
+            trimmed_lines.append(line[0] + line[1 + int(min_indent):])
         else:
             trimmed_lines.append(line)
-    
     return "\n".join(trimmed_lines)
 
 
-def _safe_relpath(path: str, start: Optional[str]) -> str:
-    """Return a relative path when possible, otherwise keep the absolute path."""
-    if not start:
-        return path
-    try:
-        return os.path.relpath(path, start)
-    except ValueError:
-        return path
+def _fuzzy_find_text(
+    content: str,
+    old_string: str,
+    content_index: Optional[FuzzyTextIndex] = None,
+) -> tuple[bool, int, int, bool]:
+    """Find text using exact match first, then fuzzy-normalized match."""
+    exact_index = content.find(old_string)
+    if exact_index != -1:
+        return True, exact_index, exact_index + len(old_string), False
+
+    fuzzy_spans = _find_fuzzy_spans(content_index or _build_fuzzy_text_index(content), old_string)
+    if not fuzzy_spans:
+        return False, -1, 0, False
+    return True, fuzzy_spans[0][0], fuzzy_spans[0][1], True
 
 
-# Replacer type: Generator that yields potential matches
-def simple_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Simple exact match replacer"""
-    yield find
+def _count_occurrences(
+    content: str,
+    old_string: str,
+    *,
+    used_fuzzy: bool,
+    content_index: Optional[FuzzyTextIndex] = None,
+) -> int:
+    if not used_fuzzy:
+        return content.count(old_string)
+
+    fuzzy_old = _normalize_fuzzy_lines(old_string)
+    if not fuzzy_old:
+        return 0
+    return (content_index or _build_fuzzy_text_index(content)).normalized_text.count(fuzzy_old)
 
 
-def line_trimmed_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Match with trimmed line comparison"""
-    original_lines = content.split("\n")
-    search_lines = find.split("\n")
-    
-    if search_lines and search_lines[-1] == "":
-        search_lines.pop()
-    
-    for i in range(len(original_lines) - len(search_lines) + 1):
-        matches = True
-        
-        for j in range(len(search_lines)):
-            original_trimmed = original_lines[i + j].strip()
-            search_trimmed = search_lines[j].strip()
-            
-            if original_trimmed != search_trimmed:
-                matches = False
-                break
-        
-        if matches:
-            # Calculate match indices
-            match_start = sum(len(original_lines[k]) + 1 for k in range(i))
-            match_end = match_start
-            for k in range(len(search_lines)):
-                match_end += len(original_lines[i + k])
-                if k < len(search_lines) - 1:
-                    match_end += 1
-            
-            yield content[match_start:match_end]
-
-
-def block_anchor_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Match using first/last lines as anchors"""
-    original_lines = content.split("\n")
-    search_lines = find.split("\n")
-    
-    if len(search_lines) < 3:
-        return
-    
-    if search_lines and search_lines[-1] == "":
-        search_lines.pop()
-    
-    first_line = search_lines[0].strip()
-    last_line = search_lines[-1].strip()
-    search_block_size = len(search_lines)
-    
-    # Collect candidate positions
-    candidates = []
-    for i in range(len(original_lines)):
-        if original_lines[i].strip() != first_line:
-            continue
-        
-        for j in range(i + 2, len(original_lines)):
-            if original_lines[j].strip() == last_line:
-                candidates.append({"start": i, "end": j})
-                break
-    
-    if not candidates:
-        return
-    
-    # Single candidate: use relaxed threshold
-    if len(candidates) == 1:
-        start, end = candidates[0]["start"], candidates[0]["end"]
-        actual_size = end - start + 1
-        
-        similarity = 0.0
-        lines_to_check = min(search_block_size - 2, actual_size - 2)
-        
-        if lines_to_check > 0:
-            for j in range(1, min(search_block_size - 1, actual_size - 1)):
-                orig_line = original_lines[start + j].strip()
-                search_line = search_lines[j].strip()
-                max_len = max(len(orig_line), len(search_line))
-                if max_len == 0:
-                    continue
-                distance = levenshtein(orig_line, search_line)
-                similarity += (1 - distance / max_len) / lines_to_check
-                if similarity >= SINGLE_CANDIDATE_SIMILARITY_THRESHOLD:
-                    break
-        else:
-            similarity = 1.0
-        
-        if similarity >= SINGLE_CANDIDATE_SIMILARITY_THRESHOLD:
-            match_start = sum(len(original_lines[k]) + 1 for k in range(start))
-            match_end = match_start
-            for k in range(start, end + 1):
-                match_end += len(original_lines[k])
-                if k < end:
-                    match_end += 1
-            yield content[match_start:match_end]
-        return
-    
-    # Multiple candidates: find best match
-    best_match = None
-    max_similarity = -1
-    
-    for candidate in candidates:
-        start, end = candidate["start"], candidate["end"]
-        actual_size = end - start + 1
-        
-        similarity = 0.0
-        lines_to_check = min(search_block_size - 2, actual_size - 2)
-        
-        if lines_to_check > 0:
-            for j in range(1, min(search_block_size - 1, actual_size - 1)):
-                orig_line = original_lines[start + j].strip()
-                search_line = search_lines[j].strip()
-                max_len = max(len(orig_line), len(search_line))
-                if max_len == 0:
-                    continue
-                distance = levenshtein(orig_line, search_line)
-                similarity += 1 - distance / max_len
-            similarity /= lines_to_check
-        else:
-            similarity = 1.0
-        
-        if similarity > max_similarity:
-            max_similarity = similarity
-            best_match = candidate
-    
-    if max_similarity >= MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD and best_match:
-        start, end = best_match["start"], best_match["end"]
-        match_start = sum(len(original_lines[k]) + 1 for k in range(start))
-        match_end = match_start
-        for k in range(start, end + 1):
-            match_end += len(original_lines[k])
-            if k < end:
-                match_end += 1
-        yield content[match_start:match_end]
-
-
-def whitespace_normalized_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Match with normalized whitespace"""
-    def normalize(text: str) -> str:
-        return re.sub(r'\s+', ' ', text).strip()
-    
-    normalized_find = normalize(find)
-    lines = content.split("\n")
-    
-    # Single line matches
-    for line in lines:
-        if normalize(line) == normalized_find:
-            yield line
-        else:
-            normalized_line = normalize(line)
-            if normalized_find in normalized_line:
-                words = find.strip().split()
-                if words:
-                    pattern = r'\s+'.join(re.escape(w) for w in words)
-                    try:
-                        match = re.search(pattern, line)
-                        if match:
-                            yield match.group(0)
-                    except re.error:
-                        pass
-    
-    # Multi-line matches
-    find_lines = find.split("\n")
-    if len(find_lines) > 1:
-        for i in range(len(lines) - len(find_lines) + 1):
-            block = lines[i:i + len(find_lines)]
-            if normalize("\n".join(block)) == normalized_find:
-                yield "\n".join(block)
-
-
-def indentation_flexible_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Match with flexible indentation"""
-    def remove_indentation(text: str) -> str:
-        text_lines = text.split("\n")
-        non_empty = [l for l in text_lines if l.strip()]
-        if not non_empty:
-            return text
-        
-        min_indent = min(
-            len(l) - len(l.lstrip())
-            for l in non_empty
+def _get_not_found_error(filepath: str, edit_index: int, total_edits: int) -> str:
+    if total_edits == 1:
+        return (
+            f"Could not find the exact text in {filepath}. "
+            "The oldString must match exactly including all whitespace and newlines."
         )
-        
-        return "\n".join(
-            l if not l.strip() else l[min_indent:]
-            for l in text_lines
-        )
-    
-    normalized_find = remove_indentation(find)
-    content_lines = content.split("\n")
-    find_lines = find.split("\n")
-    
-    for i in range(len(content_lines) - len(find_lines) + 1):
-        block = "\n".join(content_lines[i:i + len(find_lines)])
-        if remove_indentation(block) == normalized_find:
-            yield block
-
-
-def trimmed_boundary_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Match with trimmed boundaries"""
-    trimmed_find = find.strip()
-    
-    if trimmed_find == find:
-        return
-    
-    if trimmed_find in content:
-        yield trimmed_find
-    
-    lines = content.split("\n")
-    find_lines = find.split("\n")
-    
-    for i in range(len(lines) - len(find_lines) + 1):
-        block = "\n".join(lines[i:i + len(find_lines)])
-        if block.strip() == trimmed_find:
-            yield block
-
-
-def multi_occurrence_replacer(content: str, find: str) -> Generator[str, None, None]:
-    """Yield all exact matches"""
-    start = 0
-    while True:
-        idx = content.find(find, start)
-        if idx == -1:
-            break
-        yield find
-        start = idx + len(find)
-
-
-def replace(content: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
-    """
-    Replace old_string with new_string in content
-    
-    Uses multiple replacer strategies to find the best match.
-    
-    Args:
-        content: File content
-        old_string: String to find
-        new_string: Replacement string
-        replace_all: Replace all occurrences
-        
-    Returns:
-        Modified content
-        
-    Raises:
-        ValueError: If old_string not found or ambiguous
-    """
-    if old_string == new_string:
-        raise ValueError("oldString and newString must be different")
-    
-    not_found = True
-    
-    # Try each replacer strategy
-    replacers = [
-        simple_replacer,
-        line_trimmed_replacer,
-        block_anchor_replacer,
-        whitespace_normalized_replacer,
-        indentation_flexible_replacer,
-        trimmed_boundary_replacer,
-        multi_occurrence_replacer,
-    ]
-    
-    for replacer in replacers:
-        for search in replacer(content, old_string):
-            idx = content.find(search)
-            if idx == -1:
-                continue
-            
-            not_found = False
-            
-            if replace_all:
-                return content.replace(search, new_string)
-            
-            # Check for multiple occurrences
-            last_idx = content.rfind(search)
-            if idx != last_idx:
-                continue
-            
-            return content[:idx] + new_string + content[idx + len(search):]
-    
-    if not_found:
-        raise ValueError("oldString not found in content")
-    
-    raise ValueError(
-        "Found multiple matches for oldString. Provide more surrounding lines "
-        "in oldString to identify the correct match."
+    return (
+        f"Could not find edits[{edit_index}] in {filepath}. "
+        "The oldString must match exactly including all whitespace and newlines."
     )
+
+
+def _get_duplicate_error(filepath: str, edit_index: int, total_edits: int, occurrences: int) -> str:
+    if total_edits == 1:
+        return (
+            f"Found {occurrences} occurrences of the text in {filepath}. "
+            "The text must be unique. Please provide more context to make it unique."
+        )
+    return (
+        f"Found {occurrences} occurrences of edits[{edit_index}] in {filepath}. "
+        "Each oldString must be unique. Please provide more context to make it unique."
+    )
+
+
+def _get_empty_old_string_error(filepath: str, edit_index: int, total_edits: int) -> str:
+    if total_edits == 1:
+        return f"oldString must not be empty in {filepath}."
+    return f"edits[{edit_index}].oldString must not be empty in {filepath}."
+
+
+def _get_no_change_error(filepath: str, total_edits: int) -> str:
+    if total_edits == 1:
+        return (
+            f"No changes made to {filepath}. "
+            "The replacement produced identical content."
+        )
+    return f"No changes made to {filepath}. The replacements produced identical content."
+
+
+def _prepare_batch_edits(
+    filepath: str,
+    edits: Optional[List[Dict[str, Any]]],
+    old_string: Optional[str],
+    new_string: Optional[str],
+) -> tuple[Optional[List[Dict[str, str]]], Optional[str]]:
+    """Return normalized batch edits or a validation error."""
+    if edits is not None:
+        if old_string is not None or new_string is not None:
+            return None, "Use either edits or oldString/newString, not both."
+        if not isinstance(edits, list) or not edits:
+            return None, "edits must contain at least one replacement."
+
+        prepared: List[Dict[str, str]] = []
+        for index, edit in enumerate(edits):
+            if not isinstance(edit, dict):
+                return None, f"edits[{index}] must be an object."
+            current_old = edit.get("oldString")
+            current_new = edit.get("newString")
+            if not isinstance(current_old, str) or not isinstance(current_new, str):
+                return None, f"edits[{index}] must include string oldString and newString."
+            if current_old == "":
+                return None, _get_empty_old_string_error(filepath, index, len(edits))
+            if current_old == current_new:
+                return None, f"edits[{index}].oldString and newString must be different."
+            prepared.append({"oldString": current_old, "newString": current_new})
+        return prepared, None
+
+    if old_string is None or new_string is None:
+        return None, "Provide edits or legacy oldString/newString arguments."
+    if old_string != "" and old_string == new_string:
+        return None, "oldString and newString must be different"
+    return [{"oldString": old_string, "newString": new_string}], None
+
+
+def _apply_replace_all(
+    normalized_content: str,
+    old_string: str,
+    new_string: str,
+    filepath: str,
+) -> tuple[str, str]:
+    """Apply a legacy replaceAll operation without mutating untouched content."""
+    normalized_old = normalize_line_endings(old_string)
+    normalized_new = normalize_line_endings(new_string)
+    content_index = _build_fuzzy_text_index(normalized_content)
+    found, _, _, used_fuzzy = _fuzzy_find_text(
+        normalized_content,
+        normalized_old,
+        content_index,
+    )
+    if not found:
+        raise ValueError(_get_not_found_error(filepath, 0, 1))
+
+    if not used_fuzzy:
+        if normalized_old == "":
+            raise ValueError(_get_empty_old_string_error(filepath, 0, 1))
+        new_content = normalized_content.replace(normalized_old, normalized_new)
+    else:
+        fuzzy_spans = _find_fuzzy_spans(content_index, normalized_old)
+        new_content = normalized_content
+        for match_start, match_end in reversed(fuzzy_spans):
+            new_content = new_content[:match_start] + normalized_new + new_content[match_end:]
+
+    if new_content == normalized_content:
+        raise ValueError(_get_no_change_error(filepath, 1))
+    return normalized_content, new_content
+
+
+def _apply_edits_to_normalized_content(
+    normalized_content: str,
+    edits: List[Dict[str, str]],
+    filepath: str,
+) -> tuple[str, str]:
+    """Apply all edits against the same original file snapshot."""
+    normalized_edits = [
+        {
+            "oldString": normalize_line_endings(edit["oldString"]),
+            "newString": normalize_line_endings(edit["newString"]),
+        }
+        for edit in edits
+    ]
+
+    for index, edit in enumerate(normalized_edits):
+        if edit["oldString"] == "":
+            raise ValueError(_get_empty_old_string_error(filepath, index, len(normalized_edits)))
+
+    content_index = _build_fuzzy_text_index(normalized_content)
+
+    matched_edits = []
+    for index, edit in enumerate(normalized_edits):
+        found, match_start, match_end, used_fuzzy = _fuzzy_find_text(
+            normalized_content,
+            edit["oldString"],
+            content_index,
+        )
+        if not found:
+            raise ValueError(_get_not_found_error(filepath, index, len(normalized_edits)))
+
+        occurrences = _count_occurrences(
+            normalized_content,
+            edit["oldString"],
+            used_fuzzy=used_fuzzy,
+            content_index=content_index,
+        )
+        if occurrences > 1:
+            raise ValueError(_get_duplicate_error(filepath, index, len(normalized_edits), occurrences))
+
+        matched_edits.append(
+            {
+                "editIndex": index,
+                "matchStart": match_start,
+                "matchEnd": match_end,
+                "newString": edit["newString"],
+            }
+        )
+
+    matched_edits.sort(key=lambda item: item["matchStart"])
+    for index in range(1, len(matched_edits)):
+        previous = matched_edits[index - 1]
+        current = matched_edits[index]
+        if previous["matchEnd"] > current["matchStart"]:
+            raise ValueError(
+                f"edits[{previous['editIndex']}] and edits[{current['editIndex']}] overlap in {filepath}. "
+                "Merge them into one edit or target disjoint regions."
+            )
+
+    new_content = normalized_content
+    for edit in reversed(matched_edits):
+        start = edit["matchStart"]
+        end = edit["matchEnd"]
+        new_content = new_content[:start] + edit["newString"] + new_content[end:]
+
+    if new_content == normalized_content:
+        raise ValueError(_get_no_change_error(filepath, len(normalized_edits)))
+    return normalized_content, new_content
 
 
 @ToolRegistry.register_function(
@@ -488,75 +451,80 @@ def replace(content: str, old_string: str, new_string: str, replace_all: bool = 
         ToolParameter(
             name="filePath",
             type=ParameterType.STRING,
-            description="The absolute path to the file to modify",
-            required=True
+            description="The path to the file to modify. It may be absolute, use `~`, or be relative to the current project directory.",
+            required=True,
+        ),
+        ToolParameter(
+            name="edits",
+            type=ParameterType.ARRAY,
+            description=(
+                "One or more targeted replacements. Each edits[].oldString is matched "
+                "against the original file, not incrementally."
+            ),
+            required=False,
+            json_schema={
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "oldString": {
+                            "type": "string",
+                            "description": (
+                                "Exact text for one targeted replacement. It must be "
+                                "unique in the original file and must not overlap with "
+                                "any other edits[].oldString in the same call."
+                            ),
+                        },
+                        "newString": {
+                            "type": "string",
+                            "description": "Replacement text for this targeted edit.",
+                        },
+                    },
+                    "required": ["oldString", "newString"],
+                    "additionalProperties": False,
+                },
+            },
         ),
         ToolParameter(
             name="oldString",
             type=ParameterType.STRING,
-            description="The text to replace",
-            required=True
+            description="Legacy single-edit old text. Use edits[] for new callers.",
+            required=False,
         ),
         ToolParameter(
             name="newString",
             type=ParameterType.STRING,
-            description="The text to replace it with (must be different from oldString)",
-            required=True
+            description="Legacy single-edit replacement text. Use edits[] for new callers.",
+            required=False,
         ),
         ToolParameter(
             name="replaceAll",
             type=ParameterType.BOOLEAN,
-            description="Replace all occurrences of oldString (default false)",
+            description="Legacy single-edit option to replace every occurrence of oldString.",
             required=False,
-            default=False
+            default=False,
         ),
-    ]
+    ],
 )
 async def edit_tool(
     ctx: ToolContext,
     filePath: str,
-    oldString: str,
-    newString: str,
+    edits: Optional[List[Dict[str, Any]]] = None,
+    oldString: Optional[str] = None,
+    newString: Optional[str] = None,
     replaceAll: bool = False,
 ) -> ToolResult:
-    """
-    Edit a file by replacing text
-    
-    Args:
-        ctx: Tool context
-        filePath: Target file path
-        oldString: Text to find
-        newString: Replacement text
-        replaceAll: Replace all occurrences
-        
-    Returns:
-        ToolResult with operation status
-    """
+    """Edit a file with legacy single-edit or pi-style edits[] semantics."""
     if not filePath:
-        return ToolResult(
-            success=False,
-            error="filePath is required"
-        )
-    
-    if oldString == newString:
-        return ToolResult(
-            success=False,
-            error="oldString and newString must be different"
-        )
-    
-    # Resolve path
-    filepath = filePath
-    if not os.path.isabs(filepath):
-        base_dir = Instance.get_directory() or os.getcwd()
-        filepath = os.path.join(base_dir, filepath)
+        return ToolResult(success=False, error="filePath is required")
 
-    filepath, sandbox_error, sandbox = await _resolve_sandbox_file_path(ctx, filepath)
-    if sandbox_error:
-        return ToolResult(
-            success=False,
-            error=sandbox_error,
-            title=filePath,
-        )
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc), title=filePath)
+    filepath = resolution.resolved_path
+
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
         return ToolResult(
             success=False,
@@ -566,138 +534,136 @@ async def edit_tool(
             ),
             title=filePath,
         )
-    
-    # Get relative title for display
-    worktree = Instance.get_worktree() or os.getcwd()
-    title = _safe_relpath(filepath, worktree)
-    
-    # Handle empty oldString (create new file)
-    if oldString == "":
+
+    title = resolution.display_path
+
+    if oldString == "" and edits is None:
+        if newString is None:
+            return ToolResult(success=False, error="newString is required when oldString is empty", title=title)
         diff = trim_diff(generate_diff(filepath, "", newString))
-        
         await ctx.ask(
             permission="edit",
-            patterns=[_safe_relpath(filepath, worktree)],
+            patterns=[resolution.permission_pattern],
             always=["*"],
-            metadata={
-                "filepath": filepath,
-                "diff": diff
-            }
+            metadata={"filepath": filepath, "diff": diff},
         )
-        
-        # Create parent directory if needed
+
         parent_dir = os.path.dirname(filepath)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
-        
+
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(newString)
-        except Exception as e:
+            with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
+                file_handle.write(newString)
+        except Exception as error:
             return ToolResult(
                 success=False,
-                error=f"Failed to write file: {str(e)}",
-                title=title
+                error=f"Failed to write file: {str(error)}",
+                title=title,
             )
-        
+
         return ToolResult(
             success=True,
             output="Edit applied successfully. If you need to make additional edits to this file, use the Read tool first to get the current file content.",
             title=title,
-            metadata={
-                "diff": diff,
-                "diagnostics": {}
-            }
+            metadata={"diff": diff, "diagnostics": {}},
         )
-    
-    # Read existing file
+
+    prepared_edits, validation_error = _prepare_batch_edits(filepath, edits, oldString, newString)
+    if validation_error:
+        return ToolResult(success=False, error=validation_error, title=title)
+    assert prepared_edits is not None
+
     if not os.path.exists(filepath):
-        return ToolResult(
-            success=False,
-            error=f"File {filepath} not found",
-            title=title
-        )
-    
+        return ToolResult(success=False, error=f"File {filepath} not found", title=title)
     if os.path.isdir(filepath):
         return ToolResult(
             success=False,
             error=f"Path is a directory, not a file: {filepath}",
-            title=title
+            title=title,
         )
-    
+
     try:
-        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-            content_old = f.read()
-    except Exception as e:
+        with open(filepath, "r", encoding="utf-8", errors="replace", newline="") as file_handle:
+            raw_content_old = file_handle.read()
+    except Exception as error:
         return ToolResult(
             success=False,
-            error=f"Failed to read file: {str(e)}",
-            title=title
+            error=f"Failed to read file: {str(error)}",
+            title=title,
         )
-    
-    # Perform replacement
+
+    bom, content_without_bom = strip_bom(raw_content_old)
+    original_line_ending = detect_line_ending(content_without_bom)
+    normalized_content_old = normalize_line_endings(content_without_bom)
+
     try:
-        content_new = replace(content_old, oldString, newString, replaceAll)
-    except ValueError as e:
-        return ToolResult(
-            success=False,
-            error=str(e),
-            title=title
-        )
-    
-    # Generate diff
-    diff = trim_diff(generate_diff(
-        filepath,
-        normalize_line_endings(content_old),
-        normalize_line_endings(content_new)
-    ))
-    
-    # Request permission
+        if replaceAll:
+            if edits is not None:
+                raise ValueError("replaceAll is only supported with legacy oldString/newString arguments.")
+            assert oldString is not None and newString is not None
+            base_content, normalized_content_new = _apply_replace_all(
+                normalized_content_old,
+                oldString,
+                newString,
+                filepath,
+            )
+        else:
+            base_content, normalized_content_new = _apply_edits_to_normalized_content(
+                normalized_content_old,
+                prepared_edits,
+                filepath,
+            )
+    except ValueError as error:
+        return ToolResult(success=False, error=str(error), title=title)
+
+    content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
+    diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
+
     await ctx.ask(
         permission="edit",
-        patterns=[_safe_relpath(filepath, worktree)],
+        patterns=[resolution.permission_pattern],
         always=["*"],
-        metadata={
-            "filepath": filepath,
-            "diff": diff
-        }
+        metadata={"filepath": filepath, "diff": diff},
     )
-    
-    # Write file
+
     try:
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(content_new)
-    except Exception as e:
+        with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
+            file_handle.write(content_new)
+    except Exception as error:
         return ToolResult(
             success=False,
-            error=f"Failed to write file: {str(e)}",
-            title=title
+            error=f"Failed to write file: {str(error)}",
+            title=title,
         )
-    
-    # Calculate additions and deletions
-    old_lines = content_old.split("\n")
-    new_lines = content_new.split("\n")
-    additions = sum(1 for _ in set(new_lines) - set(old_lines))
-    deletions = sum(1 for _ in set(old_lines) - set(new_lines))
-    
-    # Update metadata
-    ctx.metadata({
-        "metadata": {
-            "diff": diff,
-            "filediff": {
-                "file": filepath,
-                "before": content_old,
-                "after": content_new,
-                "additions": additions,
-                "deletions": deletions
-            },
-            "diagnostics": {}
+
+    old_lines = normalize_line_endings(raw_content_old).split("\n")
+    new_lines = normalize_line_endings(content_new).split("\n")
+    additions = sum(1 for line in set(new_lines) - set(old_lines) if line)
+    deletions = sum(1 for line in set(old_lines) - set(new_lines) if line)
+
+    ctx.metadata(
+        {
+            "metadata": {
+                "diff": diff,
+                "filediff": {
+                    "file": filepath,
+                    "before": raw_content_old,
+                    "after": content_new,
+                    "additions": additions,
+                    "deletions": deletions,
+                },
+                "diagnostics": {},
+            }
         }
-    })
-    
+    )
+
     return ToolResult(
         success=True,
-        output="Edit applied successfully. If you need to make additional edits to this file, use the Read tool first to get the current file content.",
+        output=(
+            "Edit applied successfully. If you need to make additional edits to this "
+            "file, use the Read tool first to get the current file content."
+        ),
         title=title,
         metadata={
             "diff": diff,
@@ -705,7 +671,7 @@ async def edit_tool(
             "filediff": {
                 "file": filepath,
                 "additions": additions,
-                "deletions": deletions
-            }
-        }
+                "deletions": deletions,
+            },
+        },
     )

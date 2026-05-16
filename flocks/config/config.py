@@ -101,8 +101,8 @@ class AgentConfig(BaseModel):
             
             for tool, enabled in self.tools.items():
                 action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
-                # Map write/edit/patch/multiedit to edit
-                if tool in ["write", "edit", "patch", "multiedit"]:
+                # Map write/edit/patch to edit
+                if tool in ["write", "edit", "patch"]:
                     permission_dict["edit"] = action
                 else:
                     permission_dict[tool] = action
@@ -616,7 +616,7 @@ class ConfigInfo(BaseModel):
             
             for tool, enabled in self.tools.items():
                 action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
-                if tool in ["write", "edit", "patch", "multiedit"]:
+                if tool in ["write", "edit", "patch"]:
                     permission_dict["edit"] = action
                 else:
                     permission_dict[tool] = action

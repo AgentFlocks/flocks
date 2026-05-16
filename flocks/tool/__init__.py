@@ -18,7 +18,6 @@ P1 Tools:
 - plan_enter/plan_exit: Plan mode switching
 
 P2 Tools:
-- multiedit: Batch file edits
 - task: Subagent execution
 - lsp: LSP operations
 - skill: Load skills

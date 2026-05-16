@@ -12,14 +12,13 @@ import os
 import asyncio
 import shutil
 import re
-from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 
 
@@ -257,24 +256,24 @@ async def grep_tool(
             error="pattern is required"
         )
     
+    try:
+        resolution = await resolve_tool_path(ctx, path or ".")
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc), title=pattern)
+
+    search_path = resolution.resolved_path
+
     # Request permission
     await ctx.ask(
         permission="grep",
-        patterns=[pattern],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={
             "pattern": pattern,
-            "path": path,
+            "path": search_path,
             "include": include
         }
     )
-    
-    # Resolve search path
-    base_dir = Instance.get_directory() or os.getcwd()
-    search_path = path or base_dir
-    
-    if not os.path.isabs(search_path):
-        search_path = os.path.join(base_dir, search_path)
     
     # Find ripgrep
     rg_path = find_ripgrep()

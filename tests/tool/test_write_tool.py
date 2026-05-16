@@ -113,6 +113,22 @@ async def test_creates_parent_directory(tmp_path):
     assert target.read_text() == "nested"
 
 
+@pytest.mark.asyncio
+async def test_write_expands_tilde_path(tmp_path, monkeypatch):
+    """Write should expand ~/ paths before writing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = Path(tmp_path) / "tilde-write.txt"
+
+    ctx = _make_ctx()
+    result = await ToolRegistry.execute(
+        "write", ctx, filePath="~/tilde-write.txt", content="home"
+    )
+
+    assert result.success, f"write failed: {result.error}"
+    assert target.exists()
+    assert target.read_text() == "home"
+
+
 def test_filepath_parameter_references_env():
     """filePath parameter description must contain directory routing rules."""
     from flocks.tool.registry import ToolRegistry

@@ -1202,7 +1202,7 @@ class ToolRegistry:
 
         _tool_groups = [
             # file/ — filesystem operations
-            ("flocks.tool.file", ["read", "write", "edit", "multiedit", "apply_patch", "glob", "doc_parser"]),
+            ("flocks.tool.file", ["read", "write", "edit", "apply_patch", "glob", "doc_parser"]),
             # code/ — code analysis + terminal
             ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
             # web/ — internet access
@@ -1210,7 +1210,7 @@ class ToolRegistry:
             # agent/ — agent delegation/coordination
             ("flocks.tool.agent", ["delegate_task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["task", "task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", ["task", "schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — background tasks, questions, model config, memory, skill, MCP management, session management, slash commands

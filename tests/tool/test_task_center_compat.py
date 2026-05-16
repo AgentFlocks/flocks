@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-import flocks.tool.task.task_center  # noqa: F401
+import flocks.tool.task.schedule_task_center  # noqa: F401
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.task.manager import TaskManager
@@ -51,7 +51,7 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
 
 class TestTaskCenterCompatibility:
     def test_task_create_schema_allows_legacy_schedule_type(self):
-        schema = ToolRegistry.get_schema("task_create")
+        schema = ToolRegistry.get_schema("schedule_task_create")
 
         assert schema is not None
         assert "schedule_type" in schema.properties
@@ -61,7 +61,7 @@ class TestTaskCenterCompatibility:
         assert "type" not in schema.required
 
     def test_task_update_schema_makes_action_optional_and_exposes_trigger_fields(self):
-        schema = ToolRegistry.get_schema("task_update")
+        schema = ToolRegistry.get_schema("schedule_task_update")
 
         assert schema is not None
         assert "action" not in schema.required
@@ -76,7 +76,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_accepts_legacy_schedule_type_alias(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="每10分钟执行一次",
             description="兼容旧 schedule_type 字段",
@@ -99,7 +99,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_infers_scheduled_type_from_cron(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="终端输出测试",
             description='每4分钟在终端输出"我是 flocks-04"',
@@ -118,7 +118,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_accepts_legacy_schedule_action_and_enabled_fields(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="终端输出测试",
             description='每4分钟在终端输出"我是 flocks-04"',
@@ -150,7 +150,7 @@ class TestTaskCenterCompatibility:
         )
 
         result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             description="更新后的描述",
@@ -180,7 +180,7 @@ class TestTaskCenterCompatibility:
         masking missing-schedule mistakes from legacy clients.
         """
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="缺少时间参数",
             description="只传了 run_once=True 但没给 run_at/cron",
@@ -200,7 +200,7 @@ class TestTaskCenterCompatibility:
         """Legacy clients may serialise run_once as the string "false"/"0" —
         those must be coerced to False, not treated as truthy."""
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="字符串布尔值兼容",
             description="run_once 以字符串 'false' 传入",
@@ -229,7 +229,7 @@ class TestTaskCenterCompatibility:
         )
 
         disable_result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             action="stop",
@@ -241,7 +241,7 @@ class TestTaskCenterCompatibility:
         assert disabled.status.value == "disabled"
 
         enable_result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             enabled=True,

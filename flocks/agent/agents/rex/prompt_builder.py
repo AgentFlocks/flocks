@@ -494,20 +494,20 @@ channel_message(session_id="<id>", message="<content>", channel_type="<type>")
 
 ---
 
-### IM Session Resolution for task_create (MANDATORY)
+### IM Session Resolution for schedule_task_create (MANDATORY)
 
 **Trigger**: User asks to create a scheduled or queued task whose action includes sending a message to an IM platform.
 
-Before calling `task_create`, you MUST resolve the target IM session id and embed it into the task `description`. The task runs unattended — it cannot ask the user at execution time.
+Before calling `schedule_task_create`, you MUST resolve the target IM session id and embed it into the task `description`. The task runs unattended — it cannot ask the user at execution time.
 
-**Protocol (run BEFORE task_create):**
+**Protocol (run BEFORE schedule_task_create):**
 
 1. Follow **Steps 1–3 above** to resolve `session_id` and `channel_type`.
    - If the user selects "我不知道" → stop. Do NOT create the task. Tell the user they must provide a session id first.
 2. Once resolved, embed both values into the `description` field:
 
 ```
-task_create(
+schedule_task_create(
   title="...",
   description="... 发送到 IM channel_type=<wecom|feishu|dingtalk> session_id=<id>",
   ...

@@ -13,7 +13,6 @@ tools:
   - grep
   - bash
   - edit
-  - multiedit
   - write
   - apply_patch
   - websearch

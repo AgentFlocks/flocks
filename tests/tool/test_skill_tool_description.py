@@ -1,21 +1,17 @@
 """Tests for flocks.tool.system.skill.
 
-Two complementary aspects of the skill tool's progressive-disclosure design
-are exercised here:
+Two complementary aspects of the skill tool's load-on-demand design are
+exercised here:
 
-1. ``build_description`` — the meta-description that ships in every system
-   prompt. Each skill's description is capped at
-   ``MAX_SKILL_DESCRIPTION_PREVIEW_CHARS`` using head + tail truncation, so
-   both the opening (scope/triggers) and the closing (hard constraints, "must
-   load this skill before X") survive. The model is explicitly told to call
+1. ``build_description`` — the tool schema must stay short and stable. It
+   should tell the model to discover the right skill first, then call
    ``skill(name=...)`` to load the full SKILL.md before acting.
 
-2. ``skill_tool`` (load on demand) — when the model actually calls the tool,
-   the FULL SKILL.md must come back unredacted. This is the load-on-demand
-   counterpart of the truncated preview, mirroring hermes-agent's
-   ``skill_view``. Without the explicit opt-out the registry would silently
-   crop SKILL.md at 100 KB / 1000 lines (head-only), dropping the workflow
-   steps and references that authors put at the file's tail.
+2. ``skill_tool`` — when the model actually calls the tool, the FULL SKILL.md
+   must come back unredacted. This mirrors hermes-agent's ``skill_view``.
+   Without the explicit opt-out the registry would silently crop SKILL.md at
+   100 KB / 1000 lines (head-only), dropping the workflow steps and references
+   that authors put at the file's tail.
 """
 
 from __future__ import annotations
@@ -108,48 +104,40 @@ class TestTruncateSkillDescription:
 
 
 class TestBuildDescription:
-    def test_empty_skills_returns_no_skills_message(self):
+    def test_empty_skills_returns_short_load_on_demand_description(self):
         out = build_description([])
-        assert "No skills are currently available" in out
+        assert "Load the full SKILL.md for one specific skill" in out
         assert "<available_skills>" not in out
 
-    def test_each_skill_emits_xml_block(self):
+    def test_description_does_not_inline_skill_inventory(self):
         out = build_description(
             [
                 _skill("alpha", "First skill description."),
                 _skill("beta", "Second skill description."),
             ]
         )
-        assert "<available_skills>" in out
-        assert "</available_skills>" in out
-        assert "<name>alpha</name>" in out
-        assert "<name>beta</name>" in out
-        assert "<description>First skill description.</description>" in out
-        assert "<description>Second skill description.</description>" in out
+        assert "<available_skills>" not in out
+        assert "alpha" not in out
+        assert "beta" not in out
+        assert "First skill description." not in out
+        assert "Second skill description." not in out
 
     def test_includes_progressive_disclosure_instruction(self):
         out = build_description([_skill("alpha", "demo")])
-        # Must direct the model at the load-on-demand tool call pattern,
-        # otherwise the model will try to act on the (possibly truncated)
-        # preview without first reading the full SKILL.md.
+        # Must still direct the model at the load-on-demand call pattern.
         assert "skill(name=" in out
-        assert "preview" in out.lower() or "truncated" in out.lower()
+        assert "load the full skill.md" in out.lower()
         assert "MUST" in out or "must" in out.lower()
 
-    def test_long_description_is_truncated_in_output(self):
+    def test_long_description_is_not_embedded_in_output(self):
         long_desc = "a" * 2000
         out = build_description([_skill("big", long_desc)])
-        # The full 2000-char string should never appear verbatim because it
-        # exceeds the per-skill preview cap.
         assert long_desc not in out
-        assert 'skill(name="big")' in out
 
-    def test_short_descriptions_are_emitted_verbatim(self):
+    def test_short_descriptions_are_not_embedded_verbatim(self):
         desc = "Short, single-sentence description that fits."
         out = build_description([_skill("tiny", desc)])
-        # No truncation marker should appear for descriptions under the cap.
-        assert desc in out
-        assert "truncated" not in out.split("<available_skills>")[1]
+        assert desc not in out
 
     def test_api_surface_returns_string(self):
         out = build_description([_skill("alpha", "desc")])

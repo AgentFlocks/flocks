@@ -8,13 +8,12 @@ Writes files to the local filesystem with:
 """
 
 import os
-from typing import Optional
 from difflib import unified_diff
 
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path, safe_relpath as _safe_relpath
 from flocks.utils.log import Log
 
 
@@ -107,54 +106,6 @@ def trim_diff(diff: str) -> str:
     
     return "\n".join(trimmed_lines)
 
-
-def _safe_relpath(path: str, start: Optional[str]) -> str:
-    """Return a relative path when possible, otherwise keep the absolute path."""
-    if not start:
-        return path
-    try:
-        return os.path.relpath(path, start)
-    except ValueError:
-        return path
-
-
-async def _resolve_sandbox_file_path(
-    ctx: ToolContext,
-    filepath: str,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-    """
-    Resolve file path under sandbox workspace when sandbox is enabled.
-
-    Returns:
-        (resolved_path, error_message, sandbox_dict)
-    """
-    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
-    if not isinstance(sandbox, dict):
-        return filepath, None, None
-
-    workspace_root = sandbox.get("workspace_dir")
-    if not workspace_root:
-        return filepath, None, sandbox
-
-    if not os.path.isabs(filepath):
-        filepath = os.path.join(workspace_root, filepath)
-
-    try:
-        from flocks.sandbox.paths import assert_sandbox_path
-
-        resolved = await assert_sandbox_path(
-            file_path=filepath,
-            cwd=workspace_root,
-            root=workspace_root,
-        )
-        return resolved.resolved, None, sandbox
-    except Exception:
-        return None, (
-            f"Path escapes sandbox workspace: {filepath}. "
-            "Use paths inside sandbox workspace only."
-        ), sandbox
-
-
 @ToolRegistry.register_function(
     name="write",
     description=DESCRIPTION,
@@ -170,7 +121,7 @@ async def _resolve_sandbox_file_path(
             name="filePath",
             type=ParameterType.STRING,
             description=(
-                "The absolute path to the file to write (must be absolute, not relative).\n"
+                "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
                 "\n"
                 "IMPORTANT — choose the correct directory from <env>:\n"
                 "- Project source file (source code, tests, configs that belong to the project)"
@@ -209,19 +160,17 @@ async def write_tool(
         else:
             content = str(content)
 
-    # Resolve path
-    filepath = filePath
-    if not os.path.isabs(filepath):
-        base_dir = Instance.get_directory() or os.getcwd()
-        filepath = os.path.join(base_dir, filepath)
-
-    filepath, sandbox_error, sandbox = await _resolve_sandbox_file_path(ctx, filepath)
-    if sandbox_error:
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+    except ValueError as exc:
         return ToolResult(
             success=False,
-            error=sandbox_error,
+            error=str(exc),
             title=filePath,
         )
+    filepath = resolution.resolved_path
+
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
         return ToolResult(
             success=False,
@@ -233,8 +182,7 @@ async def write_tool(
         )
     
     # Get relative title for display
-    worktree = Instance.get_worktree() or os.getcwd()
-    title = _safe_relpath(filepath, worktree)
+    title = resolution.display_path
     
     # Check if file exists and get old content
     exists = os.path.exists(filepath)
@@ -257,7 +205,7 @@ async def write_tool(
     # Request permission
     await ctx.ask(
         permission="edit",
-        patterns=[_safe_relpath(filepath, worktree)],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={
             "filepath": filepath,

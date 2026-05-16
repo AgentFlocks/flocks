@@ -432,7 +432,7 @@ class TestBuildTools:
         assert event_callback.await_args.args[1]["enabledToolCount"] == 3
 
     @pytest.mark.asyncio
-    async def test_build_tools_rewrites_skill_description(self):
+    async def test_build_tools_keeps_registered_skill_description(self):
         runner = _make_runner()
         agent = _make_agent(name="rex")
         skill_tool = ToolInfo(
@@ -443,25 +443,15 @@ class TestBuildTools:
             enabled=True,
         )
 
-        mock_skill = MagicMock()
-        mock_skill.name = "secops"
-        mock_skill.description = "Security workflow guidance"
-
         with patch.object(
             SessionRunner,
             "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
-        ), patch(
-            "flocks.tool.system.skill.Skill.all",
-            AsyncMock(return_value=[mock_skill]),
-        ), patch(
-            "flocks.tool.system.skill.build_description",
-            return_value="Dynamic skill description",
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
         assert tools[0]["function"]["name"] == "skill"
-        assert tools[0]["function"]["description"] == "Dynamic skill description"
+        assert tools[0]["function"]["description"] == "Original skill description"
 
 
 class TestBuildSystemPrompts:
@@ -559,8 +549,8 @@ class TestBuildSystemPrompts:
         assert prompts == [
             "provider prompt",
             "tool protocol",
-            "agent prompt",
             "memory guidance",
+            "agent prompt",
             "## MEMORY.md\n\nremembered context",
             "tool catalog",
             "env prompt",
@@ -712,7 +702,7 @@ class TestBuildSystemPrompts:
 
         assert "memory guidance" in "\n\n".join(prompts)
         assert "## MEMORY.md\n\nremembered context" in prompts
-        assert prompts.index("agent prompt") < prompts.index("memory guidance")
+        assert prompts.index("memory guidance") < prompts.index("agent prompt")
         assert prompts.index("memory guidance") < prompts.index("## MEMORY.md\n\nremembered context")
 
     @pytest.mark.asyncio
@@ -982,44 +972,41 @@ class TestBuildSystemPrompts:
 
 
 class TestMiniMaxTextToolMode:
-    def test_enabled_for_custom_threatbook_minimax(self):
+    def test_disabled_for_custom_threatbook_minimax(self):
         session = _make_session("ses_minimax_mode")
         runner = SessionRunner(
             session=session,
             provider_id="custom-threatbook-internal",
             model_id="minimax:MiniMax-M2.5",
         )
-        assert runner._should_use_text_tool_call_mode() is True
+        assert runner._should_use_text_tool_call_mode() is False
 
-    def test_enabled_for_custom_tb_inner_minimax(self):
+    def test_disabled_for_custom_tb_inner_minimax(self):
         session = _make_session("ses_minimax_mode_tb_inner")
         runner = SessionRunner(
             session=session,
             provider_id="custom-tb-inner",
             model_id="minimax:MiniMax-M2.7",
         )
-        assert runner._should_use_text_tool_call_mode() is True
+        assert runner._should_use_text_tool_call_mode() is False
 
-    def test_enabled_for_threatbook_cn_llm_minimax(self):
-        # Regression: threatbook-cn-llm gateway strips the OpenAI tool_calls
-        # field for MiniMax models, so the XML text-call protocol must be
-        # forced or every turn ends with finish_reason=stop and zero tools.
+    def test_disabled_for_threatbook_cn_llm_minimax(self):
         session = _make_session("ses_minimax_threatbook_cn_llm")
         runner = SessionRunner(
             session=session,
             provider_id="threatbook-cn-llm",
             model_id="minimax-m2.7",
         )
-        assert runner._should_use_text_tool_call_mode() is True
+        assert runner._should_use_text_tool_call_mode() is False
 
-    def test_enabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
+    def test_disabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
         session = _make_session("ses_minimax_threatbook_cn_llm_case")
         runner = SessionRunner(
             session=session,
             provider_id="ThreatBook-CN-LLM",
             model_id="MiniMax-M2.5",
         )
-        assert runner._should_use_text_tool_call_mode() is True
+        assert runner._should_use_text_tool_call_mode() is False
 
     def test_disabled_for_threatbook_cn_llm_non_minimax(self):
         # Other models routed through the same gateway (e.g. qwen, GLM) keep
@@ -1042,7 +1029,7 @@ class TestMiniMaxTextToolMode:
         assert runner._should_use_text_tool_call_mode() is False
 
     @pytest.mark.asyncio
-    async def test_system_prompts_switch_tool_guidance_to_minimax_xml(self):
+    async def test_system_prompts_add_minimax_native_tool_guidance(self):
         session = _make_session("ses_minimax_prompt")
         runner = SessionRunner(
             session=session,
@@ -1050,8 +1037,7 @@ class TestMiniMaxTextToolMode:
             model_id="minimax:MiniMax-M2.5",
         )
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])), \
+        with patch("flocks.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])), \
              patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -1065,8 +1051,10 @@ class TestMiniMaxTextToolMode:
             )
 
         combined = "\n\n".join(prompts)
-        assert "<minimax:tool_call>" in combined
         assert "native API tool-calling" in combined
+        assert "prefer actually invoking the needed tool" in combined
+        assert "Misleading behavior" in combined
+        assert "<minimax:tool_call>" not in combined
 
     def test_build_text_tool_call_catalog_prompt(self):
         session = _make_session("ses_minimax_catalog")
@@ -1189,6 +1177,77 @@ async def test_process_step_creates_assistant_message_with_provider_and_model(mo
 
     assert captured_kwargs["model_id"] == runner.model_id
     assert captured_kwargs["provider_id"] == runner.provider_id
+
+
+@pytest.mark.asyncio
+async def test_call_llm_skips_observability_when_langfuse_inactive(monkeypatch):
+    runner = _make_runner("ses_runner_langfuse_inactive")
+    runner.callbacks = RunnerCallbacks()
+
+    agent = SimpleNamespace(name="rex")
+    assistant_msg = SimpleNamespace(id="msg_assistant_langfuse")
+    provider = MagicMock()
+
+    trace_mock = MagicMock()
+    generation_mock = MagicMock()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod, "trace_scope", trace_mock)
+    monkeypatch.setattr(runner_mod, "generation_scope", generation_mock)
+
+    result = await runner._call_llm(
+        provider=provider,
+        messages=[runner_mod.ChatMessage(role="system", content="system only")],
+        tools=[],
+        agent=agent,
+        assistant_msg=assistant_msg,
+    )
+
+    assert result.action == "stop"
+    assert result.error == "No valid messages to send to LLM"
+    trace_mock.assert_not_called()
+    generation_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monkeypatch):
+    runner = _make_runner("ses_runner_no_llm_hooks")
+    runner.callbacks = RunnerCallbacks()
+
+    class _ProviderStub:
+        async def chat_stream(self, **kwargs):  # noqa: ANN003
+            del kwargs
+            yield SimpleNamespace(delta="done", finish_reason="stop")
+
+    user_message = SimpleNamespace(
+        role="user",
+        content="hi",
+        model_dump=MagicMock(side_effect=AssertionError("message serialization should be skipped")),
+    )
+    deep_copy_mock = MagicMock(side_effect=AssertionError("tool deepcopy should be skipped"))
+    run_before_mock = AsyncMock()
+    run_after_mock = AsyncMock()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_before", run_before_mock)
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after_mock)
+    monkeypatch.setattr(runner_mod.copy, "deepcopy", deep_copy_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    result = await runner._call_llm(
+        provider=_ProviderStub(),
+        messages=[user_message],
+        tools=[{"type": "function", "function": {"name": "read"}}],
+        agent=SimpleNamespace(name="rex"),
+        assistant_msg=SimpleNamespace(id="msg_assistant_no_llm_hooks"),
+    )
+
+    assert result.action == "stop"
+    assert result.content == "done"
+    deep_copy_mock.assert_not_called()
+    run_before_mock.assert_not_awaited()
+    run_after_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

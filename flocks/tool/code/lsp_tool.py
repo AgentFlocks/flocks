@@ -16,7 +16,7 @@ from typing import Optional, List, Dict, Any
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 
 
@@ -117,9 +117,11 @@ async def lsp_tool(
             error=f"Invalid operation: {operation}. Supported: {', '.join(LSP_OPERATIONS)}"
         )
     
-    # Resolve path
-    base_dir = Instance.get_directory() or os.getcwd()
-    filepath = filePath if os.path.isabs(filePath) else os.path.join(base_dir, filePath)
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc))
+    filepath = resolution.resolved_path
     
     # Check file exists
     if not os.path.exists(filepath):
@@ -131,19 +133,12 @@ async def lsp_tool(
     # Request permission
     await ctx.ask(
         permission="lsp",
-        patterns=["*"],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={}
     )
     
-    # Get relative path for title
-    worktree = Instance.get_worktree() or os.getcwd()
-    try:
-        rel_path = os.path.relpath(filepath, worktree)
-    except ValueError:
-        rel_path = filepath
-    
-    title = f"{operation} {rel_path}:{line}:{character}"
+    title = f"{operation} {resolution.display_path}:{line}:{character}"
     
     # Convert to 0-based indices for LSP
     position = {

@@ -83,8 +83,8 @@ tmp/
 .flocks/.DS_Store
 
 # User-specific configuration (keep only example files)
-.flocks/flocks.json
-.flocks/flocks.jsonc
+# .flocks/flocks.json
+# .flocks/flocks.jsonc
 
 # Flocks built-in MCP servers
 .flocks/mcp_list.json

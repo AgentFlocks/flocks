@@ -249,7 +249,7 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="Agent name. Mutually exclusive with category — use ONE or the other, never both.",
+            description="Agent name. Mutually exclusive with category — use ONE or the other, never both. Must be a delegatable agent",
             required=False,
         ),
         ToolParameter(

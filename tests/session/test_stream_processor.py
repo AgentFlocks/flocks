@@ -324,6 +324,32 @@ class TestToolCallExecution:
         assert "tc_exec" in proc.tool_calls
 
     @pytest.mark.asyncio
+    async def test_tool_call_skips_tool_span_without_langfuse_generation(self):
+        proc = _make_processor()
+
+        mock_result = MagicMock()
+        mock_result.output = "ls output"
+        mock_result.title = "bash"
+        mock_result.metadata = {}
+        mock_result.attachments = None
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=mock_result),
+            ),
+            patch("flocks.session.streaming.stream_processor.span_scope") as span_scope_mock,
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_no_span", tool_name="bash"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_no_span", tool_name="bash", input={"command": "ls"})
+            )
+
+        span_scope_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unknown_tool_still_tracked(self):
         proc = _make_processor()
 

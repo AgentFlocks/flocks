@@ -1,9 +1,9 @@
 """
-Skill Tool - Load and execute skills
+Skill Tool - Load and execute skills.
 
-Loads skill files that provide specialized instructions for specific tasks.
-Skills are markdown files with structured content.
-Ported from original skill tool.
+The `skill` tool is the load-on-demand half of the skill system: keep the
+tool schema short, and load the full SKILL.md only after the model has already
+decided which skill applies.
 """
 
 import os
@@ -19,44 +19,38 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.skill")
 
 
-# Maximum characters of a skill's description shown in the `skill` tool's
-# meta-description (the tool index that ships with the system prompt).
-#
-# Why a limit at all?
-#   The `skill` tool's description is injected into every LLM call as part of
-#   the tool schema. Listing the full SKILL.md frontmatter description (allowed
-#   up to 1024 chars by `Skill._is_valid_description`) for every skill makes
-#   the prompt grow linearly with the number of skills — and most of that text
-#   is "how to use" detail that the model only needs *after* it decides to
-#   load the skill.
-#
-# Why 500?
-#   Empirically, the descriptions in `flocks/.flocks/plugins/skills/*/SKILL.md`
-#   cluster between 60 and 614 characters; 500 chars preserves ~96% of the
-#   total content (only one outlier needs trimming) while keeping the worst-
-#   case cost of the index bounded. Critically, threat-intel/EDR skills tend
-#   to put their hard constraints ("must load this skill before any X tool")
-#   at the *end* of the description, so we keep both head and tail.
 MAX_SKILL_DESCRIPTION_PREVIEW_CHARS = 500
+
+
+SKILL_TOOL_DESCRIPTION = (
+    "Load the full SKILL.md for one specific skill. "
+    "Use this only after you have identified the correct skill name from the "
+    "prompt's available-skills guidance or another discovery step. "
+    "If a skills listing tool is available, use that first when unsure which "
+    "skill applies. Once you know the name, you must call "
+    "skill(name=\"<skill-name>\") before acting on the skill."
+)
 
 
 def _truncate_skill_description(description: str, name: str) -> str:
     """
-    Cap a single skill's description at MAX_SKILL_DESCRIPTION_PREVIEW_CHARS.
+    Backward-compatible helper kept for tests and any callers that still want a
+    bounded skill preview outside the tool schema.
 
     Uses head + tail truncation so both the opening (scope/triggers) and the
     closing (hard constraints, "must load first") survive. Inserts a marker
     that tells the model how to fetch the full content via the `skill` tool.
     """
-    if len(description) <= MAX_SKILL_DESCRIPTION_PREVIEW_CHARS:
+    max_chars = MAX_SKILL_DESCRIPTION_PREVIEW_CHARS
+    if len(description) <= max_chars:
         return description
 
     marker = f' … [truncated; load full SKILL.md via skill(name="{name}") before acting] … '
-    available = MAX_SKILL_DESCRIPTION_PREVIEW_CHARS - len(marker)
+    available = max_chars - len(marker)
     if available < 80:
         # Marker alone is unusually long (very long skill name); fall back to
         # plain head truncation so we still emit something useful.
-        return description[: MAX_SKILL_DESCRIPTION_PREVIEW_CHARS - 1] + "…"
+        return description[: max_chars - 1] + "…"
 
     head_size = (available * 3) // 5  # ~60% head
     tail_size = available - head_size
@@ -64,47 +58,9 @@ def _truncate_skill_description(description: str, name: str) -> str:
 
 
 def build_description(skills: List[SkillInfo]) -> str:
-    """Build tool description with available skills.
-
-    Each skill's description is capped at MAX_SKILL_DESCRIPTION_PREVIEW_CHARS
-    (head + tail). The model is instructed to call `skill(name=...)` to
-    obtain the full SKILL.md when it decides to act on a skill.
-    """
-    if not skills:
-        return "Load a skill to get detailed instructions for a specific task. No skills are currently available."
-
-    # Match Flocks's format: space-separated, no newlines
-    parts = [
-        "Load a skill to get detailed instructions for a specific task.",
-        "Skills provide specialized knowledge and step-by-step guidance.",
-        "Use this when a task matches an available skill's description.",
-        # Strong, explicit guidance: the descriptions below are PREVIEWS only.
-        # The model must call this tool to get the full SKILL.md before
-        # actually executing the skill's workflow.
-        (
-            "IMPORTANT: each <description> below is a preview that may be "
-            f"truncated to {MAX_SKILL_DESCRIPTION_PREVIEW_CHARS} chars. "
-            "It is enough to decide WHETHER a skill applies, but NOT enough "
-            "to execute it. Once you pick a skill, you MUST call "
-            "skill(name=\"<skill-name>\") to load the full SKILL.md before "
-            "running its steps or calling any tool the skill governs."
-        ),
-        "<available_skills>",
-    ]
-
-    for skill in skills:
-        preview = _truncate_skill_description(skill.description, skill.name)
-        parts.extend([
-            "  <skill>",
-            f"    <name>{skill.name}</name>",
-            f"    <description>{preview}</description>",
-            "  </skill>",
-        ])
-
-    parts.append("</available_skills>")
-
-    # Join with space like Flocks does: .join(" ")
-    return " ".join(parts)
+    """Return the stable, token-light `skill` tool description."""
+    _ = skills
+    return SKILL_TOOL_DESCRIPTION
 
 
 async def skill_tool_impl(
@@ -248,17 +204,16 @@ async def get_skill(name: str) -> dict | None:
     }
 
 
-# Register the tool (description will be updated dynamically on first call)
 @ToolRegistry.register_function(
     name="skill",
-    description="Load a skill to get detailed instructions for a specific task. Available skills are listed in the description.",
+    description=SKILL_TOOL_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=True,
     parameters=[
         ToolParameter(
             name="name",
             type=ParameterType.STRING,
-            description="The skill identifier from available_skills",
+            description="The exact skill name to load",
             required=True
         ),
     ]
@@ -267,12 +222,5 @@ async def skill_tool(
     ctx: ToolContext,
     name: str,
 ) -> ToolResult:
-    """Wrapper that updates description and calls implementation"""
-    # Update tool description with available skills on first call
-    tool = ToolRegistry.get("skill")
-    if tool:
-        skills = await Skill.all()
-        tool.info.description = build_description(skills)
-
-    
+    """Wrapper that keeps `skill` as a pure load-on-demand tool."""
     return await skill_tool_impl(ctx, name)

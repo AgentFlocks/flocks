@@ -2,11 +2,15 @@
 Tests for Windows shell selection and cross-drive path fallback behavior.
 """
 
+import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
+from flocks.tool import path_utils as path_utils_module
 from flocks.tool.code import bash as bash_module
+from flocks.tool.code import lsp_tool as lsp_module
 from flocks.tool.file import apply_patch as apply_patch_module
 from flocks.tool.file import edit as edit_module
 from flocks.tool.file import write as write_module
@@ -227,3 +231,46 @@ def test_apply_patch_safe_relpath_falls_back_to_absolute(monkeypatch):
 
     path = "C:\\Users\\Example\\file.txt"
     assert apply_patch_module._safe_relpath(path, "D:\\workspace") == path
+
+
+def test_resolve_workdir_expands_tilde(tmp_path, monkeypatch):
+    """bash workdir resolution should expand ~/ paths consistently."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    resolved = bash_module._resolve_workdir("/tmp/project", "~/shell-home")
+
+    assert resolved == str(tmp_path / "shell-home")
+
+
+@pytest.mark.asyncio
+async def test_lsp_tool_resolves_relative_path_from_instance(tmp_path, monkeypatch):
+    """LSP should resolve relative file paths with the shared tool path rules."""
+    requests = []
+    ctx = _make_ctx(requests)
+    target = tmp_path / "src" / "sample.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("print('hi')\n", encoding="utf-8")
+
+    seen = {}
+
+    class _FakeLSP:
+        @staticmethod
+        async def has_clients(filepath):
+            seen["filepath"] = filepath
+            return False
+
+    monkeypatch.setattr(path_utils_module.Instance, "get_directory", lambda: str(tmp_path))
+    monkeypatch.setattr(path_utils_module.Instance, "get_worktree", lambda: str(tmp_path))
+    monkeypatch.setitem(sys.modules, "flocks.lsp", SimpleNamespace(LSP=_FakeLSP))
+
+    result = await lsp_module.lsp_tool(
+        ctx=ctx,
+        operation="hover",
+        filePath="src/sample.py",
+        line=1,
+        character=1,
+    )
+
+    assert not result.success
+    assert seen["filepath"] == str(target)
+    assert requests[-1].patterns == ["src/sample.py"]

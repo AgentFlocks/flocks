@@ -563,6 +563,7 @@ class StreamProcessor:
             from flocks.hooks.pipeline import HookPipeline
             hook_ctx = await HookPipeline.run_tool_before({
                 "sessionID": self.session_id,
+                "workspace": self.workspace_dir,
                 "agent": self.agent.name,
                 "tool": {
                     "name": tool_name,
@@ -581,22 +582,23 @@ class StreamProcessor:
 
         # Execute tool synchronously
         tool_span_ctx = None
-        try:
-            tool_span_ctx = span_scope(
-                parent=self._langfuse_generation,
-                name=f"Tool.execute.{tool_name}",
-                input=tool_input,
-                metadata={
-                    "session_id": self.session_id,
-                    "message_id": self.assistant_message.id,
-                    "call_id": tool_call_id,
-                    "agent": self.agent.name,
-                    "step": self._step_index,
-                    "session_step": f"{self.session_id}:{self._step_index}" if self._step_index is not None else None,
-                },
-            )
-        except Exception as exc:
-            log.debug("stream.tool_span.init_failed", {"error": str(exc)})
+        if self._langfuse_generation is not None:
+            try:
+                tool_span_ctx = span_scope(
+                    parent=self._langfuse_generation,
+                    name=f"Tool.execute.{tool_name}",
+                    input=tool_input,
+                    metadata={
+                        "session_id": self.session_id,
+                        "message_id": self.assistant_message.id,
+                        "call_id": tool_call_id,
+                        "agent": self.agent.name,
+                        "step": self._step_index,
+                        "session_step": f"{self.session_id}:{self._step_index}" if self._step_index is not None else None,
+                    },
+                )
+            except Exception as exc:
+                log.debug("stream.tool_span.init_failed", {"error": str(exc)})
         try:
             if hook_skip:
                 result = ToolResult(
@@ -718,6 +720,7 @@ class StreamProcessor:
                 from flocks.hooks.pipeline import HookPipeline
                 hook_ctx = await HookPipeline.run_tool_after({
                     "sessionID": self.session_id,
+                    "workspace": self.workspace_dir,
                     "agent": self.agent.name,
                     "tool": {
                         "name": tool_name,

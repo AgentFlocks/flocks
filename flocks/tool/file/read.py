@@ -17,7 +17,7 @@ from typing import Optional, List, Dict, Any
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 
@@ -46,11 +46,11 @@ DESCRIPTION = """Reads a file from the local filesystem. You can access any file
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
-- The filePath parameter must be an absolute path, not a relative path
+- filePath may be absolute, use `~`, or be relative to the current project directory
 - By default, it reads up to 2000 lines starting from the beginning of the file
 - For files longer than 2000 lines, you MUST use offset and limit to read in segments (e.g. offset=0 limit=2000, then offset=2000 limit=2000, etc.)
 - Any lines longer than 2000 characters will be truncated
-- Results are returned using cat -n format, with line numbers starting at 1
+- Text results are returned with a 5-digit, zero-padded 1-based line number prefix in the form `00001| `
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
 - You can read image files using this tool."""
@@ -139,40 +139,6 @@ def find_similar_files(directory: str, filename: str, max_suggestions: int = 3) 
         return []
 
 
-async def _resolve_sandbox_file_path(ctx: ToolContext, filepath: str) -> tuple[Optional[str], Optional[str]]:
-    """
-    Resolve file path under sandbox workspace when sandbox is enabled.
-
-    Returns:
-        (resolved_path, error_message)
-    """
-    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
-    if not isinstance(sandbox, dict):
-        return filepath, None
-
-    workspace_root = sandbox.get("workspace_dir")
-    if not workspace_root:
-        return filepath, None
-
-    if not os.path.isabs(filepath):
-        filepath = os.path.join(workspace_root, filepath)
-
-    try:
-        from flocks.sandbox.paths import assert_sandbox_path
-
-        resolved = await assert_sandbox_path(
-            file_path=filepath,
-            cwd=workspace_root,
-            root=workspace_root,
-        )
-        return resolved.resolved, None
-    except Exception:
-        return None, (
-            f"Path escapes sandbox workspace: {filepath}. "
-            "Use paths inside sandbox workspace only."
-        )
-
-
 @ToolRegistry.register_function(
     name="read",
     description=DESCRIPTION,
@@ -220,32 +186,22 @@ async def read_tool(
     Returns:
         ToolResult with file contents
     """
-    # Resolve path
-    filepath = filePath
-    if not os.path.isabs(filepath):
-        # Try to use Instance directory if available
-        base_dir = Instance.get_directory() or os.getcwd()
-        filepath = os.path.join(base_dir, filepath)
-
-    filepath, sandbox_error = await _resolve_sandbox_file_path(ctx, filepath)
-    if sandbox_error:
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+    except ValueError as exc:
         return ToolResult(
             success=False,
-            error=sandbox_error,
+            error=str(exc),
             title=filePath,
         )
-    
-    # Get relative title for display
-    worktree = Instance.get_worktree() or os.getcwd()
-    try:
-        title = os.path.relpath(filepath, worktree)
-    except ValueError:
-        title = filepath
+
+    filepath = resolution.resolved_path
+    title = resolution.display_path
     
     # Request permission
     await ctx.ask(
         permission="read",
-        patterns=[filepath],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={}
     )
@@ -386,7 +342,7 @@ async def read_tool(
         raw_lines.append(line)
         total_bytes += line_bytes
     
-    # Format with line numbers (cat -n format)
+    # Format with the read tool's stable "00001| " line prefix.
     content_lines = [
         f"{str(i + read_offset + 1).zfill(5)}| {line}"
         for i, line in enumerate(raw_lines)

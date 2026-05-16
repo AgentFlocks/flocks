@@ -154,7 +154,7 @@ Routing (important):
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="The type of specialized agent to use",
+            description="The type of specialized agent to use, must be a delegatable agent",
             required=True,
         ),
         ToolParameter(

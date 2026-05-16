@@ -245,7 +245,15 @@ class TestSystemPromptProvider:
         assert len(result) == 1
         assert result[0].startswith(PROMPT_DEFAULT.strip())
         assert "use the ls tool" not in result[0]
-        assert "use the glob tool to inspect the current directory" in result[0]
+        assert "must call the relevant tool" in result[0]
+
+    def test_minimax_model_uses_minimax_prompt(self):
+        result = SystemPrompt.provider("minimax:MiniMax-M2.5")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "prefer actually invoking the needed tool" in result[0]
+        assert "Misleading behavior" in result[0]
 
     def test_none_model_returns_list(self):
         # provider() may raise on None; just verify it returns a list or handle gracefully

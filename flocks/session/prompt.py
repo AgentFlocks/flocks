@@ -76,6 +76,10 @@ def get_prompt_general() -> str:
     return _load_prompt_file("general.txt")
 
 
+def get_prompt_minimax() -> str:
+    return _load_prompt_file("minimax.txt")
+
+
 def get_prompt_codex() -> str:
     return _load_prompt_file("codex_header.txt")
 
@@ -188,6 +192,11 @@ class SystemPrompt:
             List of prompt strings
         """
         model_lower = (model_id or "").lower()
+
+        if "minimax" in model_lower:
+            prompt = get_prompt_minimax()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
 
         # GPT-5: use codex_header.txt
         if "gpt-5" in model_lower:

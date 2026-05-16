@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 from flocks.tool.registry import ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 from flocks.project.instance import Instance
+from flocks.tool.path_utils import get_tool_base_dir, resolve_host_path
 from flocks.utils.log import Log
 
 
@@ -161,10 +162,7 @@ def _get_windows_default_workdir_fallback() -> Optional[str]:
 
 def _resolve_workdir(base_dir: str, workdir: Optional[str]) -> str:
     """Resolve command working directory, with Windows-only default cwd fallback."""
-    cwd = workdir or base_dir
-
-    if not os.path.isabs(cwd):
-        cwd = os.path.join(base_dir, cwd)
+    cwd = resolve_host_path(workdir or base_dir, base_dir=base_dir)
 
     if sys.platform == "win32" and workdir is None and not os.path.isdir(cwd):
         if fallback := _get_windows_default_workdir_fallback():
@@ -280,7 +278,7 @@ async def _resolve_sandbox_workdir(
         ToolParameter(
             name="workdir",
             type=ParameterType.STRING,
-            description="The working directory to run the command in. Defaults to project directory.",
+            description="The working directory to run the command in. It may be absolute, use `~`, or be relative to the current project directory.",
             required=False,
         ),
         ToolParameter(
@@ -314,7 +312,7 @@ async def bash_tool(
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
     # Resolve working directory
-    base_dir = Instance.get_directory() or os.getcwd()
+    base_dir = get_tool_base_dir()
     cwd = _resolve_workdir(base_dir, workdir)
 
     # Validate timeout

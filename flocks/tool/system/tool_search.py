@@ -27,7 +27,9 @@ Use this tool when you need to discover a tool that is not already exposed in
 the current turn. Search by user goal, capability, or keyword. Matching tools
 returned here are added to the current session callable tool set immediately.
 If you already know the needed tool names, prefer one exact batch query such as
-`select:websearch,webfetch,skill` instead of multiple separate searches."""
+`select:websearch,webfetch,skill` instead of multiple separate searches.
+IMPORTANT: search query must be in English.
+"""
 
 @ToolRegistry.register_function(
     name="tool_search",

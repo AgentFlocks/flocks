@@ -10,14 +10,12 @@ Fast file pattern matching tool that:
 import os
 import asyncio
 import shutil
-import fnmatch
-from pathlib import Path
 from typing import Optional, List, Dict, Any, AsyncIterator
 
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 
 
@@ -33,7 +31,7 @@ DESCRIPTION = """- Fast file pattern matching tool that works with any codebase 
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
-- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
+- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, prefer delegating that exploration or use a more specialized search workflow
 - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful."""
 
 
@@ -154,30 +152,24 @@ async def glob_tool(
     Returns:
         ToolResult with matching files
     """
+    try:
+        resolution = await resolve_tool_path(ctx, path or ".")
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc), title=path or pattern)
+
+    search_path = resolution.resolved_path
+    title = resolution.display_path
+
     # Request permission
     await ctx.ask(
         permission="glob",
-        patterns=[pattern],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={
             "pattern": pattern,
-            "path": path
+            "path": search_path,
         }
     )
-    
-    # Resolve search path
-    base_dir = Instance.get_directory() or os.getcwd()
-    search_path = path or base_dir
-    
-    if not os.path.isabs(search_path):
-        search_path = os.path.join(base_dir, search_path)
-    
-    # Get relative title
-    worktree = Instance.get_worktree() or os.getcwd()
-    try:
-        title = os.path.relpath(search_path, worktree)
-    except ValueError:
-        title = search_path
     
     # Find files
     rg_path = find_ripgrep()
