@@ -13,6 +13,7 @@ from typing import List, Optional
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, status as http_status
+from pydantic import BaseModel, Field
 
 from flocks.tool.device import (
     DEFAULT_GROUP_ID,
@@ -209,22 +210,46 @@ async def route_delete_device(device_id: str):
     await sync_service_tool_state(service_id)
 
 
+class DeviceTestRequest(BaseModel):
+    """Optional body for ``POST /devices/{id}/test``.
+
+    All fields are optional. When supplied, they take precedence over the
+    persisted device row so the user can validate unsaved edits (e.g. flip
+    the SSL toggle in the form and re-test before clicking 保存).
+    """
+    base_url: Optional[str] = Field(None, description="Override the persisted base_url for this probe only")
+    verify_ssl: Optional[bool] = Field(None, description="Override the persisted verify_ssl for this probe only")
+
+
 @router.post("/{device_id}/test", response_model=DeviceTestResult)
-async def route_test_device(device_id: str):
+async def route_test_device(device_id: str, body: Optional[DeviceTestRequest] = None):
     """Connectivity test: GET on the device's ``base_url``.
 
     HTTP 4xx → reachable (success); HTTP 5xx / connect error / timeout → failure.
+
+    Optionally accepts a JSON body with ``base_url`` / ``verify_ssl`` overrides
+    so the WebUI can probe with the form's current (unsaved) values.
     """
     row = await fetch_device(device_id)
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
 
     db_fields: dict = json.loads(row["fields"] or "{}")
-    base_url = (resolve_for_runtime(db_fields).get("base_url") or "").strip()
+    persisted_base_url = (resolve_for_runtime(db_fields).get("base_url") or "").strip()
+
+    # Form overrides take priority over the DB row so the toggle on screen is
+    # what gets used for the probe.
+    override_base_url = (body.base_url.strip() if body and body.base_url else "")
+    base_url = override_base_url or persisted_base_url
     if not base_url:
         return DeviceTestResult(success=False, message="未配置设备地址（base_url），请先填写")
 
-    result = await _probe(base_url, verify_ssl=bool(row["verify_ssl"]))
+    if body is not None and body.verify_ssl is not None:
+        verify_ssl = bool(body.verify_ssl)
+    else:
+        verify_ssl = bool(row["verify_ssl"])
+
+    result = await _probe(base_url, verify_ssl=verify_ssl)
     await record_test_result(
         device_id,
         success=result.success,

@@ -1,4 +1,5 @@
 name: sangfor_xdr
+vendor: sangfor
 service_id: sangfor_xdr
 version: "2.2"
 integration_type: device

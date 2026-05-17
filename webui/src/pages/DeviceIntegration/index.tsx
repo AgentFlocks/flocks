@@ -16,6 +16,13 @@ import ToolDetailModal from '../Tool/components/ToolDetailModal';
 
 // ============================================================================
 // Vendor catalog
+//
+// Vendor identity comes from the backend: each `_provider.yaml` declares a
+// `vendor` field that propagates into `APIServiceSummary.vendor`. The frontend
+// only owns the *presentation* (Chinese/English labels and color theme). When
+// a brand-new vendor key appears (i.e. one not in `VENDOR_PRESENTATION` below),
+// we still render it with a generic neutral label so the device is never
+// silently misclassified — see `vendorPresentation` for the fallback path.
 // ============================================================================
 
 interface DeviceVendor {
@@ -23,20 +30,27 @@ interface DeviceVendor {
   nameCn: string;
   nameEn: string;
   color: string;
-  serviceIdPrefixes: string[];
 }
 
-const VENDORS: DeviceVendor[] = [
-  { id: 'sangfor',    nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800',     serviceIdPrefixes: ['sangfor'] },
-  { id: 'nsfocus',    nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800',   serviceIdPrefixes: ['ngsoc', 'ngtip'] },
-  { id: 'qianxin',   nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', serviceIdPrefixes: ['onesec', 'onesig'] },
-  { id: 'threatbook', nameCn: '微步',   nameEn: 'ThreatBook',  color: 'bg-orange-100 text-orange-800', serviceIdPrefixes: ['tdp'] },
-  { id: 'qingteng',   nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800',     serviceIdPrefixes: ['qingteng'] },
-  { id: 'skyeye',     nameCn: '天眼',   nameEn: 'SkyEye',     color: 'bg-cyan-100 text-cyan-800',     serviceIdPrefixes: ['skyeye'] },
-];
+const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
+  sangfor:    { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800' },
+  qianxin:    { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800' },
+  threatbook: { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800' },
+  qingteng:   { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800' },
+  nsfocus:    { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800' },
+};
 
-function getVendor(serviceId: string): DeviceVendor | undefined {
-  return VENDORS.find((v) => v.serviceIdPrefixes.some((p) => serviceId.startsWith(p)));
+function vendorPresentation(vendorKey: string): DeviceVendor {
+  const preset = VENDOR_PRESENTATION[vendorKey];
+  if (preset) return { id: vendorKey, ...preset };
+  // Unknown vendor key: surface it as-is so the operator notices the gap
+  // instead of inheriting a wrong-but-pretty bucket.
+  return {
+    id: vendorKey,
+    nameCn: vendorKey,
+    nameEn: vendorKey,
+    color: 'bg-zinc-100 text-zinc-700',
+  };
 }
 
 // ============================================================================
@@ -62,12 +76,13 @@ function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) 
 // Active device card
 // ============================================================================
 
-function ActiveCard({ device, selected, onClick }: {
+function ActiveCard({ device, vendorKey, selected, onClick }: {
   device: DeviceIntegration;
+  vendorKey?: string;
   selected: boolean;
   onClick: () => void;
 }) {
-  const vendor = getVendor(device.service_id);
+  const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
   return (
     <button
       onClick={onClick}
@@ -120,25 +135,49 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
 }) {
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
 
-  const availableVendors = useMemo(
-    () => VENDORS.filter((v) => templates.some((t) => getVendor(t.id)?.id === v.id)),
-    [templates],
-  );
+  // Distinct vendor keys from the live template list. Templates whose YAML
+  // omits `vendor` are bucketed under the special "(未指定)" key so they
+  // remain visible (and obviously misconfigured) instead of disappearing.
+  //
+  // Order: pinned vendors first (threatbook 微步 is our default), then any
+  // other known vendor in catalog order, then unknown/unspecified last.
+  const availableVendors = useMemo<DeviceVendor[]>(() => {
+    const seen: string[] = [];
+    for (const t of templates) {
+      const key = t.vendor || '__unspecified__';
+      if (!seen.includes(key)) seen.push(key);
+    }
+    seen.sort((a, b) => {
+      const rank = (k: string) => {
+        if (k === 'threatbook') return 0;
+        if (k === '__unspecified__') return 99;
+        return 1;
+      };
+      const ra = rank(a);
+      const rb = rank(b);
+      if (ra !== rb) return ra - rb;
+      return a.localeCompare(b);
+    });
+    return seen.map((key) =>
+      key === '__unspecified__'
+        ? { id: '__unspecified__', nameCn: '未指定厂商', nameEn: 'Unspecified', color: 'bg-zinc-100 text-zinc-600' }
+        : vendorPresentation(key),
+    );
+  }, [templates]);
 
   const vendorTotalCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    VENDORS.forEach((v) => {
-      counts[v.id] = templates
-        .filter((t) => getVendor(t.id)?.id === v.id)
-        .reduce((sum, t) => sum + (instanceCounts[t.id] ?? 0), 0);
-    });
+    for (const t of templates) {
+      const key = t.vendor || '__unspecified__';
+      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.id] ?? 0);
+    }
     return counts;
   }, [templates, instanceCounts]);
 
-  const vendorTemplates = useMemo(
-    () => (selectedVendor ? templates.filter((t) => getVendor(t.id)?.id === selectedVendor.id) : []),
-    [templates, selectedVendor],
-  );
+  const vendorTemplates = useMemo(() => {
+    if (!selectedVendor) return [];
+    return templates.filter((t) => (t.vendor || '__unspecified__') === selectedVendor.id);
+  }, [templates, selectedVendor]);
 
   return (
     <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
@@ -191,7 +230,9 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
               <div className="grid grid-cols-2 gap-3">
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
-                  const productCount = templates.filter((t) => getVendor(t.id)?.id === vendor.id).length;
+                  const productCount = templates.filter(
+                    (t) => (t.vendor || '__unspecified__') === vendor.id,
+                  ).length;
                   return (
                     <button
                       key={vendor.id}
@@ -284,13 +325,20 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   );
 }
 
-function DeviceConfigPanel({ device, template, onSave, onDelete, onClose, onTest, onBack }: {
+function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onClose, onTest, onToggleVerifySsl, onBack }: {
   device?: DeviceIntegration;
   template?: APIServiceSummary;
+  vendorKey?: string;
   onSave: (data: { name: string; fields: Record<string, string>; enabled: boolean; verify_ssl: boolean }) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
-  onTest?: () => Promise<{ success: boolean; message: string }>;
+  /** Receives the current (unsaved) form values so the probe reflects the
+   *  on-screen toggle state instead of whatever was last persisted. */
+  onTest?: (overrides: { verify_ssl: boolean; base_url?: string }) => Promise<{ success: boolean; message: string }>;
+  /** Persist the SSL toggle immediately (without requiring "保存"). Only
+   *  meaningful when editing an existing device — for the "Add device"
+   *  wizard the value is held in local state until the row is created. */
+  onToggleVerifySsl?: (next: boolean) => Promise<void>;
   onBack?: () => void;
 }) {
   const toast = useToast();
@@ -313,7 +361,7 @@ function DeviceConfigPanel({ device, template, onSave, onDelete, onClose, onTest
   const originalMasked = useRef<Record<string, string>>({});
 
   const serviceId = device?.service_id ?? template?.id ?? '';
-  const vendor = getVendor(serviceId);
+  const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
 
   useEffect(() => {
     if (!serviceId) return;
@@ -378,8 +426,38 @@ function DeviceConfigPanel({ device, template, onSave, onDelete, onClose, onTest
     if (!onTest) return;
     setTesting(true);
     setTestResult(null);
-    try { setTestResult(await onTest()); }
-    finally { setTesting(false); }
+    try {
+      // Probe with the form's current SSL toggle / base_url so the user can
+      // validate unsaved changes immediately. Empty base_url means "fall
+      // back to whatever is already in the DB".
+      const candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
+      setTestResult(await onTest({
+        verify_ssl: verifySsl,
+        base_url: candidateBaseUrl || undefined,
+      }));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // Toggle SSL on/off and persist immediately (no need to click 保存).
+  // Optimistic update with rollback on failure so the UI stays in sync
+  // with the backend even when the request errors out.
+  const handleToggleSsl = async () => {
+    const next = !verifySsl;
+    setVerifySsl(next);
+    if (!device || !onToggleVerifySsl) {
+      // Editing a brand-new device that hasn't been persisted yet — just
+      // keep the local state; it will be sent on first 保存.
+      return;
+    }
+    try {
+      await onToggleVerifySsl(next);
+      toast.success(next ? '已开启 SSL 验证' : '已关闭 SSL 验证');
+    } catch {
+      setVerifySsl(!next);
+      toast.error('保存失败，已回滚');
+    }
   };
 
   const handleDelete = async () => {
@@ -525,7 +603,7 @@ function DeviceConfigPanel({ device, template, onSave, onDelete, onClose, onTest
                       <p className="text-sm font-medium text-zinc-700">SSL 验证</p>
                       <p className="text-[11px] text-zinc-400 mt-0.5">关闭可访问自签名证书的内网设备</p>
                     </div>
-                    <Toggle on={verifySsl} onToggle={() => setVerifySsl((v) => !v)} />
+                    <Toggle on={verifySsl} onToggle={handleToggleSsl} />
                   </div>
                   <div className="flex items-center justify-between px-4 py-3">
                     <div>
@@ -828,6 +906,34 @@ export default function DeviceIntegrationPage() {
     return counts;
   }, [devices]);
 
+  // storage_key (and bare service_id) → vendor key, sourced from the backend
+  // template list. Used to resolve vendor for already-installed devices
+  // (whose `DeviceIntegration` row does not carry the vendor field directly).
+  //
+  // Legacy devices may have been installed before api_versioning shipped, so
+  // their `storage_key` is the bare service_id (e.g. "tdp_api") rather than
+  // the versioned form ("tdp_api_v3_3_10"). We additionally index each
+  // template by its bare service_id (regex matches the backend's
+  // `storage_key_to_service_id`) so those rows still resolve correctly.
+  const vendorByKey = useMemo(() => {
+    const map: Record<string, string> = {};
+    templates.forEach((t) => {
+      if (!t.vendor) return;
+      map[t.id] = t.vendor;
+      const bareServiceId = t.id.replace(/_v[\w.]+$/i, '');
+      if (bareServiceId !== t.id && !map[bareServiceId]) {
+        map[bareServiceId] = t.vendor;
+      }
+    });
+    return map;
+  }, [templates]);
+
+  const vendorOf = useCallback(
+    (device: DeviceIntegration): string | undefined =>
+      vendorByKey[device.storage_key] ?? vendorByKey[device.service_id],
+    [vendorByKey],
+  );
+
   const panelDeviceId = panel?.kind === 'edit' ? panel.device.id : null;
 
   const handleSave = async (data: { name: string; fields: Record<string, string>; enabled: boolean; verify_ssl: boolean }) => {
@@ -863,15 +969,25 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
-  const handleTest = async () => {
+  const handleTest = async (overrides: { verify_ssl: boolean; base_url?: string }) => {
     if (panel?.kind !== 'edit') return { success: false, message: '' };
-    const res = await deviceAPI.test(panel.device.id);
+    const res = await deviceAPI.test(panel.device.id, overrides);
     await fetchData(true);
     if (panel?.kind === 'edit') {
       const updated = await deviceAPI.get(panel.device.id);
       setPanel({ kind: 'edit', device: updated.data });
     }
     return res.data;
+  };
+
+  // Persist the SSL toggle the moment it flips, without requiring 保存.
+  // Re-fetches the device so the open panel reflects the freshly stored row.
+  const handleToggleVerifySsl = async (next: boolean) => {
+    if (panel?.kind !== 'edit') return;
+    await deviceAPI.update(panel.device.id, { verify_ssl: next });
+    const updated = await deviceAPI.get(panel.device.id);
+    setPanel({ kind: 'edit', device: updated.data });
+    await fetchData(true);
   };
 
   return (
@@ -942,6 +1058,7 @@ export default function DeviceIntegrationPage() {
                   <ActiveCard
                     key={d.id}
                     device={d}
+                    vendorKey={vendorOf(d)}
                     selected={panelDeviceId === d.id}
                     onClick={() => setPanel({ kind: 'edit', device: d })}
                   />
@@ -964,21 +1081,31 @@ export default function DeviceIntegrationPage() {
       )}
 
       {/* Config panel (add or edit) */}
-      {(panel?.kind === 'add' || panel?.kind === 'edit') && (
-        <DeviceConfigPanel
-          key={panel.kind === 'edit' ? panel.device.id : panel.template.id}
-          device={panel.kind === 'edit' ? panel.device : undefined}
-          template={panel.kind === 'add' ? panel.template : undefined}
-          onSave={handleSave}
-          onDelete={panel.kind === 'edit' ? handleDelete : undefined}
-          onClose={() => setPanel(null)}
-          onTest={panel.kind === 'edit' ? handleTest : undefined}
-          onBack={panel.kind === 'add'
-            ? () => setPanel({ kind: 'wizard', initialVendor: getVendor(panel.template.id) })
-            : undefined
-          }
-        />
-      )}
+      {(panel?.kind === 'add' || panel?.kind === 'edit') && (() => {
+        const panelVendorKey = panel.kind === 'edit'
+          ? vendorOf(panel.device)
+          : panel.template.vendor;
+        return (
+          <DeviceConfigPanel
+            key={panel.kind === 'edit' ? panel.device.id : panel.template.id}
+            device={panel.kind === 'edit' ? panel.device : undefined}
+            template={panel.kind === 'add' ? panel.template : undefined}
+            vendorKey={panelVendorKey}
+            onSave={handleSave}
+            onDelete={panel.kind === 'edit' ? handleDelete : undefined}
+            onClose={() => setPanel(null)}
+            onTest={panel.kind === 'edit' ? handleTest : undefined}
+            onToggleVerifySsl={panel.kind === 'edit' ? handleToggleVerifySsl : undefined}
+            onBack={panel.kind === 'add'
+              ? () => setPanel({
+                  kind: 'wizard',
+                  initialVendor: panelVendorKey ? vendorPresentation(panelVendorKey) : undefined,
+                })
+              : undefined
+            }
+          />
+        );
+      })()}
     </div>
   );
 }

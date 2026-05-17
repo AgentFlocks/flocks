@@ -81,6 +81,14 @@ export interface DeviceTestResult {
   latency_ms?: number | null;
 }
 
+export interface DeviceTestRequest {
+  /** Override the persisted base_url for this probe only (typically the
+   *  current value in the form, before it has been saved). */
+  base_url?: string;
+  /** Override the persisted verify_ssl for this probe only. */
+  verify_ssl?: boolean;
+}
+
 export const deviceAPI = {
   // groups
   listGroups: () =>
@@ -111,6 +119,6 @@ export const deviceAPI = {
   delete: (id: string) =>
     client.delete(`/api/devices/${id}`),
 
-  test: (id: string) =>
-    client.post<DeviceTestResult>(`/api/devices/${id}/test`),
+  test: (id: string, body?: DeviceTestRequest) =>
+    client.post<DeviceTestResult>(`/api/devices/${id}/test`, body ?? {}),
 };

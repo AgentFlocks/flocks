@@ -1,4 +1,5 @@
 name: sangfor_sip
+vendor: sangfor
 service_id: sangfor_sip
 version: "9.2"
 integration_type: device

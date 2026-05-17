@@ -1,4 +1,5 @@
 name: qingteng
+vendor: qingteng
 service_id: qingteng
 version: "3.4.1.66"
 integration_type: device

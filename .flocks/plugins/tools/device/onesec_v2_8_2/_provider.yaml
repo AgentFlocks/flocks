@@ -1,4 +1,5 @@
 name: onesec
+vendor: threatbook
 service_id: onesec_api
 version: "2.8.2"
 integration_type: device

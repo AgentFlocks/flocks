@@ -885,6 +885,7 @@ class APIServiceSummary(BaseModel):
     builtin: bool = False
     verify_ssl: bool = False
     integration_type: Optional[str] = None  # e.g. "device" for security device APIs
+    vendor: Optional[str] = None  # Manufacturer key (threatbook, qianxin, sangfor, qingteng, ...)
 
 
 class APIServiceUpdateRequest(BaseModel):
@@ -908,7 +909,7 @@ def _get_api_service_tool_infos(provider_id: str) -> List[Any]:
     matched_tools: List[Any] = []
     for tool_info in ToolRegistry.list_tools():
         source, source_name = _get_tool_source(tool_info)
-        if source == "api" and source_name == provider_id:
+        if source in ("api", "device") and source_name == provider_id:
             matched_tools.append(tool_info)
     return matched_tools
 
@@ -1006,6 +1007,7 @@ def _build_api_service_summary(
         builtin=_is_api_service_builtin(provider_id, matched_tools),
         verify_ssl=verify_ssl,
         integration_type=meta.get("integration_type"),
+        vendor=meta.get("vendor"),
     )
 
 
@@ -2092,7 +2094,7 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 if not tool_info.enabled:
                     continue
                 source, source_name = _get_tool_source(tool_info)
-                if source == "api" and source_name == provider_id:
+                if source in ("api", "device") and source_name == provider_id:
                     service_tools.append(tool_info)
             
             log.info("test_credentials.service_tools", {

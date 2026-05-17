@@ -226,6 +226,9 @@ export interface APIServiceSummary {
   verify_ssl: boolean;
   /** "device" for security device APIs (set via integration_type in _provider.yaml) */
   integration_type?: string;
+  /** Manufacturer key from _provider.yaml `vendor` field
+   *  (e.g. "threatbook", "qianxin", "sangfor", "qingteng"). */
+  vendor?: string;
 }
 
 export interface APIServiceCredentialField {

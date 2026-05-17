@@ -141,6 +141,7 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
             "defaults": prov.get("defaults", {}),
             "apis": tool_apis or None,
             "integration_type": prov.get("integration_type"),
+            "vendor": prov.get("vendor"),
         }
     except Exception as e:
         log.debug("schema.yaml_metadata.load_failed", {"provider_id": provider_id, "error": str(e)})

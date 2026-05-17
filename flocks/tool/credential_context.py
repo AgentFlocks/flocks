@@ -43,6 +43,12 @@ _active_device_id: ContextVar[Optional[str]] = ContextVar(
     "active_device_id", default=None
 )
 
+# Per-device SSL verification preference. ``None`` means "no device override
+# active – fall back to the provider config / framework default".
+_verify_ssl_override: ContextVar[Optional[bool]] = ContextVar(
+    "device_verify_ssl_override", default=None
+)
+
 
 # ---------------------------------------------------------------------------
 # Read helpers (called from SecretManager / ConfigWriter)
@@ -67,6 +73,12 @@ def get_active_device_id() -> Optional[str]:
     return _active_device_id.get()
 
 
+def get_verify_ssl_override() -> Optional[bool]:
+    """Return the per-device ``verify_ssl`` toggle, or ``None`` if no device
+    credential override is active for this coroutine."""
+    return _verify_ssl_override.get()
+
+
 # ---------------------------------------------------------------------------
 # Activation (called from ToolRegistry.execute)
 # ---------------------------------------------------------------------------
@@ -87,6 +99,12 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
     t2 = _config_override.set(config_ovr or {})
     t3 = _config_override_service.set(service_id)
     t4 = _active_device_id.set(device_id)
+    # ``config_ovr`` always carries a ``verify_ssl`` key once we've reached
+    # this point (see :func:`_build_overrides`); fall back to ``False`` so a
+    # missing value still produces a defined override (rather than leaving
+    # the previous coroutine's value visible).
+    verify_ssl = bool((config_ovr or {}).get("verify_ssl", False))
+    t5 = _verify_ssl_override.set(verify_ssl)
     try:
         yield True
     finally:
@@ -94,6 +112,7 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
         _config_override.reset(t2)
         _config_override_service.reset(t3)
         _active_device_id.reset(t4)
+        _verify_ssl_override.reset(t5)
 
 
 async def _build_overrides(
@@ -116,6 +135,7 @@ async def _build_overrides(
     storage_key: str = creds.get("storage_key", "")
     service_id: str = creds.get("service_id", "")
     resolved_fields: Dict[str, str] = creds.get("fields", {})
+    verify_ssl: bool = bool(creds.get("verify_ssl", False))
 
     # Load credential_fields from _provider.yaml for the storage_key.
     # This gives us the mapping: field_key → (secret_id, config_key, storage).
@@ -155,6 +175,12 @@ async def _build_overrides(
             config_ovr[k] = v
 
     config_ovr["enabled"] = True
+    # Forward the per-device SSL verification toggle. Tool handlers read this
+    # via ``ConfigWriter.get_api_service_raw(...)["verify_ssl"]`` (canonical)
+    # or the legacy ``ssl_verify`` alias; populate both so older handlers
+    # that haven't been migrated still see the right value.
+    config_ovr["verify_ssl"] = verify_ssl
+    config_ovr["ssl_verify"] = verify_ssl
 
     return secret_ovr or None, config_ovr or None, service_id or None
 

@@ -1,4 +1,5 @@
 name: TDP
+vendor: threatbook
 service_id: tdp_api
 version: "3.3.10"
 integration_type: device

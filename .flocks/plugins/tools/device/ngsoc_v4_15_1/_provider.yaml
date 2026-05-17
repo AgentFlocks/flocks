@@ -1,4 +1,5 @@
 name: ngsoc
+vendor: qianxin
 service_id: ngsoc_api
 version: "4.15.1"
 integration_type: device

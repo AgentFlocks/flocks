@@ -23,7 +23,7 @@ from flocks.utils.log import Log
 
 from .models import DEFAULT_GROUP_ID
 from .secrets import persist_fields
-from .store import insert_device, storage_key_to_service_id
+from .store import insert_device, list_devices, storage_key_to_service_id
 
 log = Log.create(service="tool.device.migration")
 
@@ -53,6 +53,16 @@ async def migrate_from_config() -> None:
     secrets = get_secret_manager()
     new_marker = dict(marker)
 
+    # Bare service_ids that already have at least one row in device_integrations.
+    # api_versioning may rewrite the same service_id to multiple versioned
+    # storage_keys (e.g. ``tdp_api`` → ``tdp_api_v3_3_10``); without this guard
+    # each rename would re-trigger migration and create duplicate device rows.
+    try:
+        existing_service_ids = {d.service_id for d in await list_devices() if d.service_id}
+    except Exception as exc:
+        log.warn("tool.device.migrate.list_existing_error", {"error": str(exc)})
+        existing_service_ids = set()
+
     for storage_key, raw_cfg in raw_services.items():
         if not isinstance(raw_cfg, dict):
             continue
@@ -67,6 +77,18 @@ async def migrate_from_config() -> None:
 
         if marker.get(storage_key):
             log.info("tool.device.migrate.skip", {"storage_key": storage_key, "reason": "already done"})
+            continue
+
+        # Skip if a device for the same product family was already migrated
+        # under a different (e.g. unversioned) storage_key. We still record the
+        # marker so we don't re-evaluate this entry on every restart.
+        bare_service_id = storage_key_to_service_id(storage_key)
+        if bare_service_id in existing_service_ids:
+            new_marker[storage_key] = int(time.time() * 1000)
+            log.info(
+                "tool.device.migrate.skip",
+                {"storage_key": storage_key, "reason": "duplicate service_id", "service_id": bare_service_id},
+            )
             continue
 
         plain_values = _extract_plain_values(
