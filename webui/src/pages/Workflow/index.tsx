@@ -345,10 +345,7 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
             className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
             style={{ backgroundColor: hexAlpha(color, 0.12) }}
           >
-            {builtin
-              ? <Sparkles className="w-4 h-4" style={{ color }} />
-              : <FolderOpen className="w-4 h-4" style={{ color }} />
-            }
+            <WorkflowIcon className="w-4 h-4" style={{ color }} />
           </div>
 
           <div className="min-w-0 flex-1">
