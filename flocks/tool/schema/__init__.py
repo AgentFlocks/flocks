@@ -5,7 +5,7 @@ are part of the tool/plugin model — they describe *how* the agent integrates
 with an external API, independent of any HTTP transport. The ``server.routes``
 layer should depend on this module, not the other way around.
 """
-from .schema import (
+from .api_service_schema import (
     APIServiceCredentialField,
     _build_api_service_credential_schema,
     _default_api_service_field_label,

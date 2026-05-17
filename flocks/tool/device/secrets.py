@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Dict, FrozenSet, Optional, Tuple
 
-from flocks.tool.api_service.schema import _extract_secret_id as _parse_placeholder
+from flocks.tool.schema.api_service_schema import _extract_secret_id as _parse_placeholder
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.device.secrets")
@@ -39,7 +39,7 @@ def _secret_keys_for(storage_key: str) -> FrozenSet[str]:
     hard-coded sensitive-name list for legacy or missing schemas.
     """
     try:
-        from flocks.tool.api_service.schema import (
+        from flocks.tool.schema.api_service_schema import (
             _build_api_service_credential_schema,
             _load_api_service_metadata_data,
         )

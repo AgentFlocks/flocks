@@ -33,7 +33,7 @@ async def migrate_from_config() -> None:
     try:
         from flocks.config.config_writer import ConfigWriter
         from flocks.security import get_secret_manager
-        from flocks.tool.api_service.schema import (
+        from flocks.tool.schema.api_service_schema import (
             _build_api_service_credential_schema,
             _get_api_service_secret_candidates,
             _load_api_service_metadata_data,

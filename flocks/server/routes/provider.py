@@ -21,10 +21,10 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
 from flocks.tool.tool_loader import extract_provider_version
 
-# Schema helpers are re-exported from flocks.tool.api_service.schema (canonical
+# Schema helpers are re-exported from flocks.tool.schema.api_service_schema (canonical
 # home). Existing callers — tests, onboarding, device migration — keep importing
 # them from this module without churn.
-from flocks.tool.api_service.schema import (
+from flocks.tool.schema.api_service_schema import (
     APIServiceCredentialField,
     _build_api_service_credential_schema,
     _default_api_service_field_label,
