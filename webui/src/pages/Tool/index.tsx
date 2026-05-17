@@ -3201,7 +3201,7 @@ function ToolTable({
             asDiv
           />
         </div>
-        <div className="text-right">{t('table.actions')}</div>
+        <div className="text-center">{t('table.actions')}</div>
       </div>
 
       {/* Rows */}
@@ -3245,7 +3245,7 @@ function ToolTable({
               </div>
 
               {/* Actions column — manage button */}
-              <div className="flex items-center justify-end">
+              <div className="w-full flex items-center justify-center">
                 <button
                   onClick={() => onSelect(tool)}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"

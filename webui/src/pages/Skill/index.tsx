@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   BookOpen,
   Search,
@@ -12,6 +12,7 @@ import {
   Pencil,
   ChevronLeft,
   ChevronRight,
+  Filter,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -40,9 +41,13 @@ export default function SkillPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const [togglingSkills, setTogglingSkills] = useState<Record<string, boolean>>({});
-  // Status filter combines "stat counter" and "view filter" into one chip
-  // group.  Clicking a chip both shows its number and applies the filter.
-  const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
+  // Toolbar: source filter (all / builtin / custom)
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'builtin' | 'custom'>('all');
+  // Column-level multi-select filters (empty Set == "all").  Stored as
+  // ``Set<string>`` so each chip can be toggled independently, matching
+  // the Tool list page's column-filter behavior.
+  const [enabledFilter, setEnabledFilter] = useState<Set<string>>(new Set());
+  const [sourceColFilter, setSourceColFilter] = useState<Set<string>>(new Set());
 
   const fetchSkills = async (
     { silent = false, invalidateOnError = false }: { silent?: boolean; invalidateOnError?: boolean } = {}
@@ -99,21 +104,35 @@ export default function SkillPage() {
   );
   const disabledCount = visibleSkills.length - enabledCount;
 
+  // All unique source values for column filter dropdown
+  const allSources = useMemo(
+    () => Array.from(new Set(visibleSkills.map(s => s.source ?? '-'))).sort(),
+    [visibleSkills],
+  );
+
   const filteredSkills = useMemo(() => {
     const q = searchQuery.toLowerCase();
     return visibleSkills.filter(skill => {
-      if (statusFilter === 'enabled' && skill.disabled) return false;
-      if (statusFilter === 'disabled' && !skill.disabled) return false;
+      const isUser = isUserManaged(skill);
+      if (sourceFilter === 'builtin' && isUser) return false;
+      if (sourceFilter === 'custom' && !isUser) return false;
+      if (enabledFilter.size > 0) {
+        const key = skill.disabled ? 'disabled' : 'enabled';
+        if (!enabledFilter.has(key)) return false;
+      }
+      if (sourceColFilter.size > 0 && !sourceColFilter.has(skill.source ?? '-')) return false;
       if (!q) return true;
       return (
         skill.name.toLowerCase().includes(q) ||
         (skill.description || '').toLowerCase().includes(q)
       );
     });
-  }, [visibleSkills, searchQuery, statusFilter]);
+  }, [visibleSkills, searchQuery, sourceFilter, enabledFilter, sourceColFilter]);
 
-  // Reset to first page whenever search or status filter changes
-  useEffect(() => { setPage(1); }, [searchQuery, statusFilter]);
+  const hasColumnFilter = enabledFilter.size > 0 || sourceColFilter.size > 0;
+
+  // Reset to first page whenever any filter changes
+  useEffect(() => { setPage(1); }, [searchQuery, sourceFilter, enabledFilter, sourceColFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredSkills.length / PAGE_SIZE));
 
@@ -240,7 +259,7 @@ export default function SkillPage() {
         icon={<BookOpen className="w-8 h-8" />}
       />
 
-      {/* Toolbar: 搜索 · 统计过滤 chips · 刷新/安装/创建 */}
+      {/* Toolbar: 搜索 · 来源 chips · 刷新/安装/创建 */}
       <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3">
         {/* 搜索 */}
         <div className="relative w-64">
@@ -254,13 +273,13 @@ export default function SkillPage() {
           />
         </div>
 
-        {/* 统计 + 过滤 segment chips */}
-        <FilterChips
-          value={statusFilter}
-          onChange={setStatusFilter}
+        {/* 来源筛选 chips */}
+        <SourceFilterChips
+          value={sourceFilter}
+          onChange={setSourceFilter}
           total={visibleSkills.length}
-          enabled={enabledCount}
-          disabled={disabledCount}
+          builtinCount={visibleSkills.filter(s => !isUserManaged(s)).length}
+          customCount={visibleSkills.filter(s => isUserManaged(s)).length}
         />
 
         {/* 右侧操作：刷新 + 安装 + 创建 */}
@@ -295,61 +314,67 @@ export default function SkillPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {filteredSkills.length === 0 ? (
-          (() => {
-            // Three distinct empty states:
-            //   * narrowed by search       — show "no results"
-            //   * narrowed by status chip  — show "no skills in this view"
-            //                                with a quick "show all" reset
-            //   * truly empty inventory    — show CTA buttons
-            const isNarrowed = !!searchQuery || statusFilter !== 'all';
-            return (
-              <EmptyState
-                icon={<BookOpen className="w-16 h-16" />}
-                title={isNarrowed ? t('emptyState.noResults') : t('emptyState.noSkills')}
-                description={
-                  isNarrowed
-                    ? t('emptyState.tryOtherKeywords')
-                    : t('emptyState.createFirst')
-                }
-                action={
-                  isNarrowed ? (
-                    statusFilter !== 'all' ? (
-                      <button
-                        onClick={() => setStatusFilter('all')}
-                        className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
-                      >
-                        {t('filter.showAll')}
-                      </button>
-                    ) : undefined
-                  ) : (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setShowInstallDialog(true)}
-                        className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
-                      >
-                        <CloudDownload className="w-5 h-5" />
-                        {t('installSkill')}
-                      </button>
-                      <button
-                        onClick={() => setShowCreateSheet(true)}
-                        className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-                      >
-                        <Plus className="w-5 h-5" />
-                        {t('createSkill')}
-                      </button>
-                    </div>
-                  )
-                }
-              />
-            );
-          })()
+        {visibleSkills.length === 0 ? (
+          // Truly empty inventory — show big EmptyState with CTAs
+          <EmptyState
+            icon={<BookOpen className="w-16 h-16" />}
+            title={t('emptyState.noSkills')}
+            description={t('emptyState.createFirst')}
+            action={
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowInstallDialog(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50"
+                >
+                  <CloudDownload className="w-5 h-5" />
+                  {t('installSkill')}
+                </button>
+                <button
+                  onClick={() => setShowCreateSheet(true)}
+                  className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
+                >
+                  <Plus className="w-5 h-5" />
+                  {t('createSkill')}
+                </button>
+              </div>
+            }
+          />
         ) : (
+          // Always render the table (with header + filter dropdowns) when
+          // the inventory has anything in it.  Empty filter result is shown
+          // as a single empty row inside the table so the column headers
+          // and filter funnels stay visible and operable.
           <SkillTable
             skills={pagedSkills}
             selectedSkill={sheetSkill}
             installingDeps={installingDeps}
             togglingSkills={togglingSkills}
+            enabledFilter={enabledFilter}
+            onToggleEnabledFilter={(v) =>
+              setEnabledFilter(prev => {
+                const next = new Set(prev);
+                if (next.has(v)) next.delete(v); else next.add(v);
+                return next;
+              })
+            }
+            onClearEnabledFilter={() => setEnabledFilter(new Set())}
+            allSources={allSources}
+            sourceColFilter={sourceColFilter}
+            onToggleSourceColFilter={(v) =>
+              setSourceColFilter(prev => {
+                const next = new Set(prev);
+                if (next.has(v)) next.delete(v); else next.add(v);
+                return next;
+              })
+            }
+            onClearSourceColFilter={() => setSourceColFilter(new Set())}
+            hasActiveFilter={sourceFilter !== 'all' || hasColumnFilter || !!searchQuery}
+            onClearAllFilters={() => {
+              setSourceFilter('all');
+              setEnabledFilter(new Set());
+              setSourceColFilter(new Set());
+              setSearchQuery('');
+            }}
             onSelect={handleSelectSkill}
             onInstallDeps={handleInstallDeps}
             onToggle={handleToggle}
@@ -414,38 +439,61 @@ interface SkillTableProps {
   selectedSkill: Skill | null;
   installingDeps: Record<string, boolean>;
   togglingSkills: Record<string, boolean>;
+  enabledFilter: Set<string>;
+  onToggleEnabledFilter: (v: string) => void;
+  onClearEnabledFilter: () => void;
+  allSources: string[];
+  sourceColFilter: Set<string>;
+  onToggleSourceColFilter: (v: string) => void;
+  onClearSourceColFilter: () => void;
+  hasActiveFilter: boolean;
+  onClearAllFilters: () => void;
   onSelect: (skill: Skill) => void;
   onInstallDeps: (skill: Skill, e: React.MouseEvent) => void;
   onToggle: (skill: Skill, e: React.MouseEvent) => void;
 }
 
-function SkillTable({ skills, selectedSkill, installingDeps, togglingSkills, onSelect, onInstallDeps, onToggle }: SkillTableProps) {
+function SkillTable({
+  skills, selectedSkill, installingDeps, togglingSkills,
+  enabledFilter, onToggleEnabledFilter, onClearEnabledFilter,
+  allSources, sourceColFilter, onToggleSourceColFilter, onClearSourceColFilter,
+  hasActiveFilter, onClearAllFilters,
+  onSelect, onInstallDeps, onToggle,
+}: SkillTableProps) {
   const { t } = useTranslation('skill');
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
       <table className="min-w-full table-fixed text-xs">
-        {/* 5-column layout: type 8% · name+desc+deps 50% · source 18%
-            · enabled-toggle 12% · actions 12%.  We dropped the dedicated
-            "Status" column because it only ever showed Ready / Missing,
-            and "Missing" is more actionable inline beneath the name. */}
         <colgroup>
           <col style={{ width: '8%' }} />
-          <col style={{ width: '50%' }} />
+          <col style={{ width: '46%' }} />
           <col style={{ width: '18%' }} />
-          <col style={{ width: '12%' }} />
-          <col style={{ width: '12%' }} />
+          <col style={{ width: '14%' }} />
+          <col style={{ width: '14%' }} />
         </colgroup>
         <thead className="bg-gray-50 text-gray-500 border-b border-gray-200">
           <tr>
             <th className="text-left px-4 py-2.5 font-medium">{t('table.type')}</th>
             <th className="text-left px-4 py-2.5 font-medium">{t('table.name')}</th>
-            <th className="text-left px-4 py-2.5 font-medium">{t('table.source')}</th>
-            <th
-              className="text-left px-4 py-2.5 font-medium"
-              title={t('toggle.enabledTip')}
-            >
-              {t('table.enabled')}
+            <th className="text-left px-4 py-2.5 font-medium">
+              <ColumnFilterHeader
+                label={t('table.source')}
+                values={allSources}
+                active={sourceColFilter}
+                onToggle={onToggleSourceColFilter}
+                onClear={onClearSourceColFilter}
+              />
+            </th>
+            <th className="text-left px-4 py-2.5 font-medium">
+              <ColumnFilterHeader
+                label={t('table.enabled')}
+                values={['enabled', 'disabled']}
+                active={enabledFilter}
+                onToggle={onToggleEnabledFilter}
+                onClear={onClearEnabledFilter}
+                renderLabel={(v) => v === 'enabled' ? t('filter.enabled') : t('filter.disabled')}
+              />
             </th>
             <th className="text-right px-4 py-2.5 font-medium">{t('table.actions')}</th>
           </tr>
@@ -465,8 +513,20 @@ function SkillTable({ skills, selectedSkill, installingDeps, togglingSkills, onS
           ))}
           {skills.length === 0 && (
             <tr>
-              <td colSpan={5} className="px-4 py-12 text-center text-gray-400">
-                {t('emptyState.noResults')}
+              <td colSpan={5} className="px-4 py-12">
+                <div className="flex flex-col items-center justify-center gap-3 text-gray-400">
+                  <BookOpen className="w-10 h-10 text-gray-300" />
+                  <div className="text-sm">{t('emptyState.noResults')}</div>
+                  {hasActiveFilter && (
+                    <button
+                      type="button"
+                      onClick={onClearAllFilters}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-xs text-gray-600 hover:bg-gray-50 hover:text-gray-800 transition-colors"
+                    >
+                      {t('filter.clear')}
+                    </button>
+                  )}
+                </div>
               </td>
             </tr>
           )}
@@ -646,32 +706,28 @@ function SourceTypeBadge({ isUser }: { isUser: boolean }) {
   );
 }
 
-// ─── FilterChips ──────────────────────────────────────────────────────────────
-//
-// One segmented control that serves both as the "how many" stat readout and
-// as the view-filter.  Each chip shows `label · count` and is highlighted
-// when active.  Clicking a chip toggles the filter to that segment.
+// ─── SourceFilterChips ────────────────────────────────────────────────────────
 
-type StatusFilterValue = 'all' | 'enabled' | 'disabled';
+type SourceFilterValue = 'all' | 'builtin' | 'custom';
 
-function FilterChips({
+function SourceFilterChips({
   value,
   onChange,
   total,
-  enabled,
-  disabled,
+  builtinCount,
+  customCount,
 }: {
-  value: StatusFilterValue;
-  onChange: (v: StatusFilterValue) => void;
+  value: SourceFilterValue;
+  onChange: (v: SourceFilterValue) => void;
   total: number;
-  enabled: number;
-  disabled: number;
+  builtinCount: number;
+  customCount: number;
 }) {
   const { t } = useTranslation('skill');
-  const chips: Array<{ key: StatusFilterValue; label: string; count: number }> = [
+  const chips: Array<{ key: SourceFilterValue; label: string; count: number }> = [
     { key: 'all', label: t('filter.all'), count: total },
-    { key: 'enabled', label: t('filter.enabled'), count: enabled },
-    { key: 'disabled', label: t('filter.disabled'), count: disabled },
+    { key: 'builtin', label: t('filter.builtin'), count: builtinCount },
+    { key: 'custom', label: t('filter.custom'), count: customCount },
   ];
   return (
     <div
@@ -705,6 +761,91 @@ function FilterChips({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ─── ColumnFilterHeader ───────────────────────────────────────────────────────
+//
+// Multi-select column-filter dropdown, visually matching the Tool list
+// page's SortFilterHeader (label · funnel icon · checkbox menu · clear).
+// Skill table doesn't need column-level sorting, so this is the
+// filter-only variant.
+
+function ColumnFilterHeader({
+  label,
+  values,
+  active,
+  onToggle,
+  onClear,
+  renderLabel,
+}: {
+  label: string;
+  values: string[];
+  active: Set<string>;
+  onToggle: (v: string) => void;
+  onClear: () => void;
+  renderLabel?: (v: string) => string;
+}) {
+  const { t } = useTranslation('skill');
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const hasFilter = active.size > 0;
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative inline-flex items-center whitespace-nowrap">
+      <div className="flex items-center gap-1">
+        <span className={hasFilter ? 'text-red-600' : ''}>{label}</span>
+        <button
+          type="button"
+          onClick={() => setOpen(v => !v)}
+          className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${
+            hasFilter ? 'text-red-600' : 'text-gray-400'
+          }`}
+          aria-label={`${label} ${t('filter.aria')}`}
+        >
+          <Filter className="w-3 h-3" />
+        </button>
+      </div>
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
+          {hasFilter && (
+            <button
+              onClick={() => { onClear(); setOpen(false); }}
+              className="w-full text-left px-3 py-1.5 text-xs text-red-600 hover:bg-red-50"
+            >
+              {t('filter.clear')}
+            </button>
+          )}
+          {values.map(v => {
+            const checked = active.has(v);
+            const displayLabel = renderLabel ? renderLabel(v) : v;
+            return (
+              <label
+                key={v}
+                className="flex items-center px-3 py-1.5 hover:bg-gray-50 cursor-pointer"
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onToggle(v)}
+                  className="w-3.5 h-3.5 rounded border-gray-300 text-red-600 focus:ring-red-500 mr-2"
+                />
+                <span className="text-xs text-gray-700">{displayLabel}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -16,7 +16,8 @@
     "noSkills": "No Skills",
     "noResults": "No skills found",
     "createFirst": "Create your first skill",
-    "tryOtherKeywords": "Try different search keywords"
+    "tryOtherKeywords": "Try different search keywords",
+    "tryOtherFilters": "No skills match the current filters — try adjusting or clearing them"
   },
   "section": {
     "custom": "Custom Skills",
@@ -53,11 +54,14 @@
     "installFailed": "Dependency install failed"
   },
   "filter": {
-    "aria": "Skill status filter",
+    "aria": "Skill source filter",
     "all": "All",
+    "builtin": "Built-in",
+    "custom": "Custom",
     "enabled": "Enabled",
     "disabled": "Disabled",
-    "showAll": "Show all"
+    "showAll": "Show all",
+    "clear": "Clear filter"
   },
   "installDialog": {
     "title": "Install Skill",
