@@ -1,7 +1,8 @@
 """Database access for device_groups and device_integrations.
 
-All DB operations live here. Route handlers call these functions instead
-of touching SQL directly, keeping the HTTP layer thin.
+All SQL lives here. Route handlers and migration logic call these helpers
+instead of opening connections themselves, keeping the HTTP layer thin and
+the data layer the single source of truth.
 """
 from __future__ import annotations
 
@@ -34,6 +35,10 @@ log = Log.create(service="tool.device.store")
 def storage_key_to_service_id(storage_key: str) -> str:
     """Strip the version suffix: ``sangfor_af_v8_0_106`` → ``sangfor_af``."""
     return re.sub(r"_v[\w.]+$", "", storage_key, flags=re.IGNORECASE)
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +79,7 @@ def row_to_group(row: aiosqlite.Row) -> DeviceGroup:
 
 
 # ---------------------------------------------------------------------------
-# Group queries
+# Group operations
 # ---------------------------------------------------------------------------
 
 async def list_groups() -> List[DeviceGroup]:
@@ -107,8 +112,9 @@ async def group_exists(group_id: str) -> bool:
 
 async def create_group(name: str, description: Optional[str], sort_order: int) -> DeviceGroup:
     group_id = str(uuid.uuid4())
-    now = int(time.time() * 1000)
+    now = _now_ms()
     async with Storage.connect(Storage.get_db_path()) as db:
+        db.row_factory = aiosqlite.Row
         await db.execute(
             """
             INSERT INTO device_groups (id, name, description, sort_order, created_at, updated_at)
@@ -117,7 +123,11 @@ async def create_group(name: str, description: Optional[str], sort_order: int) -
             (group_id, name, description, sort_order, now, now),
         )
         await db.commit()
-    return (await get_group(group_id))  # type: ignore[return-value]
+        async with db.execute(
+            "SELECT * FROM device_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return row_to_group(row)
 
 
 async def update_group(
@@ -129,21 +139,20 @@ async def update_group(
     current = await get_group(group_id)
     if current is None:
         return None
-    new_name = (name.strip() if name else current.name) or current.name
+    new_name = (name.strip() if name else "") or current.name
     new_desc = description if description is not None else current.description
     new_sort = sort_order if sort_order is not None else current.sort_order
-    now = int(time.time() * 1000)
     async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute(
             "UPDATE device_groups SET name=?, description=?, sort_order=?, updated_at=? WHERE id=?",
-            (new_name, new_desc, new_sort, now, group_id),
+            (new_name, new_desc, new_sort, _now_ms(), group_id),
         )
         await db.commit()
     return await get_group(group_id)
 
 
 async def delete_group(group_id: str) -> int:
-    """Delete a group. Returns the number of devices still in it (0 = deleted)."""
+    """Delete a group; return the number of devices that prevented deletion (0 = deleted)."""
     async with Storage.connect(Storage.get_db_path()) as db:
         async with db.execute(
             "SELECT COUNT(*) FROM device_integrations WHERE group_id = ?", (group_id,)
@@ -157,34 +166,115 @@ async def delete_group(group_id: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Device queries
+# Device read operations
 # ---------------------------------------------------------------------------
 
 async def list_devices(group_id: Optional[str] = None) -> List[DeviceIntegration]:
+    sql = "SELECT * FROM device_integrations"
+    params: tuple = ()
+    if group_id:
+        sql += " WHERE group_id = ?"
+        params = (group_id,)
+    sql += " ORDER BY created_at DESC"
+
     async with Storage.connect(Storage.get_db_path()) as db:
         db.row_factory = aiosqlite.Row
-        if group_id:
-            cur = await db.execute(
-                "SELECT * FROM device_integrations WHERE group_id = ? ORDER BY created_at DESC",
-                (group_id,),
-            )
-        else:
-            cur = await db.execute(
-                "SELECT * FROM device_integrations ORDER BY created_at DESC"
-            )
-        rows = await cur.fetchall()
-        await cur.close()
+        async with db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
     return [row_to_device(r) for r in rows]
 
 
 async def fetch_device(device_id: str) -> Optional[aiosqlite.Row]:
-    """Return the raw DB row (for route handlers that need the full record)."""
+    """Return the raw DB row (for callers that need the full record incl. fields blob)."""
     async with Storage.connect(Storage.get_db_path()) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM device_integrations WHERE id = ?", (device_id,)
         ) as cur:
             return await cur.fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Device write operations
+# ---------------------------------------------------------------------------
+
+async def insert_device(
+    *,
+    device_id: str,
+    group_id: str,
+    name: str,
+    storage_key: str,
+    service_id: str,
+    enabled: bool,
+    verify_ssl: bool,
+    db_fields: Dict[str, str],
+    status: str = "unknown",
+    message: Optional[str] = None,
+) -> None:
+    """Insert a new device row. ``device_id`` and ``db_fields`` must already be
+    derived by the caller (so secrets can be persisted under their final id).
+    """
+    now = _now_ms()
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO device_integrations
+                (id, group_id, name, storage_key, service_id, enabled, verify_ssl,
+                 fields, status, message, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                device_id, group_id, name, storage_key, service_id,
+                int(enabled), int(verify_ssl), json.dumps(db_fields),
+                status, message, now, now,
+            ),
+        )
+        await db.commit()
+
+
+async def update_device_row(
+    device_id: str,
+    *,
+    name: str,
+    group_id: str,
+    enabled: bool,
+    verify_ssl: bool,
+    db_fields: Dict[str, str],
+) -> None:
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute(
+            """
+            UPDATE device_integrations
+            SET name=?, group_id=?, enabled=?, verify_ssl=?, fields=?, updated_at=?
+            WHERE id=?
+            """,
+            (name, group_id, int(enabled), int(verify_ssl),
+             json.dumps(db_fields), _now_ms(), device_id),
+        )
+        await db.commit()
+
+
+async def delete_device_row(device_id: str) -> None:
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute("DELETE FROM device_integrations WHERE id = ?", (device_id,))
+        await db.commit()
+
+
+async def record_test_result(
+    device_id: str,
+    *,
+    success: bool,
+    message: str,
+    latency_ms: Optional[int],
+) -> None:
+    """Persist the outcome of a connectivity test."""
+    now = _now_ms()
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute(
+            "UPDATE device_integrations SET status=?, message=?, latency_ms=?, checked_at=?, updated_at=? WHERE id=?",
+            ("ok" if success else "error", message, latency_ms, now, now, device_id),
+        )
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -202,7 +292,7 @@ async def ensure_default_group() -> None:
         ) as cur:
             if await cur.fetchone():
                 return
-        now = int(time.time() * 1000)
+        now = _now_ms()
         await db.execute(
             """
             INSERT INTO device_groups (id, name, description, sort_order, created_at, updated_at)
@@ -211,7 +301,7 @@ async def ensure_default_group() -> None:
             (DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, "默认机房，可重命名", now, now),
         )
         await db.commit()
-    log.info("device.default_group.created", {"id": DEFAULT_GROUP_ID})
+    log.info("tool.device.default_group.created", {"id": DEFAULT_GROUP_ID})
 
 
 # ---------------------------------------------------------------------------

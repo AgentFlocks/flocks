@@ -13,7 +13,10 @@ from flocks.utils.log import Log
 
 log = Log.create(service="tool.device.secrets")
 
-#: Fallback when a plugin's ``_provider.yaml`` has no credential schema.
+_PLACEHOLDER_PREFIX = "{secret:"
+_PLACEHOLDER_SUFFIX = "}"
+
+#: Fallback when a plugin's ``_provider.yaml`` exposes no credential schema.
 _FALLBACK_SECRET_KEYS: FrozenSet[str] = frozenset(
     {"api_key", "secret", "password", "token", "client_secret", "access_token"}
 )
@@ -28,10 +31,21 @@ def _secret_id(device_id: str, field_key: str) -> str:
     return f"device_{device_id}_{field_key}"
 
 
-def _secret_keys_for(storage_key: str) -> FrozenSet[str]:
-    """Return the field keys that must go to ``.secret.json``.
+def _parse_placeholder(value: object) -> Optional[str]:
+    """Return the secret-id inside ``{secret:…}`` or None if *value* is not a placeholder."""
+    if (
+        isinstance(value, str)
+        and value.startswith(_PLACEHOLDER_PREFIX)
+        and value.endswith(_PLACEHOLDER_SUFFIX)
+    ):
+        return value[len(_PLACEHOLDER_PREFIX):-len(_PLACEHOLDER_SUFFIX)]
+    return None
 
-    Reads the plugin's ``_provider.yaml`` credential schema; falls back to the
+
+def _secret_keys_for(storage_key: str) -> FrozenSet[str]:
+    """Field keys that must go to ``.secret.json`` rather than SQL.
+
+    Reads the plugin's ``_provider.yaml`` credential schema; falls back to a
     hard-coded sensitive-name list for legacy or missing schemas.
     """
     try:
@@ -78,9 +92,9 @@ def persist_fields(
             try:
                 secrets.set(sid, value)
             except Exception as exc:
-                log.warn("device.secret.set_error", {"id": sid, "error": str(exc)})
+                log.warn("tool.device.secret.set_error", {"id": sid, "error": str(exc)})
                 continue
-            result[key] = f"{{secret:{sid}}}"
+            result[key] = f"{_PLACEHOLDER_PREFIX}{sid}{_PLACEHOLDER_SUFFIX}"
         else:
             result[key] = value
 
@@ -94,13 +108,12 @@ def delete_secrets(device_id: str, db_fields: Dict[str, str]) -> None:
     secrets = get_secret_manager()
     prefix = f"device_{device_id}_"
     for raw in db_fields.values():
-        if isinstance(raw, str) and raw.startswith("{secret:") and raw.endswith("}"):
-            sid = raw[len("{secret:"):-1]
-            if sid.startswith(prefix):
-                try:
-                    secrets.delete(sid)
-                except Exception as exc:
-                    log.warn("device.secret.delete_error", {"id": sid, "error": str(exc)})
+        sid = _parse_placeholder(raw)
+        if sid and sid.startswith(prefix):
+            try:
+                secrets.delete(sid)
+            except Exception as exc:
+                log.warn("tool.device.secret.delete_error", {"id": sid, "error": str(exc)})
 
 
 def mask_for_display(db_fields: Dict[str, str]) -> Tuple[Dict[str, str], Dict[str, bool]]:
@@ -117,8 +130,8 @@ def mask_for_display(db_fields: Dict[str, str]) -> Tuple[Dict[str, str], Dict[st
     has_value: Dict[str, bool] = {}
 
     for key, raw in db_fields.items():
-        if isinstance(raw, str) and raw.startswith("{secret:") and raw.endswith("}"):
-            sid = raw[len("{secret:"):-1]
+        sid = _parse_placeholder(raw)
+        if sid is not None:
             real = secrets.get(sid) or ""
             display[key] = SecretManager.mask(real) if real else ""
             has_value[key] = bool(real)
@@ -138,9 +151,11 @@ def resolve_for_runtime(db_fields: Dict[str, str]) -> Dict[str, str]:
     from flocks.security import get_secret_manager
 
     secrets = get_secret_manager()
-    return {
-        key: (secrets.get(raw[len("{secret:"):-1]) or "")
-             if isinstance(raw, str) and raw.startswith("{secret:") and raw.endswith("}")
-             else (raw if isinstance(raw, str) else "")
-        for key, raw in db_fields.items()
-    }
+    out: Dict[str, str] = {}
+    for key, raw in db_fields.items():
+        sid = _parse_placeholder(raw)
+        if sid is not None:
+            out[key] = secrets.get(sid) or ""
+        else:
+            out[key] = raw if isinstance(raw, str) else ""
+    return out
