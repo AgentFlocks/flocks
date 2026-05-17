@@ -1,4 +1,9 @@
-"""Device integration domain — public API."""
+"""Device integration domain — public API.
+
+Place in the tool hierarchy because device integrations are fundamentally
+tool-enablement infrastructure: they configure which external security
+devices the agent can call.
+"""
 from .models import (
     DEFAULT_GROUP_ID,
     DEFAULT_GROUP_NAME,
@@ -15,7 +20,7 @@ from .startup import device_startup
 from .store import get_device_credentials
 
 __all__ = [
-    # Feature flags / constants
+    # Constants / feature flags
     "MULTI_GROUP_ENABLED",
     "DEFAULT_GROUP_ID",
     "DEFAULT_GROUP_NAME",

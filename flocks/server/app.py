@@ -183,7 +183,7 @@ async def lifespan(app: FastAPI):
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
     try:
-        from flocks.device import device_startup
+        from flocks.tool.device import device_startup
         await _run_startup_phase(log, "device.startup", device_startup)
         log.info("device.startup.done")
     except Exception as e:

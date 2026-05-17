@@ -1,18 +1,18 @@
 """Synchronise LLM tool visibility with device enabled/disabled state.
 
 Rule:
-  ≥1 enabled device instance for a service_id  →  api_services[storage_key].enabled = True
-  0  enabled device instances                   →  api_services[storage_key].enabled = False
+  ≥1 enabled device instance for service_id  →  api_services[storage_key].enabled = True
+  0  enabled device instances                 →  api_services[storage_key].enabled = False
 
-After updating ``flocks.json``, triggers ``ToolRegistry._sync_api_service_states()``
-so the LLM tool-list refreshes immediately without a server restart.
+After writing ``flocks.json``, triggers ``ToolRegistry._sync_api_service_states()``
+so the change is visible to the LLM immediately, without a server restart.
 """
 from __future__ import annotations
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
-log = Log.create(service="device.sync")
+log = Log.create(service="tool.device.sync")
 
 
 async def sync_service_tool_state(service_id: str) -> None:
@@ -44,11 +44,11 @@ async def sync_service_tool_state(service_id: str) -> None:
 
         ToolRegistry._sync_api_service_states()
 
-        log.info("device.sync_tool_state", {
+        log.info("tool.device.sync", {
             "service_id": service_id,
-            "enabled_count": enabled_count,
+            "enabled_devices": enabled_count,
             "tools_enabled": should_enable,
             "storage_keys": storage_keys,
         })
     except Exception as exc:
-        log.warn("device.sync_tool_state.failed", {"service_id": service_id, "error": str(exc)})
+        log.warn("tool.device.sync.failed", {"service_id": service_id, "error": str(exc)})

@@ -22,7 +22,7 @@ DEFAULT_GROUP_ID = "default-room"
 DEFAULT_GROUP_NAME = "默认机房"
 
 # ---------------------------------------------------------------------------
-# DDL — registered once; Storage.init() picks them up automatically.
+# DDL — registered once; Storage.init() picks them up on startup.
 # ---------------------------------------------------------------------------
 
 Storage.register_ddl("""
@@ -58,6 +58,8 @@ CREATE INDEX IF NOT EXISTS idx_device_group       ON device_integrations(group_i
 """)
 
 # Upgrade hook for installations created before group_id was added.
+# Storage wraps each DDL in try/except so the duplicate-column error on fresh
+# installs is silently ignored.
 Storage.register_ddl(
     "ALTER TABLE device_integrations ADD COLUMN group_id TEXT NOT NULL DEFAULT '';"
 )
@@ -96,8 +98,8 @@ class DeviceIntegration(BaseModel):
     service_id: str
     enabled: bool = True
     verify_ssl: bool = False
-    #: Non-sensitive fields returned as-is; sensitive fields returned as
-    #: masked previews (e.g. ``sk-***abc``). Empty string = not set.
+    #: Non-sensitive fields returned as-is; sensitive fields returned as masked
+    #: previews (e.g. ``sk-***abc``). Empty string means "not yet configured".
     fields: Dict[str, str] = Field(default_factory=dict)
     #: True for each key where a value is currently stored.
     fields_set: Dict[str, bool] = Field(default_factory=dict)
@@ -112,8 +114,8 @@ class DeviceIntegration(BaseModel):
 class DeviceIntegrationCreate(BaseModel):
     name: str
     storage_key: str
-    group_id: Optional[str] = None       # defaults to single default group
-    service_id: Optional[str] = None     # derived from storage_key if omitted
+    group_id: Optional[str] = None    # defaults to the single default group
+    service_id: Optional[str] = None  # derived from storage_key if omitted
     enabled: bool = True
     verify_ssl: bool = False
     fields: Dict[str, str] = Field(default_factory=dict)
@@ -124,8 +126,8 @@ class DeviceIntegrationUpdate(BaseModel):
     group_id: Optional[str] = None
     enabled: Optional[bool] = None
     verify_ssl: Optional[bool] = None
-    #: Partial update. Absent keys keep existing value; empty-string secret
-    #: fields keep existing secret ("leave blank = keep current" UX).
+    #: Partial update: absent keys keep existing value; empty-string secret
+    #: fields keep the existing secret ("leave blank = keep current" UX).
     fields: Optional[Dict[str, str]] = None
 
 

@@ -1,20 +1,20 @@
 """Device Integration HTTP routes.
 
-This module is a thin HTTP layer only: parse requests, delegate to the
-``flocks.device`` domain package, return responses. Business logic,
-secret management, and DB access live in that package.
+Thin HTTP layer only: parse requests, delegate to ``flocks.tool.device``,
+return responses. No business logic or SQL here.
 """
 from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import List, Optional
 
 import aiosqlite
 import httpx
 from fastapi import APIRouter, HTTPException, status as http_status
 
-from flocks.device import (
+from flocks.tool.device import (
     DEFAULT_GROUP_ID,
     MULTI_GROUP_ENABLED,
     DeviceGroup,
@@ -25,18 +25,20 @@ from flocks.device import (
     DeviceIntegrationUpdate,
     DeviceTestResult,
 )
-from flocks.device.secrets import resolve_for_runtime
-from flocks.device.store import (
+from flocks.tool.device.secrets import delete_secrets, persist_fields, resolve_for_runtime
+from flocks.tool.device.store import (
+    create_group,
+    delete_group,
     fetch_device,
+    get_group,
     group_exists,
     list_devices,
     list_groups,
     row_to_device,
-    row_to_group,
     storage_key_to_service_id,
+    update_group,
 )
-from flocks.device.secrets import persist_fields, delete_secrets
-from flocks.device.sync import sync_service_tool_state
+from flocks.tool.device.sync import sync_service_tool_state
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -62,63 +64,30 @@ async def route_create_group(body: DeviceGroupCreate):
         )
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="name is required")
-
-    now = int(time.time() * 1000)
-    import uuid
-    group_id = str(uuid.uuid4())
     try:
-        async with Storage.connect(Storage.get_db_path()) as db:
-            await db.execute(
-                """
-                INSERT INTO device_groups (id, name, description, sort_order, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (group_id, body.name.strip(), body.description, body.sort_order, now, now),
-            )
-            await db.commit()
+        return await create_group(body.name.strip(), body.description, body.sort_order)
     except aiosqlite.IntegrityError:
         raise HTTPException(status_code=409, detail=f"机房名称 '{body.name}' 已存在")
-    return await route_get_group(group_id)
 
 
 @router.get("/groups/{group_id}", response_model=DeviceGroup)
 async def route_get_group(group_id: str):
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM device_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-    if row is None:
+    group = await get_group(group_id)
+    if group is None:
         raise HTTPException(status_code=404, detail="Group not found")
-    return row_to_group(row)
+    return group
 
 
 @router.patch("/groups/{group_id}", response_model=DeviceGroup)
 async def route_update_group(group_id: str, body: DeviceGroupUpdate):
     """Rename the default room (or any room when multi-group is enabled)."""
-    async with Storage.connect(Storage.get_db_path()) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM device_groups WHERE id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Group not found")
-        current = row_to_group(row)
-        new_name = (body.name.strip() if body.name else current.name) or current.name
-        new_desc = body.description if body.description is not None else current.description
-        new_sort = body.sort_order if body.sort_order is not None else current.sort_order
-        now = int(time.time() * 1000)
-        try:
-            await db.execute(
-                "UPDATE device_groups SET name=?, description=?, sort_order=?, updated_at=? WHERE id=?",
-                (new_name, new_desc, new_sort, now, group_id),
-            )
-            await db.commit()
-        except aiosqlite.IntegrityError:
-            raise HTTPException(status_code=409, detail=f"机房名称 '{new_name}' 已存在")
-    return await route_get_group(group_id)
+    try:
+        result = await update_group(group_id, body.name, body.description, body.sort_order)
+    except aiosqlite.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"机房名称 '{body.name}' 已存在")
+    if result is None:
+        raise HTTPException(status_code=404, detail="Group not found")
+    return result
 
 
 @router.delete("/groups/{group_id}", status_code=http_status.HTTP_204_NO_CONTENT)
@@ -130,19 +99,12 @@ async def route_delete_group(group_id: str):
         )
     if group_id == DEFAULT_GROUP_ID:
         raise HTTPException(status_code=400, detail="不能删除默认机房")
-    async with Storage.connect(Storage.get_db_path()) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM device_integrations WHERE group_id = ?", (group_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        device_count = row[0] if row else 0
-        if device_count > 0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"机房中还有 {device_count} 台设备，请先转移或删除后再尝试",
-            )
-        await db.execute("DELETE FROM device_groups WHERE id = ?", (group_id,))
-        await db.commit()
+    device_count = await delete_group(group_id)
+    if device_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"机房中还有 {device_count} 台设备，请先转移或删除后再尝试",
+        )
 
 
 # ===========================================================================
@@ -164,8 +126,6 @@ async def route_get_device(device_id: str):
 
 @router.post("", response_model=DeviceIntegration, status_code=http_status.HTTP_201_CREATED)
 async def route_create_device(body: DeviceIntegrationCreate):
-    import uuid
-
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="name is required")
     if not body.storage_key.strip():
@@ -266,9 +226,7 @@ async def route_test_device(device_id: str):
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
 
     db_fields: dict = json.loads(row["fields"] or "{}")
-    runtime = resolve_for_runtime(db_fields)
-    base_url = (runtime.get("base_url") or "").strip()
-
+    base_url = (resolve_for_runtime(db_fields).get("base_url") or "").strip()
     if not base_url:
         return DeviceTestResult(success=False, message="未配置设备地址（base_url），请先填写")
 
@@ -277,9 +235,8 @@ async def route_test_device(device_id: str):
         async with httpx.AsyncClient(verify=bool(row["verify_ssl"]), timeout=10.0) as client:
             resp = await client.get(base_url)
         latency_ms = int((time.monotonic() - start) * 1000)
-        success = resp.status_code < 500
         result = DeviceTestResult(
-            success=success,
+            success=resp.status_code < 500,
             message=f"HTTP {resp.status_code}，延迟 {latency_ms}ms",
             latency_ms=latency_ms,
         )

@@ -3,13 +3,14 @@
 For each ``api_services`` entry that:
   * declares ``integration_type: device`` in its ``_provider.yaml``;
   * has at least one non-empty credential value;
-  * has not been migrated before (per ``device.migration.done`` storage marker);
+  * has NOT been migrated before (tracked per storage_key in the
+    ``device.migration.done`` Storage key);
 
-…create a corresponding row in ``device_integrations``, re-isolating its
-secrets under the new ``device_<uuid>_<field>`` namespace.
+…insert a corresponding row in ``device_integrations``, re-scoping its
+secrets to the new ``device_<uuid>_<field>`` namespace via :func:`persist_fields`.
 
-The per-storage_key marker ensures the migration is skipped on subsequent
-restarts and is unaffected by the user deleting a previously migrated device.
+The per-storage_key marker ensures the migration is a strict no-op on
+subsequent restarts, even if the user later deletes the migrated device.
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ from .models import DEFAULT_GROUP_ID
 from .secrets import persist_fields
 from .store import storage_key_to_service_id
 
-log = Log.create(service="device.migration")
+log = Log.create(service="tool.device.migration")
 
 
 async def migrate_from_config() -> None:
@@ -69,13 +70,12 @@ async def migrate_from_config() -> None:
             log.info("device.migrate.skip", {"storage_key": storage_key, "reason": "already done"})
             continue
 
-        # --- Extract plain-text values from config + secret store ---
+        # --- Reconstruct plaintext values from config + secret store ---
         schema = _build_api_service_credential_schema(storage_key, meta)
         plain_values: Dict[str, str] = {}
 
         for field in schema:
             if field.storage == "config":
-                # Look for the value under the canonical key, the config_key, or camelCase variants
                 for candidate in (field.config_key, field.key, "baseUrl" if field.key == "base_url" else None):
                     if candidate and isinstance(raw_cfg.get(candidate), str) and raw_cfg[candidate]:
                         plain_values[field.key] = raw_cfg[candidate]
@@ -89,8 +89,12 @@ async def migrate_from_config() -> None:
                         plain_values[field.key] = val
                         break
 
-        # Legacy fallbacks for plugins without a formal schema
-        for legacy_key, field_name in [("base_url", "base_url"), ("baseUrl", "base_url"), ("username", "username")]:
+        # Legacy fallbacks for plugins without a formal credential schema
+        for legacy_key, field_name in [
+            ("base_url", "base_url"),
+            ("baseUrl", "base_url"),
+            ("username", "username"),
+        ]:
             if field_name not in plain_values and isinstance(raw_cfg.get(legacy_key), str) and raw_cfg[legacy_key]:
                 plain_values[field_name] = raw_cfg[legacy_key]
 
@@ -99,13 +103,11 @@ async def migrate_from_config() -> None:
             log.info("device.migrate.skip", {"storage_key": storage_key, "reason": "no credentials"})
             continue
 
-        # --- Create device row ---
+        # --- Insert the new device row ---
         service_name = meta.get("name") or storage_key.replace("_", " ").title()
         device_id = str(uuid.uuid4())
         now = int(time.time() * 1000)
-
-        # Re-scope secrets to the new device_<uuid>_<field> namespace
-        db_fields = persist_fields(device_id, storage_key, plain_values, prior_db_fields=None)
+        db_fields = persist_fields(device_id, storage_key, plain_values)
 
         try:
             async with Storage.connect(Storage.get_db_path()) as db:
