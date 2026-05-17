@@ -43,9 +43,7 @@ from flocks.tool.device.store import (
     update_group,
 )
 from flocks.tool.device.sync import sync_service_tool_state
-from flocks.utils.log import Log
 
-log = Log.create(service="tool.device.routes")
 router = APIRouter()
 
 
@@ -237,7 +235,10 @@ async def route_test_device(device_id: str):
 async def _probe(base_url: str, *, verify_ssl: bool) -> DeviceTestResult:
     """Single HTTP GET probe; uniformly returns a DeviceTestResult."""
     start = time.monotonic()
-    elapsed = lambda: int((time.monotonic() - start) * 1000)
+
+    def elapsed() -> int:
+        return int((time.monotonic() - start) * 1000)
+
     try:
         async with httpx.AsyncClient(verify=verify_ssl, timeout=10.0) as client:
             resp = await client.get(base_url)

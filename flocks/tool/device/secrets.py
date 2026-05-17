@@ -48,6 +48,10 @@ def _secret_keys_for(storage_key: str) -> FrozenSet[str]:
     Reads the plugin's ``_provider.yaml`` credential schema; falls back to a
     hard-coded sensitive-name list for legacy or missing schemas.
     """
+    # TODO(arch): Reverse dependency — domain (flocks.tool.device) imports
+    # transport (flocks.server.routes.provider). The schema helpers below are
+    # HTTP-agnostic and should live in flocks.config or flocks.tool, with
+    # provider.py becoming a thin HTTP wrapper. Tracked separately.
     try:
         from flocks.server.routes.provider import (
             _build_api_service_credential_schema,
