@@ -325,7 +325,7 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   );
 }
 
-function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onClose, onTest, onToggleVerifySsl, onBack }: {
+function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onClose, onTest, onToggleVerifySsl, onToggleEnabled, onBack }: {
   device?: DeviceIntegration;
   template?: APIServiceSummary;
   vendorKey?: string;
@@ -339,6 +339,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
    *  meaningful when editing an existing device — for the "Add device"
    *  wizard the value is held in local state until the row is created. */
   onToggleVerifySsl?: (next: boolean) => Promise<void>;
+  onToggleEnabled?: (next: boolean) => Promise<void>;
   onBack?: () => void;
 }) {
   const toast = useToast();
@@ -447,8 +448,6 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
     const next = !verifySsl;
     setVerifySsl(next);
     if (!device || !onToggleVerifySsl) {
-      // Editing a brand-new device that hasn't been persisted yet — just
-      // keep the local state; it will be sent on first 保存.
       return;
     }
     try {
@@ -456,6 +455,22 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       toast.success(next ? '已开启 SSL 验证' : '已关闭 SSL 验证');
     } catch {
       setVerifySsl(!next);
+      toast.error('保存失败，已回滚');
+    }
+  };
+
+  // Same immediate-persist pattern for the "启用设备" toggle.
+  const handleToggleEnabled = async () => {
+    const next = !enabled;
+    setEnabled(next);
+    if (!device || !onToggleEnabled) {
+      return;
+    }
+    try {
+      await onToggleEnabled(next);
+      toast.success(next ? '设备已启用' : '设备已停用');
+    } catch {
+      setEnabled(!next);
       toast.error('保存失败，已回滚');
     }
   };
@@ -610,7 +625,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                       <p className="text-sm font-medium text-zinc-700">启用设备</p>
                       <p className="text-[11px] text-zinc-400 mt-0.5">关闭后 Agent 不会调用此设备的工具</p>
                     </div>
-                    <Toggle on={enabled} onToggle={() => setEnabled((v) => !v)} />
+                    <Toggle on={enabled} onToggle={handleToggleEnabled} />
                   </div>
                 </div>
 
@@ -640,7 +655,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                     >
                       {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                       {device ? '保存配置' : '确认接入'}
@@ -990,6 +1005,15 @@ export default function DeviceIntegrationPage() {
     await fetchData(true);
   };
 
+  // Same pattern for enabled — persists immediately without needing 保存.
+  const handleToggleEnabled = async (next: boolean) => {
+    if (panel?.kind !== 'edit') return;
+    await deviceAPI.update(panel.device.id, { enabled: next });
+    const updated = await deviceAPI.get(panel.device.id);
+    setPanel({ kind: 'edit', device: updated.data });
+    await fetchData(true);
+  };
+
   return (
     <div className="h-full flex flex-col">
       <PageHeader
@@ -1001,14 +1025,14 @@ export default function DeviceIntegrationPage() {
             <button
               onClick={() => void fetchData(true)}
               disabled={refreshing}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 transition-colors"
+              title="刷新"
+              className="p-1.5 rounded-lg border border-zinc-200 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-700 disabled:opacity-50 transition-colors"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-              刷新
             </button>
             <button
               onClick={() => setPanel({ kind: 'wizard' })}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 transition-colors font-medium"
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors font-medium"
             >
               <Plus className="w-3.5 h-3.5" />
               添加设备
@@ -1096,6 +1120,7 @@ export default function DeviceIntegrationPage() {
             onClose={() => setPanel(null)}
             onTest={panel.kind === 'edit' ? handleTest : undefined}
             onToggleVerifySsl={panel.kind === 'edit' ? handleToggleVerifySsl : undefined}
+            onToggleEnabled={panel.kind === 'edit' ? handleToggleEnabled : undefined}
             onBack={panel.kind === 'add'
               ? () => setPanel({
                   kind: 'wizard',
