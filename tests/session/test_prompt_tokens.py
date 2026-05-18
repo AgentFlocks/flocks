@@ -7,6 +7,7 @@ Covers:
 - SessionPrompt.count_message_tokens(): multi-message counting
 - SessionPrompt.load_template() / render_template(): template processing
 - SystemPrompt.environment(): env info injection
+- SystemPrompt.runtime_metadata(): session/model/provider tail block
 - SystemPrompt.provider(): model-to-prompt-file routing
 """
 
@@ -214,6 +215,30 @@ class TestSystemPromptEnvironment:
         result = await SystemPrompt.environment("/tmp")
         assert len(result) > 0
         assert any(len(s) > 0 for s in result)
+
+
+# ---------------------------------------------------------------------------
+# SystemPrompt.runtime_metadata()
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptRuntimeMetadata:
+    def test_includes_session_model_provider_when_set(self) -> None:
+        block = SystemPrompt.runtime_metadata(
+            session_id="ses_test",
+            model_id="claude-sonnet-4-20250514",
+            provider_id="anthropic",
+        )[0]
+        assert "Session ID: ses_test" in block
+        assert "Model: claude-sonnet-4-20250514" in block
+        assert "Provider: anthropic" in block
+
+    def test_omits_optional_lines_when_unset(self) -> None:
+        block = SystemPrompt.runtime_metadata()[0]
+        assert "Session ID:" not in block
+        assert "Model:" not in block
+        assert "Provider:" not in block
+        assert "## Runtime Metadata" in block
 
 
 # ---------------------------------------------------------------------------

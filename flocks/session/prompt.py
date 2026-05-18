@@ -95,6 +95,8 @@ You specialize in cybersecurity operations including:
 - Compliance and hardening (CIS, NIST, PCI-DSS, configuration reviews)
 - Other security operations tasks
 
+IMPORTANT: Precision are core operating principles. All outputs must be grounded in verifiable evidence, explicit context, or validated reasoning. Do not speculate, fabricate facts, or infer beyond the available information. When uncertainty exists, state it clearly and constrain conclusions accordingly.
+
 Best practices for security operations:
 Your work primarily covers threat detection and analysis, incident response, vulnerability assessment, security automation, malware and forensic analysis, and compliance or hardening reviews. 
 Using tools to solve tasks is a core part of your capabilities.
@@ -272,6 +274,8 @@ class SystemPrompt:
         directory: Optional[str] = None,
         vcs: Optional[str] = None,
         session_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
     ) -> List[str]:
         """Build dynamic runtime metadata that should stay near the prompt tail."""
         del directory, vcs  # Reserved for future runtime metadata.
@@ -289,6 +293,10 @@ class SystemPrompt:
         ]
         if session_id:
             lines.append(f"Session ID: {session_id}")
+        if model_id:
+            lines.append(f"Model: {model_id}")
+        if provider_id:
+            lines.append(f"Provider: {provider_id}")
         return ["\n".join(lines)]
 
     @classmethod
@@ -1061,12 +1069,16 @@ class SessionPrompt:
                 "session_id": session_id,
                 "directory": session_directory,
                 "runtime_day": runtime_day,
+                "model_id": model_id,
+                "provider_id": provider_id,
             },
             builder=lambda: cls._join_prompt_parts(
                 SystemPrompt.runtime_metadata(
                     directory=session_directory,
                     vcs=vcs,
                     session_id=session_id,
+                    model_id=model_id,
+                    provider_id=provider_id,
                 ),
             ),
         ))

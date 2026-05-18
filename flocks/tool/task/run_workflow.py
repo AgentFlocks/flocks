@@ -82,7 +82,7 @@ When to use:
 How to use:
 - Provide the workflow definition (dictionary, JSON string, or file path).
 - The workflow file path should be an absolute path. IMPORTANT: In JSON, file paths must be quoted strings (e.g. "workflow": "/path/to/workflow.json"). Unquoted paths will cause parse errors.
-- Optional: Provide input parameters, timeout settings, and whether to use LLM for logic node codegen.
+- Parameters: Provide input parameters, timeout settings. If inputs are not provided, ask user to provide them.
 
 Note:
 - This tool depends on an existing workflow file.
