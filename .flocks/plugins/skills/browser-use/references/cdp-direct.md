@@ -52,6 +52,7 @@ print(page_info())
 
 - `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
 - 多行代码请直接写成真正的多行 shell 字符串或 heredoc；不要把 `\n` 当字面量塞进单引号参数里。
+- 在 `Windows PowerShell` 中，优先把 `flocks browser -c` 写成单行并用分号分隔；多行单引号字符串的换行/转义处理不稳定，容易让代码没有完整传给 Python。
 
 常用 helpers：
 

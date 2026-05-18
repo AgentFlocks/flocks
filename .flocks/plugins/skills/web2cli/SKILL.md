@@ -48,6 +48,7 @@ mkdir -p "$CAPTURE_ROOT/captures"
 
 - `flocks browser -c '...'` 会把代码直接交给 Python `exec()`，表达式不会像 REPL 一样自动回显；需要输出时必须显式 `print(...)`。
 - 多行代码要直接写成真正的多行字符串或 heredoc，不要把 `\n` 当成字面量塞进单引号字符串里。
+- 在 `Windows PowerShell` 中，优先把 `flocks browser -c` 写成单行并用分号分隔；多行单引号字符串的换行/转义处理不稳定，容易让代码没有完整传给 Python。
 
 各类输出位置固定如下：
 
