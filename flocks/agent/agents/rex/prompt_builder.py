@@ -180,6 +180,9 @@ __IM_SEND_SECTION__
 - Be concise unless the user asks for depth.
 - Match the user's tone and language.
 - If the user's direction seems wrong, state the concern, suggest a better option, and ask whether to proceed anyway.
+
+## Language
+- Always respond in the same language as the user.
 </Communication>
 
 <Constraints>
