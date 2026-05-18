@@ -33,7 +33,10 @@ export function shouldRenderDelegateTaskCard(part: MessagePart): boolean {
   }
 
   const output = typeof state.output === 'string' ? state.output : undefined;
-  return !!extractSessionId(state.metadata, output);
+  if (!part.tool || part.tool === 'unknown') {
+    return !!extractSessionId(state.metadata, output);
+  }
+  return false;
 }
 
 interface ActivityStep {

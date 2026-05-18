@@ -83,6 +83,7 @@ def simple_workflow():
     return {
         "id": "test-workflow-001",
         "name": "Test Workflow",
+        "start": "node-1",
         "metadata": {},
         "nodes": [
             {
@@ -101,6 +102,7 @@ def workflow_with_requirements():
     return {
         "id": "test-workflow-002",
         "name": "Test Workflow with Requirements",
+        "start": "node-1",
         "metadata": {
             "requirements": ["requests>=2.31,<3"]
         },
@@ -121,6 +123,7 @@ def workflow_with_inputs():
     return {
         "id": "test-workflow-003",
         "name": "Test Workflow with Inputs",
+        "start": "node-1",
         "metadata": {},
         "nodes": [
             {
@@ -336,6 +339,49 @@ class TestRunWorkflowToolExecution:
         record_result.assert_awaited_once()
         assert storage_write.await_count >= 1
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
+
+    @pytest.mark.anyio
+    async def test_run_workflow_uses_isolated_child_tool_context(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        fake = FakeRunWorkflowResult(
+            status="SUCCEEDED",
+            run_id="run-isolated-ctx",
+            steps=1,
+            last_node_id="node-1",
+            outputs={"ok": True},
+            history=[],
+            error=None,
+        )
+        mock_run = Mock(name="run_workflow", return_value=fake)
+
+        with patch.object(
+            run_workflow_module,
+            "_get_workflow_runtime",
+            return_value=_runtime_tuple(run_fn=mock_run),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={"name": "Flocks"},
+            )
+
+        assert result.success is True
+        call_kwargs = mock_run.call_args.kwargs
+        nested_ctx = call_kwargs["tool_context"]
+        assert nested_ctx is not tool_context_with_permission
+        assert nested_ctx.session_id == tool_context_with_permission.session_id
+        assert nested_ctx.message_id == tool_context_with_permission.message_id
+        assert nested_ctx.agent == tool_context_with_permission.agent
+        assert nested_ctx.call_id == tool_context_with_permission.call_id
+        assert nested_ctx.extra == tool_context_with_permission.extra
+        assert nested_ctx.abort is tool_context_with_permission.abort
+        assert nested_ctx.event_publish_callback == tool_context_with_permission.event_publish_callback
+        assert nested_ctx._permission_callback == tool_context_with_permission._permission_callback
+        assert nested_ctx._metadata_callback is None
     
     @pytest.mark.anyio
     async def test_run_workflow_with_inputs(self, tool_context_with_permission, workflow_with_inputs):

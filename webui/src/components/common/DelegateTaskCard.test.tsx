@@ -62,4 +62,25 @@ describe('shouldRenderDelegateTaskCard', () => {
 
     expect(shouldRenderDelegateTaskCard(part)).toBe(true);
   });
+
+  it('does not treat run_workflow with leaked child session metadata as a delegate task', () => {
+    const part = {
+      id: 'part-run-workflow',
+      type: 'tool',
+      tool: 'run_workflow',
+      state: {
+        status: 'running',
+        input: {
+          workflow: 'loop_host_forensics_fast',
+        },
+        metadata: {
+          workflow_id: 'loop_host_forensics_fast',
+          workflow_execution_id: 'wf_exec_123',
+          sessionId: 'ses_child_leaked',
+        },
+      },
+    } as MessagePart;
+
+    expect(shouldRenderDelegateTaskCard(part)).toBe(false);
+  });
 });
