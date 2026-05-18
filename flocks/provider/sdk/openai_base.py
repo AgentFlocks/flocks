@@ -86,29 +86,85 @@ def _summarise_block(block: Any) -> Dict[str, Any]:
     return {"type": type(block).__name__}
 
 
-def _summarise_messages(openai_messages: List[Any]) -> List[Dict[str, Any]]:
-    """Compute a redacted ``message_shapes`` for diagnostic logging.
+def _summarise_messages(openai_messages: List[Any]) -> Dict[str, Any]:
+    """Compute a compact diagnostic summary for request logging.
 
-    See :func:`_summarise_block`. Used by both streaming and non-streaming
-    request paths so multimodal regressions surface uniformly in the log.
+    The previous ``message_shapes`` payload logged every message in the request,
+    which became very large on long-running sessions because the full history
+    was repeated on every model call. Keep the useful signal, but collapse it
+    into aggregate counters plus a short tail of the most recent messages.
     """
-    out: List[Dict[str, Any]] = []
+    role_counts: Dict[str, int] = {}
+    block_type_counts: Dict[str, int] = {}
+    skipped_types: Dict[str, int] = {}
+    tail: List[Dict[str, Any]] = []
+    total_content_chars = 0
+    max_content_chars = 0
+    multimodal_messages = 0
+
     for m in openai_messages:
         if not isinstance(m, dict):
-            out.append({"type": type(m).__name__, "skipped": True})
+            skipped_type = type(m).__name__
+            skipped_types[skipped_type] = skipped_types.get(skipped_type, 0) + 1
             continue
+
+        role = str(m.get("role") or "unknown")
+        role_counts[role] = role_counts.get(role, 0) + 1
         content = m.get("content")
+        tail_entry: Dict[str, Any] = {"role": role}
+        content_chars: Optional[int] = None
+
         if isinstance(content, list):
-            out.append({
-                "role": m.get("role"),
-                "blocks": [_summarise_block(b) for b in content],
-            })
+            multimodal_messages += 1
+            block_summaries = [_summarise_block(block) for block in content]
+            message_block_types: Dict[str, int] = {}
+            text_chars = 0
+            image_url_chars = 0
+            for summary in block_summaries:
+                block_type = str(summary.get("type") or "unknown")
+                block_type_counts[block_type] = block_type_counts.get(block_type, 0) + 1
+                message_block_types[block_type] = message_block_types.get(block_type, 0) + 1
+                text_chars += int(summary.get("text_chars") or 0)
+                image_url_chars += int(summary.get("url_chars") or 0)
+
+            content_chars = text_chars + image_url_chars
+            tail_entry.update(
+                {
+                    "content_kind": "blocks",
+                    "block_count": len(content),
+                    "block_types": message_block_types,
+                }
+            )
+            if text_chars:
+                tail_entry["text_chars"] = text_chars
+            if image_url_chars:
+                tail_entry["image_url_chars"] = image_url_chars
         else:
-            out.append({
-                "role": m.get("role"),
-                "content_chars": len(content) if isinstance(content, str) else None,
-            })
-    return out
+            content_chars = len(content) if isinstance(content, str) else None
+            tail_entry["content_kind"] = "text"
+
+        if content_chars is not None:
+            tail_entry["content_chars"] = content_chars
+            total_content_chars += content_chars
+            max_content_chars = max(max_content_chars, content_chars)
+
+        tail.append(tail_entry)
+        if len(tail) > 6:
+            tail.pop(0)
+
+    summary: Dict[str, Any] = {
+        "message_count": len(openai_messages),
+        "role_counts": role_counts,
+        "multimodal_messages": multimodal_messages,
+        "total_content_chars": total_content_chars,
+        "max_content_chars": max_content_chars,
+        "tail": tail,
+    }
+    if block_type_counts:
+        summary["block_type_counts"] = block_type_counts
+    if skipped_types:
+        summary["skipped_types"] = skipped_types
+    return summary
 
 
 def format_openai_content(content: Any) -> Any:
@@ -694,8 +750,8 @@ class OpenAIBaseProvider(BaseProvider):
             params["tools"] = kwargs["tools"]
 
         # Mirror ``chat_stream``'s diagnostic log so non-streaming multimodal
-        # regressions are equally visible. Never logs raw base64 — see
-        # ``_summarise_block``.
+        # regressions are equally visible. Keep INFO payloads compact because
+        # these request logs are emitted for every model call in long sessions.
         log.info("openai_base.chat.request", {
             "model": model_id,
             "thinking_enabled": bool(thinking),
@@ -703,7 +759,7 @@ class OpenAIBaseProvider(BaseProvider):
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": kwargs.get("max_tokens"),
             "has_temperature": "temperature" in params,
-            "message_shapes": _summarise_messages(openai_messages),
+            "message_summary": _summarise_messages(openai_messages),
         })
 
         response = await client.chat.completions.create(**params)
@@ -768,8 +824,8 @@ class OpenAIBaseProvider(BaseProvider):
         if kwargs.get("tools"):
             params["tools"] = kwargs["tools"]
 
-        # Inspect content shape so multimodal regressions surface in the log.
-        # We *never* log full base64 payloads — see ``_summarise_block``.
+        # Inspect request shape so multimodal regressions surface in the log
+        # without repeating the full message history on every turn.
         log.info("openai_base.stream.request", {
             "model": model_id,
             "thinking_enabled": bool(thinking),
@@ -778,7 +834,7 @@ class OpenAIBaseProvider(BaseProvider):
             "max_tokens": kwargs.get("max_tokens"),
             "has_temperature": "temperature" in params,
             "include_usage": True,
-            "message_shapes": _summarise_messages(openai_messages),
+            "message_summary": _summarise_messages(openai_messages),
         })
 
         try:

@@ -227,7 +227,7 @@ class CompactionPolicy:
             preserve_last=preserve_last,
         )
 
-        _policy_log.info("compaction_policy.created", {
+        _policy_log.debug("compaction_policy.created", {
             "context_window": context_window,
             "max_output_tokens": max_output_tokens,
             "usable_context": usable,

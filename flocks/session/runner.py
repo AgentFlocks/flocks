@@ -2509,7 +2509,7 @@ class SessionRunner:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
             raise
         
-        log.info("runner.stream.summary", {
+        log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
             "reasoning_chunks": chunk_counts["reasoning"],
             "text_chunks": chunk_counts["text"],
@@ -2559,7 +2559,7 @@ class SessionRunner:
                 log.warn("runner.stream.usage_update_failed", {"error": str(e)})
         
         # Log summary
-        log.info("runner.stream.complete", {
+        log.debug("runner.stream.complete", {
             "text_length": len(content),
             "reasoning_length": len(reasoning),
             "tool_calls": len(processor.tool_calls),

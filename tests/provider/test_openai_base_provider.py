@@ -8,9 +8,12 @@ Tests various scenarios:
 4. Provider with config-based models (defers to config merge)
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
+
+import pytest
+
+import flocks.provider.sdk.openai_base as openai_base_module
 from flocks.provider.sdk.openai_base import OpenAIBaseProvider, extract_reasoning_content
 from flocks.provider.provider import ModelInfo, ModelCapabilities, ProviderConfig
 
@@ -427,6 +430,80 @@ class TestOpenAIBaseProviderTemperature:
 
         kwargs = create.await_args.kwargs
         assert kwargs["temperature"] == 1.0
+
+    def test_summarise_messages_compacts_long_history(self):
+        summary = openai_base_module._summarise_messages(
+            [
+                {"role": "system", "content": "a" * 10},
+                {"role": "user", "content": "b" * 20},
+                {"role": "assistant", "content": "c" * 30},
+                {"role": "tool", "content": "d" * 40},
+                {"role": "assistant", "content": "e" * 50},
+                {"role": "user", "content": "f" * 60},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abcd"},
+                        },
+                    ],
+                },
+                "skipped",
+            ]
+        )
+
+        assert summary["message_count"] == 8
+        assert summary["role_counts"] == {
+            "system": 1,
+            "user": 3,
+            "assistant": 2,
+            "tool": 1,
+        }
+        assert summary["multimodal_messages"] == 1
+        assert summary["block_type_counts"] == {"text": 1, "image_url": 1}
+        assert summary["skipped_types"] == {"str": 1}
+        assert len(summary["tail"]) == 6
+        assert summary["tail"][-1] == {
+            "role": "user",
+            "content_kind": "blocks",
+            "block_count": 2,
+            "block_types": {"text": 1, "image_url": 1},
+            "text_chars": 5,
+            "image_url_chars": 26,
+            "content_chars": 31,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_logs_compact_message_summary(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+        info = Mock()
+
+        from flocks.provider.provider import ChatMessage
+
+        with patch.object(openai_base_module, "log", Mock(info=info)):
+            await provider.chat(
+                "kimi-k2.5",
+                [
+                    ChatMessage(role="system", content="system prompt"),
+                    ChatMessage(role="user", content="hello"),
+                    ChatMessage(role="assistant", content="world"),
+                ],
+                max_tokens=20,
+            )
+
+        event, payload = info.call_args.args
+        assert event == "openai_base.chat.request"
+        assert "message_summary" in payload
+        assert "message_shapes" not in payload
+        assert payload["message_summary"]["message_count"] == 3
+        assert payload["message_summary"]["role_counts"] == {
+            "system": 1,
+            "user": 1,
+            "assistant": 1,
+        }
 
 
 class TestExtractReasoningContent:

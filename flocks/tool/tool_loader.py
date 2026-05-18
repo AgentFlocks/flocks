@@ -615,7 +615,7 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     tool._provider_version = provider_version  # type: ignore[attr-defined]
     tool._source = source or "yaml_plugin"  # type: ignore[attr-defined]
 
-    log.info("tool.yaml.loaded", {
+    log.debug("tool.yaml.loaded", {
         "name": name,
         "service_id": service_id,
         "storage_key": storage_key,
