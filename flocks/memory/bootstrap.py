@@ -3,7 +3,7 @@ Memory Bootstrap - Load memory files at session start
 
 Implements OpenClaw-style memory loading:
 1. MEMORY.md - Main long-term memory (auto-injected)
-2. memory/daily/YYYY-MM-DD.md - Daily notes (agent reads today + yesterday)
+2. memory/daily/YYYY-MM-DD.md - Daily notes for any calendar date
 3. memory_search tool - Search all history
 """
 
@@ -26,12 +26,12 @@ MEMORY_INSTRUCTIONS = """
 ## Memory System Guidance
 
 You have access to a persistent memory system for continuity across sessions.
-Memory is stored in a global location and accessible across all your sessions.
+On-disk memory root (absolute path): `{memory_root}`. The same store is shared across all your sessions.
 
 ### Files Available:
 1. `MEMORY.md` - Your long-term curated memory (already injected above)
-2. `daily/{today}.md` - Today's notes (read using memory tools if needed)
-3. `daily/{yesterday}.md` - Yesterday's notes (read using memory tools if needed)
+2. `daily/YYYY-MM-DD.md` - Daily notes for **any** calendar date; substitute the date you need, then read with `memory_get` (path is relative to the memory root above).
+3. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
 
 ### When to Write Memory:
 - **Daily notes**: Use path `daily/YYYY-MM-DD.md` - Raw logs of what happened today
@@ -57,7 +57,7 @@ class MemoryBootstrap:
     """
     Bootstrap memory files at session start
     
-    Uses Flocks' global memory storage: ~/.flocks/data/memory/
+    Uses Flocks' global memory storage: ``<data_dir>/memory`` (see ``Config.get_data_path()``).
     """
     
     def __init__(self):
@@ -262,10 +262,14 @@ This is your curated long-term memory file. Store important information here:
         today = today_date.strftime("%Y-%m-%d")
         if yesterday is None:
             yesterday = (today_date - timedelta(days=1)).strftime("%Y-%m-%d")
-        
-        instructions = MEMORY_INSTRUCTIONS.replace("{today}", today)
+
+        from flocks.config import Config
+
+        memory_root = (Config.get_data_path() / "memory").resolve()
+        instructions = MEMORY_INSTRUCTIONS.replace("{memory_root}", str(memory_root))
+        instructions = instructions.replace("{today}", today)
         instructions = instructions.replace("{yesterday}", yesterday)
-        
+
         return instructions
     
     async def bootstrap(

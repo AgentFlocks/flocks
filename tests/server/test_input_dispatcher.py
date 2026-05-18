@@ -50,6 +50,28 @@ class TestDispatchUserInput:
         assert not llm
 
     @pytest.mark.asyncio
+    async def test_clear_without_clear_callback_sends_fallback_text(self):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/clear",
+            parts=[{"type": "text", "text": "/clear"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert direct == ["Screen cleared."]
+        assert not llm
+
+    @pytest.mark.asyncio
     async def test_llm_command_routes_raw_slash_text(self):
         direct = []
         llm = []

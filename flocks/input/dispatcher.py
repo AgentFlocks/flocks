@@ -106,11 +106,16 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
         async def _collect_prompt(prompt: str) -> None:
             llm_prompts.append(prompt)
 
+        # Pass only the optional callback, not sink.clear_screen: the latter is
+        # always a bound method (truthy) even when no _clear_screen was
+        # registered, which made /clear skip the "Screen cleared." fallback and
+        # publish an empty assistant message on WebUI.
+        clear_cb = getattr(sink, "_clear_screen", None)
         handled = await handle_slash_command(
             parsed.raw_text,
             send_text=_collect_text,
             send_prompt=_collect_prompt,
-            clear_screen=sink.clear_screen,
+            clear_screen=clear_cb,
             surface=sink.surface,
         )
         if handled:
