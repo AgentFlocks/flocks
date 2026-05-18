@@ -259,3 +259,39 @@ class TestMcpClientCrossLoopSubmission:
         assert owner_task.done() is True
         assert client._owner_loop is None
         assert client._command_queue is None
+
+    @pytest.mark.asyncio
+    async def test_disconnect_while_connecting_cancels_owner_task(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def fake_remote(startup_future):
+            del startup_future
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        monkeypatch.setattr(client, "_connect_remote", fake_remote)
+
+        connect_task = asyncio.create_task(client.connect())
+        await started.wait()
+
+        await client.disconnect()
+
+        with pytest.raises(RuntimeError, match="Connection closed before initialization: demo"):
+            await connect_task
+
+        assert cancelled.is_set() is True
+        assert client._owner_task is None
+        assert client._command_queue is None

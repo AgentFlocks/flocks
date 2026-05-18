@@ -631,7 +631,7 @@ class McpClient:
             return
 
         try:
-            if owner_task is not None and not owner_task.done() and self._command_queue is not None:
+            if owner_task is not None and not owner_task.done() and self._connected and self._command_queue is not None:
                 await self._submit_command("disconnect")
             elif owner_task is not None and not owner_task.done():
                 self._cancel_task_threadsafe(owner_task)
