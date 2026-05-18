@@ -8,7 +8,7 @@ import flocks.tool.task.schedule_task_center  # noqa: F401
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.task.manager import TaskManager
-from flocks.task.models import SchedulerMode, TaskTrigger
+from flocks.task.models import SchedulerMode, TaskPriority, TaskScheduler, TaskTrigger
 from flocks.task.store import TaskStore
 from flocks.tool.registry import ToolContext, ToolRegistry
 
@@ -216,6 +216,80 @@ class TestTaskCenterCompatibility:
         assert scheduler.mode == SchedulerMode.CRON
         assert scheduler.trigger.cron == "*/5 * * * *"
         assert scheduler.trigger.run_immediately is False
+
+    @pytest.mark.asyncio
+    async def test_task_create_rejects_six_field_cron_with_hint(self):
+        result = await ToolRegistry.execute(
+            "task_create",
+            ctx=_make_ctx(),
+            title="每天早上 6 点执行",
+            description="误传了 6 段 Quartz cron",
+            cron="0 0 6 * * *",
+            user_prompt="执行巡检",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "only 5-field cron is supported" in result.error
+        assert "`0 6 * * *`" in result.error
+
+        _, total = await TaskManager.list_schedulers(limit=10)
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_task_update_rejects_six_field_cron_with_hint(self):
+        scheduler = await TaskManager.create_scheduler(
+            title="待更新的定时任务",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="*/5 * * * *",
+                timezone="Asia/Shanghai",
+            ),
+        )
+
+        result = await ToolRegistry.execute(
+            "task_update",
+            ctx=_make_ctx(),
+            task_id=scheduler.id,
+            cron="0 0 6 * * *",
+            run_once=False,
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "only 5-field cron is supported" in result.error
+        assert "`0 6 * * *`" in result.error
+
+        unchanged = await TaskManager.get_scheduler(scheduler.id)
+        assert unchanged is not None
+        assert unchanged.trigger.cron == "*/5 * * * *"
+
+    @pytest.mark.asyncio
+    async def test_task_status_formats_scheduler_times_in_schedule_timezone(self):
+        scheduler = TaskScheduler(
+            title="每日主机安全巡检",
+            mode=SchedulerMode.CRON,
+            priority=TaskPriority.NORMAL,
+            trigger=TaskTrigger(
+                cron="0 6 * * *",
+                timezone="Asia/Shanghai",
+                next_run=datetime(2026, 5, 15, 22, 0, tzinfo=timezone.utc),
+            ),
+            created_at=datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+        )
+        await TaskStore.create_scheduler(scheduler)
+
+        result = await ToolRegistry.execute(
+            "task_status",
+            ctx=_make_ctx(),
+            task_id=scheduler.id,
+        )
+
+        assert result.success is True
+        assert result.output is not None
+        assert "Cron: 0 6 * * * (Asia/Shanghai)" in result.output
+        assert "Next run: 2026-05-16 06:00:00+08:00 (Asia/Shanghai)" in result.output
+        assert "Created: 2026-05-15 09:53:08+08:00 (Asia/Shanghai)" in result.output
 
     @pytest.mark.asyncio
     async def test_task_update_can_disable_and_enable_scheduled_task(self):

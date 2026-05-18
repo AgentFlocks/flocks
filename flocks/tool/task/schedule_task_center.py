@@ -8,6 +8,7 @@ create, list, update, delete, and query delayed tasks via natural language.
 import json
 from typing import Optional
 
+from flocks.task.formatting import format_task_datetime, resolve_task_timezone_name
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -362,6 +363,7 @@ async def schedule_task_create(
     if enabled is False:
         scheduler = await TaskManager.disable_scheduler(scheduler.id) or scheduler
 
+    display_tz = resolve_task_timezone_name(scheduler)
     output_lines = [
         f"ID: {scheduler.id}",
         f"Title: {scheduler.title}",
@@ -379,11 +381,17 @@ async def schedule_task_create(
             output_lines.append(f"Execution ID: {execution.id}")
             output_lines.append(f"Execution Status: {execution.status.value}")
     elif scheduler.trigger.run_at:
-        output_lines.append(f"Run at: {scheduler.trigger.run_at.isoformat()}")
+        output_lines.append(
+            f"Run at: {format_task_datetime(scheduler.trigger.run_at, display_tz)}"
+        )
     elif scheduler.trigger.cron:
-        output_lines.append(f"Cron: {scheduler.trigger.cron}")
+        output_lines.append(
+            f"Cron: {scheduler.trigger.cron} ({scheduler.trigger.timezone})"
+        )
         if scheduler.trigger.next_run:
-            output_lines.append(f"Next run: {scheduler.trigger.next_run.isoformat()}")
+            output_lines.append(
+                f"Next run: {format_task_datetime(scheduler.trigger.next_run, display_tz)}"
+            )
 
     return ToolResult(
         success=True,
@@ -864,6 +872,7 @@ def _format_task_line(t) -> str:
 def _format_task(t) -> str:
     mode_value = getattr(getattr(t, "mode", None), "value", getattr(t, "mode", None))
     trigger = getattr(t, "trigger", None)
+    display_tz = resolve_task_timezone_name(t)
     if mode_value == "cron":
         type_value = "scheduled"
     elif getattr(trigger, "run_immediately", False):
@@ -882,24 +891,26 @@ def _format_task(t) -> str:
     ]
     if trigger is not None:
         if trigger.run_at:
-            lines.append(f"Run at: {trigger.run_at.isoformat()}")
+            lines.append(f"Run at: {format_task_datetime(trigger.run_at, display_tz)}")
         if trigger.cron:
             lines.append(f"Cron: {trigger.cron} ({trigger.timezone})")
         if trigger.next_run:
-            lines.append(f"Next run: {trigger.next_run.isoformat()}")
+            lines.append(
+                f"Next run: {format_task_datetime(trigger.next_run, display_tz)}"
+            )
         if trigger.cron_description:
             lines.append(f"Schedule desc: {trigger.cron_description}")
     if getattr(t, "queued_at", None):
-        lines.append(f"Queued: {t.queued_at.isoformat()}")
+        lines.append(f"Queued: {format_task_datetime(t.queued_at, display_tz)}")
     if getattr(t, "started_at", None):
-        lines.append(f"Started: {t.started_at.isoformat()}")
+        lines.append(f"Started: {format_task_datetime(t.started_at, display_tz)}")
     if getattr(t, "completed_at", None):
-        lines.append(f"Completed: {t.completed_at.isoformat()}")
+        lines.append(f"Completed: {format_task_datetime(t.completed_at, display_tz)}")
     if getattr(t, "duration_ms", None) is not None:
         lines.append(f"Duration: {t.duration_ms}ms")
     if getattr(t, "result_summary", None):
         lines.append(f"Result:\n{t.result_summary}")
     if getattr(t, "error", None):
         lines.append(f"Error: {t.error}")
-    lines.append(f"Created: {t.created_at.isoformat()}")
+    lines.append(f"Created: {format_task_datetime(t.created_at, display_tz)}")
     return "\n".join(lines)

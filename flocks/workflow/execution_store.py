@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from flocks.session.recorder import Recorder
 from flocks.storage.storage import Storage
@@ -13,6 +13,94 @@ from flocks.utils.log import Log
 from flocks.workflow.runner import RunWorkflowResult
 
 log = Log.create(service="workflow.execution_store")
+
+# Keys whose values are expected to be large alert/event lists that have
+# already been persisted elsewhere (typically JSONL on disk).  When writing
+# the execution record to SQLite we replace them with a ``_<key>_count``
+# integer to keep row sizes bounded.  Callers may extend or override this
+# set via the ``keys`` argument of the compact helpers below.
+DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
+    {
+        "enriched_alerts",
+        "unique_alerts",
+        "raw_alerts",
+        "normalized_alerts",
+        "filtered_alerts",
+    }
+)
+
+# Lists smaller than this many items are passed through verbatim.  The cap
+# protects against accidentally stripping small metadata lists that happen
+# to share a name with a known large-list key.
+DEFAULT_COMPACT_SIZE_THRESHOLD: int = 100
+
+
+def compact_outputs_for_storage(
+    outputs: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> Dict[str, Any]:
+    """Return a copy of *outputs* with large alert lists replaced by counts.
+
+    Only **list or tuple** values whose key is in *keys* AND whose length
+    exceeds *size_threshold* are compacted to ``_<key>_count``; everything
+    else is passed through unchanged.  This prevents megabytes of alert data
+    from being serialised into the ``workflow_execution`` SQLite row on every
+    invocation, while still keeping small sequences (e.g. error details, short
+    configuration arrays) fully inspectable in the execution-history UI.
+
+    **Keys that are compacted by default** (see ``DEFAULT_LARGE_LIST_KEYS``):
+    ``enriched_alerts``, ``unique_alerts``, ``raw_alerts``,
+    ``normalized_alerts``, ``filtered_alerts``.  Keys outside this set — such
+    as a generic ``alerts`` parameter — are *not* compacted unless the caller
+    passes a custom *keys* argument.  Callers who depend on inspecting the
+    full list contents of compacted keys must read the data from the JSONL
+    files written by the workflow itself.
+    """
+    if not isinstance(outputs, dict):
+        return {}
+    key_set = frozenset(keys)
+    compacted: Dict[str, Any] = {}
+    for k, v in outputs.items():
+        if (
+            k in key_set
+            and isinstance(v, (list, tuple))
+            and len(v) > size_threshold
+        ):
+            compacted[f"_{k}_count"] = len(v)
+        else:
+            compacted[k] = v
+    return compacted
+
+
+def compact_history_for_storage(
+    history: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> List[Any]:
+    """Strip large alert lists from step outputs in workflow history.
+
+    Returns an empty list when *history* is falsy.  Non-dict step entries
+    (defensive: shouldn't happen with normal ``StepResult`` dumps) are
+    passed through unchanged so the caller sees no surprising drops.
+    """
+    if not history:
+        return []
+    result: List[Any] = []
+    for step in history:
+        if not isinstance(step, dict):
+            result.append(step)
+            continue
+        step_copy = dict(step)
+        raw_outputs = step_copy.get("outputs")
+        if isinstance(raw_outputs, dict):
+            step_copy["outputs"] = compact_outputs_for_storage(
+                raw_outputs, keys=keys, size_threshold=size_threshold
+            )
+        result.append(step_copy)
+    return result
 
 # Maximum number of execution history records retained per workflow.
 # Older records are pruned automatically to prevent a syslog flood from bloating Storage.
@@ -155,10 +243,19 @@ async def create_execution_record(
     input_params: Optional[Dict[str, Any]] = None,
     exec_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create and persist a running workflow execution record."""
+    """Create and persist a running workflow execution record.
+
+    *input_params* is passed through ``compact_outputs_for_storage`` before
+    writing to SQLite so that batch HTTP calls whose inputs contain a key in
+    ``DEFAULT_LARGE_LIST_KEYS`` (e.g. ``{"raw_alerts": [...10k items...]}``
+    ) don't bloat the row.  Keys outside the default set — such as a generic
+    ``alerts`` parameter — are stored verbatim; pass a custom *keys* argument
+    to ``compact_outputs_for_storage`` directly if you need broader coverage.
+    """
+    compacted_params = compact_outputs_for_storage(input_params or {})
     exec_data = build_initial_execution_record(
         workflow_id,
-        input_params=input_params,
+        input_params=compacted_params,
         exec_id=exec_id,
     )
     await Storage.write(workflow_execution_key(exec_data["id"]), exec_data)
