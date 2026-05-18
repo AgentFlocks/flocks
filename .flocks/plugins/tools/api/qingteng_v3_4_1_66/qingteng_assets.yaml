@@ -1,0 +1,260 @@
+name: qingteng_assets
+description: >
+  青藤资产清点分组工具。通过 `action` 参数访问资产查询、资产刷新、刷新状态和资产侧扩展操作。
+  适用于主机、进程、账号、端口、Web 应用、数据库、安装包等资产域接口。
+description_cn: >
+  青藤资产清点分组工具。通过 `action` 参数访问资产查询、刷新和业务组/主机资产相关操作。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: qingteng
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        资产分组动作名，可选值：
+        - list
+          用途: 查询资产结果，覆盖 host/process/account/port/webapp/dbinfo/pkg 等资源
+          必填: `resource`、`os_type`
+          常用: `page`、`size`、`sorts`、`groups`、`keyword`、`hostId`、`hostname`、`ip`
+          资源字段:
+          - `resource=process`: `processName`、`processPath`、`processPid`
+          - `resource=account/accountgroup`: `accountName`、`accountUid`、`accountGroup`
+          - `resource=port`: `portNumber`、`portProtocol`
+          - `resource=service`: `serviceName`、`serviceState`、`serviceStartType`
+          - `resource=dbinfo`: `dbName`、`dbType`
+          - `resource=website/webapp`: `websiteName`、`websiteDomain`
+          - `resource=app/pkg/jar_pkg/webframe`: `packageName`、`packageVersion`
+          风险提示: 建议显式传分页；资源专属字段会按 `resource` 校验，传错资源会被拦截
+          是否任务型: 否
+        - refresh
+          用途: 发起单类资产刷新任务
+          必填: `resource`、`os_type`
+          常用: `hostIds`、`groups`、`force`、`taskName`
+          风险提示: 刷新类接口通常异步执行，后续应配合 `refresh_status`
+          是否任务型: 是
+        - refresh_status
+          用途: 查询资产刷新任务状态
+          必填: `jobId`
+          常用: `status`
+          风险提示: 常用于轮询，注意控制频率
+          是否任务型: 否
+        - host_info_sync
+          用途: 将外部主机信息同步到主机资产表
+          必填: 通常为 `hostInfoList`
+          常用: `hostInfoList`、`source`、`syncMode`
+          风险提示: 写操作，会变更主机资产数据
+          是否任务型: 否
+        - delete_host
+          用途: 批量卸载 Agent
+          必填: `os_type`
+          常用: `hostIds`、`agentIds`、`reason`、`password`（MD5 加密的授权密码）、`allOffline`（true=卸载离线超7天主机）
+          风险提示: 高风险写操作，会影响主机受管状态
+          是否任务型: 是
+        - batch_create_group
+          用途: 批量创建业务组
+          必填: `os_type`
+          常用: `groupNames`、`parentGroupId`
+          风险提示: 写操作，会变更资产分组结构
+          是否任务型: 否
+        - refresh_all
+          用途: 按系统批量刷新全部资产
+          必填: `os_type`
+          常用: `groups`、`force`、`taskName`
+          风险提示: 任务范围可能较大，谨慎用于生产环境
+          是否任务型: 是
+        - batch_move_host
+          用途: 批量调整主机业务组归属
+          必填: 通常为 `hostIds`、`targetGroupId`
+          常用: `hostIds`、`targetGroupId`、`sourceGroupId`
+          风险提示: 写操作，会影响资产归属和后续策略范围
+          是否任务型: 否
+      enum:
+        - list
+        - refresh
+        - refresh_status
+        - host_info_sync
+        - delete_host
+        - batch_create_group
+        - refresh_all
+        - batch_move_host
+    resource:
+      type: string
+      description: 资产资源类型，适用于 `list` 和 `refresh`
+      enum:
+        - host
+        - process
+        - account
+        - accountgroup
+        - port
+        - webapp
+        - website
+        - app
+        - webframe
+        - dbinfo
+        - service
+        - task
+        - env
+        - kernelmodule
+        - pkg
+        - jar_pkg
+    os_type:
+      type: string
+      description: 操作系统类型，按接口不同支持 `linux`、`win`、`unix`
+      enum:
+        - linux
+        - win
+        - unix
+    page:
+      type: integer
+      description: GET 分页页码，从 0 开始
+      default: 0
+    size:
+      type: integer
+      description: GET 每页数量
+      default: 20
+    sorts:
+      type: string
+      description: GET 排序字段，如 `-eventTime`
+    groups:
+      type: string
+      description: 多值分组条件，逗号分隔，如 `1,2,3`
+    time_range:
+      type: string
+      description: 时间范围，格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    keyword:
+      type: string
+      description: 通用关键词筛选
+    hostId:
+      type: string
+      description: 单个主机 ID，用于精确筛选查询结果
+    hostname:
+      type: string
+      description: 主机名筛选
+    ip:
+      type: string
+      description: IP 筛选
+    agentId:
+      type: string
+      description: Agent ID 筛选
+    businessGroupId:
+      type: string
+      description: 业务组 ID 筛选
+    status:
+      type: string
+      description: 任务或资产状态筛选
+    processName:
+      type: string
+      description: 进程名筛选，适合 `resource=process`
+    processPath:
+      type: string
+      description: 进程路径筛选，适合 `resource=process`
+    processPid:
+      type: integer
+      description: 进程 PID 筛选，适合 `resource=process`
+    accountName:
+      type: string
+      description: 账号名筛选，适合 `resource=account`
+    accountUid:
+      type: string
+      description: 账号 UID 筛选，适合 `resource=account`
+    accountGroup:
+      type: string
+      description: 账号组筛选，适合 `resource=account` 或 `resource=accountgroup`
+    portNumber:
+      type: integer
+      description: 端口号筛选，适合 `resource=port`
+    portProtocol:
+      type: string
+      description: 端口协议筛选，适合 `resource=port`
+    serviceName:
+      type: string
+      description: 服务名筛选，适合 `resource=service`
+    serviceState:
+      type: string
+      description: 服务状态筛选，适合 `resource=service`
+    serviceStartType:
+      type: string
+      description: 服务启动类型筛选，适合 `resource=service`
+    dbName:
+      type: string
+      description: 数据库名筛选，适合 `resource=dbinfo`
+    dbType:
+      type: string
+      description: 数据库类型筛选，适合 `resource=dbinfo`
+    websiteName:
+      type: string
+      description: Web 站点名筛选，适合 `resource=website`
+    websiteDomain:
+      type: string
+      description: 站点域名筛选，适合 `resource=website` 或 `resource=webapp`
+    packageName:
+      type: string
+      description: 安装包名筛选，适合 `resource=pkg` 或 `resource=jar_pkg`
+    packageVersion:
+      type: string
+      description: 安装包版本筛选，适合 `resource=app/pkg/jar_pkg/webframe`
+    jobId:
+      type: string
+      description: 资产刷新任务 ID，适用于 `refresh_status`
+    hostIds:
+      type: array
+      items:
+        type: string
+      description: 主机 ID 列表，常用于刷新、卸载、移动主机
+    agentIds:
+      type: array
+      items:
+        type: string
+      description: Agent ID 列表，常用于卸载 Agent
+    force:
+      type: boolean
+      description: 是否强制执行刷新
+    taskName:
+      type: string
+      description: 任务名称
+    password:
+      type: string
+      description: MD5 加密的授权密码，用于 `delete_host` 时的身份验证
+    allOffline:
+      type: boolean
+      description: 设为 true 时批量卸载离线超过 7 天的主机（`delete_host` 专用）
+    hostInfoList:
+      type: array
+      items:
+        type: object
+      description: 主机同步信息列表
+    source:
+      type: string
+      description: 外部同步来源标识
+    syncMode:
+      type: string
+      description: 同步模式
+    groupNames:
+      type: array
+      items:
+        type: string
+      description: 待创建业务组名称列表
+    parentGroupId:
+      type: string
+      description: 父业务组 ID
+    targetGroupId:
+      type: string
+      description: 目标业务组 ID
+    sourceGroupId:
+      type: string
+      description: 原业务组 ID
+    query:
+      type: object
+      description: 额外 GET 查询参数对象，会与 `page/size/sorts` 合并
+    body:
+      type: object
+      description: POST 请求体对象，适用于刷新和资产扩展操作
+  required:
+    - action
+handler:
+  type: script
+  script_file: qingteng.handler.py
+  function: assets

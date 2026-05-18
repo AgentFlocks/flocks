@@ -1,0 +1,60 @@
+name: tdp_platform_config
+description: >
+  管理 TDP 平台配置相关接口，覆盖资产配置、白名单过滤和级联平台管理。
+  通过 action 可切换到资产列表、资产增删改、白名单搜索与维护、子节点列表和处置日志等子接口；
+  其中 `asset_add`、`asset_update`、`asset_delete`、`white_rule_add`、
+  `white_rule_update`、`white_rule_delete` 属于写操作，调用前应确认影响范围。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        平台配置子接口动作。`asset_list` / `white_rule_search` 会补默认分页；
+        `asset_delete` 需要非空资产 IP 列表；`cascade_children`
+        使用根级 `keyword` 做子节点模糊查询；其余动作使用对应的显式对象参数。
+      enum:
+        - asset_list
+        - asset_add
+        - asset_update
+        - asset_delete
+        - white_rule_search
+        - white_rule_add
+        - white_rule_update
+        - white_rule_delete
+        - cascade_children
+        - disposal_log_list
+      default: asset_list
+    condition:
+      type: object
+      description: 条件对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
+    page:
+      type: object
+      description: 分页对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
+    asset:
+      type: object
+      description: 资产对象。`asset_add` 直接作为请求体；`asset_update` 会写入 `asset` 字段。
+    lock:
+      type: object
+      description: 锁定配置对象，适用于 `asset_update`。
+    rule:
+      type: object
+      description: 白名单规则对象，适用于 `white_rule_add`、`white_rule_update`；`white_rule_delete` 需要在对象中提供 `id`，可按接口文档传单值或数组。
+    ips:
+      type: array
+      items:
+        type: string
+      description: 资产 IP 列表，适用于 `asset_delete`。
+    keyword:
+      type: string
+      description: 级联平台子节点搜索关键词，适用于 `cascade_children`。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: platform_config

@@ -1,0 +1,144 @@
+name: qingteng_baseline
+description: >
+  青藤合规基线分组工具。通过 `action` 参数访问基线任务、执行状态、规则结果和授权相关接口。
+description_cn: >
+  青藤合规基线分组工具。覆盖任务管理、执行状态、规则结果和授权请求。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: qingteng
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        基线分组动作名，可选值：
+        - job_create / job_update / job_delete / job_list / job_execute / job_status
+          用途: 基线任务增删改查、执行与状态查询
+          必填: `os_type`；`job_delete`、`job_status` 还需要 `specId`
+          常用: `name`、`group_ids`、`host_ids`、`rule_ids`、`cron`、`auth_id`、`specIds`
+          风险提示: 写操作会直接影响基线任务和执行计划
+          是否任务型: `job_create`、`job_update`、`job_execute` 为是
+        - spec_rule_list / spec_check_result / spec_failed_host
+          用途: 查询基线规则、检查结果和失败主机
+          必填: `os_type`
+          常用: `specId`、`status`、`hostId`、`page`、`size`、`sorts`
+          风险提示: 结果类接口建议带分页；列表类专属字段误传会被拦截
+          是否任务型: 否
+        - auth_login / auth_create / auth_update / auth_delete / auth_list
+          用途: 基线授权测试、授权创建、更新、删除和查询
+          必填: `os_type`
+          常用: `page`、`size`、`auth_id`、`name`、`username`、`password`、`port`、`hosts`
+          风险提示: 涉及凭据管理，注意敏感信息保护
+          是否任务型: 否
+        - job_batch_create
+          用途: 批量创建基线任务
+          必填: `os_type`
+          常用: `jobs`
+          风险提示: 仅适用于 `multilinux` 或 `multiwin`
+          是否任务型: 是
+      enum:
+        - job_create
+        - job_delete
+        - job_update
+        - job_list
+        - job_execute
+        - job_status
+        - spec_rule_list
+        - spec_check_result
+        - spec_failed_host
+        - auth_login
+        - auth_create
+        - auth_update
+        - auth_delete
+        - auth_list
+        - job_batch_create
+    os_type:
+      type: string
+      description: 操作系统类型，任务批量创建时可用 `multilinux` 或 `multiwin`
+      enum:
+        - linux
+        - win
+        - multilinux
+        - multiwin
+    specId:
+      type: string
+      description: 基线任务 ID，适用于删除和状态查询
+    name:
+      type: string
+      description: 任务或授权名称
+    page:
+      type: integer
+      description: GET 分页页码，从 0 开始
+      default: 0
+    size:
+      type: integer
+      description: GET 每页数量
+      default: 20
+    sorts:
+      type: string
+      description: GET 排序字段
+    status:
+      type: string
+      description: 任务或检查状态筛选
+    hostId:
+      type: string
+      description: 主机 ID 筛选
+    group_ids:
+      type: array
+      items:
+        type: string
+      description: 业务组 ID 列表
+    host_ids:
+      type: array
+      items:
+        type: string
+      description: 主机 ID 列表
+    rule_ids:
+      type: array
+      items:
+        type: string
+      description: 基线规则 ID 列表
+    cron:
+      type: string
+      description: 调度表达式
+    auth_id:
+      type: string
+      description: 授权 ID
+    specIds:
+      type: array
+      items:
+        type: string
+      description: 基线任务 ID 列表
+    username:
+      type: string
+      description: 授权用户名
+    password:
+      type: string
+      description: 授权密码
+    port:
+      type: integer
+      description: 登录端口
+    hosts:
+      type: array
+      items:
+        type: string
+      description: 授权主机列表
+    jobs:
+      type: array
+      items:
+        type: object
+      description: 批量创建任务对象列表
+    query:
+      type: object
+      description: 额外 GET 查询参数对象
+    body:
+      type: object
+      description: POST/PUT/DELETE 请求体对象
+  required:
+    - action
+handler:
+  type: script
+  script_file: qingteng.handler.py
+  function: baseline

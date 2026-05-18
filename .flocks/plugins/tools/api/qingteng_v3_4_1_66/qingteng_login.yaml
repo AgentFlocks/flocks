@@ -1,0 +1,27 @@
+name: qingteng_login
+description: >
+  青藤云安全平台登录认证。首次使用需调用此接口获取认证凭证，
+  返回的 jwt、signKey、comId 用于后续 API 请求的签名验证。
+  当用户提到青藤云主机安全、漏洞检测、基线检查时需要先调用此工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: qingteng
+
+inputSchema:
+  type: object
+  properties: {}
+  required: []
+
+handler:
+  type: script
+  script_file: qingteng_login.handler.py
+  function: login
+
+notes: |
+  返回数据包含:
+  - signKey: 签名密钥，用于后续请求签名
+  - jwt: JWT token  
+  - comId: 公司ID
+
+  提示：用户名密码应配置在 SecretManager 中

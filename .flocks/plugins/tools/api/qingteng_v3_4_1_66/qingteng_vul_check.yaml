@@ -1,0 +1,33 @@
+name: qingteng_vul_check
+description: >
+  青藤云漏洞/风险检测。支持多种风险类型检测：
+  - app: 应用风险
+  - system: 系统风险  
+  - access: 访问控制风险
+  - account: 账户风险
+  
+  用于安全评估、漏洞检测、合规检查等场景。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: qingteng
+
+inputSchema:
+  type: object
+  properties:
+    risk_type:
+      type: string
+      description: 风险类型 (app/system/access/account)
+      enum: [app, system, access, account]
+      default: system
+    os_type:
+      type: string
+      description: 操作系统类型 (linux 或 win)
+      enum: [linux, win]
+      default: linux
+  required: []
+
+handler:
+  type: script
+  script_file: qingteng_vul_check.handler.py
+  function: vul_check

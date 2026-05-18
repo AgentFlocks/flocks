@@ -1,0 +1,49 @@
+name: skyeye_dashboard_view
+description: >
+  查询 SkyEye 仪表板视图数据。默认返回整体视图，可通过 `name` 切换到告警统计、
+  资产态势、攻击源排行和系统维护等不同看板；部分视图还支持关键字、分页和排序参数。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: skyeye_api
+
+inputSchema:
+  type: object
+  properties:
+    name:
+      type: string
+      description: >
+        视图 name 标识。常用值包括 `overall_view`、`alarm_level_trend`、
+        `alarm_type_trend`、`alarm_level_pie`、`alarm_type_pie`、
+        `apt_hit_rank`、`alarm_attack_stage`、`asset_situation_overview`、
+        `victim_asset_trend`、`top_attacksrc`、`system_status`、
+        `cluster_state`、`device_info`、`log_count`、`server_info`。
+      default: overall_view
+    interval_time:
+      type: integer
+      description: 时间范围，0=今天，7=最近7天，14=最近14天，30=最近30天。
+      default: 7
+    start_time:
+      type: integer
+      description: 开始时间，13位毫秒级Unix时间戳；不传时自动按 interval_time 计算。可以使用python datetime动态计算。
+    end_time:
+      type: integer
+      description: 结束时间，13位毫秒级Unix时间戳；不传时自动取当前时间。可以使用python datetime动态计算。
+    keyword:
+      type: string
+      description: 搜索关键字，仅部分支持检索或列表展示的视图会使用该参数。
+    page:
+      type: integer
+      description: 页数，从 1 开始；仅部分分页视图生效。
+    limit:
+      type: integer
+      description: 每页数量；仅部分分页视图生效。
+    order:
+      type: string
+      description: 排序字段，仅部分列表视图生效，具体值取决于对应视图返回的数据字段。
+  required: []
+
+handler:
+  type: script
+  script_file: skyeye.handler.py
+  function: dashboard_view

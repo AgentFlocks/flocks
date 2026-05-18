@@ -1,0 +1,20 @@
+name: tdp_file_download
+description: >
+  按样本哈希下载 TDP 告警关联的恶意文件。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+
+inputSchema:
+  type: object
+  properties:
+    hash:
+      type: string
+      description: 恶意文件样本 hash 值。
+  required: [hash]
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: download_malware_file

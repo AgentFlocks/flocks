@@ -1,0 +1,73 @@
+name: tdp_dashboard_status
+description: >
+  查询 TDP Dashboard 相关数据。默认返回概览状态，也可通过 action 切换到阻断、
+  安全统计、攻击资产、文件检测、阶段统计等子接口。优先使用顶层时间、业务组和分页参数；
+  `alert_sum` / `unhandled_host_list` 需要的 `machine_type`、`severity` 等也已提升到顶层。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        Dashboard 子接口动作。`status` 无需额外参数；`block`、`security`、
+        `threat_event`、`threat_topic`、`file_check`、`phase_sum`、
+        `login_api`、`vulnerability`、`track`、`privacy_info`、
+        `alert_level_trend` 通常使用根级 `time_from`、`time_to` 和可选
+        `assets_group`；`attack_assets_all`、`attack_assets_public`、
+        `attack_assets_new`、`app_frame`、`service_class` 通常只需要
+        `assets_group` 或少量附加筛选；`alert_sum` 和
+        `unhandled_host_list` 需要传 `condition` / `page` 结构。
+      enum: [status, block, security, threat_event, threat_topic, attack_assets_all, attack_assets_public, attack_assets_new, file_check, phase_sum, login_api, vulnerability, alert_sum, track, app_frame, unhandled_host_list, service_class, privacy_info, alert_level_trend]
+      default: status
+    time_from:
+      type: integer
+      description: 开始时间戳，Unix 秒级时间戳，常用于根级时间统计动作。可以使用python datetime动态计算。
+    time_to:
+      type: integer
+      description: 结束时间戳，Unix 秒级时间戳，常用于根级时间统计动作。可以使用python datetime动态计算。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表；时间统计类动作通常直接使用根级 `assets_group`，`alert_sum` / `unhandled_host_list` 会自动写入 `condition.assets_group`。
+    is_new:
+      type: boolean
+      description: 是否查询新上线视角，常用于 `service_class`；`true` 表示仅看新上线资产视角。
+    machine_type:
+      type: string
+      description: 主机类型，主要适用于 `alert_sum` / `unhandled_host_list`。
+    severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 严重级别列表，主要适用于 `alert_sum` / `unhandled_host_list`。
+    cur_page:
+      type: integer
+      description: 页码，主要适用于 `alert_sum` / `unhandled_host_list`。
+    page_size:
+      type: integer
+      description: 每页条数，主要适用于 `alert_sum` / `unhandled_host_list`。
+    sort_by:
+      type: string
+      description: 排序字段，主要适用于 `alert_sum` / `unhandled_host_list`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，主要适用于 `alert_sum` / `unhandled_host_list`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: dashboard_status

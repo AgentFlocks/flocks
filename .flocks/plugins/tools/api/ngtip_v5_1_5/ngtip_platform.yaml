@@ -1,0 +1,273 @@
+name: ngtip_platform
+description: >
+  NGTIP Platform Function grouped tool. Use the `action` parameter to access
+  intelligence management, asset management, user management, intelligence
+  production, device linkage, vulnerability-asset matching, situational
+  intelligence subscription, and industry attack intelligence APIs.
+description_cn: >
+  NGTIP 平台功能分组工具。通过 `action` 参数调用情报管理、资产管理、用户管理、情报生产、
+  设备联动、漏洞资产匹配、态势情报订阅和行业攻击情报接口。
+  Base URL 为平台功能端点（默认无端口）。请求体为 JSON，apikey 自动注入。
+  【选用原则】
+  - 写入类接口（新增情报/资产/用户）返回值仅含 response_code 和 verbose_msg，无 data；
+  - 导出/查询类接口返回 data 含分页信息（current_page / total_page / total_record / items）；
+  - platform_export_hw_data 使用特殊 sha1 token 认证，不注入 apikey，调用前须自行计算 token；
+  - platform_add_intelligence 调用前需先在平台「情报源管理」中创建手动添加类型情报源；
+  - platform_distribution_rules 频率限制 1 次/秒，请勿并发；
+  - platform_upload_sample 为 multipart/form-data 上传，本工具暂不支持文件上传，仅供元数据确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: ngtip_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        平台功能动作名，可选值：
+        - platform_add_intelligence
+          用途: 新增/删除情报（写入手动添加类型情报源，支持 IP/域名/Hash/漏洞四种类型）
+          必填: `source_name`、`intel_data`
+          常用: `op`（默认 add，可传 delete）
+          风险提示: 写操作；情报源必须在平台中预先创建
+          是否任务型: 否
+        - platform_export_ioc
+          用途: 情报导出（导出手动添加/文件下载类型情报源的情报数据，分页）
+          必填: `source_name`
+          常用: `current_page`、`page_size`、`start_time`、`end_time`
+          是否任务型: 否
+        - platform_intelligence_count
+          用途: 情报数量统计（查询最近 1 年情报总量/命中量，可按情报集/来源/类型筛选）
+          必填: 无
+          常用: `start_time`、`end_time`、`type`、`org`、`source`、`content`
+          是否任务型: 否
+        - platform_export_hw_data
+          用途: 重保情报导出（导出当前 HW 期间攻击 IP 情报）
+          必填: `hw_token`、`start_time`、`end_time`
+          ⚠️ 认证: 使用特殊 sha1 token，不使用 apikey；token = sha1("tip-intelligence-{day}")，day 为日期数字
+          是否任务型: 否
+        - platform_add_asset
+          用途: 新增资产（向 NGTIP 写入资产，一次最多 100 条）
+          必填: `asset_data`（数组，每项含 asset/asset_name/group_name）
+          风险提示: 写操作；group_name 不存在时自动创建（顶级分组上限 1000 个）
+          是否任务型: 否
+        - platform_update_asset
+          用途: 更新/删除资产（一次最多 100 条）
+          必填: `operation`、`asset_data`
+          常用: `operation`（0-追加，1-覆盖，2-删除）
+          风险提示: operation=2 时会删除资产，谨慎操作
+          是否任务型: 否
+        - platform_add_user
+          用途: 新增用户（通过 API 创建系统用户）
+          必填: `username`、`roles`
+          常用: `password`、`describe`
+          风险提示: 写操作；返回 data.salt 供免密登录使用
+          是否任务型: 否
+        - platform_login_with_token
+          用途: 免密登录（通过 sha256 token 实现 NGTIP 平台免密登录）
+          必填: `username`、`timestamp`、`login_token`
+          ⚠️ token 算法: sha256("{username}{salt}{day}")，day 为当日日期数字，salt 从新增用户接口返回
+          是否任务型: 否
+        - platform_query_sample
+          用途: 查询情报生产结果（查询已上传样本的沙箱分析结果）
+          必填: `resource`
+          常用: `format`（默认 tip，可传 stix）
+          是否任务型: 否
+        - platform_distribution_rules
+          用途: 下发设备联动规则（对 IP/域名下发阻断/删除/白名单规则）
+          必填: `operation`、`rule`
+          常用: `block_time`（operation=1 时有效）、`direction`、`device_id`
+          ⚠️ 频率限制: 1 次/秒，严禁并发
+          风险提示: 高风险写操作，会影响生产网络阻断策略
+          是否任务型: 是
+        - platform_vuln_alert
+          用途: 漏洞资产匹配（获取企业已录入资产与漏洞的关联风险告警）
+          必填: `start_time`+`end_time` 或 `threatbook_create_time` 或 `publish_time` 三选一
+          常用: `current_page`、`page_size`、`group_name`
+          特性: 优先排查 external_asset=true 的互联网暴露资产
+          是否任务型: 否
+        - platform_subscription
+          用途: 态势情报订阅查询（获取订阅标签关联的安全事件/漏洞/恶意软件分析报告）
+          必填: 无
+          常用: `current_page`、`page_size`、`report_time`
+          是否任务型: 否
+        - platform_industry_attack
+          用途: 行业攻击情报（获取活跃攻击 IP 情报，可按行业/可信度/威胁级别筛选）
+          必填: `update_time`
+          常用: `confidence_level`、`severity`、`industry`、`current_page`、`page_size`
+          是否任务型: 否
+      enum:
+        - platform_add_intelligence
+        - platform_export_ioc
+        - platform_intelligence_count
+        - platform_export_hw_data
+        - platform_add_asset
+        - platform_update_asset
+        - platform_add_user
+        - platform_login_with_token
+        - platform_query_sample
+        - platform_distribution_rules
+        - platform_vuln_alert
+        - platform_subscription
+        - platform_industry_attack
+
+    # ── 情报管理 ──────────────────────────────────────────────────────────────
+    source_name:
+      type: string
+      description: >
+        情报源名称（platform_add_intelligence / platform_export_ioc 必填）。
+        必须与平台「情报源管理」中的名称完全一致（非微步官方情报源）。
+    op:
+      type: string
+      description: "platform_add_intelligence 操作类型：`add`（默认）-新增；`delete`-删除"
+    intel_data:
+      type: array
+      items:
+        type: object
+      description: >
+        platform_add_intelligence 的情报数据数组（对应文档中的 data 字段）。
+        每个元素因情报类型不同而异：
+        ① IP 信誉：ioc(必填)、judgments(必填)、severity(必填)、confidence_level(必填)、expire_time、tags_classes 等；
+        ② 失陷/域名：ioc(必填)、judgments(必填)、severity(必填)、confidence_level(必填)、main_tag 等；
+        ③ Hash：md5/sha1/sha256(三选一)、judgments(必填)、threat_level(必填) 等；
+        ④ 漏洞：xve_id/cve_id/cnvd_id/cnnvd_id(四选一)、vuln_name(必填) 等。
+
+    # ── 情报导出/统计 ─────────────────────────────────────────────────────────
+    current_page:
+      type: integer
+      description: 当前页码，默认 1
+    page_size:
+      type: integer
+      description: 每页数量，默认 20，最大 100
+    start_time:
+      type: integer
+      description: 起始时间（秒级 Unix 时间戳）
+    end_time:
+      type: integer
+      description: 截止时间（秒级 Unix 时间戳）
+    intel_type:
+      type: integer
+      description: "情报类型（platform_intelligence_count）：1-失陷检测，2-IP信誉，3-恶意域名，5-漏洞情报"
+    org:
+      type: array
+      items:
+        type: string
+      description: "情报集列表（platform_intelligence_count），如 [\"微步在线\",\"自定义\"]，不填为全部"
+    source:
+      type: array
+      items:
+        type: string
+      description: "情报源列表（platform_intelligence_count），如 [\"微步在线-IP信誉\"]，不填为全部"
+    content:
+      type: integer
+      description: "查询内容（platform_intelligence_count）：1-情报总量/增量，2-命中总量/增量，不填为全部"
+
+    # ── 重保情报 ──────────────────────────────────────────────────────────────
+    hw_token:
+      type: string
+      description: >
+        重保情报导出专用 token（platform_export_hw_data 必填）。
+        计算方式：sha1("tip-intelligence-{day}")，day 为当日日期数字（如 1 月 7 日 day=7）。
+        校验时忽略大小写。
+
+    # ── 资产管理 ──────────────────────────────────────────────────────────────
+    asset_data:
+      type: array
+      items:
+        type: object
+      description: >
+        资产数据数组（platform_add_asset / platform_update_asset 必填，最多 100 条）。
+        每项包含：asset(IPv4/IPv6/域名)、asset_name(设备名称)、group_name(分组，不存在时自动创建)。
+        可选字段：asset_type(1-防火墙/2-WAF/3-DNS/4-负载均衡/5-终端/6-服务器/7-三层交换机/20-其它)、
+        owner、owner_contact、remarks、e_ip、location、outside、product(数组)、component(数组)。
+    operation:
+      type: integer
+      description: >
+        操作类型（platform_update_asset）：0-新增/追加产品组件信息（默认），1-覆盖，2-精确删除。
+        platform_distribution_rules：1-下发阻断，2-下发删除，3-添加白名单，4-从白名单删除。
+
+    # ── 用户管理 ──────────────────────────────────────────────────────────────
+    username:
+      type: string
+      description: 用户名（platform_add_user / platform_login_with_token 必填），4-20 位字母或数字
+    roles:
+      type: array
+      items:
+        type: integer
+      description: 角色 ID 列表（platform_add_user 必填）
+    password:
+      type: string
+      description: 用户密码（platform_add_user 可选），8-20 位字母+数字+特殊字符；不填则系统自动生成
+    describe:
+      type: string
+      description: 用户描述（platform_add_user 可选），最多 50 个字符
+    timestamp:
+      type: string
+      description: 毫秒级时间戳（platform_login_with_token 必填）
+    login_token:
+      type: string
+      description: >
+        免密登录 token（platform_login_with_token 必填）。
+        计算方式：sha256("{username}{salt}{day}")，day 为当日日期数字，salt 从 platform_add_user 返回。
+
+    # ── 情报生产 ──────────────────────────────────────────────────────────────
+    resource:
+      type: string
+      description: "样本哈希值（platform_query_sample 必填），支持 sha256 / sha1 / md5"
+    format:
+      type: string
+      description: "输出格式（platform_query_sample）：默认 tip 格式；`stix`-STIX 格式"
+
+    # ── 设备联动 ──────────────────────────────────────────────────────────────
+    rule:
+      type: string
+      description: IP 地址或域名（platform_distribution_rules 必填），批量最多 50 个，逗号分隔
+    block_time:
+      type: integer
+      description: "阻断时长（platform_distribution_rules，operation=1 时有效）：10-10080（分钟），-1 永久"
+    direction:
+      type: integer
+      description: "阻断方向（platform_distribution_rules）：1-出站，2-入站，不填-双向"
+    device_id:
+      type: array
+      items:
+        type: integer
+      description: "指定阻断设备 ID 列表（platform_distribution_rules），不填默认全部设备"
+
+    # ── 漏洞资产匹配 ─────────────────────────────────────────────────────────
+    group_name:
+      type: string
+      description: 资产所属分组/企业名称（platform_vuln_alert 可选筛选项）
+    threatbook_create_time:
+      type: string
+      description: "按微步收录时间筛选（platform_vuln_alert）：`30d`、`7d`、`3d`、`1d`"
+    publish_time:
+      type: string
+      description: "按漏洞披露时间筛选（platform_vuln_alert）：`30d`、`7d`、`3d`、`1d`"
+
+    # ── 态势情报订阅 ─────────────────────────────────────────────────────────
+    report_time:
+      type: string
+      description: "报告时间筛选（platform_subscription）：`90d`、`30d`、`7d`、`3d`、`1d`"
+
+    # ── 行业攻击情报 ─────────────────────────────────────────────────────────
+    update_time:
+      type: string
+      description: "最近活跃时间筛选（platform_industry_attack 必填）：`90d`、`30d`、`7d`、`3d`、`1d`"
+    confidence_level:
+      type: integer
+      description: "可信度等级（platform_industry_attack）：1-低，2-中，3-高"
+    severity:
+      type: integer
+      description: "威胁级别（platform_industry_attack）：0-基础信息，1-低，2-中，3-高，4-严重"
+    industry:
+      type: string
+      description: 行业模糊检索过滤（platform_industry_attack）
+
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngtip.handler.py
+  function: platform

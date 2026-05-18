@@ -1,0 +1,23 @@
+name: skyeye_alarm_params
+description: >
+  获取 SkyEye 告警检索所需的枚举值，例如攻击阶段、攻击组织、资产组、
+  资产标签、告警类型、API 威胁类型和重点关注标签等，可先查询本接口再调用
+  `skyeye_alarm_list` 组装筛选条件。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: skyeye_api
+
+inputSchema:
+  type: object
+  properties:
+    data_source:
+      type: integer
+      description: 设备类型；0=全部，1=传感器，2=沙箱，3=邮件沙箱，4=云锁，7=蜜罐。不同数据源返回的告警类型、攻击阶段和标签枚举可能不同。
+      default: 0
+  required: []
+
+handler:
+  type: script
+  script_file: skyeye.handler.py
+  function: alarm_params

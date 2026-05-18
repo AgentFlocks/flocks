@@ -1,0 +1,47 @@
+name: qingteng_system_audit
+description: >
+  查询青藤云平台系统审计日志。支持按操作名称和操作账号模糊过滤，
+  适用于排查配置变更来源、分析用户操作轨迹和审计外部 API 调用记录。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: qingteng
+
+inputSchema:
+  type: object
+  properties:
+    eventName:
+      type: string
+      description: 操作名称，支持模糊查询
+    userName:
+      type: string
+      description: 操作帐号名，支持模糊查询
+    page:
+      type: integer
+      description: 页码，从 0 开始
+      default: 0
+    size:
+      type: integer
+      description: 每页数量
+      default: 20
+    sorts:
+      type: string
+      description: 排序字段，常见传值如 `-eventTime`
+  required: []
+
+handler:
+  type: script
+  script_file: qingteng_system_audit.handler.py
+  function: system_audit
+
+notes: |
+  调用流程:
+  1. 自动使用已配置的 `qingteng_host`、`qingteng_username`、`qingteng_password` 登录
+  2. 自动计算 `comId + sorted(query params) + timestamp + signKey` 的 SHA1 签名
+  3. 调用 `GET /external/api/system/audit`
+
+  返回重点:
+  - `rows`: 审计日志列表
+  - `total`: 总记录数
+  - `requestParam`: 字符串形式的 JSON，请在需要时自行二次解析
+  - `eventTime`: 秒级时间戳

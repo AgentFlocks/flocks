@@ -1,0 +1,38 @@
+name: skyeye_download_alarm_report
+description: >
+  下载 SkyEye 告警详情报告，支持 docx 或 pdf。通常需要传入告警发生当天对应的
+  `start_time` / `end_time` 查询窗口，并返回文件内容的 base64、
+  Content-Type 和文件名。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: skyeye_api
+
+inputSchema:
+  type: object
+  properties:
+    alarm_id:
+      type: string
+      description: 告警 ID，建议先从 `skyeye_alarm_list` 返回结果中获取。
+    export_type:
+      type: string
+      description: 下载文件类型，支持 `docx` 或 `pdf`。
+      enum: [docx, pdf]
+    start_time:
+      type: integer
+      description: 开始时间，13位毫秒级Unix时间戳；通常取告警发生当天 00:00:00 对应时间。可以使用python datetime动态计算。
+    end_time:
+      type: integer
+      description: 结束时间，13位毫秒级Unix时间戳；通常取告警发生当天 23:59:59 对应时间。可以使用python datetime动态计算。
+    asset_group:
+      type: string
+      description: 资产组，可按告警详情中的资产组信息补充。
+    is_white:
+      type: string
+      description: 是否白名单，0=否，1=是；如告警命中白名单可补该字段。
+  required: [alarm_id, export_type, start_time, end_time]
+
+handler:
+  type: script
+  script_file: skyeye.handler.py
+  function: download_alarm_report

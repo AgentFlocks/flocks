@@ -1,0 +1,121 @@
+name: tdp_policy_settings
+description: >
+  管理 TDP 策略配置相关接口，覆盖自定义情报、IP信誉、旁路阻断、联动阻断、
+  告警处置状态和处理记录。通过 action 可切换到各子目录下的列表、新增、编辑、
+  删除和状态变更接口；除 `*_list` 与 `disposal_log_list` 外，大多数动作都会修改
+  平台策略或处置状态，调用前应确认影响范围。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        策略配置子接口动作。`custom_intel_edit` / `custom_intel_delete`
+        会自动补齐请求体里的 action 字段，但仍要求在 `data.intel_uuid`
+        里提供目标记录；`ip_reputation_delete` 需要非空 ID 列表；
+        `*_list` 动作会补默认分页；`custom_intel_add`、`ip_reputation_*`、
+        `bypass_block_*`、`block_filter_*`、`linkage_*`、`resolve_host`
+        属于写操作或状态变更动作；其中 `bypass_block_add` 使用顶层
+        `block_ip` / `block_expire_time` / `block_remark`，而
+        `bypass_block_update`、`bypass_block_delete` 需要通过 `entry`
+        传递请求体，其余动作使用对应的显式对象参数。
+      enum:
+        - custom_intel_list
+        - custom_intel_add
+        - custom_intel_edit
+        - custom_intel_delete
+        - ip_reputation_list
+        - ip_reputation_add
+        - ip_reputation_update
+        - ip_reputation_delete
+        - bypass_block_list
+        - bypass_block_add
+        - bypass_block_update
+        - bypass_block_delete
+        - block_filter_list
+        - block_filter_add
+        - block_filter_update
+        - block_filter_delete
+        - linkage_block_ioc_list
+        - linkage_deny_list_add
+        - linkage_deny_list_edit
+        - linkage_deny_list_delete
+        - linkage_pass_list_add
+        - linkage_pass_list_edit
+        - linkage_pass_list_delete
+        - linkage_deny_list_list
+        - linkage_pass_list_list
+        - resolve_host
+        - disposal_log_list
+      default: custom_intel_list
+    condition:
+      type: object
+      description: 条件对象，适用于所有 `*_list` 动作。
+    page:
+      type: object
+      description: 分页对象，适用于所有 `*_list` 动作。
+    data:
+      type: object
+      description: 数据对象，适用于 `custom_intel_edit`、`custom_intel_delete`。
+    entry:
+      type: object
+      description: 通用条目对象，适用于 `bypass_block_update`、`bypass_block_delete`、联动阻断和 `resolve_host` 等动作。
+    rule:
+      type: object
+      description: 规则对象，适用于 `block_filter_add`、`block_filter_update`、`block_filter_delete`。
+    ids:
+      type: array
+      items:
+        type: integer
+      description: ID 列表，适用于 `ip_reputation_delete`。
+    id:
+      type: integer
+      description: 单条记录 ID，适用于 `ip_reputation_update`。
+    ioc_type:
+      type: string
+      description: IOC 类型，适用于 `custom_intel_add`。
+    ioc_list:
+      type: array
+      items:
+        type: object
+      description: IOC 对象列表，适用于 `custom_intel_add`，列表元素应包含 `ioc` 字段。
+    main_tag:
+      type: string
+      description: 主标签，适用于 `custom_intel_add`。
+    severity:
+      type: integer
+      description: 严重等级，适用于 `custom_intel_add`；接口文档示例中也可能出现字符串形式的数字。
+    overwrite:
+      type: boolean
+      description: 是否覆盖已有记录，适用于 `custom_intel_add`、`ip_reputation_add`。
+    ip_list:
+      type: array
+      items:
+        type: string
+      description: IP 列表，适用于 `ip_reputation_add`。
+    tags:
+      type: array
+      items:
+        type: string
+      description: 标签列表，适用于 `ip_reputation_add`、`ip_reputation_update`。
+    block_ip:
+      type: array
+      items:
+        type: string
+      description: 旁路阻断 IP 列表，仅适用于 `bypass_block_add`。
+    block_expire_time:
+      type: integer
+      description: 旁路阻断过期时间，适用于 `bypass_block_add`。
+    block_remark:
+      type: string
+      description: 旁路阻断备注，适用于 `bypass_block_add`。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: policy_settings

@@ -1,0 +1,59 @@
+name: sangfor_xdr_assets
+description: >
+  Query and manage Sangfor XDR assets. Retrieve asset lists, IP segment
+  tree, asset types, connected devices, and department structure.
+  Essential for asset inventory and attack surface management.
+description_cn: >
+  查询和管理深信服 XDR 资产。支持获取资产列表、IP 段树结构、
+  资产类型、接入设备列表和部门组织结构。用于资产盘点和攻击面管理。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_xdr
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        资产操作类型：
+        - `list`            ：查询资产列表（分页）
+        - `ip_segment_tree` ：查询 IP 段左树结构
+        - `asset_class`     ：获取资产类型分类
+        - `device_list`     ：获取接入设备列表
+        - `department_tree` ：获取部门组织树
+        - `delete`          ：删除资产
+      enum: [list, ip_segment_tree, asset_class, device_list, department_tree, delete]
+      default: list
+    page_size:
+      type: integer
+      description: 每页条数（list 时使用）。
+      default: 20
+    page_num:
+      type: integer
+      description: 页码，从 1 开始。
+      default: 1
+    name:
+      type: string
+      description: 数据源名称过滤（device_list 时可选）。
+    is_filter:
+      type: boolean
+      description: 是否过滤资产小类（asset_class 时可选）。
+    need_auto:
+      type: boolean
+      description: 是否展示未知分类（asset_class 时可选）。
+    get_undistributed:
+      type: integer
+      description: 是否带无部门分组（department_tree 时可选，1=是）。
+    ids:
+      type: array
+      description: 要删除的资产ID列表（delete 时使用）。
+      items:
+        type: string
+  required: [action]
+
+handler:
+  type: script
+  script_file: sangfor_xdr.handler.py
+  function: run_assets

@@ -1,0 +1,117 @@
+name: onesec_software
+description: >
+  OneSEC software grouped tool. Use the `action` parameter to access installed
+  software inventory APIs. Configure the OneSEC service with separate API Key
+  and Secret credentials.
+description_cn: >
+  OneSEC 软件管理分组工具。通过 `action` 参数调用软件资产相关接口。请在 OneSEC
+  服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: onesec_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        Software 分组动作名，可选值：
+        - software_query_page_list
+          用途: 分页查询已安装软件列表
+          必填: 无
+          常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`fuzzy`、`condition`、`agent_group_list`
+          风险提示: 分页接口通常要求排序对象，建议显式传 `sort_by` + `sort_order`
+          是否任务型: 否
+        - software_query_agent_list
+          用途: 查询安装指定软件的终端列表
+          必填: `name`、`publisher`
+          常用: `cur_page`、`page_size`、`version_min`、`version_max`、`include_empty_version`
+          风险提示: 软件名称与厂商建议成对提供；缺失时会被工具层拦截
+          是否任务型: 否
+      enum:
+        - software_query_page_list
+        - software_query_agent_list
+    cur_page:
+      type: integer
+      default: 1
+      description: 页码
+    page_size:
+      type: integer
+      default: 20
+      description: 每页数量
+    group_list:
+      type: array
+      items:
+        type: integer
+      description: 分组 ID 列表
+    agent_group_list:
+      type: array
+      items:
+        type: integer
+      description: 终端分组 ID 列表，对应 `querySoftwarePageList` 文档字段
+    fuzzy:
+      type: string
+      description: 模糊查询关键词
+    install_begin:
+      type: integer
+      description: 软件安装开始时间戳，单位秒
+    install_end:
+      type: integer
+      description: 软件安装结束时间戳，单位秒
+    software_group_name:
+      type: string
+      description: 软件分组名称
+    condition:
+      type: array
+      items:
+        type: object
+      description: 软件筛选条件列表
+    sort_by:
+      type: string
+      description: 排序字段，默认 `install_time`
+    sort_order:
+      type: string
+      description: 排序方向，支持 `asc` / `desc`
+    sort:
+      type: object
+      description: 完整排序对象，支持直接传 `{sort_by, sort_order}`
+    software_id:
+      type: integer
+      description: 软件 ID，兼容旧调用方式
+    name:
+      type: string
+      description: 软件名称，对应 `querySoftwareAgentList`
+    publisher:
+      type: string
+      description: 软件厂商，对应 `querySoftwareAgentList`
+    version_min:
+      type: string
+      description: 软件版本范围起始值
+    version_max:
+      type: string
+      description: 软件版本范围结束值
+    include_empty_version:
+      type: boolean
+      description: 是否包含软件版本为空的终端
+    os_version:
+      type: array
+      items:
+        type: string
+      description: 终端操作系统列表
+    agent_version:
+      type: array
+      items:
+        type: string
+      description: 终端版本列表
+    software_version:
+      type: array
+      items:
+        type: string
+      description: 安装的软件版本列表
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesec.handler.py
+  function: software

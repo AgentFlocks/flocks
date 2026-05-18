@@ -1,0 +1,100 @@
+name: ngsoc
+service_id: ngsoc_api
+version: "4.15.1"
+description: >
+  Qi-Anxin NGSOC (NGSOC-BD / NGSOC-LV) Web API service. Authentication is
+  token-based: every request carries the static ``NGSOC-Access-Token`` HTTP
+  header issued by the device admin (`系统管理 > 基础配置 > 安全性 > 凭据
+  管理`). The handler concatenates ``base_url + api_prefix + path`` to build
+  the final URL, where ``api_prefix`` defaults to ``/api/v1`` per the
+  R4.15.1 manual.
+description_cn: >
+  奇安信网神安全分析与管理系统 NGSOC（NGSOC-BD / NGSOC-LV，R4.15.1）
+  Web API 服务。认证采用静态 Token 头：每次请求都需要携带 NGSOC 控制台
+  「系统管理 > 基础配置 > 安全性 > 凭据管理」中签发的授权码，处理器将
+  其放入 `NGSOC-Access-Token` HTTP Header。URL 拼接规则为
+  `base_url + api_prefix + path`，其中 `api_prefix` 默认 `/api/v1`，对应
+  手册「2.1 URL 拼接规则」（`https://ngsoc/api/v1/<api-url>`）。
+auth:
+  type: custom
+  secret: ngsoc_access_token
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://ngsoc.example.com"
+  - key: api_prefix
+    label: API Prefix
+    storage: config
+    config_key: api_prefix
+    input_type: text
+    required: false
+    default: "/api/v1"
+    placeholder: "/api/v1"
+  - key: access_token
+    label: NGSOC Access Token
+    storage: secret
+    config_key: access_token
+    secret_id: ngsoc_access_token
+    input_type: password
+    required: true
+defaults:
+  api_prefix: "/api/v1"
+  timeout: 60
+  category: custom
+  product_version: "R4.15.1"
+notes: |
+  NGSOC API（R4.15.1）使用 Token 头部鉴权，处理器自动注入：
+
+      NGSOC-Access-Token: <凭据管理中生成的授权码>
+
+  常见配置示例：
+    - api_services.ngsoc_api.base_url      = "https://ngsoc.example.com"
+    - api_services.ngsoc_api.api_prefix    = "/api/v1"   # 与手册一致，默认值
+    - api_services.ngsoc_api.access_token  = "{secret:ngsoc_access_token}"
+
+  `api_prefix` 选取建议：
+    - 默认值 `"/api/v1"`，与手册「2.1 URL 拼接规则」一致：
+      `https://<host>/api/v1/<api-url>`。
+    - 反向代理或其它路径前缀部署，请按实际部署调整（例如 `""`、`"/ngsoc/api/v1"`）。
+
+  `verify_ssl` 由表单底部「SSL 验证」开关控制，与 onesec / onesig 一致，
+  下列字段都会被识别为 SSL 验证开关，按以下优先级取值：
+    1. `verify_ssl`                         （主键）
+    2. `ssl_verify`                         （兼容别名）
+    3. `verifySsl`                          （camelCase 别名）
+    4. `custom_settings.verify_ssl`         （WebUI 表单写入位置）
+    5. 环境变量 `NGSOC_VERIFY_SSL`         （CLI / 容器场景兜底）
+    6. 兜底默认值 `False`（**默认关闭证书验证**，与 onesec / onesig 一致）
+
+  关于默认值：NGSOC 设备绝大多数情况以私有部署形式上线，使用自签证书，
+  为开盒即用，默认关闭证书校验。在公网或受信任 CA 的部署上，请显式
+  开启 UI「SSL 验证」开关或配置 `verify_ssl: true`。
+
+  Token 获取方式（手册 2.2 章节）：
+    - 登录 NGSOC 控制台
+    - 进入「系统管理 > 基础配置 > 安全性 > 凭据管理」
+    - 新增凭据后，在凭据列表查看「凭据授权码」即为本插件需要的 Token
+
+  接口模块（手册「4 产品模块列表」）：
+    - alarms      威胁告警，对应 `ngsoc_alarms` 工具
+    - assets      资产管理，对应 `ngsoc_assets` 工具
+    - vuls        漏洞管理，对应 `ngsoc_vuls` 工具
+    - risks       风险管理，对应 `ngsoc_risks` 工具
+    - users       用户管理，对应 `ngsoc_users` 工具
+    - workorders  工单管理，对应 `ngsoc_workorders` 工具
+    - bigscreens  态势大屏，对应 `ngsoc_bigscreens` 工具
+    - storage     存储管理，对应 `ngsoc_storage` 工具
+
+  所有响应统一为 NGSOC 包络：
+    {"errCode": 0, "errMsg": "成功", "service": "default",
+     "data": <实际数据>, "requestId": ..., "errDetail": null}
+  处理器在 `errCode != 0` 时把 `errMsg` / `errDetail` 包装到
+  `ToolResult.error`；在 `errCode == 0` 时直接返回 `data` 字段。
+
+  二进制下载接口（如 `/storage/download` 或 `/alarms/kvstore/export-file`
+  下载产物）会落盘到 `~/.flocks/workspace/outputs/<today>/`，文件名前缀
+  统一为 `ngsoc_`，并在 metadata 中返回 `saved_path`。

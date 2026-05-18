@@ -1,0 +1,176 @@
+schema_version: 1
+provider: ngsoc_api
+
+# Service-level connectivity probe.
+# `user_nicknames` is chosen because:
+#   - lightweight (GET; no required body params),
+#   - exercises base_url + api_prefix assembly and the NGSOC-Access-Token header,
+#   - deterministic (returns system users list regardless of data state).
+connectivity:
+  tool: ngsoc_users
+  params:
+    action: user_nicknames
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  ngsoc_users:
+    - label: "Get user nicknames list"
+      label_cn: "获取用户名列表"
+      tags: [smoke, users]
+      params:
+        action: user_nicknames
+      assert:
+        success: true
+
+  ngsoc_alarms:
+    - label: "List alarms (last 24 hours, page 1)"
+      label_cn: "查询告警列表（最近 24 小时，第 1 页）"
+      tags: [smoke, alarms]
+      params:
+        action: alarm_list
+        queryParams:
+          latestTimestamp:
+            stime: 0
+            etime: 0
+        page: 1
+        size: 20
+      assert:
+        success: true
+
+    - label: "Get alarm total count (last 24 hours)"
+      label_cn: "获取告警总数（最近 24 小时）"
+      tags: [alarms]
+      params:
+        action: alarm_list_total
+        queryParams:
+          latestTimestamp:
+            stime: 0
+            etime: 0
+
+    - label: "Get PCAP export status"
+      label_cn: "查询 PCAP 下载进度"
+      tags: [alarms, pcap]
+      params:
+        action: alarm_pcap_export_status
+        token: "placeholder-token"
+
+  ngsoc_assets:
+    - label: "List asset groups (default view)"
+      label_cn: "查询资产组列表（默认视图）"
+      tags: [smoke, assets]
+      params:
+        action: asset_group_list
+      assert:
+        success: true
+
+    - label: "Get assets by group ID"
+      label_cn: "获取指定资产组下的资产 ID 列表"
+      tags: [assets]
+      params:
+        action: asset_id_list
+        groupId: "0"
+
+  ngsoc_vuls:
+    - label: "List vulnerabilities (page 1)"
+      label_cn: "查询漏洞列表（第 1 页）"
+      tags: [smoke, vuln]
+      params:
+        action: vuls_raw_data_list
+        page: 1
+        size: 20
+        cnnvdOrder: false
+      assert:
+        success: true
+
+    - label: "List weak-password findings (page 1)"
+      label_cn: "查询弱口令列表（第 1 页）"
+      tags: [vuln, weakpwd]
+      params:
+        action: vuls_pwd_raw_data
+        page: 1
+        size: 20
+
+    - label: "List web vulnerabilities (page 1)"
+      label_cn: "查询 Web 漏洞列表（第 1 页）"
+      tags: [vuln, web]
+      params:
+        action: vuls_web_raw_data
+        page: 1
+        size: 20
+
+  ngsoc_risks:
+    - label: "List asset risks (default view, page 1)"
+      label_cn: "查询资产风险列表（默认视图，第 1 页）"
+      tags: [smoke, risk]
+      params:
+        action: asset_risks_list
+        viewId: 1
+        page: 1
+        size: 20
+      assert:
+        success: true
+
+  ngsoc_workorders:
+    - label: "List work orders (all tabs, page 1)"
+      label_cn: "查询工单列表（所有标签，第 1 页）"
+      tags: [smoke, workorders]
+      params:
+        action: work_order_list
+        tabType: ADMIN
+        page: 1
+        size: 20
+      assert:
+        success: true
+
+    - label: "List pending work orders"
+      label_cn: "查询待处置工单"
+      tags: [workorders]
+      params:
+        action: work_order_list
+        tabType: RECEIVE
+        status: UNDISPOSED
+        page: 1
+        size: 20
+
+  ngsoc_bigscreens:
+    - label: "Get top exploited vulnerabilities (all severities)"
+      label_cn: "查询被利用漏洞 TOP5（全部危害等级）"
+      tags: [smoke, bigscreen]
+      params:
+        action: vulnerability_leakused_top
+        parentId: "0"
+        severity: 0
+      assert:
+        success: true
+
+    - label: "Get victim IP TOP5 (last 24 hours)"
+      label_cn: "查询受害 IP TOP5（最近 24 小时）"
+      tags: [bigscreen]
+      params:
+        action: attack_asset_top
+        type: 1
+
+    - label: "Get external threat type TOP5 (last 7 days)"
+      label_cn: "查询外部威胁类型 TOP5（最近 7 天）"
+      tags: [bigscreen]
+      params:
+        action: threat_type_top
+        type: 2
+
+    - label: "Get victim IP survey (last 24 hours)"
+      label_cn: "查询受害者 IP 数统计（最近 24 小时）"
+      tags: [bigscreen]
+      params:
+        action: victim_survey
+        dateType: 1
+
+  ngsoc_storage:
+    - label: "Download file by UUID"
+      label_cn: "通过 UUID 下载文件"
+      tags: [storage]
+      params:
+        action: storage_download
+        uuidName: "placeholder-uuid"
+        mode: attachment

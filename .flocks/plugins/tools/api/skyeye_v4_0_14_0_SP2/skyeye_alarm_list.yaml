@@ -1,0 +1,125 @@
+name: skyeye_alarm_list
+description: >
+  查询 SkyEye 告警列表。默认返回最近 7 天的告警，可按告警类型、API 威胁类型、
+  威胁级别、攻击结果、攻击阶段、资产组、攻击组织、IOC、资产标签和分页排序等条件过滤。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: skyeye_api
+
+inputSchema:
+  type: object
+  properties:
+    start_time:
+      type: integer
+      description: 开始时间，13位毫秒级Unix时间戳；不传时自动取最近7天。可以使用python datetime动态计算。
+    end_time:
+      type: integer
+      description: 结束时间，13位毫秒级Unix时间戳；不传时自动取当前时间。可以使用python datetime动态计算。
+    threat_type:
+      type: string
+      description: 告警类型，可从 `skyeye_alarm_params` 返回的 threat_types 获取。
+    api_type_chain:
+      type: string
+      description: API 威胁类型，可从枚举接口获取。
+    hazard_level:
+      type: string
+      description: 威胁级别，0=低危，1=中危，2=高危，3=危急。
+    status:
+      type: string
+      description: 处理状态，0=未处置，1=已处置，6=忽略，7=误报。
+    serial_num:
+      type: string
+      description: 采集设备序列号，即传感器或沙箱设备序列号。
+    data_source:
+      type: string
+      description: 数据来源，0=全部，1=传感器，2=沙箱，3=邮件沙箱，4=云锁，6=smac，7=蜜罐，8=soar。
+    alarm_sip:
+      type: string
+      description: 受害 IP。
+    attack_sip:
+      type: string
+      description: 攻击 IP。
+    ioc:
+      type: string
+      description: 威胁情报 IOC，可用于按情报命中值精确筛选。
+    threat_name:
+      type: string
+      description: 威胁名称关键字，支持按告警名称模糊过滤。
+    host:
+      type: string
+      description: 主机域名。
+    is_web_attack:
+      type: string
+      description: 是否为 WEB 攻击，0=否，1=是。
+    x_forwarded_for:
+      type: string
+      description: XFF 代理。
+    host_state:
+      type: string
+      description: 攻击结果，-1=失败，0=企图，1=成功，2=失陷。
+    attack_stage:
+      type: string
+      description: 攻击阶段，可从 `skyeye_alarm_params` 的 attack_chain 获取。
+    asset_group:
+      type: string
+      description: 资产分组 ID，可从 `skyeye_alarm_params` 的 asset_group 获取。
+    status_http:
+      type: string
+      description: HTTP 状态码。
+    attack_dimension:
+      type: string
+      description: 攻击维度，0=其他，1=横向攻击，2=外部攻击，3=外联攻击。
+    attck:
+      type: string
+      description: 攻击方式，可从 `skyeye_alarm_params` 返回的攻击方式枚举中获取。
+    attck_org:
+      type: string
+      description: 攻击组织，可从 `skyeye_alarm_params` 返回的攻击组织枚举中获取。
+    alarm_id:
+      type: string
+      description: 告警 ID。
+    focus_label:
+      type: string
+      description: 重点关注标签，可从 `skyeye_alarm_params` 返回的 `focus_label` 枚举中获取。
+    file_md5:
+      type: string
+      description: 文件 MD5。
+    asset_ip:
+      type: string
+      description: 资产 IP。
+    is_alarm_black_ip:
+      type: integer
+      description: 是否黑 IP，0=否，1=是。
+    is_white:
+      type: integer
+      description: 是否白名单，0=否，1=是。
+    marks:
+      type: string
+      description: 告警标签，可结合页面已有标签或检索条件标签筛选。
+    asset_mark:
+      type: string
+      description: 资产标签，可从 `skyeye_alarm_params` 返回的资产标签枚举中获取。
+    alarm_sip_asset_group:
+      type: string
+      description: 受害 IP 资产组 ID，可从 `skyeye_alarm_params` 返回的 `asset_group` 获取。
+    attack_sip_asset_group:
+      type: string
+      description: 攻击 IP 资产组 ID，可从 `skyeye_alarm_params` 返回的 `asset_group` 获取。
+    offset:
+      type: integer
+      description: 页号，从1开始。
+      default: 1
+    limit:
+      type: integer
+      description: 每页数据量。
+      default: 20
+    order_by:
+      type: string
+      description: 排序字段，例如 `time`、`hazard_level`；通常配合分页参数一起使用。
+  required: []
+
+handler:
+  type: script
+  script_file: skyeye.handler.py
+  function: alarm_list

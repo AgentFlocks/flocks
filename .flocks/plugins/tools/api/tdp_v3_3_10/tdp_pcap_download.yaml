@@ -1,0 +1,24 @@
+name: tdp_pcap_download
+description: >
+  下载单个告警日志关联的 PCAP 文件。通常需要从告警日志结果中拿到
+  `alert_id` 和对应的发生时间 `occ_time` 才能准确下载。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+
+inputSchema:
+  type: object
+  properties:
+    alert_id:
+      type: string
+      description: 告警唯一 ID，建议先从 `tdp_log_search` 的检索结果中获取。
+    occ_time:
+      type: integer
+      description: 告警发生时间，Unix 秒级时间戳；需要与对应告警记录的发生时间一致。可以使用python datetime动态计算。
+  required: [alert_id, occ_time]
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: download_pcap

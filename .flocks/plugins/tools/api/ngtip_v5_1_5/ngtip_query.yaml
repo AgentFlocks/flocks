@@ -1,0 +1,119 @@
+name: ngtip_query
+description: >
+  NGTIP Intelligence Query grouped tool. Use the `action` parameter to access
+  DNS/domain detection, IP reputation, file hash reputation, vulnerability
+  intelligence, and IP geolocation APIs.
+description_cn: >
+  NGTIP 情报查询分组工具。通过 `action` 参数调用失陷检测、IP 信誉、Hash 信誉、漏洞情报和 IP 地理位置接口。
+  Base URL 为情报查询端点（默认端口 8090）。所有接口支持 GET 传参（apikey 自动注入）。
+  【选用原则】
+  - 出站场景（域名/失陷）优先使用 `query_dns`；
+  - 入站场景（IP 行为分析）使用 `query_ip`；
+  - 需要地理位置但不判断威胁时使用 `query_location`；
+  - 漏洞编号精确查询或条件筛选使用 `query_vuln`（游标翻页，不支持跳页）；
+  - `intelligence` 字段是数组，代表多情报源结果，需遍历处理；
+  - 批量查询最多 50 个（逗号分隔），漏洞 vuln_id 最多 100 个。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: ngtip_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        情报查询动作名，可选值：
+        - query_dns
+          用途: 失陷检测及恶意域名检测（出站场景，检测 IP/域名是否为 C2/矿池/钓鱼等）
+          必填: `resource`
+          常用: `host`、`lang`
+          特性: 支持批量最多 50 个（逗号分隔）；IP 可携带端口提高精度，如 8.8.8.8:443
+          是否任务型: 否
+        - query_ip
+          用途: IP 信誉查询（入站场景，分析扫描/暴破/僵尸网络/CDN/VPN 等行为特征）
+          必填: `resource`
+          常用: `host`、`lang`、`location`
+          特性: 支持批量最多 50 个；`location=true` 可在无情报时也返回地理位置
+          是否任务型: 否
+        - query_hash
+          用途: 文件信誉检测（Hash 查询威胁级别、病毒家族、沙箱分析结果）
+          必填: `resource`
+          特性: 支持 sha256 / sha1 / md5 三种格式，单次查询一个哈希值
+          是否任务型: 否
+        - query_vuln
+          用途: 漏洞情报查询（通过漏洞编号/产品/更新时间等筛选，获取评分/PoC/补丁）
+          必填: 无（不传任何筛选则默认返回最近 1 天更新的漏洞）
+          常用: `vuln_id`（精确）、`product`/`vendor`（模糊）、`is_highrisk`、`update_time`、`cursor`（翻页）
+          ⚠️ 翻页: 使用游标 `cursor`，首次不传，下次将上次返回的 cursor 传入；不支持跳页
+          是否任务型: 否
+        - query_location
+          用途: IP 地理位置查询（仅获取国家/省/城市/经纬度，不涉及威胁判断）
+          必填: `resource`
+          特性: 支持批量最多 50 个（逗号分隔）
+          是否任务型: 否
+      enum:
+        - query_dns
+        - query_ip
+        - query_hash
+        - query_vuln
+        - query_location
+    resource:
+      type: string
+      description: >
+        查询目标。
+        - query_dns/query_ip/query_location: IP 地址或域名，批量时逗号分隔，最多 50 个；
+          query_dns 的 IP 可携带端口：`8.8.8.8:443`。
+        - query_hash: 文件哈希值，支持 sha256 / sha1 / md5，单次一个。
+    host:
+      type: string
+      description: 告警主机地址（query_dns 和 query_ip 可选参数）
+    lang:
+      type: string
+      description: "返回语言：`zh`-中文，`en`-英文（默认英文）"
+    location:
+      type: boolean
+      description: "仅 query_ip 可用。`true`-无情报命中时也返回地理位置信息；`false`-默认不返回"
+    cursor:
+      type: string
+      description: >
+        漏洞查询翻页游标（query_vuln 专用）。首次查询不传，后续将上一次响应的 cursor 值传入。
+        cursor 为空字符串时表示已到最后一页。
+    limit:
+      type: integer
+      description: "query_vuln 每页数量，默认 10，最大 50"
+    vuln_id:
+      type: string
+      description: >
+        漏洞编号，支持 XVE/CVE/CNVD/CNNVD，批量最多 100 个，逗号分隔。
+        示例：`CVE-2024-1234` 或 `CVE-2024-1234,CVE-2024-5678`
+    vendor:
+      type: string
+      description: 漏洞影响厂商（单个）
+    product:
+      type: string
+      description: 漏洞影响产品，批量最多 20 个；与 version 同时使用时仅支持单个产品名称
+    component_name:
+      type: string
+      description: 漏洞影响组件，批量最多 20 个；与 version 同时使用时只能填单个
+    component_package_manager:
+      type: string
+      description: "影响组件的包管理器，如 `Maven`、`ubuntu22.04`"
+    version:
+      type: string
+      description: 按版本号筛选；使用时 product 或 component_name 二选一必填
+    update_time:
+      type: string
+      description: "按漏洞更新时间筛选：`30d`、`7d`、`3d`、`1d`"
+    threatbook_create_time:
+      type: string
+      description: "按微步收录时间筛选：`30d`、`7d`、`3d`、`1d`"
+    is_highrisk:
+      type: boolean
+      description: "`true`-仅返回高风险漏洞；`false`-排除高风险；不传-全部"
+  required:
+    - action
+handler:
+  type: script
+  script_file: ngtip.handler.py
+  function: query

@@ -1,0 +1,52 @@
+name: skyeye_download_pcap
+description: >
+  下载 SkyEye 告警关联的 PCAP 包。通常需要传入告警发生当天对应的
+  `start_time` / `end_time` 查询窗口，并返回文件内容的 base64、
+  Content-Type 和文件名。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: skyeye_api
+
+inputSchema:
+  type: object
+  properties:
+    alarm_id:
+      type: string
+      description: 告警 ID，建议先从 `skyeye_alarm_list` 返回结果中获取。
+    start_time:
+      type: integer
+      description: 开始时间，13位毫秒级Unix时间戳；一般取告警发生当天 00:00:00 对应时间。可以使用python datetime动态计算。
+    end_time:
+      type: integer
+      description: 结束时间，13位毫秒级Unix时间戳；一般取告警发生当天 23:59:59 对应时间。可以使用python datetime动态计算。
+    alarm_sip:
+      type: string
+      description: 受害 IP，可从告警列表或详情中补充，用于精确定位对应抓包文件。
+    attack_sip:
+      type: string
+      description: 攻击 IP，可从告警列表或详情中补充，用于精确定位对应抓包文件。
+    skyeye_type:
+      type: string
+      description: 告警规则类型，例如 webid-webattack_dolog。
+    ioc:
+      type: string
+      description: 威胁情报或规则标识。
+    type:
+      type: string
+      description: 二级告警类型，通常来自告警详情中的细分类型字段。
+    branch_id:
+      type: string
+      description: 级联单位，即分析平台设备序列号；级联部署场景建议补齐。
+    xff:
+      type: string
+      description: XFF 代理，请求经过代理转发时可补齐该字段。
+    host_state:
+      type: string
+      description: 攻击结果，-1=失败，0=企图，1=成功，2=失陷。
+  required: [alarm_id, start_time, end_time]
+
+handler:
+  type: script
+  script_file: skyeye.handler.py
+  function: download_pcap

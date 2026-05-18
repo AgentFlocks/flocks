@@ -1,0 +1,246 @@
+name: qingteng_risk
+description: >
+  青藤风险发现分组工具。通过 `action` 参数访问补丁、风险项、弱密码、Web 风险文件、
+  漏洞检测和漏洞作业管理相关接口。
+description_cn: >
+  青藤风险发现分组工具。覆盖补丁、风险、弱密码、Web 风险文件、漏洞检测和作业管理。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: qingteng
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        风险分组动作名，可选值：
+        - patch_scan
+          用途: 发起补丁扫描
+          必填: `os_type`
+          常用: `groups`、`hostIds`、`time_range`、`taskName`
+          风险提示: 任务型接口，建议后续查询状态
+          是否任务型: 是
+        - patch_scan_status
+          用途: 查询补丁扫描状态
+          必填: `os_type`
+          常用: `status`
+          风险提示: 建议轮询频率不要过高
+          是否任务型: 否
+        - patch_list / patch_detail
+          用途: 查询补丁结果和详情
+          必填: `os_type`；`patch_detail` 还需要 `id`
+          常用: `page`、`size`、`severity`、`status`、`hostId`、`groups`、`patch_name`、`cve`
+          风险提示: 明细查询更适合先从列表获取 ID；列表类专属字段误传会被拦截
+          是否任务型: 否
+        - risk_scan / risk_scan_status / risk_list / risk_detail
+          用途: 查询应用风险、系统风险、访问控制风险、账号风险
+          必填: `risk_type`、`os_type`；`risk_detail` 还需要 `id`
+          常用: `groups`、`hostIds`、`severity`、`status`、`risk_name`
+          风险提示: `risk_type` 需明确为 `app/system/access/account`；列表类专属字段误传会被拦截
+          是否任务型: 仅 `risk_scan` 为是
+        - weakpwd_scan / weakpwd_scan_status / weakpwd_list / weakpwd_detail
+          用途: 弱密码扫描、状态、结果和详情查询
+          必填: `os_type`；`weakpwd_detail` 还需要 `id`
+          常用: `page`、`size`、`groups`、`hostIds`、`severity`、`status`、`accountName`
+          风险提示: 列表接口建议显式传分页
+          是否任务型: 仅 `weakpwd_scan` 为是
+        - weakfile_list / weakfile_scan / weakfile_scan_status / weakfile_download_create / weakfile_download
+          用途: Web 风险文件查询、扫描和下载
+          必填: `os_type`；`weakfile_download` 还需要 `download_id`
+          常用: `page`、`size`、`severity`、`status`、`hostId`、`groups`、`file_path`、`ids`、`fileName`
+          风险提示: 下载类动作通常需要先创建下载任务
+          是否任务型: 扫描/下载创建为是
+        - poc_scan / poc_scan_status / poc_list / poc_detail
+          用途: Linux/Windows 漏洞检测扫描与结果查询
+          必填: `os_type`；`poc_detail` 还需要 `recordId`
+          常用: `page`、`size`、`groups`、`hostIds`、`ruleIds`、`severity`、`status`、`cve`
+          风险提示: 建议限定扫描范围
+          是否任务型: 仅 `poc_scan` 为是
+        - poc_job_rule_list / poc_job_add / poc_job_fix / poc_job_delete / poc_job_execute / poc_job_status / poc_job_error_host / poc_job_list / poc_job_tasks / poc_job_stats / poc_job_result_detail
+          用途: 漏洞检测作业管理与结果查询
+          必填: `poc_job_rule_list` 的 `os_type` 为可选（不传或传 `linux` 时调用通用规则列表，传 `win` 时调用 Windows 规则列表）；其余动作通常需要 `os_type`；删除通常需要 `jobId`
+          常用: `jobName`、`ruleIds`、`groups`、`hostIds`、`schedule`
+          风险提示: 写操作较多，建议先确认任务目标范围
+          是否任务型: 是
+        - patch_business_impact_check / patch_business_impact_status / patch_business_impact_detail
+          用途: Linux 补丁进程影响分析
+          必填: `patch_business_impact_detail` 需要 `patchId`
+          常用: `patchIds`、`hostIds`、`groups`
+          风险提示: 仅适用于 Linux 补丁场景
+          是否任务型: `check` 为是
+        - linux_all_scan / linux_all_scan_status
+          用途: Linux 全部风险扫描及状态查询
+          必填: 无
+          常用: `groups`、`hostIds`、`taskName`、`status`
+          风险提示: 范围通常较大，建议明确主机范围
+          是否任务型: 仅 `linux_all_scan` 为是
+      enum:
+        - patch_scan
+        - patch_scan_status
+        - patch_list
+        - patch_detail
+        - patch_business_impact_check
+        - patch_business_impact_status
+        - patch_business_impact_detail
+        - risk_scan
+        - risk_scan_status
+        - risk_list
+        - risk_detail
+        - weakpwd_scan
+        - weakpwd_scan_status
+        - weakpwd_list
+        - weakpwd_detail
+        - weakfile_list
+        - weakfile_scan
+        - weakfile_scan_status
+        - weakfile_download_create
+        - weakfile_download
+        - poc_scan
+        - poc_scan_status
+        - poc_list
+        - poc_detail
+        - poc_job_rule_list
+        - poc_job_add
+        - poc_job_fix
+        - poc_job_delete
+        - poc_job_execute
+        - poc_job_status
+        - poc_job_error_host
+        - poc_job_list
+        - poc_job_tasks
+        - poc_job_stats
+        - poc_job_result_detail
+        - linux_all_scan
+        - linux_all_scan_status
+    os_type:
+      type: string
+      description: 操作系统类型，常用 `linux` 或 `win`
+      enum:
+        - linux
+        - win
+    risk_type:
+      type: string
+      description: 风险类型，适用于 `risk_*` 动作
+      enum:
+        - app
+        - system
+        - access
+        - account
+    page:
+      type: integer
+      description: GET 分页页码，从 0 开始
+      default: 0
+    size:
+      type: integer
+      description: GET 每页数量
+      default: 20
+    sorts:
+      type: string
+      description: GET 排序字段
+    groups:
+      type: string
+      description: 多值分组条件，逗号分隔
+    time_range:
+      type: string
+      description: 时间范围，格式 `yyyy-MM-dd HH:mm:ss - yyyy-MM-dd HH:mm:ss`
+    keyword:
+      type: string
+      description: 通用关键词筛选
+    begin_time:
+      type: string
+      description: 起始时间，作为通用扩展筛选字段
+    end_time:
+      type: string
+      description: 结束时间，作为通用扩展筛选字段
+    severity:
+      type: string
+      description: 严重级别筛选
+    status:
+      type: string
+      description: 状态筛选
+    hostId:
+      type: string
+      description: 主机 ID 筛选
+    hostIds:
+      type: array
+      items:
+        type: string
+      description: 主机 ID 列表，常用于扫描类和作业类请求
+    patchIds:
+      type: array
+      items:
+        type: string
+      description: 补丁 ID 列表
+    ruleIds:
+      type: array
+      items:
+        type: string
+      description: 漏洞检测规则 ID 列表
+    ids:
+      type: array
+      items:
+        type: string
+      description: 通用对象 ID 列表，常用于下载创建
+    patch_name:
+      type: string
+      description: 补丁名称筛选，适合 `patch_list`
+    risk_name:
+      type: string
+      description: 风险名称筛选，适合 `risk_list`
+    accountName:
+      type: string
+      description: 账号名筛选，适合 `weakpwd_list`
+    file_path:
+      type: string
+      description: 文件路径筛选，适合 `weakfile_list`
+    id:
+      type: string
+      description: 通用详情 ID，如补丁详情、风险详情、弱密码详情
+    patchId:
+      type: string
+      description: Linux 补丁进程影响明细的补丁 ID
+    recordId:
+      type: string
+      description: 漏洞检测结果记录 ID
+    jobId:
+      type: string
+      description: 漏洞检测作业 ID
+    jobIds:
+      type: array
+      items:
+        type: string
+      description: 漏洞检测作业 ID 列表
+    jobName:
+      type: string
+      description: 漏洞检测作业名称
+    taskName:
+      type: string
+      description: 扫描任务名称
+    schedule:
+      type: object
+      description: 作业调度配置
+    cve:
+      type: string
+      description: CVE 编号筛选
+    fileName:
+      type: string
+      description: 下载文件名
+    filters:
+      type: object
+      description: 下载创建时使用的筛选条件
+    download_id:
+      type: string
+      description: Web 风险文件下载任务 ID
+    query:
+      type: object
+      description: 额外 GET 查询参数对象
+    body:
+      type: object
+      description: POST/DELETE 请求体对象
+  required:
+    - action
+handler:
+  type: script
+  script_file: qingteng.handler.py
+  function: risk

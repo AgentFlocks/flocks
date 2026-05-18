@@ -1,0 +1,218 @@
+name: onesec_ops
+description: >
+  OneSEC operations grouped tool. Use the `action` parameter to access endpoint
+  management, audit, task, and strategy APIs. Configure the OneSEC service with
+  separate API Key and Secret credentials.
+description_cn: >
+  OneSEC 运营管理分组工具。通过 `action` 参数调用终端管理、审计、任务和策略相关
+  接口。请在 OneSEC 服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesec_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        OPS 分组动作名，可选值：
+        - ops_query_agent_page_list
+          用途: 分页查询终端信息
+          必填: 无
+          常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`fuzzy`、`group_list`
+          风险提示: 分页接口通常要求排序对象，建议显式传 `sort_by` + `sort_order`
+          是否任务型: 否
+        - ops_edit_agent_info
+          用途: 编辑终端管理信息
+          必填: `umid` 或 `mac` 其一
+          常用: `name`、`department`、`job_number`、`group_path`、`organization_user_id`、`update_type`
+          风险提示: 写操作；会直接修改终端基础信息与归属
+          是否任务型: 否
+        - ops_query_audit_log
+          用途: 分页查询审计日志
+          必填: `begin_time`、`end_time`
+          常用: `cur_page`、`page_size`、`operate_list`、`role_list`、`group_list`、`api_access_type_list`
+          风险提示: 建议限定时间范围，避免返回量过大；按 OneSEC API 文档仅支持最近 30 天内日志
+          是否任务型: 否
+        - ops_query_task_page_list
+          用途: 分页查询任务列表
+          必填: `time_type`、`begin_time`、`end_time`、`auto`
+          常用: `cur_page`、`page_size`、`sort_by`、`sort_order`、`task_status_list`、`task_type_list`、`group_id`
+          风险提示: 分页接口通常要求排序对象；`time_type` 仅支持 `create_time/update_time`，`auto` 仅支持 `0/1`
+          是否任务型: 否
+        - ops_query_task_execute_list
+          用途: 分页查询任务执行进度明细
+          必填: `task_id`
+          常用: `cur_page`、`page_size`
+          风险提示: 常用于追踪任务执行结果
+          是否任务型: 否
+        - ops_uninstall_agent
+          用途: 下发卸载 Agent 任务
+          必填: `agent_list`
+          常用: `agent_list`
+          风险提示: 高风险任务；会触发终端卸载 Agent
+          是否任务型: 是
+        - ops_edit_strategy_scope
+          用途: 修改终端策略应用范围
+          必填: `strategy_id`
+          常用: `group_list`、`agent_list`
+          风险提示: 写操作；会影响策略生效范围
+          是否任务型: 否
+      enum:
+        - ops_query_agent_page_list
+        - ops_edit_agent_info
+        - ops_query_audit_log
+        - ops_query_task_page_list
+        - ops_query_task_execute_list
+        - ops_uninstall_agent
+        - ops_edit_strategy_scope
+    begin_time:
+      type: integer
+      description: 开始时间戳，单位秒
+    end_time:
+      type: integer
+      description: 结束时间戳，单位秒
+    fuzzy:
+      type: string
+      description: 模糊查询关键词
+    group_list:
+      type: array
+      items:
+        type: integer
+      description: 分组 ID 列表
+    condition:
+      type: array
+      items:
+        type: object
+      description: 结构化条件列表
+    time_type:
+      type: string
+      description: 时间字段类型，仅支持 `create_time`、`update_time`
+    cur_page:
+      type: integer
+      default: 1
+      description: 页码
+    page_size:
+      type: integer
+      default: 20
+      description: 每页数量
+    sort_by:
+      type: string
+      description: 排序字段
+    sort_order:
+      type: string
+      description: 排序方向，支持 `asc` / `desc`
+    umid:
+      type: string
+      description: 单个终端 UMID
+    mac:
+      type: string
+      description: 终端 MAC 地址
+    update_type:
+      type: integer
+      description: 编辑模式，`0` 保留原值，`1` 覆盖原值
+    name:
+      type: string
+      description: 名称
+    department:
+      type: string
+      description: 部门
+    job_number:
+      type: string
+      description: 工号
+    phone_number:
+      type: string
+      description: 电话
+    mail:
+      type: string
+      description: 邮箱
+    organization_user_id:
+      type: string
+      description: 三方账号 ID
+    is_virtual:
+      type: integer
+      description: 是否为虚拟机，`0` 未知，`1` 是，`2` 否
+    pc_id:
+      type: string
+      description: 终端编号
+    group_path:
+      type: array
+      items:
+        type: string
+      description: 分组路径
+    operate_list:
+      type: array
+      items:
+        type: integer
+      description: 操作类型列表
+    role_list:
+      type: array
+      items:
+        type: string
+      description: 角色列表
+    api_access_type_list:
+      type: array
+      items:
+        type: integer
+      description: API 访问来源列表
+    auto:
+      type: integer
+      description: 任务来源，仅支持 `0` 人工响应、`1` 自动响应
+    task_type_list:
+      type: array
+      items:
+        type: integer
+      description: 任务类型列表
+    task_status_list:
+      type: array
+      items:
+        type: integer
+      description: 任务状态列表
+    group_id:
+      type: array
+      items:
+        type: integer
+      description: 兼容旧调用的分组 ID 别名
+    group_name:
+      type: array
+      items:
+        type: string
+      description: 分组名称列表
+    agent_host_name:
+      type: array
+      items:
+        type: string
+      description: 主机名列表
+    agent_host_ip:
+      type: array
+      items:
+        type: string
+      description: 主机 IP 列表
+    agent_host_mac:
+      type: array
+      items:
+        type: string
+      description: 主机 MAC 列表
+    agent_umid:
+      type: array
+      items:
+        type: string
+      description: 终端 UMID 列表
+    task_id:
+      type: integer
+      description: 任务 ID
+    agent_list:
+      type: array
+      items:
+        type: string
+      description: 终端 UMID 列表
+    strategy_id:
+      type: integer
+      description: 策略 ID
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesec.handler.py
+  function: ops

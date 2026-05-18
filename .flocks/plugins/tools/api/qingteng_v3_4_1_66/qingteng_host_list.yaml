@@ -1,0 +1,32 @@
+name: qingteng_host_list
+description: >
+  查询青藤云平台的主机资产列表。支持查询 Linux 和 Windows 主机。
+  用于主机资产梳理、资产盘点、安全评估等场景。
+  当用户提到青藤云主机列表、资产管理、查看服务器时使用此工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: qingteng
+
+inputSchema:
+  type: object
+  properties:
+    os_type:
+      type: string
+      description: 操作系统类型 (linux 或 win)
+      enum: [linux, win]
+      default: linux
+    page:
+      type: integer
+      description: 页码，从0开始
+      default: 0
+    size:
+      type: integer
+      description: 每页数量
+      default: 50
+  required: []
+
+handler:
+  type: script
+  script_file: qingteng_host_list.handler.py
+  function: host_list
