@@ -122,8 +122,8 @@ IMPORTANT: This tool is for terminal operations. Do not use PowerShell for file 
 Before executing commands:
 1. If the command will create files or directories, verify the target location first.
 2. Always quote file paths that contain spaces with double quotes.
-   - `New-Item -ItemType Directory "C:\Users\...\My Documents"` (correct)
-   - `New-Item -ItemType Directory C:\Users\...\My Documents` (incorrect)
+   - `New-Item -ItemType Directory "C:\\Users\\...\\My Documents"` (correct)
+   - `New-Item -ItemType Directory C:\\Users\\...\\My Documents` (incorrect)
 
 PowerShell syntax notes:
 - Variables use the `$` prefix: `$name = "value"`.
