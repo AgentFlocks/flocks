@@ -203,11 +203,15 @@ async def route_delete_device(device_id: str):
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
     service_id: str = row["service_id"]
+    # Capture storage_key BEFORE deletion: once the row is gone the DB query
+    # inside sync_service_tool_state can no longer see it, so if this was the
+    # last instance for that storage_key the tool would never get disabled.
+    storage_key: str = row["storage_key"]
     db_fields: dict = json.loads(row["fields"] or "{}")
 
     delete_secrets(device_id, db_fields)
     await delete_device_row(device_id)
-    await sync_service_tool_state(service_id)
+    await sync_service_tool_state(service_id, deleted_storage_keys=[storage_key])
 
 
 class DeviceTestRequest(BaseModel):

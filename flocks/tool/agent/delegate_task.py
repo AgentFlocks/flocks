@@ -147,7 +147,10 @@ async def _resolve_skill_content(skill_names: List[str]) -> Dict[str, Any]:
     missing: List[str] = []
     for name in skill_names:
         skill = await Skill.get(name)
-        if not skill:
+        # Treat disabled skills the same as missing ones — do not reveal to the
+        # LLM that the skill exists but is toggled off, as that would invite it
+        # to retry via a different code path.
+        if not skill or Skill.is_disabled(skill.name):
             missing.append(name)
             continue
         try:
