@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   rerunExecution: vi.fn(),
   deleteExecution: vi.fn(),
   copyText: vi.fn().mockResolvedValue(undefined),
+  sessionChat: vi.fn(({ live }: { live?: boolean }) => <div>session-chat-live:{String(live)}</div>),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -110,7 +111,7 @@ vi.mock('@/components/common/EmptyState', () => ({
 }));
 
 vi.mock('@/components/common/SessionChat', () => ({
-  default: () => <div>session-chat</div>,
+  default: (props: { live?: boolean }) => mocks.sessionChat(props),
 }));
 
 vi.mock('./components', () => ({
@@ -181,6 +182,7 @@ describe('QueuedSection', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.useRealTimers();
     mocks.confirm.mockResolvedValue(true);
     mocks.useTaskExecutions.mockImplementation((params?: TaskListParams) => {
       const tasks = params?.status === 'completed' ? completedTasks : allTasks;
@@ -310,5 +312,89 @@ describe('QueuedSection', () => {
 
     expect(mocks.copyText).toHaveBeenCalledWith(expect.stringContaining('"keywords": "flocks agent"'));
     expect(mocks.toastSuccess).toHaveBeenCalled();
+  });
+
+  it('带 session 的任务详情始终以 live 模式挂载 SessionChat', async () => {
+    const user = userEvent.setup();
+    const sessionTask = buildExecution(
+      'exec-session-live-1',
+      '会话任务',
+      'completed',
+      {
+        sessionID: 'ses-task-1',
+      },
+    );
+
+    mocks.useTaskExecutions.mockReturnValue({
+      tasks: [sessionTask],
+      total: 1,
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getExecution.mockResolvedValue({ data: sessionTask });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+
+    await user.click(screen.getByText('会话任务'));
+
+    expect(await screen.findByText('session-chat-live:true')).toBeInTheDocument();
+    expect(mocks.sessionChat).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sessionId: 'ses-task-1',
+        live: true,
+        hideInput: true,
+      }),
+    );
+  });
+
+  it('详情抽屉打开后会按 execution id 轮询最新状态', async () => {
+    vi.useFakeTimers();
+    const staleCompletedTask = buildExecution(
+      'exec-poll-1',
+      '轮询任务',
+      'completed',
+      {
+        sessionID: 'ses-task-poll',
+      },
+    );
+    const runningTask = {
+      ...staleCompletedTask,
+      status: 'running' as const,
+      completedAt: undefined,
+    };
+
+    mocks.useTaskExecutions.mockReturnValue({
+      tasks: [staleCompletedTask],
+      total: 1,
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getExecution
+      .mockResolvedValueOnce({ data: staleCompletedTask })
+      .mockResolvedValueOnce({ data: runningTask });
+
+    render(<QueuedSection onRefreshGlobal={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('轮询任务'));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getAllByText('completed').length).toBeGreaterThan(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30000);
+    });
+
+    expect(mocks.getExecution).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getAllByText('running').length).toBeGreaterThan(1);
   });
 });
