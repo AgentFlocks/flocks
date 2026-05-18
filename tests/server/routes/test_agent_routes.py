@@ -106,10 +106,29 @@ class TestAgentCreate:
         resp = await client.post("/api/agent", json=_AGENT_PAYLOAD)
         assert resp.status_code == status.HTTP_200_OK
 
-        # Direct GET by name always reads Storage, so the new agent is visible
+        # Direct GET by name uses the refreshed agent registry, so the new agent is visible
         get_resp = await client.get("/api/agent/test-agent")
         assert get_resp.status_code == status.HTTP_200_OK
         assert get_resp.json()["name"] == "test-agent"
+
+    @pytest.mark.asyncio
+    async def test_created_agent_survives_registry_reload(self, client: AsyncClient):
+        """Storage-backed custom agents remain visible after process cache reload."""
+        from flocks.agent.registry import Agent
+
+        resp = await client.post("/api/agent", json=_AGENT_PAYLOAD)
+        assert resp.status_code == status.HTTP_200_OK
+
+        Agent._custom_agents.clear()
+        Agent.invalidate_cache()
+
+        get_resp = await client.get("/api/agent/test-agent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["name"] == "test-agent"
+
+        list_resp = await client.get("/api/agent")
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert "test-agent" in [agent["name"] for agent in list_resp.json()]
 
 
 # ===========================================================================

@@ -139,6 +139,62 @@ def _build_available_agents(agents: Dict[str, AgentInfo]) -> List[AvailableAgent
     return available
 
 
+def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentInfo]:
+    """Convert a Storage-backed custom agent record into AgentInfo."""
+    name = agent_data.get("name")
+    if not name:
+        return None
+
+    model_raw = agent_data.get("model")
+    model: Optional[AgentModel] = None
+    if isinstance(model_raw, dict):
+        model_id = model_raw.get("model_id") or model_raw.get("modelID")
+        provider_id = model_raw.get("provider_id") or model_raw.get("providerID")
+        if model_id and provider_id:
+            model = AgentModel(model_id=model_id, provider_id=provider_id)
+
+    return AgentInfo(
+        name=name,
+        description=agent_data.get("description"),
+        description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
+        prompt=agent_data.get("prompt"),
+        temperature=agent_data.get("temperature"),
+        color=agent_data.get("color"),
+        mode=agent_data.get("mode", "primary"),
+        model=model,
+        native=False,
+        hidden=agent_data.get("hidden", False),
+        tools=agent_data.get("tools", []),
+        tags=agent_data.get("tags", []),
+    )
+
+
+async def _load_storage_custom_agents(existing_names: Set[str]) -> Dict[str, AgentInfo]:
+    """Load Storage-backed custom agents created by POST /api/agent."""
+    try:
+        from flocks.storage.storage import Storage
+        entries = await Storage.list_entries("agent/custom/")
+    except Exception as exc:
+        log.warn("agent.registry.storage_custom_load_error", {"error": str(exc)})
+        return {}
+
+    loaded: Dict[str, AgentInfo] = {}
+    for key, agent_data in entries:
+        if not isinstance(agent_data, dict) or not agent_data.get("name"):
+            continue
+        agent = _storage_custom_agent_to_info(agent_data)
+        if agent is None:
+            continue
+        if agent.name in existing_names or agent.name in loaded:
+            log.warn("agent.registry.storage_custom_name_conflict", {
+                "name": agent.name,
+                "key": key,
+            })
+            continue
+        loaded[agent.name] = agent
+    return loaded
+
+
 # ---------------------------------------------------------------------------
 # Agent registry
 # ---------------------------------------------------------------------------
@@ -338,6 +394,9 @@ class Agent:
                     item.permission = merge(item.permission, from_config(value.permission), cli_overrides)
                     if isinstance(value.permission, dict):
                         item.tools = _permission_dict_to_tools(value.permission)
+
+        storage_custom_agents = await _load_storage_custom_agents(set(result.keys()))
+        result.update(storage_custom_agents)
 
         # enabled_agents whitelist filter
         if cfg.enabled_agents is not None:
