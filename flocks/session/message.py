@@ -974,6 +974,22 @@ class Message:
             updated = False
             for i, existing in enumerate(parts_list):
                 if existing.id == part.id:
+                    existing_status = getattr(getattr(existing, "state", None), "status", None)
+                    incoming_status = getattr(getattr(part, "state", None), "status", None)
+                    if (
+                        isinstance(existing, ToolPart)
+                        and isinstance(part, ToolPart)
+                        and existing_status in {"completed", "error"}
+                        and incoming_status in {"pending", "running"}
+                    ):
+                        log.debug("message.part.skip_terminal_tool_downgrade", {
+                            "session_id": session_id,
+                            "message_id": message_id,
+                            "part_id": part.id,
+                            "existing_status": existing_status,
+                            "incoming_status": incoming_status,
+                        })
+                        return existing
                     parts_list[i] = part
                     updated = True
                     break
