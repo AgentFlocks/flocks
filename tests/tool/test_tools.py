@@ -411,25 +411,38 @@ class TestBashTool:
         assert "Edit an existing file -> `edit`" in description
         assert "Search file names or directories -> `glob`" in description
         assert "Search file contents -> `grep`" in description
-        assert "Navigate symbols or code structure -> `lsp`" in description
         assert "use `glob` instead of `find` or `ls`" in description
 
     def test_get_description_windows_mentions_powershell_guidance(self, monkeypatch):
         monkeypatch.setattr(bash_module.sys, "platform", "win32")
+        monkeypatch.setattr(bash_module, "_detect_windows_powershell_shell", lambda: "powershell")
 
         description = bash_module.get_description("/workspace")
 
-        assert "prefers `pwsh` or `powershell`" in description
-        assert "PowerShell syntax rather than GNU bash syntax" in description
-        assert 'Path(path).read_text(encoding="utf-8-sig")' in description
+        assert "Execute PowerShell commands with optional timeout." in description
+        assert "Do not prefix commands with `cd` or `Set-Location`" in description
+        assert "Avoid bash-only syntax such as `export NAME=value`" in description
+        assert "Windows PowerShell 5.1 notes:" in description
+        assert "Pipeline chain operators `&&` and `||` are not available." in description
+
+    def test_get_description_windows_pwsh_omits_powershell_51_notes(self, monkeypatch):
+        monkeypatch.setattr(bash_module.sys, "platform", "win32")
+        monkeypatch.setattr(bash_module, "_detect_windows_powershell_shell", lambda: "pwsh")
+
+        description = bash_module.get_description("/workspace")
+
+        assert "Execute PowerShell commands with optional timeout." in description
+        assert "PowerShell syntax notes:" in description
+        assert "Windows PowerShell 5.1 notes:" not in description
 
     def test_get_description_non_windows_omits_windows_guidance(self, monkeypatch):
         monkeypatch.setattr(bash_module.sys, "platform", "linux")
 
         description = bash_module.get_description("/workspace")
 
-        assert "PowerShell syntax rather than GNU bash syntax" not in description
-        assert 'Path(path).read_text(encoding="utf-8-sig")' not in description
+        assert "Execute shell commands with optional timeout." in description
+        assert "PowerShell syntax notes:" not in description
+        assert "Windows PowerShell 5.1 notes:" not in description
     
     @pytest.mark.asyncio
     async def test_bash_simple_command(self, tool_context):

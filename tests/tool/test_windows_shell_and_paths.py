@@ -39,6 +39,56 @@ class _FakeProcess:
     returncode = 0
 
 
+def test_get_shell_windows_prefers_powershell_variants(monkeypatch):
+    """Windows shell detection should only consider PowerShell variants."""
+    monkeypatch.setattr(bash_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        bash_module,
+        "shutil_which",
+        lambda shell: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+        if shell == "powershell"
+        else None,
+    )
+
+    assert bash_module.get_shell() == "powershell"
+
+
+def test_get_shell_windows_raises_when_powershell_missing(monkeypatch):
+    """Windows shell detection should fail clearly without PowerShell."""
+    monkeypatch.setattr(bash_module.sys, "platform", "win32")
+    monkeypatch.setattr(bash_module, "shutil_which", lambda _shell: None)
+
+    with pytest.raises(FileNotFoundError, match="PowerShell executable not found"):
+        bash_module.get_shell()
+
+
+@pytest.mark.asyncio
+async def test_execute_host_windows_reports_missing_powershell(monkeypatch):
+    """Windows host execution should surface a clear startup error."""
+    ctx = _make_ctx()
+
+    monkeypatch.setattr(bash_module.sys, "platform", "win32")
+    monkeypatch.setattr(bash_module.Instance, "contains_path", lambda _path: True)
+    monkeypatch.setattr(
+        bash_module,
+        "_get_windows_shell_command",
+        lambda _command: (_ for _ in ()).throw(FileNotFoundError("PowerShell executable not found")),
+    )
+
+    result = await bash_module._execute_host(
+        ctx=ctx,
+        command="Write-Output 'hi'",
+        cwd="/tmp",
+        timeout_sec=1,
+        timeout_ms=1000,
+        description="missing powershell",
+    )
+
+    assert result.success is False
+    assert "Failed to start command" in result.error
+    assert "PowerShell executable not found" in result.error
+
+
 @pytest.mark.asyncio
 async def test_execute_host_windows_uses_explicit_powershell(monkeypatch):
     """Windows host execution should use an explicit shell command."""

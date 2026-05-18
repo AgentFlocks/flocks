@@ -42,9 +42,15 @@ DEFAULT_PATH = os.environ.get(
 
 
 def get_description(directory: str) -> str:
-    """Get tool description with directory placeholder replaced"""
-    platform_guidance = _build_platform_shell_guidance()
-    return f"""Execute shell commands in a persistent shell session with optional timeout.
+    """Get the platform-specific tool description."""
+    if sys.platform == "win32":
+        return _get_powershell_description(directory)
+    return _get_unix_shell_description(directory)
+
+
+def _get_unix_shell_description(directory: str) -> str:
+    """Build the Unix shell description for the bash tool."""
+    return f"""Execute shell commands with optional timeout.
 
 All commands run in {directory} by default. Use the `workdir` parameter if you need a different directory. Avoid `cd <directory> && <command>` patterns and set `workdir` instead.
 
@@ -56,15 +62,12 @@ Do not use this tool when a dedicated tool is a better fit:
 - Edit an existing file -> `edit`
 - Search file names or directories -> `glob`
 - Search file contents -> `grep`
-- Navigate symbols or code structure -> `lsp`
 
 Before executing commands:
 1. If the command will create files or directories, verify the target location.
 2. Always quote file paths that contain spaces with double quotes.
    - `mkdir "/Users/name/My Documents"` (correct)
    - `mkdir /Users/name/My Documents` (incorrect)
-   - `python "/path/with spaces/script.py"` (correct)
-   - `python /path/with spaces/script.py` (incorrect)
 
 Usage notes:
 - The `command` argument is required.
@@ -74,24 +77,95 @@ Usage notes:
 - Prefer dedicated tools instead of shell equivalents: use `glob` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
 - If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
 - If commands depend on each other, use a single bash tool call with `&&` to chain them together.
-- Use `;` only when you want sequential commands and do not care if earlier ones fail.
-{platform_guidance}"""
+- Use `;` only when you want sequential commands and do not care if earlier ones fail."""
 
 
-def _build_platform_shell_guidance() -> str:
-    """Return platform-specific guidance for the bash tool description."""
-    if sys.platform != "win32":
+def _detect_windows_powershell_shell() -> Optional[str]:
+    """Detect the preferred PowerShell executable on Windows."""
+    for shell in ["pwsh", "powershell"]:
+        if shutil_which(shell):
+            return shell
+    return None
+
+
+def _get_windows_powershell_51_guidance() -> str:
+    """Return Windows PowerShell 5.1 specific notes when relevant."""
+    if _detect_windows_powershell_shell() != "powershell":
         return ""
 
     return """
 
-Windows usage:
-- On Windows this tool prefers `pwsh` or `powershell`; if neither is available it falls back to `cmd`.
-- Write commands in PowerShell syntax rather than GNU bash syntax.
-- Avoid bash-only constructs such as heredocs, `cat > file <<'EOF'`, `export NAME=value`, and Unix-only path expansion.
-- For multi-step logic, prefer explicit PowerShell commands or a short `python -c` snippet over shell-specific tricks.
-- When Python reads text files on Windows, always pass `encoding=...`; prefer `Path(path).read_text(encoding="utf-8-sig")`.
+Windows PowerShell 5.1 notes:
+- Pipeline chain operators `&&` and `||` are not available. Run `A; if ($?) {{ B }}` for conditional chaining, or `A; B` for unconditional chaining.
+- Avoid `2>&1` on native executables. PowerShell 5.1 may wrap stderr in `NativeCommandError` records and set `$?` to `$false` even when the executable exits with code 0. stderr is already captured for you.
+- Default file encoding is UTF-16 LE with BOM. If you absolutely must write text for another tool to consume, pass `-Encoding utf8`.
+- `ConvertFrom-Json` returns `PSCustomObject`; `-AsHashtable` is not available.
 """
+
+
+def _get_powershell_description(directory: str) -> str:
+    """Build the Windows PowerShell description for the bash tool."""
+    powershell_51_guidance = _get_windows_powershell_51_guidance()
+    return f"""Execute PowerShell commands with optional timeout.
+
+All commands run in {directory} by default. Use the `workdir` parameter if you need a different directory. Do not prefix commands with `cd` or `Set-Location`; set `workdir` instead.
+
+Use this tool for terminal work via PowerShell: git, uv/pip/npm, docker, builds, tests, servers, scripts, process inspection, system status, networking commands, native executables, and PowerShell cmdlets.
+
+IMPORTANT: This tool is for terminal operations. Do not use PowerShell for file operations when a dedicated tool is a better fit:
+- Read file contents -> `read`
+- Write a new file -> `write`
+- Edit an existing file -> `edit`
+- Search file names or directories -> `glob`
+- Search file contents -> `grep`
+
+Before executing commands:
+1. If the command will create files or directories, verify the target location first.
+2. Always quote file paths that contain spaces with double quotes.
+   - `New-Item -ItemType Directory "C:\Users\...\My Documents"` (correct)
+   - `New-Item -ItemType Directory C:\Users\...\My Documents` (incorrect)
+
+PowerShell syntax notes:
+- Variables use the `$` prefix: `$name = "value"`.
+- The escape character is backtick (`` ` ``), not backslash.
+- Prefer Verb-Noun cmdlets such as `Get-ChildItem`, `Set-Location`, `New-Item`, `Remove-Item`.
+- Pipes pass objects, not plain text. Use `Select-Object`, `Where-Object`, and `ForEach-Object` for filtering and transformation.
+- Read environment variables with `$env:NAME`; set them with `$env:NAME = "value"`.
+- Use the call operator for native executables whose path contains spaces: `& "C:\\Program Files\\App\\app.exe" arg1 arg2`.
+- Avoid bash-only syntax such as `export NAME=value`, `cat <<'EOF'`, backtick command substitution, or `if [ -f x ]`.
+
+Unix to PowerShell quick reference:
+- `head` / `tail` -> `Get-Content file -TotalCount N` / `Get-Content file -Tail N`
+- `which` -> `(Get-Command name).Source`
+- `touch` -> `if (-not (Test-Path path)) {{ New-Item -ItemType File path }}`
+- `wc -l` -> `(Get-Content file | Measure-Object -Line).Lines`
+- `mkdir -p` -> `New-Item -ItemType Directory -Force path`
+- `rm -rf` -> `Remove-Item -Recurse -Force path`
+- `VAR=x cmd` -> `$env:VAR = 'x'; cmd`
+- `2>/dev/null` -> `2>$null` (usually unnecessary because stderr is already captured)
+
+Interactive and blocking commands:
+- Never use `Read-Host`, `Get-Credential`, `Out-GridView`, `$Host.UI.PromptForChoice`, or `pause`.
+- Destructive cmdlets may prompt for confirmation. Add `-Confirm:$false` when you intend the action to proceed.
+
+Passing multiline strings to native executables:
+- Use a single-quoted here-string so PowerShell does not expand `$` or backticks inside:
+  `git commit -m @'`
+  `Commit message here.`
+  `'@`
+- The closing `'@` must start at column 0 on its own line.
+- Use `@'...'@` unless you explicitly need interpolation.
+- For arguments PowerShell may parse as operators, use the stop-parsing token: `git log --% --format=%H`.
+
+Usage notes:
+- The `command` argument is required.
+- You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
+- It is very helpful to write a clear, concise `description` in 5-10 words.
+- If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
+- Avoid unnecessary `Start-Sleep`. If commands can run immediately, run them immediately. If you must wait, prefer a short polling check over sleeping first.
+- If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
+- If commands depend on each other, chain them in one bash tool call. On PowerShell 7+, `&&` is available. On Windows PowerShell 5.1, use `A; if ($?) {{ B }}` instead.
+- Use `;` only when you want sequential commands and do not care if earlier ones fail.{powershell_51_guidance}"""
 
 
 def _build_error_message(
@@ -122,11 +196,10 @@ def _build_error_message(
 def get_shell() -> str:
     """Get the appropriate shell for the current platform"""
     if sys.platform == "win32":
-        # Prefer PowerShell variants on Windows for better scripting compatibility.
-        for shell in ["pwsh", "powershell", "cmd"]:
-            if shutil_which(shell):
-                return shell
-        return "cmd"
+        shell = _detect_windows_powershell_shell()
+        if shell:
+            return shell
+        raise FileNotFoundError("PowerShell executable not found (expected `pwsh` or `powershell` in PATH)")
     else:
         # Unix-like systems
         return os.environ.get("SHELL", "/bin/bash")
@@ -142,9 +215,7 @@ def shutil_which(cmd: str) -> Optional[str]:
 def _get_windows_shell_command(command: str) -> tuple[str, list[str]]:
     """Build an explicit Windows shell invocation for the command."""
     shell = get_shell()
-    if shell in {"pwsh", "powershell"}:
-        return shell, [shell, "-NoProfile", "-NonInteractive", "-Command", command]
-    return "cmd", ["cmd", "/d", "/s", "/c", command]
+    return shell, [shell, "-NoProfile", "-NonInteractive", "-Command", command]
 
 
 def _get_windows_default_workdir_fallback() -> Optional[str]:
@@ -386,9 +457,6 @@ async def _execute_host(
     # Request bash permission
     await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={})
 
-    # Get shell
-    shell = get_shell()
-
     # Initialize metadata
     ctx.metadata(
         {
@@ -423,6 +491,7 @@ async def _execute_host(
                 env=env,
             )
         else:
+            shell = get_shell()
             log.info("bash.execute.host", {"command": command, "cwd": cwd, "shell": shell})
             proc = await asyncio.create_subprocess_shell(
                 command,
