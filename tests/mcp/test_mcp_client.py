@@ -1,4 +1,5 @@
 import asyncio
+import threading
 from contextlib import asynccontextmanager
 from types import MethodType
 from unittest.mock import AsyncMock
@@ -176,3 +177,85 @@ class TestMcpClientTransportSelection:
             await client._connect_local(startup_future)
 
         assert fake_stderr.closed is True
+
+
+class TestMcpClientCrossLoopSubmission:
+    @pytest.mark.asyncio
+    async def test_call_tool_from_another_loop_reuses_owner_loop(self):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        owner_loop = asyncio.get_running_loop()
+        client._connected = True
+        client._owner_loop = owner_loop
+        client._command_queue = asyncio.Queue()
+
+        observed: dict[str, object] = {}
+
+        async def owner() -> None:
+            while True:
+                command = await client._command_queue.get()
+                observed["owner_loop"] = asyncio.get_running_loop()
+                observed["action"] = command.action
+                observed["payload"] = dict(command.payload)
+                if command.action == "disconnect":
+                    if command.response is not None and not command.response.done():
+                        command.response.set_result(None)
+                    return
+                if command.response is not None and not command.response.done():
+                    command.response.set_result(
+                        {
+                            "ok": True,
+                            "loop_matches": asyncio.get_running_loop() is owner_loop,
+                            "payload": dict(command.payload),
+                        }
+                    )
+
+        client._owner_task = asyncio.create_task(owner())
+
+        result = await asyncio.to_thread(
+            lambda: asyncio.run(client.call_tool("demo_tool", {"value": "x"}))
+        )
+
+        assert result == {
+            "ok": True,
+            "loop_matches": True,
+            "payload": {"name": "demo_tool", "arguments": {"value": "x"}},
+        }
+        assert observed["owner_loop"] is owner_loop
+        assert observed["action"] == "call_tool"
+
+        await client.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_from_another_loop_finishes_owner_task(self):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        client._connected = True
+        client._owner_loop = asyncio.get_running_loop()
+        client._command_queue = asyncio.Queue()
+        disconnect_seen = threading.Event()
+
+        async def owner() -> None:
+            while True:
+                command = await client._command_queue.get()
+                if command.action == "disconnect":
+                    disconnect_seen.set()
+                    if command.response is not None and not command.response.done():
+                        command.response.set_result(None)
+                    return
+
+        owner_task = asyncio.create_task(owner())
+        client._owner_task = owner_task
+
+        await asyncio.to_thread(lambda: asyncio.run(client.disconnect()))
+
+        assert disconnect_seen.is_set() is True
+        assert owner_task.done() is True
+        assert client._owner_loop is None
+        assert client._command_queue is None

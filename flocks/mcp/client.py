@@ -118,6 +118,7 @@ class McpClient:
         self._connected = False
         self._transport_type: Optional[str] = None
         self._command_queue: asyncio.Queue[_ClientCommand] | None = None
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
         self._owner_task: asyncio.Task[None] | None = None
         self._owner_error: BaseException | None = None
     
@@ -140,6 +141,7 @@ class McpClient:
         loop = asyncio.get_running_loop()
         startup_future: asyncio.Future[None] = loop.create_future()
         self._owner_error = None
+        self._owner_loop = loop
         self._command_queue = asyncio.Queue()
 
         owner_task = asyncio.create_task(
@@ -225,6 +227,7 @@ class McpClient:
         self._connected = False
         self._transport_type = None
         self._command_queue = None
+        self._owner_loop = None
         if self._owner_task is not None and self._owner_task.done():
             self._owner_task = None
         if clear_owner_error:
@@ -629,15 +632,12 @@ class McpClient:
 
         try:
             if owner_task is not None and not owner_task.done() and self._command_queue is not None:
-                response = asyncio.get_running_loop().create_future()
-                await self._command_queue.put(_ClientCommand(action="disconnect", response=response))
-                await response
+                await self._submit_command("disconnect")
             elif owner_task is not None and not owner_task.done():
-                owner_task.cancel()
+                self._cancel_task_threadsafe(owner_task)
 
             if owner_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await owner_task
+                await self._await_task(owner_task)
         except Exception as exc:
             log.error("mcp.client.disconnect_error", {
                 "server": self.name,
@@ -753,6 +753,38 @@ class McpClient:
                 ) from self._owner_error
             raise RuntimeError(f"Client not connected: {self.name}")
 
+        owner_loop = self._owner_loop
+        if owner_loop is None:
+            raise RuntimeError(f"Client owner loop not initialized: {self.name}")
+
+        current_loop = asyncio.get_running_loop()
+        if current_loop is owner_loop:
+            return await self._submit_command_on_owner_loop(action, payload)
+
+        if not owner_loop.is_running():
+            owner_error = self._owner_error or RuntimeError(f"Client not connected: {self.name}")
+            raise owner_error
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._submit_command_on_owner_loop(action, payload),
+            owner_loop,
+        )
+        return await asyncio.wrap_future(future)
+
+    async def _submit_command_on_owner_loop(
+        self,
+        action: str,
+        payload: Dict[str, Any],
+    ) -> Any:
+        """Submit a command from the owner loop and await the response."""
+        owner_task = self._owner_task
+        if self._command_queue is None or owner_task is None:
+            if self._owner_error is not None:
+                raise RuntimeError(
+                    f"Client not connected: {self.name}: {_extract_root_cause(self._owner_error)}"
+                ) from self._owner_error
+            raise RuntimeError(f"Client not connected: {self.name}")
+
         response = asyncio.get_running_loop().create_future()
         command = _ClientCommand(action=action, payload=payload, response=response)
         await self._command_queue.put(command)
@@ -762,6 +794,36 @@ class McpClient:
             response.set_exception(owner_error)
 
         return await response
+
+    async def _await_task(self, task: asyncio.Task[Any]) -> None:
+        """Await a task safely from the owner loop or another loop."""
+        owner_loop = self._owner_loop
+        current_loop = asyncio.get_running_loop()
+        if owner_loop is None or current_loop is owner_loop:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            return
+
+        if not owner_loop.is_running():
+            return
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._await_task_on_owner_loop(task),
+            owner_loop,
+        )
+        await asyncio.wrap_future(future)
+
+    async def _await_task_on_owner_loop(self, task: asyncio.Task[Any]) -> None:
+        """Await a task that belongs to the owner loop."""
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    def _cancel_task_threadsafe(self, task: asyncio.Task[Any]) -> None:
+        """Cancel a task from the owner loop or another thread/loop."""
+        owner_loop = self._owner_loop
+        if owner_loop is None or not owner_loop.is_running():
+            return
+        owner_loop.call_soon_threadsafe(task.cancel)
     
     @property
     def is_connected(self) -> bool:
