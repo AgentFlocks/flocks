@@ -9,18 +9,24 @@ Tests cover:
 - Permission handling
 """
 
+import asyncio
 import pytest
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from typing import Dict, Any
 
 # Import the tool system
 from flocks.tool import (
+    ParameterType,
+    ToolCategory,
     ToolRegistry,
     ToolContext,
+    ToolParameter,
     ToolResult,
 )
 
 import flocks.tool.task.run_workflow as run_workflow_module
+from flocks.mcp.client import McpClient
+from flocks.workflow.runner import RunWorkflowResult, run_workflow
 
 
 class FakeRunWorkflowResult:
@@ -83,7 +89,9 @@ def simple_workflow():
     return {
         "id": "test-workflow-001",
         "name": "Test Workflow",
+        "start": "node-1",
         "metadata": {},
+        "start": "node-1",
         "nodes": [
             {
                 "id": "node-1",
@@ -101,9 +109,11 @@ def workflow_with_requirements():
     return {
         "id": "test-workflow-002",
         "name": "Test Workflow with Requirements",
+        "start": "node-1",
         "metadata": {
             "requirements": ["requests>=2.31,<3"]
         },
+        "start": "node-1",
         "nodes": [
             {
                 "id": "node-1",
@@ -121,7 +131,9 @@ def workflow_with_inputs():
     return {
         "id": "test-workflow-003",
         "name": "Test Workflow with Inputs",
+        "start": "node-1",
         "metadata": {},
+        "start": "node-1",
         "nodes": [
             {
                 "id": "node-1",
@@ -336,6 +348,49 @@ class TestRunWorkflowToolExecution:
         record_result.assert_awaited_once()
         assert storage_write.await_count >= 1
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
+
+    @pytest.mark.anyio
+    async def test_run_workflow_uses_isolated_child_tool_context(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        fake = FakeRunWorkflowResult(
+            status="SUCCEEDED",
+            run_id="run-isolated-ctx",
+            steps=1,
+            last_node_id="node-1",
+            outputs={"ok": True},
+            history=[],
+            error=None,
+        )
+        mock_run = Mock(name="run_workflow", return_value=fake)
+
+        with patch.object(
+            run_workflow_module,
+            "_get_workflow_runtime",
+            return_value=_runtime_tuple(run_fn=mock_run),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={"name": "Flocks"},
+            )
+
+        assert result.success is True
+        call_kwargs = mock_run.call_args.kwargs
+        nested_ctx = call_kwargs["tool_context"]
+        assert nested_ctx is not tool_context_with_permission
+        assert nested_ctx.session_id == tool_context_with_permission.session_id
+        assert nested_ctx.message_id == tool_context_with_permission.message_id
+        assert nested_ctx.agent == tool_context_with_permission.agent
+        assert nested_ctx.call_id == tool_context_with_permission.call_id
+        assert nested_ctx.extra == tool_context_with_permission.extra
+        assert nested_ctx.abort is tool_context_with_permission.abort
+        assert nested_ctx.event_publish_callback == tool_context_with_permission.event_publish_callback
+        assert nested_ctx._permission_callback == tool_context_with_permission._permission_callback
+        assert nested_ctx._metadata_callback is None
     
     @pytest.mark.anyio
     async def test_run_workflow_with_inputs(self, tool_context_with_permission, workflow_with_inputs):
@@ -737,3 +792,94 @@ class TestRunWorkflowToolIntegration:
         assert result is not None
         assert result.success is True
         assert "Status: SUCCEEDED" in (result.output or "")
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_integration_reuses_cross_loop_mcp_client(
+        self,
+        tool_context,
+    ):
+        tool_name = "test_fake_mcp_cross_loop_tool"
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        owner_loop = asyncio.get_running_loop()
+        client._connected = True
+        client._owner_loop = owner_loop
+        client._command_queue = asyncio.Queue()
+        observed: dict[str, Any] = {}
+
+        async def owner() -> None:
+            while True:
+                command = await client._command_queue.get()
+                if command.action == "disconnect":
+                    if command.response is not None and not command.response.done():
+                        command.response.set_result(None)
+                    return
+                observed["action"] = command.action
+                observed["payload"] = dict(command.payload)
+                if command.response is not None and not command.response.done():
+                    command.response.set_result("owner-loop-ok")
+
+        client._owner_task = asyncio.create_task(owner())
+
+        @ToolRegistry.register_function(
+            name=tool_name,
+            description="Cross-loop MCP-backed test tool",
+            category=ToolCategory.SYSTEM,
+            parameters=[
+                ToolParameter(
+                    name="value",
+                    type=ParameterType.STRING,
+                    description="Payload value",
+                    required=True,
+                )
+            ],
+        )
+        async def _tool(_ctx: ToolContext, value: str) -> ToolResult:
+            result = await client.call_tool("demo_tool", {"value": value})
+            return ToolResult(success=True, output=result)
+
+        workflow = {
+            "id": "integration-mcp-cross-loop",
+            "name": "Integration MCP Cross Loop Workflow",
+            "metadata": {},
+            "start": "tool-node",
+            "nodes": [
+                {
+                    "id": "tool-node",
+                    "type": "tool",
+                    "tool_name": tool_name,
+                    "tool_args": {"value": "demo"},
+                    "output_key": "result",
+                }
+            ],
+            "edges": [],
+        }
+
+        try:
+            with patch.object(
+                run_workflow_module,
+                "_get_workflow_runtime",
+                return_value=(Mock(name="RequirementsInstaller"), run_workflow, RunWorkflowResult),
+            ):
+                result = await ToolRegistry.execute(
+                    "run_workflow",
+                    ctx=tool_context,
+                    workflow=workflow,
+                    inputs={},
+                    ensure_requirements=False,
+                )
+        finally:
+            await client.disconnect()
+            ToolRegistry.unregister(tool_name)
+            ToolRegistry._enabled_defaults.pop(tool_name, None)
+
+        assert result.success is True
+        assert "owner-loop-ok" in (result.output or "")
+        assert observed["action"] == "call_tool"
+        assert observed["payload"] == {
+            "name": "demo_tool",
+            "arguments": {"value": "demo"},
+        }

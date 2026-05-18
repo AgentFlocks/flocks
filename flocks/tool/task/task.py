@@ -355,7 +355,7 @@ async def task_tool(
             loop_result=result,
             metadata=forwarder.final_metadata,
         )
-        result_status = "running" if tool_result.success else "error"
+        result_status = "completed" if tool_result.success else "error"
         ctx.metadata({
             "title": description,
             "metadata": {**forwarder.final_metadata, "status": result_status},

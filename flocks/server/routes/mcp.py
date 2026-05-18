@@ -476,13 +476,54 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
         _persist_mcp_server_config(name, clean_config)
 
         status = await MCP.status()
-        if name in status:
+        previous_status = status.get(name)
+        was_connected = (
+            previous_status is not None
+            and previous_status.status == McpStatus.CONNECTED
+        )
+        should_reconnect = was_connected and clean_config.get("enabled", True) is not False
+
+        if previous_status is not None:
             await MCP.remove(name)
+
+        reconnected = False
+        reconnect_error: Optional[str] = None
+        if should_reconnect:
+            reconnect_timeout_seconds = max(float(clean_config.get("timeout", 30.0) or 30.0), 1.0) + 2.0
+            try:
+                reconnected = await asyncio.wait_for(
+                    MCP.connect(name, clean_config),
+                    timeout=reconnect_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                reconnect_error = (
+                    f"Connection timed out while reconnecting MCP server: {name}"
+                )
+            except Exception as exc:
+                reconnect_error = str(exc)
+            if not reconnected and reconnect_error is None:
+                reconnect_status = (await MCP.status()).get(name)
+                reconnect_error = (
+                    getattr(reconnect_status, "error", None)
+                    if reconnect_status is not None
+                    else None
+                ) or f"Failed to reconnect MCP server: {name}"
+
+        message = f"MCP server '{name}' updated successfully."
+        if should_reconnect and reconnected:
+            message = f"MCP server '{name}' updated and reconnected successfully."
+        elif should_reconnect and reconnect_error:
+            message = (
+                f"MCP server '{name}' updated successfully, but reconnect failed: "
+                f"{reconnect_error}"
+            )
 
         return {
             "success": True,
-            "message": f"MCP server '{name}' updated successfully.",
+            "message": message,
             "config": _to_frontend_mcp_config(clean_config),
+            "reconnected": reconnected,
+            "reconnect_error": reconnect_error,
         }
     except HTTPException:
         raise
