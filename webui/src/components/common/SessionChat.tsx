@@ -2107,7 +2107,13 @@ function ChatMessageBubbleInner({
                   </div>
                 )}
                 {otherParts.map((part: MessagePart, i: number) => (
-                  <div key={part.id || i}>
+                  // Spacing between consecutive parts is owned by this wrapper,
+                  // not by individual part components. Each part used to set its
+                  // own `mt-2 first:mt-0`, but since every part lives in its own
+                  // wrapper div, `first:` always matched and the gap collapsed
+                  // to zero between, e.g., a tool card and the next thinking
+                  // block, making them look glued together.
+                  <div key={part.id || i} className="mt-2 first:mt-0">
                     {/* Text */}
                     {part.type === 'text' && part.text && (() => {
                       const nodeRefMatch = isUser
@@ -2152,7 +2158,11 @@ function ChatMessageBubbleInner({
                 const isExpanded = getPartExpanded(partKey);
                 const isThinking = !isReasoningDone;
                 return (
-                  <div className="mt-2 first:mt-0">
+                  // Vertical spacing is provided by the parent part wrapper
+                  // (see `otherParts.map` above); keep this container neutral
+                  // so wrapper-level `mt-2 first:mt-0` is the single source of
+                  // truth for inter-part gaps.
+                  <div>
                     <button
                       onClick={() => togglePart(partKey)}
                       disabled={isThinking}
@@ -2396,8 +2406,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     : '';
 
   if (isWaitingForAnswer) {
+    // Outer spacing is owned by the part wrapper in SessionChat's parts map.
     return (
-      <div className="mt-2">
+      <div>
         <QuestionTool
           questions={pendingQuestion!.questions}
           onAnswer={onAnswer!}
@@ -2409,7 +2420,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   }
 
   return (
-    <details className="mt-2 group/tool rounded-lg bg-zinc-50 overflow-hidden">
+    // No top margin here — the part wrapper in SessionChat owns vertical
+    // spacing so every adjacent tool / thinking / text part is separated by a
+    // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
+    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
       <summary className="px-2.5 py-2 cursor-pointer list-none flex items-center gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
         <span className={`${config.iconColor} flex-shrink-0`}>{config.icon}</span>
         <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
