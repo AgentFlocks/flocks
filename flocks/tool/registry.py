@@ -626,7 +626,7 @@ class ToolRegistry:
             Agent.invalidate_cache()
         except Exception as e:
             log.debug("tool.revision.agent_invalidate_failed", {"error": str(e)})
-        log.info("tool.registry.revision.bumped", {"revision": cls._revision, "reason": reason})
+        log.debug("tool.registry.revision.bumped", {"revision": cls._revision, "reason": reason})
 
     @classmethod
     def register_function(
@@ -958,7 +958,7 @@ class ToolRegistry:
                 p for p, svc in api_services.items()
                 if not svc.get("enabled", False)
             ]
-            log.info("tool_registry.api_service_sync", {
+            log.debug("tool_registry.api_service_sync", {
                 "disabled_tools": disabled_count,
                 "disabled_providers": disabled_providers,
             })
@@ -1639,7 +1639,7 @@ class ToolFileWatcher:
     def _run_refresh(self) -> None:
         try:
             ToolRegistry.refresh_plugin_tools()
-            log.info("tool.watcher.reloaded", {"reason": "plugin tool file changed on disk"})
+            log.debug("tool.watcher.reloaded", {"reason": "plugin tool file changed on disk"})
         except Exception as e:
             log.warn("tool.watcher.reload_failed", {"error": str(e)})
 

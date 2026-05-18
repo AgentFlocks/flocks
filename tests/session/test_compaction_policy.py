@@ -6,9 +6,17 @@ tier classification, clamping, overrides, and backward-compatible defaults
 all work correctly.
 """
 
+from unittest.mock import Mock
+
 import pytest
 
-from flocks.session.lifecycle.compaction import CompactionPolicy, ContextTier, _BOUNDS, _MIN_OVERFLOW_THRESHOLD
+import flocks.session.lifecycle.compaction.policy as policy_module
+from flocks.session.lifecycle.compaction import (
+    CompactionPolicy,
+    ContextTier,
+    _BOUNDS,
+    _MIN_OVERFLOW_THRESHOLD,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +52,18 @@ class TestTierClassification:
     def test_xlarge_tier(self):
         assert CompactionPolicy._classify_tier(500_001) == ContextTier.XLARGE
         assert CompactionPolicy._classify_tier(1_000_000) == ContextTier.XLARGE
+
+
+class TestPolicyLogging:
+    def test_policy_creation_uses_debug_log(self, monkeypatch: pytest.MonkeyPatch):
+        logger = Mock()
+        monkeypatch.setattr(policy_module, "_policy_log", logger)
+
+        policy = CompactionPolicy.from_model(128_000, 16_384)
+
+        assert policy.tier == ContextTier.LARGE
+        logger.debug.assert_called_once()
+        logger.info.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

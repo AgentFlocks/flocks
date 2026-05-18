@@ -234,7 +234,7 @@ class PluginLoader:
                 exclude_subdirs=ext.exclude_subdirs,
             )
             if default_sources:
-                log.info(
+                log.debug(
                     "plugin.scan",
                     {
                         "subdir": ext.subdir,
@@ -253,7 +253,7 @@ class PluginLoader:
                     exclude_subdirs=ext.exclude_subdirs,
                 )
                 if project_sources:
-                    log.info(
+                    log.debug(
                         "plugin.project.scan",
                         {
                             "subdir": ext.subdir,
@@ -415,7 +415,7 @@ class PluginLoader:
         items = cls._validate_and_dedup(ext, [item], str(yaml_path))
         if items:
             ext.consumer(items, str(yaml_path))
-            log.info(
+            log.debug(
                 "plugin.yaml_dispatched",
                 {
                     "source": str(yaml_path),

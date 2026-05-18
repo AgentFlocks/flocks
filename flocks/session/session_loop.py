@@ -831,7 +831,7 @@ class SessionLoop:
                             ctx.session.id, messages
                         )
                         tokens_dict = {"input": estimated_tokens, "output": 0, "cache": {"read": 0, "write": 0}}
-                        log.info("loop.tokens_estimated_from_messages", {
+                        log.debug("loop.tokens_estimated_from_messages", {
                             "session_id": ctx.session.id,
                             "estimated_tokens": estimated_tokens,
                             "message_count": len(messages),

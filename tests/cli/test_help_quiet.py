@@ -5,10 +5,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 NOISY_MARKERS = (
+    "plugin.scan",
     "plugin.project.scan",
     "tool.yaml.loaded",
     "plugin.yaml_dispatched",
     "tool_registry.api_service_sync",
+    "tool.registry.revision.bumped",
+    "tool.watcher.reloaded",
 )
 
 
