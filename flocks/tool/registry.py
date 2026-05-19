@@ -861,6 +861,15 @@ class ToolRegistry:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
+        python_tool_sources: Dict[str, Path] = {}
+        try:
+            from flocks.tool.tool_loader import discover_python_tool_sources
+
+            python_tool_sources = discover_python_tool_sources()
+        except Exception as e:
+            log.debug("tool_registry.python_source_discovery_failed", {"error": str(e)})
+
+        user_plugin_root = (Path.home() / ".flocks" / "plugins").resolve()
         for name in new_plugin_tools:
             tool = cls._tools.get(name)
             if tool is None:
@@ -870,6 +879,15 @@ class ToolRegistry:
             # consumer that would normally stamp source="plugin_py".
             if tool.info.source is None:
                 tool.info.source = "plugin_py"
+            if tool.info.source == "plugin_py":
+                origin = python_tool_sources.get(name)
+                if origin is not None:
+                    origin_path = origin.resolve()
+                    try:
+                        origin_path.relative_to(user_plugin_root)
+                        tool.info.native = False
+                    except ValueError:
+                        tool.info.native = True
         cls._plugin_tool_names = new_plugin_tools
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for

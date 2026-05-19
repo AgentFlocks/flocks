@@ -22,6 +22,7 @@ from flocks.tool.tool_loader import (
     create_yaml_tool,
     delete_python_tool,
     delete_yaml_tool,
+    discover_python_tool_sources,
     find_yaml_tool,
     list_yaml_tools,
     read_yaml_tool,
@@ -670,6 +671,41 @@ class TestCrudHelpers:
         assert not project_yaml.exists()
         assert find_yaml_tool("project_del_tool") is None
 
+    def test_discover_python_tool_sources_scans_user_and_project_dirs(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path / "user_tools")
+        monkeypatch.chdir(tmp_path)
+
+        user_python = tmp_path / "user_tools" / "python" / "user_tool.py"
+        user_python.parent.mkdir(parents=True, exist_ok=True)
+        user_python.write_text(textwrap.dedent("""\
+            from flocks.tool.registry import ToolRegistry
+
+            @ToolRegistry.register_function(
+                name="user_tool",
+                description="user tool",
+            )
+            async def user_tool(ctx):
+                return None
+        """))
+
+        project_python = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "project_tool.py"
+        project_python.parent.mkdir(parents=True, exist_ok=True)
+        project_python.write_text(textwrap.dedent("""\
+            from flocks.tool.registry import ToolRegistry
+
+            @ToolRegistry.register_function(
+                name="project_tool",
+                description="project tool",
+            )
+            async def project_tool(ctx):
+                return None
+        """))
+
+        sources = discover_python_tool_sources()
+
+        assert sources["user_tool"] == user_python
+        assert sources["project_tool"] == project_python
+
 
 # ---------------------------------------------------------------------------
 # scan_directory recursive
@@ -821,9 +857,11 @@ class TestPluginPyRegistration:
 
         old_tools = ToolRegistry._tools.copy()
         old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
         try:
             ToolRegistry._tools = {}
             ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
 
             def _fake_plugin_load() -> None:
                 ToolRegistry.register(Tool(
@@ -843,6 +881,81 @@ class TestPluginPyRegistration:
         finally:
             ToolRegistry._tools = old_tools
             ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_marks_project_python_tools_native(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        project_tool_path = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "project_tool.py"
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            def _fake_plugin_load() -> None:
+                ToolRegistry.register(Tool(
+                    info=ToolInfo(
+                        name="project_tool",
+                        description="Project tool",
+                        category=ToolCategory.CUSTOM,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                ))
+
+            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+                with patch(
+                    "flocks.tool.tool_loader.discover_python_tool_sources",
+                    return_value={"project_tool": project_tool_path},
+                ):
+                    ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["project_tool"].info.source == "plugin_py"
+            assert ToolRegistry._tools["project_tool"].info.native is True
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_marks_user_python_tools_non_native(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        user_tool_path = tmp_path / "user_flocks" / ".flocks" / "plugins" / "tools" / "python" / "user_tool.py"
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            def _fake_plugin_load() -> None:
+                ToolRegistry.register(Tool(
+                    info=ToolInfo(
+                        name="user_tool",
+                        description="User tool",
+                        category=ToolCategory.CUSTOM,
+                        native=True,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                ))
+
+            with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
+                with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+                    with patch(
+                        "flocks.tool.tool_loader.discover_python_tool_sources",
+                        return_value={"user_tool": user_tool_path},
+                    ):
+                        ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["user_tool"].info.source == "plugin_py"
+            assert ToolRegistry._tools["user_tool"].info.native is False
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
 
 
 # ---------------------------------------------------------------------------
