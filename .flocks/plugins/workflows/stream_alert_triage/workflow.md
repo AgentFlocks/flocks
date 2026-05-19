@@ -6,7 +6,7 @@
 
 * **跨批次复用**：dedup_key 命中持久化 cache 时直接复用历史 verdict/title/final_report，不调 LLM
 * **同批次去重**：批内多条 alert 共享 dedup_key 时，只对 **leader（首条）研判**，follower 广播复用 leader 结果
-* **保留 4 并行 LLM 分支**（survey / cve_related / cve_info / payload_analysis）— 与 `tdp_alert_triage` 完全相同的研判语义
+* **保留 4 并行 LLM 分支**（survey / cve_related / cve_info / payload_analysis）— 与 `tdp_alert_triage` 完全相同的研判语义；**默认仅开启 payload_analysis**，其余三个分支可按需通过 `branch_enables` 参数开启
 * **研判产物仅以字段形式附加**到每条 alert（`final_report` 字段含完整 markdown），**不生成任何独立的 per-alert 报告文件**
 
 ## 与上游的关系
@@ -53,11 +53,11 @@ input: 100 alerts
                                  │
                                  ├── _prepare_intel  (情报)
                                  │
-                                 ├── _parallel_4_branches  ← 内层 ThreadPoolExecutor(4)
-                                 │      ├── _llm_survey            ┐
-                                 │      ├── _llm_cve_related       │  4 LLM 并行
-                                 │      ├── _llm_cve_info          │
-                                 │      └── _llm_payload_analysis  ┘
+                                 ├── _parallel_4_branches  ← 内层 ThreadPoolExecutor(N, N≤4)
+                                 │      ├── _llm_survey            ┐ 默认关闭
+                                 │      ├── _llm_cve_related       │ 默认关闭  (branch_enables 控制)
+                                 │      ├── _llm_cve_info          │ 默认关闭
+                                 │      └── _llm_payload_analysis  ┘ 默认开启
                                  │
                                  ├── _llm_attack_analysis
                                  ├── _llm_attack_verdict
@@ -69,7 +69,7 @@ input: 100 alerts
 output: 100 enriched_alerts_with_triage (followers 拿到与 leader 相同的研判字段)
 ```
 
-**稳态 LLM 并发**：5 × 4 = **20**（4 并行分支期间）；5 × 1 = **5**（attack_analysis/verdict/title 顺序期间）。
+**稳态 LLM 并发**：默认配置（仅 payload_analysis 开启）全程固定 **5**（= 外层 5 worker × 每阶段 1 个 LLM 调用），无峰值波动。全部 4 分支开启时，分支阶段峰值为 5 × 4 = **20**。
 
 ## 输入参数
 
@@ -81,6 +81,7 @@ output: 100 enriched_alerts_with_triage (followers 拿到与 leader 相同的研
 | `concurrency` | `int` | `5` | 外层并发 worker 数（处理 unique work units） |
 | `max_triage_cache_size` | `int` | `100000` | 研判缓存 FIFO LRU 上限 |
 | `persist_triage_output` | `bool` | `True` | 是否把附加了研判字段的 alerts 落盘为 JSONL（关闭时仅保留内存输出） |
+| `branch_enables` | `dict` | `{'survey':false,'cve_related':false,'cve_info':false,'payload_analysis':true}` | 控制 4 个并行 LLM 分支的开关；未传入的 key 沿用默认值，禁用的分支不发起任何 LLM 调用 |
 
 输入优先级：`input_paths` > `input_path` > `input_date` > 当日默认。
 
@@ -172,11 +173,11 @@ output: 100 enriched_alerts_with_triage (followers 拿到与 leader 相同的研
 3. **单条研判**（cache miss 时）：
    1. `_parse_alert`：解析告警，提取 src/dst/url/payload/response，生成统一 `log_text` 与 IOC 列表
    2. `_prepare_intel`：调用 `threatbook_ip_query` / `threatbook_domain_query` / `threatbook_url_query` 与 `__mcp_vuln_query` 工具，预取情报
-   3. **`_parallel_4_branches`**：**`ThreadPoolExecutor(max_workers=4)`** 并行调用 4 个 LLM：
-      - `survey`：测绘信息总结
-      - `cve_related`：漏洞编号提取
-      - `cve_info`：漏洞详情
-      - `payload_analysis`：攻击 payload 分析
+   3. **`_parallel_4_branches`**：**`ThreadPoolExecutor(max_workers=N)`**（N = 已启用分支数，最大 4）并行调用已启用的 LLM 分支；禁用的分支直接返回空字符串，不占用线程也不发起 LLM 调用：
+      - `survey`：测绘信息总结（**默认关闭**）
+      - `cve_related`：漏洞编号提取（**默认关闭**）
+      - `cve_info`：漏洞详情（**默认关闭**）
+      - `payload_analysis`：攻击 payload 分析（**默认开启**）
    4. `_llm_attack_analysis`：5 类攻击状态判定
    5. `_llm_attack_verdict`：归一化为 5 个标签之一
    6. `_llm_report_title`：≤30 字中文报告标题
