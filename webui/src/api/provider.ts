@@ -73,6 +73,9 @@ export const providerAPI = {
   listApiServices: () =>
     client.get<APIServiceSummary[]>('/api/provider/api-services'),
 
+  getServiceMetadata: (id: string) =>
+    client.get<APIServiceMetadata>(`/api/provider/${id}/metadata`),
+
   updateApiService: (id: string, data: { enabled: boolean; verify_ssl?: boolean }) =>
     client.patch<APIServiceSummary>(`/api/provider/api-services/${id}`, data),
 

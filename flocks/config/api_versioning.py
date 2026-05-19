@@ -310,11 +310,11 @@ _descriptor_cache: Optional[List[ApiServiceDescriptor]] = None
 
 
 def _api_plugin_roots() -> List[Path]:
-    """Return ``<plugins>/tools/api/`` roots to scan for descriptors.
+    """Return ``<plugins>/tools/api/`` and ``<plugins>/tools/device/`` roots to scan for descriptors.
 
     Multi-version API plugins (different ``service_id``+``version`` combos
-    living side-by-side under the same ``api/`` parent) are supported by
-    :func:`discover_api_service_descriptors` walking each root's
+    living side-by-side under the same ``api/`` or ``device/`` parent) are
+    supported by :func:`discover_api_service_descriptors` walking each root's
     immediate subdirectories — no extra root is needed for that case.
 
     Both project- and user-level roots are computed at call time
@@ -322,10 +322,17 @@ def _api_plugin_roots() -> List[Path]:
     monkey-patch ``HOME`` or ``chdir`` see the new locations without
     needing to reimport :mod:`flocks.plugin.loader`.
     """
-    project_tools_api = Path.cwd() / ".flocks" / "plugins" / "tools" / "api"
-    user_tools_api = Path.home() / ".flocks" / "plugins" / "tools" / "api"
+    base_pairs = [
+        Path.cwd() / ".flocks" / "plugins" / "tools",
+        Path.home() / ".flocks" / "plugins" / "tools",
+    ]
+    type_subdirs = ("api", "device")
 
-    candidates = [project_tools_api, user_tools_api]
+    candidates: List[Path] = []
+    for base in base_pairs:
+        for subdir in type_subdirs:
+            candidates.append(base / subdir)
+
     seen: Set[str] = set()
     unique: List[Path] = []
     for root in candidates:

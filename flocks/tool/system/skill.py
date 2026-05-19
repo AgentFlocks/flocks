@@ -85,13 +85,25 @@ async def skill_tool_impl(
     
     # Get skill
     skill = await Skill.get(name)
-    
+
     if not skill:
-        all_skills = await Skill.all()
+        all_skills = await Skill.list_enabled()
         available = ", ".join(s.name for s in all_skills) or "none"
         return ToolResult(
             success=False,
             error=f'Skill "{name}" not found. Available skills: {available}'
+        )
+
+    # The skill exists, but the user has disabled it from the management UI.
+    # Refuse to load — otherwise the LLM could bypass the toggle by simply
+    # recalling a skill name from memory.
+    if Skill.is_disabled(skill.name):
+        return ToolResult(
+            success=False,
+            error=(
+                f'Skill "{name}" is disabled by the user and cannot be loaded. '
+                "Enable it from the Skills page to use it again."
+            )
         )
     
     # Request permission
@@ -155,14 +167,15 @@ async def skill_tool_impl(
 
 async def get_all_skills() -> List[dict]:
     """
-    Get all available skills as dictionaries
-    
-    Wrapper function for API routes compatibility.
-    
-    Returns:
-        List of skill dictionaries with name, description, location
+    Get all *enabled* skills as dictionaries.
+
+    Wrapper used by the Flocks SDK / TUI compatibility endpoints in
+    ``server/routes/misc.py`` (``GET /skill``).  Those endpoints feed
+    directly into the agent's view of "what skills exist", so we must
+    honour the disabled flag here — otherwise toggling a skill off in
+    the WebUI would still leave it visible to TUI-attached agents.
     """
-    skills = await Skill.all()
+    skills = await Skill.list_enabled()
     return [
         {
             "name": skill.name,
@@ -175,27 +188,24 @@ async def get_all_skills() -> List[dict]:
 
 async def get_skill(name: str) -> dict | None:
     """
-    Get a specific skill by name as a dictionary
-    
-    Wrapper function for API routes compatibility.
-    
-    Args:
-        name: Skill name to get
-        
-    Returns:
-        Skill dictionary or None if not found
+    Get a specific skill by name as a dictionary.
+
+    Wrapper for the SDK/TUI ``GET /skill/{name}`` endpoint.  Disabled
+    skills behave the same as missing skills — we return ``None`` so
+    the agent cannot load the body of a skill the user has turned off.
     """
+    if Skill.is_disabled(name):
+        return None
     skill = await Skill.get(name)
     if not skill:
         return None
-    
-    # Also read the content
+
     try:
         with open(skill.location, 'r', encoding='utf-8') as f:
             content = f.read()
     except Exception:
         content = ""
-    
+
     return {
         "name": skill.name,
         "description": skill.description,
@@ -222,5 +232,18 @@ async def skill_tool(
     ctx: ToolContext,
     name: str,
 ) -> ToolResult:
-    """Wrapper that keeps `skill` as a pure load-on-demand tool."""
+    """Wrapper that refreshes the `skill` tool description on every call.
+
+    Why we keep refreshing instead of relying on a one-shot registration:
+    toggling a skill off in the UI must immediately remove it from the LLM's
+    view, but the `skill` tool description is part of the tool index baked
+    into the system prompt.  Re-building from `Skill.list_enabled()` here
+    mirrors the same call in `session/runner.py:build_tools` so a disabled
+    skill never re-appears on the next turn.
+    """
+    tool = ToolRegistry.get("skill")
+    if tool:
+        skills = await Skill.list_enabled()
+        tool.info.description = build_description(skills)
+
     return await skill_tool_impl(ctx, name)

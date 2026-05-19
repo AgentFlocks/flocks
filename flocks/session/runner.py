@@ -930,6 +930,16 @@ class SessionRunner:
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
+
+        # Device asset hint depends on the live device list, which is mutable
+        # outside of any of the block digests `SessionPrompt.build_system_prompts`
+        # tracks.  Append it on a fresh list so we never mutate a cached
+        # `system_prompts` returned by the prompt cache, and so the hint is
+        # re-evaluated every turn (its content has no business being cached).
+        device_hint = await self._build_device_asset_hint()
+        if device_hint:
+            system_prompts = [*system_prompts, device_hint]
+
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -1391,6 +1401,35 @@ class SessionRunner:
                 "error": str(exc),
             })
     
+    async def _build_device_asset_hint(self) -> Optional[str]:
+        """Return a short hint listing the count of enabled security devices.
+
+        Migrated from the now-deleted ``_build_system_prompts`` method when
+        prompt assembly moved to ``SessionPrompt.build_system_prompts`` on
+        the ``dev`` branch.  The hint is intentionally tiny: the full
+        machine-room → device → tool tree is returned by the
+        ``device_context`` tool on demand, so the system prompt stays lean
+        and never duplicates the tool catalog.  Returns ``None`` when no
+        device is enabled (or device lookup fails) so the caller can skip
+        appending an empty block.
+        """
+        try:
+            from flocks.tool.device.store import list_devices
+
+            devices = await list_devices()
+            enabled = [d for d in devices if d.enabled]
+            if not enabled:
+                return None
+            return (
+                "## 安全设备资产\n\n"
+                f"当前共接入 {len(enabled)} 台安全设备（共 {len(devices)} 台）。"
+                "调用 `device_context` 工具可查看机房结构、设备名称与对应工具列表，"
+                "操作特定设备前请先确认其工具前缀。"
+            )
+        except Exception as exc:
+            log.warn("runner.device_hint_failed", {"error": str(exc)})
+            return None
+
     async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
         try:
@@ -1613,6 +1652,24 @@ class SessionRunner:
         tools = []
         for tool_info in selected_tool_infos:
             description = tool_info.description
+            if tool_info.name == "skill":
+                # Import here to avoid circular dependency.
+                from flocks.tool.system.skill import build_description
+                from flocks.skill.skill import Skill
+
+                # `list_enabled()` honors the user's per-skill disable toggle
+                # in ``~/.flocks/config/skill_settings.json``.  We MUST rebuild
+                # the description at schema-build time (not just in the wrapper
+                # invoked when the LLM eventually calls the `skill` tool),
+                # because this description ships as part of the tool index in
+                # every system prompt — without this refresh, a disabled skill
+                # would still appear in the LLM's view of available skills.
+                skills = await Skill.list_enabled()
+                description = build_description(skills)
+                log.info("runner.build_tools.skill_description", {
+                    "skill_count": len(skills),
+                    "description_preview": description[:100],
+                })
 
             # Surface provider/service version to the model so it can pick
             # version-appropriate parameters (e.g. SIP v9.2 vs older spec).

@@ -20,6 +20,12 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
 }
 
 describe('getMessageBubbleClassName', () => {
+  // The bubble's max width is owned by its outer container (`max-w-[50%]` for
+  // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
+  // only controls its own intrinsic sizing (`w-auto` vs `w-full`).  Previously
+  // the inner bubble also pinned `max-w-2xl`, but the unified chat redesign
+  // moved that responsibility outward.  Tests here therefore assert width
+  // semantics, not the legacy `max-w-2xl` literal.
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -27,7 +33,8 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('max-w-2xl w-auto');
+    expect(className).toContain('w-auto');
+    expect(className).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -37,7 +44,7 @@ describe('getMessageBubbleClassName', () => {
       isEditing: true,
     });
 
-    expect(className).toContain('max-w-2xl w-full');
+    expect(className).toContain('w-full');
     expect(className).not.toContain('w-auto');
   });
 
@@ -48,7 +55,7 @@ describe('getMessageBubbleClassName', () => {
       isEditing: true,
     });
 
-    expect(className).toContain('max-w-2xl w-full');
+    expect(className).toContain('w-full');
   });
 });
 

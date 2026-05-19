@@ -120,6 +120,15 @@ class SecretManager:
         Returns:
             Secret value or None if not found
         """
+        # Per-device credential context takes priority over global secrets.
+        try:
+            from flocks.tool.credential_context import get_secret_override
+            override = get_secret_override(secret_id)
+            if override is not None:
+                return override
+        except Exception:
+            pass
+
         data = self._load()
         value = data.get(secret_id)
         if value:

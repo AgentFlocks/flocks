@@ -12,6 +12,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const TOOL_PANEL_WIDTH = 720;
@@ -402,33 +403,24 @@ export default function MCPTabContent({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
-          <button
-            onClick={() => setSelectedCategory('all')}
-            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-          >
-            {t('catalog.all')}
-          </button>
-          {Object.entries(catalogCategories).map(([id, cat]) =>
-            catalogCategoryCounts[id] ? (
-              <button
-                key={id}
-                onClick={() => setSelectedCategory(id)}
-                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-              >
-                {cat.label} ({catalogCategoryCounts[id]})
-              </button>
-            ) : null
-          )}
-        </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
         <button
-          onClick={fetchServers}
-          className="inline-flex items-center px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 flex-shrink-0"
+          onClick={() => setSelectedCategory('all')}
+          className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
         >
-          <RefreshCw className="w-4 h-4 mr-1.5" />
-          {t('mcp.refreshStatus')}
+          {t('catalog.all')}
         </button>
+        {Object.entries(catalogCategories).map(([id, cat]) =>
+          catalogCategoryCounts[id] ? (
+            <button
+              key={id}
+              onClick={() => setSelectedCategory(id)}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              {cat.label} ({catalogCategoryCounts[id]})
+            </button>
+          ) : null
+        )}
       </div>
 
       {serversLoading && catalogLoading ? (
@@ -436,91 +428,109 @@ export default function MCPTabContent({
       ) : unifiedCards.length === 0 ? (
         <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
-        <div className="grid gap-4 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
           {unifiedCards.map(({ id, entry, server, configured }) => {
             const displayName = entry?.name || server.name;
             const metadataDescription = getMetadataDescription(server.metadata, i18n.language);
-            const cardDescription = getCatalogDescription(entry, i18n.language)
+            const rowDescription = getCatalogDescription(entry, i18n.language)
               || metadataDescription
-              || `${displayName} MCP server for secure tool integration and operational workflows.`;
+              || `${displayName} MCP server`;
             const serverTools = toolsByServer[id] || [];
             const isSelected = selectedServer === id;
             const isActive = server.status === 'connected';
             const isError = server.status === 'error';
             const isDisabled = server.status === 'disabled';
-            const borderColor = isActive ? '#10B981' : isError ? '#EF4444' : '#9CA3AF';
             const isActionable = isActive || configured;
-            const hasCatalogMeta = !!entry;
+            const statusLabel = isActive
+              ? t('statusBadge.active')
+              : isError
+              ? t('statusBadge.error')
+              : isDisabled
+              ? t('statusBadge.disabled')
+              : t('statusBadge.inactive');
+            const statusClass = isActive
+              ? 'bg-green-100 text-green-700'
+              : isError
+              ? 'bg-red-100 text-red-700'
+              : 'bg-gray-100 text-gray-500';
 
             return (
               <div
                 key={id}
-                onClick={() => {
-                  if (!isActionable) return;
-                  setSelectedCard(isSelected ? null : id);
-                }}
-                className={`relative bg-white rounded-xl border overflow-hidden h-[180px] flex flex-col transition-all duration-150 ${isActionable ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-red-400 shadow-md ring-2 ring-red-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
-                style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}`}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
-                <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
-                  <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{displayName}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : isDisabled ? 'bg-gray-100 text-gray-500' : 'bg-gray-100 text-gray-600'}`}>
-                      {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : isDisabled ? t('statusBadge.disabled') : t('statusBadge.inactive')}
-                    </span>
-                    <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">MCP</span>
+                {/* Icon */}
+                <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${isActive ? 'bg-green-50' : isError ? 'bg-red-50' : 'bg-gray-50'}`}>
+                  <Server className={`w-4 h-4 ${isActive ? 'text-green-600' : isError ? 'text-red-500' : 'text-gray-400'}`} />
+                </div>
+
+                {/* Name + description.
+                    Whole block is the click target — mirrors the Hub catalog
+                    pattern (``Hub/index.tsx`` HubTable row) so the description
+                    line is just as clickable as the name itself. */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCard(isSelected ? null : id)}
+                  className="min-w-0 text-left group/name focus:outline-none"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">{displayName}</span>
                     {entry && PRIORITY_IDS.has(entry.id) && (
-                      <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">{t('mcp.recommended')}</span>
+                      <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">{t('mcp.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 leading-relaxed min-h-[40px] line-clamp-2">
-                    {cardDescription}
-                  </p>
-                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
-                    <Wrench className="w-3 h-3 shrink-0" />
-                    <span>{serverTools.length} {t('mcp.tools')}</span>
-                    <span className="mx-1">·</span>
-                    <FileText className="w-3 h-3 shrink-0" />
-                    <span>{server.resources?.length || 0} {t('mcp.resources')}</span>
-                  </div>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{rowDescription}</p>
+                </button>
+
+                {/* Type column */}
+                <div className="text-center">
+                  <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-medium rounded">MCP</span>
+                </div>
+
+                {/* Status column */}
+                <div className="text-center">
+                  <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${statusClass}`}>
+                    {statusLabel}
+                  </span>
+                </div>
+
+                {/* Stats column */}
+                <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
+                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{serverTools.length}</span>
                   {server.connected_at ? (
-                    <div className="flex items-center gap-1">
-                      <Clock className="w-3 h-3 shrink-0" />
-                      <span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
-                    </div>
-                  ) : hasCatalogMeta ? (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                      <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{entry.stars}</span>
-                    </div>
+                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDuration(server.connected_at, t)}</span>
+                  ) : entry ? (
+                    <span className="flex items-center gap-1"><Star className="w-3 h-3" />{entry.stars}</span>
                   ) : null}
                 </div>
-                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+
+                {/* Actions column */}
+                <div className="flex items-center justify-end gap-1.5">
                   {isActive ? (
                     <>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <Settings className="w-3 h-3" /> {t('mcp.manage')}
+                        <Settings className="w-3 h-3" />{t('mcp.manage')}
                       </button>
-                      <button onClick={(e) => handleDisconnect(id, e)} className="flex items-center justify-center w-7 h-7 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 transition-colors" title={t('mcp.disconnectTitle')}>
+                      <button onClick={(e) => handleDisconnect(id, e)} className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors" title={t('mcp.disconnectTitle')}>
                         <PowerOff className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : isDisabled ? (
                     <>
                       <button
-                        onClick={(e) => { handleToggleEnabled(id, true, e); }}
+                        onClick={(e) => handleToggleEnabled(id, true, e)}
                         disabled={installing === id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('detail.enableServer')}
+                        <Power className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex items-center justify-center w-7 h-7 border rounded-lg transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
                         <Settings className="w-3.5 h-3.5" />
@@ -531,14 +541,13 @@ export default function MCPTabContent({
                       <button
                         onClick={(e) => { e.stopPropagation(); handleConnect(id, e); }}
                         disabled={installing === id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('mcp.reconnect')}
+                        <Power className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('mcp.reconnect')}
                       </button>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex items-center justify-center w-7 h-7 border rounded-lg transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
                         <Settings className="w-3.5 h-3.5" />
@@ -558,22 +567,23 @@ export default function MCPTabContent({
                           }
                         }}
                         disabled={!entry || installing === id}
-                        className={INSTALL_BUTTON_CLASS}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Download className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('button.install')}
+                        <Download className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('button.install')}
                       </button>
                       {entry?.github ? (
                         <a
                           href={`https://github.com/${entry.github}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
+                          className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                           title="GitHub"
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                         </a>
-                      ) : null}
+                      ) : (
+                        <span className="w-7 h-7" aria-hidden="true" />
+                      )}
                     </>
                   )}
                 </div>
@@ -732,7 +742,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>}
           </div>
           <button onClick={onClose} className="flex-shrink-0 p-1 rounded hover:bg-gray-100 transition-colors">

@@ -18,10 +18,23 @@
       "subtitle": "由主 Agent 调度的专业执行者，各司其职完成特定任务"
     }
   },
+  "totalCount": "共 {{total}} 个 Agent",
   "badge": {
     "native": "内置",
+    "custom": "自定义",
     "delegatable": "可委托",
-    "delete": "删除"
+    "delete": "删除",
+    "edit": "编辑",
+    "nativeDeleteDisabled": "内置 Agent 不支持删除"
+  },
+  "filter": {
+    "all": "全部",
+    "builtin": "内置",
+    "custom": "自定义",
+    "aria": "按来源筛选"
+  },
+  "pagination": {
+    "info": "{{start}}–{{end}} / 共 {{total}} 个"
   },
   "form": {
     "name": "名称",

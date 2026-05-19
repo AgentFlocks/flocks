@@ -246,7 +246,9 @@ class Agent:
         # ── ① Collect context ─────────────────────────────────────────────
         available_tools = [t.name for t in ToolRegistry.list_tools() if t.enabled]
         categorized_tools = categorize_tools(available_tools)
-        skills = await Skill.all()
+        # Use list_enabled() so user-disabled skills are excluded from the
+        # agent's system prompt context.  All() would include them.
+        skills = await Skill.list_enabled()
         available_skills = [
             AvailableSkill(name=s.name, description=s.description, location=s.source or "project")
             for s in skills
@@ -433,8 +435,43 @@ class Agent:
 
     _state_accessor = Instance.state(_create_task)
 
+    # Last observed mtime of skill_settings.json — used by each worker process
+    # to detect changes made by other workers.  Stored as a class variable so it
+    # persists across async calls in the same process.
+    _skill_settings_mtime: float = 0.0
+
+    @classmethod
+    def _sync_skill_settings_cache(cls) -> None:
+        """Invalidate in-process agent cache when skill settings change on disk.
+
+        ``PATCH /api/skills/{name}/toggle`` writes ``skill_settings.json`` and
+        then calls ``Agent.invalidate_cache()``, which only clears the cache for
+        the *current* uvicorn worker.  Other workers never receive the signal and
+        keep serving stale agent prompts that still include the now-disabled skill.
+
+        Each worker independently calls this method at the start of
+        :meth:`state`.  If the file's mtime is newer than what this worker last
+        saw, the local cache is dropped so the next :meth:`state` call rebuilds
+        the agent prompts from the current (post-toggle) skill list.
+        """
+        try:
+            sentinel = Skill.settings_path()
+            if not sentinel.exists():
+                return
+            current_mtime = sentinel.stat().st_mtime
+            if current_mtime > cls._skill_settings_mtime:
+                # Another worker (or the current one) updated the settings file.
+                # Record the new mtime first to avoid a redundant invalidation on
+                # the very next call in the same worker.
+                cls._skill_settings_mtime = current_mtime
+                cls._state_accessor.invalidate()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     @staticmethod
     async def state() -> Dict[str, AgentInfo]:
+        # Detect cross-worker skill-settings changes before serving cached state.
+        Agent._sync_skill_settings_cache()
         return await Agent._state_accessor()
 
     @classmethod

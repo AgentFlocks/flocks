@@ -22,6 +22,17 @@
     "nodes": "节点"
   },
   "noDescription": "无描述",
+  "totalCount": "共 {{total}} 个工作流",
+  "filter": {
+    "all": "全部",
+    "builtin": "内置",
+    "custom": "自定义",
+    "aria": "按来源筛选"
+  },
+  "badge": {
+    "builtin": "内置",
+    "custom": "自定义"
+  },
   "detail": {
     "loadFailed": "加载工作流失败",
     "notFound": "工作流不存在",
