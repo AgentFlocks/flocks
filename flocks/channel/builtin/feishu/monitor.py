@@ -23,6 +23,7 @@ import hashlib
 import importlib
 import json
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 from typing import Any, Awaitable, Callable, Optional
@@ -107,31 +108,50 @@ def _build_ws_client(
 
         class _CompatWSClient:
             def __init__(self) -> None:
-                self._client = native_client_cls(
-                    app_id=app_id,
-                    app_secret=app_secret,
-                    log_level=lark.LogLevel.WARNING,
-                    event_handler=_Dispatcher(),
-                    domain=domain,
-                    auto_reconnect=False,
-                )
+                self._client: Any | None = None
                 self._thread: Optional[threading.Thread] = None
                 self._loop: Optional[asyncio.AbstractEventLoop] = None
                 self._receive_task: Optional[asyncio.Task] = None
+                self._ping_task: Optional[asyncio.Task] = None
                 self._start_error: Optional[BaseException] = None
                 self._stop_requested = False
                 self._finished = threading.Event()
 
             def start(self) -> None:
+                self._finished.clear()
+                self._start_error = None
+                self._stop_requested = False
+
                 def _run() -> None:
                     self._loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(self._loop)
                     ws_module.loop = self._loop
+                    self._client = native_client_cls(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        log_level=lark.LogLevel.WARNING,
+                        event_handler=_Dispatcher(),
+                        domain=domain,
+                        auto_reconnect=False,
+                    )
+
+                    original_ping_loop = getattr(self._client, "_ping_loop", None)
+                    if callable(original_ping_loop):
+                        async def _tracked_ping_loop() -> None:
+                            self._ping_task = asyncio.current_task()
+                            try:
+                                await original_ping_loop()
+                            finally:
+                                self._ping_task = None
+
+                        self._client._ping_loop = _tracked_ping_loop
 
                     async def _receive_message_loop() -> None:
                         self._receive_task = asyncio.current_task()
                         try:
                             while True:
+                                if self._client is None:
+                                    return
                                 if self._stop_requested and self._client._conn is None:
                                     return
                                 if self._client._conn is None:
@@ -160,6 +180,8 @@ def _build_ws_client(
 
                     self._client._receive_message_loop = _receive_message_loop
                     try:
+                        if self._stop_requested:
+                            return
                         self._client.start()
                     except RuntimeError as e:
                         if "Event loop stopped before Future completed" not in str(e):
@@ -175,42 +197,71 @@ def _build_ws_client(
                     daemon=True,
                 )
                 self._thread.start()
-                self._finished.wait(timeout=0.2)
+                deadline = time.monotonic() + 0.2
+                while self._client is None and not self._finished.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._finished.wait(timeout=min(remaining, 0.01))
                 if self._start_error:
                     raise RuntimeError(str(self._start_error)) from self._start_error
 
             def stop(self) -> None:
-                if self._loop is None:
-                    return
                 self._stop_requested = True
+                if self._client is None and self._thread and self._thread.is_alive():
+                    deadline = time.monotonic() + 0.5
+                    while self._client is None and not self._finished.is_set():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._finished.wait(timeout=min(remaining, 0.01))
+                if self._loop is None:
+                    if self._thread:
+                        self._thread.join(timeout=5)
+                        self._thread = None
+                    return
+                loop_running = self._loop.is_running()
 
-                async def _drain_receive_task() -> None:
-                    task = self._receive_task
+                async def _drain_task(task: Optional[asyncio.Task], timeout: float) -> None:
                     if task is None or task.done():
                         return
                     try:
-                        await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+                        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
                     except asyncio.TimeoutError:
                         task.cancel()
                         with contextlib.suppress(asyncio.CancelledError, Exception):
                             await task
 
-                with contextlib.suppress(Exception):
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._client._disconnect(),
-                        self._loop,
-                    )
-                    future.result(timeout=5)
-                with contextlib.suppress(Exception):
-                    future = asyncio.run_coroutine_threadsafe(
-                        _drain_receive_task(),
-                        self._loop,
-                    )
-                    future.result(timeout=2)
+                if loop_running and self._client is not None:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._client._disconnect(),
+                            self._loop,
+                        )
+                        future.result(timeout=5)
+                if loop_running:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            _drain_task(self._receive_task, timeout=1.0),
+                            self._loop,
+                        )
+                        future.result(timeout=2)
+                if loop_running:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            _drain_task(self._ping_task, timeout=1.0),
+                            self._loop,
+                        )
+                        future.result(timeout=2)
                 with contextlib.suppress(Exception):
                     self._loop.call_soon_threadsafe(self._loop.stop)
                 if self._thread:
                     self._thread.join(timeout=5)
+                self._thread = None
+                self._loop = None
+                self._client = None
+                self._receive_task = None
+                self._ping_task = None
 
             @property
             def start_error(self) -> Optional[BaseException]:
