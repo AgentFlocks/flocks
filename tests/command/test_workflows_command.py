@@ -93,7 +93,7 @@ class TestWorkflowsCommandRegistration:
 
     def test_tools_skills_workflows_all_registered(self):
         """Verify the three capability-discovery commands exist together."""
-        for name in ("tools", "skills", "workflows"):
+        for name in ("tools", "skills", "agents", "workflows"):
             assert Command.get(name) is not None, f"Command '/{name}' not registered"
 
     def test_restart_command_removed(self):
@@ -219,6 +219,7 @@ class TestHelpHandler:
         assert "Other commands (handled through the normal assistant/session flow):" in output
         assert "/tools" in output
         assert "/skills" in output
+        assert "/agents" in output
         assert "/workflows" in output
 
     async def test_help_uses_backtick_placeholders_instead_of_html_like_tokens(self):

@@ -46,6 +46,7 @@ class TestHelpFormatting:
         assert "/help" in output
         assert "/tools" in output
         assert "/skills" in output
+        assert "/agents" in output
         assert "/workflows" in output
         assert "/mcp" in output
         assert "/clear" not in output

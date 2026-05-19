@@ -17,6 +17,7 @@ _DEFAULT_HINTS: dict[str, str] = {
 _AGENT_SAFE_HINTS: dict[str, str] = {
     "tools": "- /tools [list|info `name`]",
     "skills": "- /skills [list]",
+    "agents": "- /agents",
     "workflows": "- /workflows",
     "mcp": "- /mcp [list|status|tools]",
 }

@@ -25,25 +25,18 @@ function buildRexContext(isEdit: boolean, formData: SkillFormData): string {
   if (!isEdit) {
     return `你是 Skill 创建助手。用户希望通过对话来创建一个新的 Skill。
 
-**Skill 文件规范（必须严格遵守）：**
-- 每个 Skill 是一个独立目录，目录名即 skill 名称（kebab-case，如 \`my-skill\`）
-- 文件路径：\`~/.flocks/plugins/skills/<skill-name>/SKILL.md\`（优先写到用户全局目录）
-  - 若需写到项目目录则使用：\`./.flocks/plugins/skills/<skill-name>/SKILL.md\`
-  - **注意：不要写到 \`.flocks/skills/\`（那是内置 skill 目录，不应由用户创建）**
-- 文件必须以 YAML front matter 开头，格式如下：
-  \`\`\`
-  ---
-  name: <skill-name>
-  description: <一句话描述>
-  ---
-  
-  # 正文内容（Markdown 格式）
-  \`\`\`
+请使用 skill-builder skill 根据用户需求完成创建，产物写入 ~/.flocks/plugins/skills/<skill-name>/ 目录。
 
 **创建流程：**
-1. 先确认用户需求：Skill 名称（kebab-case）、描述、主要功能
-2. 生成完整的 SKILL.md 内容（含 front matter + Markdown 正文）
-3. 用 \`write\` 工具写入文件（路径：\`~/.flocks/plugins/skills/<name>/SKILL.md\`）`;
+1. 先确认用户需求：Skill 名称（kebab-case）、描述、主要功能、作用域（用户/global 或项目）
+2. 按 skill 生成 SKILL.md（及必要的 references/scripts/evals）
+3. 执行 skill 要求的验证，确保 skill 可被系统发现
+
+**重要约束：**
+- 必须先加载 skill-builder skill，再动手写文件
+- 禁止写到 .flocks/skills/ 等内置 skill 目录
+
+请先引导用户描述需求，信息不足时可追问，然后按 skill 一次性完成创建。`;
   }
 
   return `你是 Skill 优化助手，正在帮助用户修改技能「${formData.name}」。

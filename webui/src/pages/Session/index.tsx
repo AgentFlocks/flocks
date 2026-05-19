@@ -30,6 +30,28 @@ function sanitizeSessionExportName(value: string) {
     .replace(/^-|-$/g, '') || 'session';
 }
 
+const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
+
+function readLastSelectedSessionId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_SELECTED_SESSION_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSelectedSessionId(sessionId: string | null) {
+  try {
+    if (sessionId) {
+      window.localStorage.setItem(LAST_SELECTED_SESSION_STORAGE_KEY, sessionId);
+    } else {
+      window.localStorage.removeItem(LAST_SELECTED_SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures so the main chat flow is never blocked.
+  }
+}
+
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
   const [searchParams, setSearchParams] = useSearchParams();
@@ -99,6 +121,11 @@ export default function SessionPage() {
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
 
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    writeLastSelectedSessionId(selectedSessionId);
+  }, [selectedSessionId]);
+
   // Close agent dropdown on outside click
   useEffect(() => {
     if (!showAgentOptions) return;
@@ -148,6 +175,34 @@ export default function SessionPage() {
       setCreating(false);
     }
   }, [creating, addSession, toast, t]);
+
+  useEffect(() => {
+    if (loadingSessions) return;
+    if (searchParams.get('session')) return;
+
+    if (selectedSessionId && sessions.some((session) => session.id === selectedSessionId)) {
+      return;
+    }
+
+    const lastSelectedSessionId = readLastSelectedSessionId();
+    const fallbackSession = lastSelectedSessionId
+      ? sessions.find((session) => session.id === lastSelectedSessionId)
+      : undefined;
+
+    if (fallbackSession && fallbackSession.id !== selectedSessionId) {
+      setSelectedSessionId(fallbackSession.id);
+      return;
+    }
+
+    if (!fallbackSession && selectedSessionId) {
+      setSelectedSessionId(null);
+    }
+  }, [
+    loadingSessions,
+    searchParams,
+    selectedSessionId,
+    sessions,
+  ]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,

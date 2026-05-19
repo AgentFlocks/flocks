@@ -22,9 +22,9 @@ export function useTools() {
     }
   }, []);
 
-  const refreshAndFetch = useCallback(async () => {
+  const refreshAndFetch = useCallback(async (force = false) => {
     const now = Date.now();
-    if (now - lastRefreshRef.current < 5000) return;
+    if (!force && now - lastRefreshRef.current < 5000) return;
     lastRefreshRef.current = now;
     try {
       await toolAPI.refresh();
@@ -40,10 +40,8 @@ export function useTools() {
       if (cancelled) return;
 
       try {
-        await toolAPI.refresh();
+        await refreshAndFetch(true);
         if (cancelled) return;
-        lastRefreshRef.current = Date.now();
-        await fetchTools(false);
       } catch {
         /* ignore */
       }
@@ -53,13 +51,18 @@ export function useTools() {
 
     const onVisible = () => {
       if (document.visibilityState === 'visible') {
-        void refreshAndFetch();
+        void refreshAndFetch(false);
       }
     };
+    const onFocus = () => {
+      void refreshAndFetch(false);
+    };
     document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onFocus);
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onFocus);
     };
   }, [fetchTools, refreshAndFetch]);
 
@@ -67,6 +70,6 @@ export function useTools() {
     tools,
     loading,
     error,
-    refetch: () => fetchTools(false),
+    refetch: () => refreshAndFetch(true),
   };
 }

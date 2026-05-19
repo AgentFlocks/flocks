@@ -176,6 +176,15 @@ class Command:
                 visible_surfaces=("webui", "tui", "acp", "cli"),
             ),
             CommandDef(
+                name="agents",
+                description="List available agents",
+                template="List all available agents that can be delegated to.",
+                agent="rex",
+                execution_kind="direct",
+                allow_attachments=False,
+                visible_surfaces=("webui", "tui", "acp", "cli"),
+            ),
+            CommandDef(
                 name="workflows",
                 description="List available workflows",
                 template="List all available workflows with their names, descriptions, and file paths.",

@@ -8,12 +8,14 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
+from flocks.agent.agent import AvailableAgent
+from flocks.agent.registry import Agent
 from flocks.command.command import Command, CommandInfo, CommandSurface
 from flocks.command.help import format_help
 from flocks.skill.skill import Skill
 from flocks.tool.registry import ToolRegistry
 
-AGENT_SAFE_DIRECT_COMMANDS = frozenset({"help", "tools", "skills", "workflows", "mcp"})
+AGENT_SAFE_DIRECT_COMMANDS = frozenset({"help", "tools", "skills", "agents", "workflows", "mcp"})
 _TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "custom"]
 
 
@@ -97,6 +99,23 @@ def build_tools_catalog_summary(
         max_description_chars=max_description_chars,
         include_tip=include_tip,
     )
+
+
+def format_available_agents_summary(agents: list[AvailableAgent]) -> str:
+    if not agents:
+        return "No available agents."
+
+    lines = ["Available agents:", ""]
+    for agent in agents:
+        metadata_bits = []
+        if agent.metadata.category:
+            metadata_bits.append(agent.metadata.category)
+        if agent.metadata.cost:
+            metadata_bits.append(agent.metadata.cost)
+        metadata_suffix = f" ({', '.join(metadata_bits)})" if metadata_bits else ""
+        description = agent.description.strip() or "No description provided."
+        lines.append(f"- `{agent.name}`{metadata_suffix}: {description}")
+    return "\n".join(lines)
 
 
 async def run_direct_command(
@@ -213,6 +232,15 @@ async def run_direct_command(
             return DirectCommandResult(handled=True, text="\n".join(lines))
 
         return DirectCommandResult(handled=True, text="Usage: /skills [list|refresh]")
+
+    if name == "agents":
+        if args:
+            return DirectCommandResult(handled=True, text="Usage: /agents")
+        agents = await Agent.list_available_agents()
+        return DirectCommandResult(
+            handled=True,
+            text=format_available_agents_summary(agents),
+        )
 
     if name == "workflows":
         from flocks.workflow.center import format_workflow_entries, scan_skill_workflows

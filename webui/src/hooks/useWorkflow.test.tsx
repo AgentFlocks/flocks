@@ -68,4 +68,32 @@ describe('useWorkflows', () => {
 
     expect(result.current.error).toBe('Session expired');
   });
+
+  it('refetches workflows when the page becomes visible', async () => {
+    listMock
+      .mockResolvedValueOnce({
+        data: [makeWorkflow()],
+      })
+      .mockResolvedValueOnce({
+        data: [makeWorkflow(), makeWorkflow({ id: 'wf-2', name: 'Workflow Two' })],
+      });
+
+    const { result } = renderHook(() => useWorkflows());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.workflows).toHaveLength(1);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await waitFor(() => {
+      expect(result.current.workflows).toHaveLength(2);
+    });
+  });
 });

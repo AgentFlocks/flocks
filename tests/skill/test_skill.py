@@ -399,6 +399,28 @@ async def test_discover_project_overrides_global(tmp_path):
     assert "Project version" in skill.description
 
 
+@pytest.mark.asyncio
+async def test_repo_contains_skill_builder_project_skill(tmp_path):
+    """The repo should expose skill-builder as a project-installed skill."""
+    project_dir = Path(__file__).resolve().parents[2]
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with (
+        patch("os.path.expanduser", return_value=str(fake_home)),
+        patch("flocks.skill.skill.Instance.get_directory", return_value=str(project_dir)),
+        patch("flocks.skill.skill.Instance.get_worktree", return_value=str(project_dir)),
+    ):
+        Skill.clear_cache()
+        skills = await Skill.all()
+
+    skill = next((s for s in skills if s.name == "skill-builder"), None)
+    assert skill is not None, "skill-builder not discovered"
+    assert skill.source == "project", f"expected 'project', got {skill.source!r}"
+    assert skill.category == "system"
+    assert "skill" in skill.description.lower()
+
+
 # =============================================================================
 # SkillFileWatcher — basic lifecycle
 # =============================================================================
@@ -539,13 +561,32 @@ def test_parse_skill_md_nonexistent_file_returns_none():
 async def test_create_skill_writes_to_plugins_path(tmp_path, monkeypatch):
     """POST /skills should write to ~/.flocks/plugins/skills/, not ~/.flocks/skills/."""
     from httpx import AsyncClient, ASGITransport
+    from flocks.server import auth as auth_module
     from flocks.server.app import app
+
+    class SecretManagerStub:
+        def __init__(self, values: dict[str, str]):
+            self._values = values
+
+        def get(self, key: str):
+            return self._values.get(key)
+
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: SecretManagerStub({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
 
     # Redirect home directory to tmp_path so we don't pollute real ~/.flocks
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(os.path, "expanduser", lambda p: str(tmp_path) if p == "~" else p.replace("~", str(tmp_path)))
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    headers = {"Authorization": "Bearer abc123", "User-Agent": "curl/8.0"}
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+        headers=headers,
+    ) as client:
         resp = await client.post("/api/skills", json={
             "name": "write-path-test",
             "description": "Testing write path is plugins/skills",

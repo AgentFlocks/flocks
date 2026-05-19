@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Workflow as WorkflowIcon, Plus, ChevronRight, FolderOpen, Sparkles } from 'lucide-react';
+import { Workflow as WorkflowIcon, Plus, RefreshCw, ChevronRight, FolderOpen, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -12,8 +12,25 @@ export default function WorkflowPage() {
   const { t } = useTranslation('workflow');
   const navigate = useNavigate();
   const { workflows, loading, error, refetch } = useWorkflows();
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshDone, setRefreshDone] = useState(false);
   const customWorkflows = useMemo(() => workflows.filter(isUserManaged), [workflows]);
   const builtinWorkflows = useMemo(() => workflows.filter(workflow => !isUserManaged(workflow)), [workflows]);
+
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    try {
+      setRefreshing(true);
+      await Promise.all([
+        refetch(),
+        new Promise((r) => setTimeout(r, 600)),
+      ]);
+      setRefreshDone(true);
+      setTimeout(() => setRefreshDone(false), 2000);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   if (loading) {
     return (
@@ -46,13 +63,27 @@ export default function WorkflowPage() {
         description={t('pageDescription')}
         icon={<WorkflowIcon className="w-8 h-8" />}
         action={
-          <button
-            onClick={() => navigate('/workflows/new')}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
+              className={`p-2 border rounded-lg transition-all ${
+                refreshDone
+                  ? 'border-green-300 text-green-600 bg-green-50'
+                  : 'border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50'
+              }`}
+            >
+              <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              onClick={() => navigate('/workflows/new')}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
             >
               <Plus className="w-4 h-4" />
-            {t('createWorkflow')}
-          </button>
+              {t('createWorkflow')}
+            </button>
+          </div>
         }
       />
 

@@ -26,6 +26,7 @@ _READ_ONLY_ARGUMENT_HINTS = {
     "help": "",
     "tools": "[list|info `name`]",
     "skills": "[list]",
+    "agents": "",
     "workflows": "",
     "mcp": "[list|status|tools]",
 }
@@ -70,6 +71,8 @@ def _normalize_arguments(command: str, arguments: str) -> tuple[bool, str]:
         return (not args, "")
     if command == "skills":
         return (args in {"", "list"}, args)
+    if command == "agents":
+        return (not args, "")
     if command == "workflows":
         return (not args, "")
     if command == "tools":

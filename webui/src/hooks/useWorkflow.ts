@@ -1,14 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { workflowAPI, Workflow } from '@/api/workflow';
 
-const POLL_INTERVAL_MS = 10_000;
-
 export function useWorkflows(category?: string, status?: string) {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadingRef = useRef(false);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastRefreshRef = useRef(0);
 
   const fetchWorkflows = useCallback(async (silent = false) => {
     if (loadingRef.current) return;
@@ -31,33 +29,34 @@ export function useWorkflows(category?: string, status?: string) {
     }
   }, [category, status]);
 
-  const resetPollTimer = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => fetchWorkflows(true), POLL_INTERVAL_MS);
-  }, [fetchWorkflows]);
-
   // Initial fetch
   useEffect(() => {
-    fetchWorkflows();
+    void fetchWorkflows();
   }, [fetchWorkflows]);
 
-  // Polling with resetable timer
-  useEffect(() => {
-    resetPollTimer();
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [resetPollTimer]);
+  const refreshOnResume = useCallback((force = false) => {
+    const now = Date.now();
+    if (!force && now - lastRefreshRef.current < 1000) return;
+    lastRefreshRef.current = now;
+    void fetchWorkflows(true);
+  }, [fetchWorkflows]);
 
-  // Refetch on focus and reset poll timer to avoid immediate double-fetch
   useEffect(() => {
-    const onFocus = () => {
-      fetchWorkflows(true);
-      resetPollTimer();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refreshOnResume(false);
+      }
     };
+    const onFocus = () => {
+      refreshOnResume(false);
+    };
+    document.addEventListener('visibilitychange', onVisible);
     window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  }, [fetchWorkflows, resetPollTimer]);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshOnResume]);
 
   return {
     workflows,

@@ -6,6 +6,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 import SessionPage from './index';
 
 const {
+  client,
   sessionApi,
   updateSessionTitle,
   removeSession,
@@ -16,6 +17,9 @@ const {
   useAgents,
   toast,
 } = vi.hoisted(() => ({
+  client: {
+    post: vi.fn(),
+  },
   sessionApi: {
     delete: vi.fn(),
     get: vi.fn(),
@@ -35,6 +39,11 @@ const {
     success: vi.fn(),
     warning: vi.fn(),
   },
+}));
+
+vi.mock('@/api/client', () => ({
+  __esModule: true,
+  default: client,
 }));
 
 vi.mock('@/api/session', () => ({
@@ -100,9 +109,11 @@ const secondSession = {
   title: 'Second Session',
 };
 
-function renderSessionPage() {
+function renderSessionPage(
+  initialEntry: string | { pathname: string; state?: unknown } = '/sessions',
+) {
   return render(
-    <MemoryRouter initialEntries={['/sessions']}>
+    <MemoryRouter initialEntries={[initialEntry]}>
       <SessionPage />
     </MemoryRouter>,
   );
@@ -111,6 +122,7 @@ function renderSessionPage() {
 describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
 
     useSessions.mockReturnValue({
       sessions: [session],
@@ -131,6 +143,7 @@ describe('SessionPage session actions menu', () => {
     });
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
+    client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
     sessionApi.getMessages.mockResolvedValue([
       {
@@ -264,10 +277,18 @@ describe('SessionPage session actions menu', () => {
     expect(global.confirm).toHaveBeenCalledWith('confirmDelete');
   });
 
-  it('does not auto-select the first session on initial load', () => {
+  it('does not auto-attach any session on first load without history', () => {
     renderSessionPage();
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+  });
+
+  it('attaches the previously selected session on initial load', () => {
+    localStorage.setItem('flocks:last-selected-session', 'session-1');
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
   });
 
   it('syncs selected session when query param changes after mount', async () => {
