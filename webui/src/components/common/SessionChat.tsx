@@ -2259,6 +2259,20 @@ function ChatMessageBubbleInner({
 // ChatToolPart — collapsible tool call card
 // ============================================================================
 
+const TOOL_DISPLAY_MAX_LEN = 120;
+
+/** Truncate long tool titles / param summaries shown in the card header. */
+export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}…`;
+}
+
+function buildToolInputSummary(input: Record<string, unknown>): string {
+  return Object.entries(input)
+    .map(([k, v]) => `${k}=${String(v)}`)
+    .join(', ');
+}
+
 export interface ChatToolPartProps {
   part: MessagePart;
   pendingQuestion?: PendingQuestion;
@@ -2300,8 +2314,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   };
 
   const inputSummary = state.input
-    ? Object.entries(state.input).map(([k, v]) => `${k}=${v}`).join(', ')
+    ? truncateToolDisplayText(buildToolInputSummary(state.input))
     : '';
+  const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
 
   if (isWaitingForAnswer) {
     return (
@@ -2319,22 +2334,34 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   return (
     <details className={`mt-1.5 rounded-md border ${config.bg} ${config.border} overflow-hidden`}>
       <summary
-        className={`px-2 py-1.5 cursor-pointer flex items-center gap-1.5 text-xs font-medium ${config.text} hover:opacity-80`}
+        className={`px-2 py-1.5 cursor-pointer flex items-center gap-1.5 min-w-0 text-xs font-medium ${config.text} hover:opacity-80`}
       >
         <span>{config.icon}</span>
-        <span className="truncate">{toolName.replace(/_/g, ' ')}</span>
+        <span className="truncate shrink-0">{toolName.replace(/_/g, ' ')}</span>
         {inputSummary && (
-          <span className="text-[10px] opacity-50 truncate max-w-[120px]">({inputSummary})</span>
+          <span
+            className="text-[10px] opacity-50 truncate min-w-0 max-w-[120px]"
+            title={state.input ? buildToolInputSummary(state.input) : undefined}
+          >
+            ({inputSummary})
+          </span>
         )}
-        {state.title && <span className="ml-1 opacity-70 text-[10px]">{state.title}</span>}
-        <span className="ml-auto opacity-70">{config.label}</span>
+        {displayTitle && (
+          <span
+            className="ml-1 opacity-70 text-[10px] truncate min-w-0 max-w-[240px]"
+            title={state.title}
+          >
+            {displayTitle}
+          </span>
+        )}
+        <span className="ml-auto shrink-0 opacity-70">{config.label}</span>
       </summary>
 
       <div className="px-2 pb-2 space-y-1 text-xs">
         {state.input && (
           <details className="bg-white/50 rounded p-1.5">
             <summary className="cursor-pointer font-medium text-gray-600 text-[11px]">📥 {t('chat.tool.inputParams')}</summary>
-            <pre className="mt-1 p-1.5 bg-gray-800 text-gray-100 rounded text-[11px] overflow-x-auto font-mono">
+            <pre className="mt-1 p-1.5 bg-gray-800 text-gray-100 rounded text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono">
               {JSON.stringify(state.input, null, 2)}
             </pre>
           </details>
