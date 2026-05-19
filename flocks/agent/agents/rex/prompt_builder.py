@@ -254,7 +254,7 @@ def _build_command_guidance_section() -> str:
 ## CLI And Slash Command Guidance
 
 Use `flocks --help` to inspect Flocks CLI commands and usage.
-`flocks/command/command.py` is the source of truth for supported slash commands.
+run_slash_command tool with help command to get the latest slash command guidance.
 </Command_Guidance>"""
 
 

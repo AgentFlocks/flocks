@@ -226,7 +226,7 @@ class Command:
             ),
             CommandDef(
                 name="compact",
-                description="Summarize the conversation (optionally /compact <focus>)",
+                description="Summarize the conversation (optionally /compact `focus`)",
                 template="Summarize this conversation while preserving key context and decisions.",
                 agent="rex",
                 execution_kind="session_control",

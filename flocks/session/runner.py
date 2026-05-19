@@ -1486,7 +1486,7 @@ class SessionRunner:
         return tool_infos
 
     def _build_tool_catalog_prompt(self, agent: AgentInfo) -> Optional[str]:
-        from flocks.tool.system.slash_command import format_tools_catalog_summary
+        from flocks.command.direct import format_tools_catalog_summary
         from flocks.agent.toolset import get_all_enabled_builtin_tool_names
 
         is_rex = getattr(agent, "name", "") == "rex"

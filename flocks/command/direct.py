@@ -1,0 +1,362 @@
+"""
+Shared execution logic for direct slash commands.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional
+
+from flocks.command.command import Command, CommandInfo, CommandSurface
+from flocks.command.help import format_help
+from flocks.skill.skill import Skill
+from flocks.tool.registry import ToolRegistry
+
+AGENT_SAFE_DIRECT_COMMANDS = frozenset({"help", "tools", "skills", "workflows", "mcp"})
+_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "custom"]
+
+
+@dataclass
+class DirectCommandResult:
+    handled: bool
+    success: bool = True
+    text: Optional[str] = None
+    prompt: Optional[str] = None
+    clear_screen: bool = False
+
+
+def is_agent_safe_direct_command(command: CommandInfo) -> bool:
+    return (
+        command.execution_kind == "direct"
+        and command.name in AGENT_SAFE_DIRECT_COMMANDS
+    )
+
+
+def list_agent_safe_direct_commands() -> list[CommandInfo]:
+    return [cmd for cmd in Command.list_all() if is_agent_safe_direct_command(cmd)]
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return "No description provided."
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def format_tools_catalog_summary(
+    tools: list,
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for tool in tools:
+        if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):
+            continue
+        category = getattr(tool.category, "value", str(tool.category))
+        grouped[category].append((
+            tool.name,
+            _truncate_text(getattr(tool, "description", ""), max_description_chars),
+        ))
+
+    lines = ["Available Tools (grouped by category):", ""]
+    seen: set[str] = set()
+    for category in _TOOL_CATEGORY_ORDER:
+        if category not in grouped:
+            continue
+        lines.append(f"**{category}**")
+        for name, description in sorted(grouped[category], key=lambda item: item[0]):
+            lines.append(f"- {name}: {description}")
+        lines.append("")
+        seen.add(category)
+
+    for category, items in grouped.items():
+        if category in seen:
+            continue
+        lines.append(f"**{category}**")
+        for name, description in sorted(items, key=lambda item: item[0]):
+            lines.append(f"- {name}: {description}")
+        lines.append("")
+
+    if include_tip:
+        lines.append("Tip: use /tools info `name` for full details.")
+
+    return "\n".join(lines).strip()
+
+
+def build_tools_catalog_summary(
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    ToolRegistry.init()
+    tools = ToolRegistry.list_tools()
+    return format_tools_catalog_summary(
+        tools=tools,
+        max_description_chars=max_description_chars,
+        include_tip=include_tip,
+    )
+
+
+async def run_direct_command(
+    name: str,
+    *,
+    args: str = "",
+    surface: Optional[CommandSurface] = None,
+) -> DirectCommandResult:
+    """Execute a direct command and return its result."""
+    resolved = Command.resolve(name)
+    if not resolved or resolved.execution_kind != "direct":
+        return DirectCommandResult(handled=False)
+
+    name = resolved.name
+    args = (args or "").strip()
+
+    if name == "help":
+        return DirectCommandResult(handled=True, text=format_help(surface=surface))
+
+    if name == "clear":
+        return DirectCommandResult(handled=True, clear_screen=True, text="Screen cleared.")
+
+    if name == "tools":
+        if not args or args == "list":
+            return DirectCommandResult(handled=True, text=build_tools_catalog_summary())
+
+        if args == "refresh":
+            ToolRegistry.refresh_dynamic_tools()
+            summary = build_tools_catalog_summary()
+            text = "Dynamic tools refreshed. Current summary:\n\n" + summary.split("\n", 1)[1]
+            return DirectCommandResult(handled=True, text=text)
+
+        if args.startswith("info"):
+            tool_name = args[len("info"):].strip()
+            if not tool_name:
+                return DirectCommandResult(handled=True, text="Usage: /tools info `name`")
+
+            ToolRegistry.init()
+            tool = ToolRegistry.get(tool_name)
+            if not tool:
+                return DirectCommandResult(handled=True, text=f'Tool not found: "{tool_name}"')
+
+            info = tool.info
+            lines = [
+                f"Tool details: {info.name}",
+                "",
+                f"- Category: {info.category.value}",
+                f"- Description: {info.description.strip()}",
+                f"- Enabled: {info.enabled}",
+                f"- Requires confirmation: {info.requires_confirmation}",
+                "",
+            ]
+            if info.parameters:
+                lines.append("Parameters:")
+                for param in info.parameters:
+                    required = "required" if param.required else "optional"
+                    enum = f" Values: {param.enum}" if param.enum else ""
+                    lines.append(
+                        f"- {param.name} ({param.type.value}, {required}){enum}: {param.description}"
+                    )
+            else:
+                lines.append("Parameters: none")
+
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        if args.startswith("create"):
+            requirement = args[len("create"):].strip()
+            if not requirement:
+                return DirectCommandResult(
+                    handled=True,
+                    text="Usage: /tools create `requirement`",
+                )
+
+            skill = await Skill.get("tool-builder")
+            if not skill:
+                return DirectCommandResult(
+                    handled=True,
+                    text='Skill not found: "tool-builder". Check whether skills are loaded.',
+                )
+
+            try:
+                with open(skill.location, "r", encoding="utf-8") as file:
+                    skill_content = file.read().strip()
+            except Exception as exc:
+                return DirectCommandResult(handled=True, text=f"Failed to load skill: {str(exc)}")
+
+            create_prompt = "\n\n".join([
+                "Please follow this skill exactly to create the tool:",
+                skill_content,
+                f"User requirement: {requirement}",
+            ])
+            return DirectCommandResult(handled=True, prompt=create_prompt)
+
+        return DirectCommandResult(
+            handled=True,
+            text="Usage: /tools [list|refresh|info `name`|create `requirement`]",
+        )
+
+    if name == "skills":
+        if not args or args == "list":
+            skills = await Skill.all()
+            if not skills:
+                return DirectCommandResult(handled=True, text="No skills available.")
+            lines = ["Available skills:", ""]
+            for index, skill in enumerate(skills, 1):
+                lines.append(f"{index}. {skill.name}: {skill.description}")
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        if args == "refresh":
+            skills = await Skill.refresh()
+            lines = ["Skills refreshed. Current list:", ""]
+            for index, skill in enumerate(skills, 1):
+                lines.append(f"{index}. {skill.name}: {skill.description}")
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        return DirectCommandResult(handled=True, text="Usage: /skills [list|refresh]")
+
+    if name == "workflows":
+        from flocks.workflow.center import format_workflow_entries, scan_skill_workflows
+
+        try:
+            entries = await scan_skill_workflows()
+        except Exception as exc:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Error scanning workflows: {exc}",
+            )
+
+        if not entries:
+            return DirectCommandResult(
+                handled=True,
+                text=(
+                    "No workflows found.\n"
+                    "Create a workflow.json in .flocks/workflow/<name>/ to get started."
+                ),
+            )
+
+        body = format_workflow_entries(entries)
+        return DirectCommandResult(
+            handled=True,
+            text=(
+                "Available Workflows:\n\n"
+                + body
+                + "\n\nTip: use run_workflow with the path shown above to execute a workflow."
+            ),
+        )
+
+    if name == "mcp":
+        from flocks.mcp import MCP, McpStatus
+
+        if not args or args == "list":
+            try:
+                status = await MCP.status()
+                if not status:
+                    lines = [
+                        "No MCP servers configured.",
+                        "",
+                        "To add servers, configure them in ~/.flocks/config/flocks.json under the 'mcp' key.",
+                        "Example:",
+                        '  "mcp": {',
+                        '    "my_server": {',
+                        '      "type": "remote",',
+                        '      "url": "https://example.com/mcp",',
+                        '      "enabled": true',
+                        '    }',
+                        '  }',
+                    ]
+                else:
+                    lines = ["MCP Servers:", ""]
+                    for server_name, info in status.items():
+                        status_icon = "✓" if info.status == McpStatus.CONNECTED else "✗"
+                        lines.append(
+                            f"{status_icon} {server_name}: {info.status.value} "
+                            f"({info.tools_count} tools, {info.resources_count} resources)"
+                        )
+                    lines.append("")
+                    lines.append("Tip: use /mcp tools to list all available MCP tools")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error listing MCP servers: {str(exc)}",
+                )
+
+        if args == "status":
+            try:
+                status = await MCP.status()
+                if not status:
+                    return DirectCommandResult(handled=True, text="No MCP servers configured.")
+
+                lines = ["MCP Server Status:", ""]
+                for server_name, info in status.items():
+                    lines.append(f"Server: {server_name}")
+                    lines.append(f"  Status: {info.status.value}")
+                    lines.append(f"  Tools: {info.tools_count}")
+                    lines.append(f"  Resources: {info.resources_count}")
+                    if info.error:
+                        lines.append(f"  Error: {info.error}")
+                    lines.append("")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error getting MCP status: {str(exc)}",
+                )
+
+        if args == "tools":
+            try:
+                from flocks.mcp import McpToolRegistry
+
+                all_servers = McpToolRegistry.get_all_servers()
+                if not all_servers:
+                    return DirectCommandResult(
+                        handled=True,
+                        text="No MCP tools available. Connect to an MCP server first.",
+                    )
+
+                lines = ["MCP Tools:", ""]
+                for server_name in all_servers:
+                    tools = McpToolRegistry.get_server_tools(server_name)
+                    lines.append(f"From {server_name}: ({len(tools)} tools)")
+                    for tool_name in tools:
+                        source = McpToolRegistry.get_source(tool_name)
+                        if source:
+                            lines.append(f"  - {tool_name} (original: {source.mcp_tool})")
+                    lines.append("")
+
+                lines.append("Tip: use /tools info `name` to see tool details")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error listing MCP tools: {str(exc)}",
+                )
+
+        if args.startswith("refresh"):
+            server_name = args[len("refresh"):].strip()
+            if not server_name:
+                return DirectCommandResult(handled=True, text="Usage: /mcp refresh `server`")
+
+            try:
+                count = await MCP.refresh_tools(server_name)
+                return DirectCommandResult(
+                    handled=True,
+                    text=f"Refreshed {count} tools from {server_name}",
+                )
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error refreshing MCP tools: {str(exc)}",
+                )
+
+        return DirectCommandResult(
+            handled=True,
+            text="Usage: /mcp [list|status|tools|refresh `server`]",
+        )
+
+    return DirectCommandResult(handled=False)

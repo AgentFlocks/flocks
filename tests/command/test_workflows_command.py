@@ -215,9 +215,28 @@ class TestHelpHandler:
     async def test_help_lists_core_discovery_commands(self):
         texts, _ = await _collect_text("/help")
         output = "\n".join(texts)
+        assert "Direct commands:" in output
+        assert "Other commands (handled through the normal assistant/session flow):" in output
         assert "/tools" in output
         assert "/skills" in output
         assert "/workflows" in output
+
+    async def test_help_uses_backtick_placeholders_instead_of_html_like_tokens(self):
+        texts, _ = await _collect_text("/help")
+        output = "\n".join(texts)
+        assert "/compact `focus`" in output
+        assert "<focus>" not in output
+        assert "<name>" not in output
+        assert "<server>" not in output
+
+    async def test_help_tips_only_include_commands_with_extra_usage(self):
+        texts, _ = await _collect_text("/help")
+        output = "\n".join(texts)
+        assert "/tools [list|refresh|info `name`|create `requirement`]" in output
+        assert "/skills [list|refresh]" in output
+        assert "/mcp [list|status|tools|refresh `server`]" in output
+        assert "/clear clears the screen" not in output
+        assert "/workflows - list all available workflows" not in output
 
     async def test_help_returns_true(self):
         _, handled = await _collect_text("/help")
