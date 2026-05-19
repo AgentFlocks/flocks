@@ -23,6 +23,7 @@ import hashlib
 import importlib
 import json
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 from typing import Any, Awaitable, Callable, Optional
@@ -179,6 +180,8 @@ def _build_ws_client(
 
                     self._client._receive_message_loop = _receive_message_loop
                     try:
+                        if self._stop_requested:
+                            return
                         self._client.start()
                     except RuntimeError as e:
                         if "Event loop stopped before Future completed" not in str(e):
@@ -194,14 +197,30 @@ def _build_ws_client(
                     daemon=True,
                 )
                 self._thread.start()
-                self._finished.wait(timeout=0.2)
+                deadline = time.monotonic() + 0.2
+                while self._client is None and not self._finished.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._finished.wait(timeout=min(remaining, 0.01))
                 if self._start_error:
                     raise RuntimeError(str(self._start_error)) from self._start_error
 
             def stop(self) -> None:
-                if self._loop is None:
-                    return
                 self._stop_requested = True
+                if self._client is None and self._thread and self._thread.is_alive():
+                    deadline = time.monotonic() + 0.5
+                    while self._client is None and not self._finished.is_set():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        self._finished.wait(timeout=min(remaining, 0.01))
+                if self._loop is None:
+                    if self._thread:
+                        self._thread.join(timeout=5)
+                        self._thread = None
+                    return
+                loop_running = self._loop.is_running()
 
                 async def _drain_task(task: Optional[asyncio.Task], timeout: float) -> None:
                     if task is None or task.done():
@@ -213,25 +232,27 @@ def _build_ws_client(
                         with contextlib.suppress(asyncio.CancelledError, Exception):
                             await task
 
-                if self._client is not None:
+                if loop_running and self._client is not None:
                     with contextlib.suppress(Exception):
                         future = asyncio.run_coroutine_threadsafe(
                             self._client._disconnect(),
                             self._loop,
                         )
                         future.result(timeout=5)
-                with contextlib.suppress(Exception):
-                    future = asyncio.run_coroutine_threadsafe(
-                        _drain_task(self._receive_task, timeout=1.0),
-                        self._loop,
-                    )
-                    future.result(timeout=2)
-                with contextlib.suppress(Exception):
-                    future = asyncio.run_coroutine_threadsafe(
-                        _drain_task(self._ping_task, timeout=1.0),
-                        self._loop,
-                    )
-                    future.result(timeout=2)
+                if loop_running:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            _drain_task(self._receive_task, timeout=1.0),
+                            self._loop,
+                        )
+                        future.result(timeout=2)
+                if loop_running:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            _drain_task(self._ping_task, timeout=1.0),
+                            self._loop,
+                        )
+                        future.result(timeout=2)
                 with contextlib.suppress(Exception):
                     self._loop.call_soon_threadsafe(self._loop.stop)
                 if self._thread:
