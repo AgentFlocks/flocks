@@ -107,31 +107,50 @@ def _build_ws_client(
 
         class _CompatWSClient:
             def __init__(self) -> None:
-                self._client = native_client_cls(
-                    app_id=app_id,
-                    app_secret=app_secret,
-                    log_level=lark.LogLevel.WARNING,
-                    event_handler=_Dispatcher(),
-                    domain=domain,
-                    auto_reconnect=False,
-                )
+                self._client: Any | None = None
                 self._thread: Optional[threading.Thread] = None
                 self._loop: Optional[asyncio.AbstractEventLoop] = None
                 self._receive_task: Optional[asyncio.Task] = None
+                self._ping_task: Optional[asyncio.Task] = None
                 self._start_error: Optional[BaseException] = None
                 self._stop_requested = False
                 self._finished = threading.Event()
 
             def start(self) -> None:
+                self._finished.clear()
+                self._start_error = None
+                self._stop_requested = False
+
                 def _run() -> None:
                     self._loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(self._loop)
                     ws_module.loop = self._loop
+                    self._client = native_client_cls(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        log_level=lark.LogLevel.WARNING,
+                        event_handler=_Dispatcher(),
+                        domain=domain,
+                        auto_reconnect=False,
+                    )
+
+                    original_ping_loop = getattr(self._client, "_ping_loop", None)
+                    if callable(original_ping_loop):
+                        async def _tracked_ping_loop() -> None:
+                            self._ping_task = asyncio.current_task()
+                            try:
+                                await original_ping_loop()
+                            finally:
+                                self._ping_task = None
+
+                        self._client._ping_loop = _tracked_ping_loop
 
                     async def _receive_message_loop() -> None:
                         self._receive_task = asyncio.current_task()
                         try:
                             while True:
+                                if self._client is None:
+                                    return
                                 if self._stop_requested and self._client._conn is None:
                                     return
                                 if self._client._conn is None:
@@ -184,26 +203,32 @@ def _build_ws_client(
                     return
                 self._stop_requested = True
 
-                async def _drain_receive_task() -> None:
-                    task = self._receive_task
+                async def _drain_task(task: Optional[asyncio.Task], timeout: float) -> None:
                     if task is None or task.done():
                         return
                     try:
-                        await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+                        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
                     except asyncio.TimeoutError:
                         task.cancel()
                         with contextlib.suppress(asyncio.CancelledError, Exception):
                             await task
 
+                if self._client is not None:
+                    with contextlib.suppress(Exception):
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._client._disconnect(),
+                            self._loop,
+                        )
+                        future.result(timeout=5)
                 with contextlib.suppress(Exception):
                     future = asyncio.run_coroutine_threadsafe(
-                        self._client._disconnect(),
+                        _drain_task(self._receive_task, timeout=1.0),
                         self._loop,
                     )
-                    future.result(timeout=5)
+                    future.result(timeout=2)
                 with contextlib.suppress(Exception):
                     future = asyncio.run_coroutine_threadsafe(
-                        _drain_receive_task(),
+                        _drain_task(self._ping_task, timeout=1.0),
                         self._loop,
                     )
                     future.result(timeout=2)
@@ -211,6 +236,11 @@ def _build_ws_client(
                     self._loop.call_soon_threadsafe(self._loop.stop)
                 if self._thread:
                     self._thread.join(timeout=5)
+                self._thread = None
+                self._loop = None
+                self._client = None
+                self._receive_task = None
+                self._ping_task = None
 
             @property
             def start_error(self) -> Optional[BaseException]:
