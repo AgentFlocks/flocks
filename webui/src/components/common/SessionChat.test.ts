@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import type { Message } from '@/types';
 
-import { getMessageBubbleClassName, getRegenerateTruncateTarget } from './SessionChat';
+import {
+  getMessageBubbleClassName,
+  getRegenerateTruncateTarget,
+  truncateToolDisplayText,
+} from './SessionChat';
 
 function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   return {
@@ -45,6 +49,20 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('max-w-2xl w-full');
+  });
+});
+
+describe('truncateToolDisplayText', () => {
+  it('returns short text unchanged', () => {
+    expect(truncateToolDisplayText('bash')).toBe('bash');
+  });
+
+  it('truncates long text with an ellipsis', () => {
+    const long = 'python3 -c "' + 'x'.repeat(200) + '"';
+    const result = truncateToolDisplayText(long, 120);
+    expect(result.length).toBe(121);
+    expect(result.endsWith('…')).toBe(true);
+    expect(result.startsWith('python3 -c "')).toBe(true);
   });
 });
 
