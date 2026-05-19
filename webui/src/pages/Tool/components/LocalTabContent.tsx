@@ -7,6 +7,7 @@ import type { Tool } from '@/api/tool';
 import EmptyState from '@/components/common/EmptyState';
 import { CATEGORY_LABEL_KEY } from '../constants';
 import { getLocalizedToolDescription } from '../toolDisplay';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 interface LocalTabContentProps {
   tools: Tool[];
@@ -100,20 +101,24 @@ export default function LocalTabContent({
               <div
                 key={tool.name}
                 className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
-                style={{
-                  gridTemplateColumns:
-                    '32px minmax(0, 1fr) 56px 72px 110px 200px',
-                }}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
                   <Code className={`w-4 h-4 ${tool.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
                 </div>
 
-                {/* Name + description */}
-                <div className="min-w-0">
+                {/* Name + description.
+                    Whole block is the click target (mirrors Hub catalog rows)
+                    so users can open the detail panel anywhere along the row
+                    rather than hunting for the small "manage" action. */}
+                <button
+                  type="button"
+                  onClick={() => onSelectTool(tool)}
+                  className="min-w-0 text-left group/name focus:outline-none"
+                >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-gray-900 truncate font-mono">{tool.name}</span>
+                    <span className="text-sm font-semibold text-gray-900 truncate font-mono transition-colors group-hover/name:text-blue-700 group-focus-visible/name:underline">{tool.name}</span>
                     {tool.enabled_customized && (
                       <span
                         title={t('toolDetail.customizedTooltip', {
@@ -132,7 +137,7 @@ export default function LocalTabContent({
                     )}
                   </div>
                   <p className="text-xs text-gray-500 truncate mt-0.5">{description || t('detail.noDescription')}</p>
-                </div>
+                </button>
 
                 {/* Type column */}
                 <div className="text-center">

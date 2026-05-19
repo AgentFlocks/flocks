@@ -598,10 +598,10 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
   const hasMissingDeps = skill.eligible === false && (skill.install_specs?.length ?? 0) > 0;
   const enabled = !skill.disabled;
 
-  // Row is no longer clickable — the edit button in the "Actions" column
-  // is the only way to open SkillSheet.  We keep a subtle hover so users
-  // can still scan rows visually, but drop ``cursor-pointer`` to avoid
-  // promising a click-affordance that isn't there.
+  // Row hover is purely a visual scan aid; the click affordance lives on the
+  // name itself (mirrors the Hub catalog `<button>` pattern at
+  // ``Hub/index.tsx`` line ~633) so the rest of the row — toggles, action
+  // buttons — stays independently clickable without nested-button warnings.
   return (
     <tr
       className={`transition-colors ${
@@ -613,25 +613,33 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
         <SourceTypeBadge isUser={isUser} />
       </td>
 
-      {/* 名称 + 描述列（含内嵌的缺依赖警告） */}
+      {/* 名称 + 描述列（含内嵌的缺依赖警告）— 整块作为打开 SkillSheet 的点击区，
+          mirrors the Hub catalog row pattern (`Hub/index.tsx` HubTable). */}
       <td className="max-w-0 px-4 py-3">
-        <div className="flex items-start gap-2.5 min-w-0">
-          <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-gray-100 text-gray-400 mt-0.5">
+        <button
+          type="button"
+          onClick={() => onSelect(skill)}
+          title={t('table.edit')}
+          className="flex items-start gap-2.5 min-w-0 w-full text-left group/name focus:outline-none"
+        >
+          <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-gray-100 text-gray-400 mt-0.5">
             {isUser
               ? <FolderOpen className="w-3.5 h-3.5" />
               : <Sparkles className="w-3.5 h-3.5" />
             }
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="font-medium text-gray-900 truncate">{skill.name}</div>
-            <div className="text-[11px] text-gray-400 truncate mt-0.5">
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block font-medium text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">
+              {skill.name}
+            </span>
+            <span className="block text-[11px] text-gray-400 truncate mt-0.5">
               {skill.description || t('sheet.noDescription')}
-            </div>
+            </span>
             {/* The old "Status" column collapsed to this single inline
                 warning — only rendered when the skill is actually
                 missing dependencies, so the row stays quiet by default. */}
             {hasMissingDeps && (
-              <div
+              <span
                 className="text-[11px] text-amber-600 truncate mt-0.5 flex items-center gap-1"
                 title={(skill.missing ?? []).join(', ')}
               >
@@ -641,10 +649,10 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
                     list: (skill.missing ?? []).join(', '),
                   })}
                 </span>
-              </div>
+              </span>
             )}
-          </div>
-        </div>
+          </span>
+        </button>
       </td>
 
       {/* 来源列 */}

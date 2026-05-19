@@ -12,6 +12,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const TOOL_PANEL_WIDTH = 720;
@@ -457,26 +458,30 @@ export default function MCPTabContent({
               <div
                 key={id}
                 className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}`}
-                style={{
-                  gridTemplateColumns:
-                    '32px minmax(0, 1fr) 56px 72px 110px 200px',
-                }}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${isActive ? 'bg-green-50' : isError ? 'bg-red-50' : 'bg-gray-50'}`}>
                   <Server className={`w-4 h-4 ${isActive ? 'text-green-600' : isError ? 'text-red-500' : 'text-gray-400'}`} />
                 </div>
 
-                {/* Name + description */}
-                <div className="min-w-0">
+                {/* Name + description.
+                    Whole block is the click target — mirrors the Hub catalog
+                    pattern (``Hub/index.tsx`` HubTable row) so the description
+                    line is just as clickable as the name itself. */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCard(isSelected ? null : id)}
+                  className="min-w-0 text-left group/name focus:outline-none"
+                >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-gray-900 truncate">{displayName}</span>
+                    <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">{displayName}</span>
                     {entry && PRIORITY_IDS.has(entry.id) && (
                       <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">{t('mcp.recommended')}</span>
                     )}
                   </div>
                   <p className="text-xs text-gray-500 truncate mt-0.5">{rowDescription}</p>
-                </div>
+                </button>
 
                 {/* Type column */}
                 <div className="text-center">

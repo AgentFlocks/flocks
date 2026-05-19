@@ -3158,7 +3158,22 @@ function ToolTable({
   onSelect: (tool: Tool) => void;
 }) {
   const { t } = useTranslation('tool');
-  const GRID_COLS = '32px minmax(0, 1fr) 80px 140px 80px 90px';
+  // Column layout, left-to-right.  Every data column uses ``minmax(min, fr)``
+  // so any leftover width on wide screens is shared *proportionally* across
+  // the table rather than dumped into a single gap between "name" and
+  // "source".  Long names truncate via ``truncate`` on the inner button.
+  //
+  //   1) 32px                       icon
+  //   2) minmax(220px, 3fr)         tool name (dominant column, truncates)
+  //   3) minmax(80px,  1fr)         source badge
+  //   4) minmax(140px, 1.6fr)       provider / source name
+  //   5) minmax(80px,  1fr)         enabled badge
+  //   6) minmax(90px,  1fr)         actions button
+  //
+  // Ratio 3 : 1 : 1.6 : 1 : 1  ≈ keeps the name comfortably wide while
+  // distributing the rest so the small badge columns don't feel orphaned.
+  const GRID_COLS =
+    '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
@@ -3230,9 +3245,25 @@ function ToolTable({
                 <Wrench className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
               </div>
 
-              {/* Name (no description, kept compact) */}
+              {/* Name (no description, kept compact).
+                  Name is a `<button>` rather than a `<span>` so the click
+                  affordance matches the Hub catalog (see ``Hub/index.tsx``
+                  HubTable row), letting users open the tool detail drawer
+                  without hunting for the "manage" action on the right.
+                  Font is `text-xs` (one step smaller than the previous
+                  `text-sm`) because the Tool list is denser than other tabs
+                  and the mono name otherwise visually overpowers the row. */}
               <div className="min-w-0 flex items-center gap-1.5">
-                <span className="text-sm font-medium text-gray-900 font-mono truncate">{tool.name}</span>
+                <button
+                  type="button"
+                  onClick={() => onSelect(tool)}
+                  title={tool.name}
+                  className="text-xs font-medium text-gray-900 font-mono truncate
+                             hover:text-slate-700 transition-colors
+                             focus:outline-none focus-visible:underline text-left min-w-0"
+                >
+                  {tool.name}
+                </button>
                 <span className="text-[10px] text-gray-400 shrink-0">{categoryLabel}</span>
               </div>
 

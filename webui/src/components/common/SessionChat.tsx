@@ -1481,7 +1481,7 @@ export default function SessionChat({
     ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3 scrollbar-hide'
     : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 scrollbar-hide';
 
-  const msgListClass = compact ? '' : 'space-y-5 max-w-3xl mx-auto w-full pl-4 pr-8';
+  const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -1634,7 +1634,7 @@ export default function SessionChat({
       {/* Follow-up input */}
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
-          <div className={`relative min-w-0 ${!compact ? 'max-w-3xl mx-auto w-full pr-8 pl-[58px]' : ''}`}>
+          <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
             <input
               ref={fileInputRef}
               type="file"
@@ -2001,12 +2001,8 @@ function ChatMessageBubbleInner({
   const isActionPending = actionMessageId === targetMessageId;
 
   const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
-  const actionBarClass = `absolute bottom-0 right-3 translate-x-0.5 translate-y-1/2 z-10 flex items-center gap-1.5 transition-all duration-150 ${
-    isEditing
-      ? 'opacity-100 pointer-events-auto'
-      : 'opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto'
-  }`;
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/90 bg-white text-gray-500 shadow-[0_6px_18px_rgba(15,23,42,0.08)] backdrop-blur-sm transition-all duration-150 hover:-translate-y-px hover:border-gray-300 hover:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed';
+  const actionBarClass = `flex items-center gap-1.5`;
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
@@ -2032,16 +2028,24 @@ function ChatMessageBubbleInner({
         {avatar}
 
         <div className="flex flex-col items-start flex-1 min-w-0">
-          {/* Name + timestamp header — same height as avatar so they vertically align */}
+          {/* Name header */}
           <div className={`flex items-center gap-2 ${headerHeight}`}>
             <span className="text-xs font-semibold text-zinc-700">
               {isUser ? t('chat.you') : agentName}
             </span>
-            {showTimestamp && message.timestamp && (
-              <span className="text-[11px] text-zinc-400">{formatSmartTime(message.timestamp)}</span>
-            )}
           </div>
 
+      {/* Bubble + footer wrapper.
+          ``flex flex-col`` defaults to ``align-items: stretch``, so the
+          footer underneath is automatically pulled to the bubble's intrinsic
+          width.  This is what makes the user-side timestamp sit flush with
+          the bubble's left edge and the action buttons flush with its right
+          edge — without the wrapper, a user bubble (``w-auto``) and a
+          ``w-full`` footer would not share the same width and
+          ``justify-between`` would either look stuck-together (short text)
+          or balloon past the bubble (the actions would drift further right
+          than the bubble's right edge). */}
+      <div className={`flex flex-col min-w-0 ${isUser ? 'max-w-full' : 'w-full'}`}>
       <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
 
         {/* Empty / loading state */}
@@ -2228,8 +2232,8 @@ function ChatMessageBubbleInner({
         })()}
 
 
-        {/* Actions */}
-        {showActions && parts.length > 0 && (
+        {/* Actions — rendered inside bubble only while editing */}
+        {showActions && parts.length > 0 && isEditing && (
           <div className={actionBarClass}>
             {isEditing ? (
               <>
@@ -2264,58 +2268,76 @@ function ChatMessageBubbleInner({
                 </button>
               </>
             ) : (
-              <>
-                {/* 用户气泡：编辑 → 复制；AI气泡：重新生成 → 复制 */}
-                {isUser ? (
-                  <>
-                    {targetPartId && editableRawText && (
-                      <button
-                        onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
-                        disabled={actionsDisabled || isActionPending}
-                        className={iconButtonClass}
-                        aria-label={t('chat.edit')}
-                      >
-                        <Pencil className="w-3 h-3" />
-                        <span className={tooltipClass}>{t('chat.edit')}</span>
-                      </button>
-                    )}
-                    <button
-                      onClick={() => onCopy?.(getTextContent())}
-                      disabled={isActionPending}
-                      className={iconButtonClass}
-                      aria-label={t('chat.copy')}
-                    >
-                      <Copy className="w-3 h-3" />
-                      <span className={tooltipClass}>{t('chat.copy')}</span>
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={() => void onRegenerate?.(targetMessageId)}
-                      disabled={actionsDisabled || isActionPending}
-                      className={iconButtonClass}
-                      aria-label={t('chat.regenerate')}
-                    >
-                      <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
-                      <span className={tooltipClass}>{t('chat.regenerate')}</span>
-                    </button>
-                    <button
-                      onClick={() => onCopy?.(getTextContent())}
-                      disabled={isActionPending}
-                      className={iconButtonClass}
-                      aria-label={t('chat.copy')}
-                    >
-                      <Copy className="w-3 h-3" />
-                      <span className={tooltipClass}>{t('chat.copy')}</span>
-                    </button>
-                  </>
-                )}
-              </>
+              // Non-editing branch: placeholder — never rendered because we
+              // guard `isEditing` above.  Keeps the ternary shape intact.
+              <></>
             )}
           </div>
         )}
-      </div>
+      </div>{/* end bubble */}
+
+        {/* Footer below bubble.  Stretched to the bubble's width by the
+            wrapper's default ``align-items: stretch`` (see comment on the
+            wrapper above), so ``justify-between`` pins the timestamp to the
+            bubble's left edge and the action buttons to its right edge for
+            both user and assistant messages — even for very short user
+            inputs where the bubble itself is narrow. */}
+        {!compact && showActions && parts.length > 0 && !isEditing && (
+          <div className="flex items-center justify-between mt-1.5">
+            {showTimestamp && message.timestamp
+              ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
+              : <span />
+            }
+            <div className={actionBarClass}>
+              {isUser ? (
+                <>
+                  {targetPartId && editableRawText && (
+                    <button
+                      onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+                      disabled={actionsDisabled || isActionPending}
+                      className={iconButtonClass}
+                      aria-label={t('chat.edit')}
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span className={tooltipClass}>{t('chat.edit')}</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => onCopy?.(getTextContent())}
+                    disabled={isActionPending}
+                    className={iconButtonClass}
+                    aria-label={t('chat.copy')}
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span className={tooltipClass}>{t('chat.copy')}</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => void onRegenerate?.(targetMessageId)}
+                    disabled={actionsDisabled || isActionPending}
+                    className={iconButtonClass}
+                    aria-label={t('chat.regenerate')}
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+                    <span className={tooltipClass}>{t('chat.regenerate')}</span>
+                  </button>
+                  <button
+                    onClick={() => onCopy?.(getTextContent())}
+                    disabled={isActionPending}
+                    className={iconButtonClass}
+                    aria-label={t('chat.copy')}
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span className={tooltipClass}>{t('chat.copy')}</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>{/* end bubble+footer wrapper */}
         </div>{/* end name+bubble col */}
       </div>{/* end avatar+content group */}
       {previewImage && (

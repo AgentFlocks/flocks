@@ -10,6 +10,7 @@ import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/t
 import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const LANG_COLORS: Record<string, string> = {
@@ -313,20 +314,25 @@ export default function APITabContent({
               <div
                 key={service.id}
                 className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}`}
-                style={{
-                  gridTemplateColumns:
-                    '32px minmax(0, 1fr) 56px 72px 110px 200px',
-                }}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
                   <Cloud className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
                 </div>
 
-                {/* Name + description */}
-                <div className="min-w-0">
+                {/* Name + description.
+                    Whole block is the click target (mirrors Hub catalog rows
+                    where name+description live inside one `<button>`).  Toggle
+                    is `isSelected ? null : id` so a second click collapses
+                    the panel, matching the "manage" button's behaviour. */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
+                  className="min-w-0 text-left group/name focus:outline-none"
+                >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-semibold text-gray-900 truncate">{service.name}</span>
+                    <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-purple-700 group-focus-visible/name:underline">{service.name}</span>
                     {service.version && (
                       <span className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-100 text-[10px] font-medium rounded shrink-0" title={t('serviceInfo.version')}>
                         v{service.version.replace(/^v/i, '')}
@@ -334,7 +340,7 @@ export default function APITabContent({
                     )}
                   </div>
                   <p className="text-xs text-gray-500 truncate mt-0.5">{rowDescription}</p>
-                </div>
+                </button>
 
                 {/* Type column */}
                 <div className="text-center">
@@ -408,10 +414,7 @@ export default function APITabContent({
             <div
               key={`catalog-${entry.id}`}
               className="grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors"
-              style={{
-                gridTemplateColumns:
-                  '32px minmax(0, 1fr) 56px 72px 110px 200px',
-              }}
+              style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
             >
               {/* Icon */}
               <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50">
