@@ -880,6 +880,29 @@ def _iter_python_tool_files() -> List[Path]:
     return files
 
 
+def discover_python_tool_sources() -> Dict[str, Path]:
+    """Map registered python tool names to the plugin file that defines them."""
+    tool_sources: Dict[str, Path] = {}
+    for path in _iter_python_tool_files():
+        try:
+            source = path.read_text(encoding="utf-8")
+            module = ast.parse(source)
+        except Exception as e:
+            log.warn("tool.python.parse_failed", {"path": str(path), "error": str(e)})
+            continue
+
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                registered_name = _register_function_name(decorator)
+                if registered_name and registered_name not in tool_sources:
+                    tool_sources[registered_name] = path
+    return tool_sources
+
+
 def _register_function_name(call: ast.Call) -> Optional[str]:
     """Extract tool name from a ToolRegistry.register_function decorator call."""
     func = call.func
