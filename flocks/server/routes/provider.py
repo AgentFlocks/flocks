@@ -1202,12 +1202,40 @@ def _get_api_service_tool_infos(provider_id: str) -> List[Any]:
 def _is_api_service_builtin(provider_id: str, tools: Optional[List[Any]] = None) -> bool:
     """Check if an API service is built-in (project-level or core).
 
-    A service is built-in if it has at least one registered tool and ALL of
-    its tools have native=True (project-level .flocks/plugins/ or core code).
-    User-level tools (~/.flocks/plugins/) have native=False.
+    Prefer the ``_provider.yaml`` descriptor location when available: a
+    descriptor under ``<cwd>/.flocks/plugins/tools/api`` is project-level
+    (built-in for delete-protection purposes), while a descriptor under
+    ``~/.flocks/plugins/tools/api`` is user-installed and therefore
+    deletable.  This avoids false positives when the in-memory tool
+    registry still carries stale ``native=True`` flags for the same
+    provider from an earlier refresh.
+
+    When no descriptor exists (for older/core registrations), fall back to
+    the historical rule: the service is built-in if it has at least one
+    registered tool and ALL of its tools have ``native=True``.
 
     Pass pre-fetched *tools* to avoid a redundant registry scan.
     """
+    from flocks.config.api_versioning import discover_api_service_descriptors
+
+    project_root = Path.cwd() / ".flocks" / "plugins" / "tools" / "api"
+    user_root = Path.home() / ".flocks" / "plugins" / "tools" / "api"
+
+    for descriptor in discover_api_service_descriptors():
+        if descriptor.storage_key != provider_id:
+            continue
+        provider_dir = descriptor.provider_yaml.parent.resolve()
+        try:
+            provider_dir.relative_to(project_root.resolve())
+            return True
+        except ValueError:
+            pass
+        try:
+            provider_dir.relative_to(user_root.resolve())
+            return False
+        except ValueError:
+            pass
+
     if tools is None:
         tools = _get_api_service_tool_infos(provider_id)
     if not tools:
