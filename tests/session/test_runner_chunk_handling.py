@@ -32,6 +32,7 @@ class FakeStreamChunk:
     reasoning: Optional[str] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     event_type: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
     finish_reason: Optional[str] = None
     usage: Optional[Dict[str, int]] = None
 
@@ -52,9 +53,9 @@ class _RecordingProcessor:
     async def process_event(self, ev):
         cls = type(ev).__name__
         if cls == "ReasoningStartEvent":
-            self.events.append(_Event("reasoning_start", {"id": ev["id"]}))
+            self.events.append(_Event("reasoning_start", {"id": ev["id"], "metadata": ev.get("metadata")}))
         elif cls == "ReasoningDeltaEvent":
-            self.events.append(_Event("reasoning_delta", {"id": ev["id"], "text": ev["text"]}))
+            self.events.append(_Event("reasoning_delta", {"id": ev["id"], "text": ev["text"], "metadata": ev.get("metadata")}))
         elif cls == "ReasoningEndEvent":
             self.events.append(_Event("reasoning_end", {"id": ev["id"]}))
         elif cls == "TextStartEvent":
@@ -72,14 +73,14 @@ class _EventDict(dict):
             raise AttributeError(item) from exc
 
 
-def ReasoningStartEvent(*, id):  # noqa: N802 – mimic real event class name
-    e = _EventDict(id=id)
+def ReasoningStartEvent(*, id, metadata=None):  # noqa: N802 – mimic real event class name
+    e = _EventDict(id=id, metadata=metadata)
     e.__class__.__name__ = "ReasoningStartEvent"
     return e
 
 
-def ReasoningDeltaEvent(*, id, text):  # noqa: N802
-    e = _EventDict(id=id, text=text)
+def ReasoningDeltaEvent(*, id, text, metadata=None):  # noqa: N802
+    e = _EventDict(id=id, text=text, metadata=metadata)
     e.__class__.__name__ = "ReasoningDeltaEvent"
     return e
 
@@ -125,28 +126,53 @@ async def consume_chunks(chunks, processor, tool_accumulator) -> Dict[str, int]:
 
     for chunk in chunks:
         event_type = getattr(chunk, "event_type", None)
+        chunk_metadata = getattr(chunk, "metadata", None) or {}
+        reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
+
+        if event_type == "reasoning-start" and state["reasoning_id"] is None:
+            reasoning_id_counter += 1
+            state["reasoning_id"] = f"reasoning-{reasoning_id_counter}"
+            await processor.process_event(
+                ReasoningStartEvent(id=state["reasoning_id"], metadata=chunk_metadata)
+            )
+
+        if event_type == "reasoning-end" and state["reasoning_id"] is not None:
+            await processor.process_event(
+                ReasoningEndEvent(id=state["reasoning_id"])
+            )
+            state["reasoning_id"] = None
 
         chunk_reasoning = getattr(chunk, "reasoning", None) or None
         if not chunk_reasoning and event_type == "reasoning":
             chunk_reasoning = getattr(chunk, "delta", "") or None
+        has_reasoning_metadata = bool(
+            chunk_metadata.get("reasoningDetails")
+            or chunk_metadata.get("reasoningContent") is not None
+            or chunk_metadata.get("reasoningField")
+        )
 
         chunk_text = ""
-        if event_type != "reasoning" or getattr(chunk, "reasoning", None):
+        if event_type not in reasoning_event_types or getattr(chunk, "reasoning", None):
             chunk_text = getattr(chunk, "delta", "") or ""
 
         chunk_tool_calls = getattr(chunk, "tool_calls", None)
 
-        if chunk_reasoning:
+        if chunk_reasoning or (event_type == "reasoning" and has_reasoning_metadata):
             chunk_counts["reasoning"] += 1
             if state["reasoning_id"] is None:
                 reasoning_id_counter += 1
                 state["reasoning_id"] = f"reasoning-{reasoning_id_counter}"
                 await processor.process_event(
-                    ReasoningStartEvent(id=state["reasoning_id"])
+                    ReasoningStartEvent(id=state["reasoning_id"], metadata=chunk_metadata)
                 )
-            await processor.process_event(
-                ReasoningDeltaEvent(id=state["reasoning_id"], text=chunk_reasoning)
-            )
+            if chunk_reasoning:
+                await processor.process_event(
+                    ReasoningDeltaEvent(
+                        id=state["reasoning_id"],
+                        text=chunk_reasoning,
+                        metadata=chunk_metadata,
+                    )
+                )
 
         if (chunk_text or chunk_tool_calls) and state["reasoning_id"] is not None:
             await processor.process_event(
@@ -261,6 +287,54 @@ class TestBundledChunks:
         assert kinds.count("reasoning_end") == 1
         # Then the text block opens cleanly.
         assert kinds[-2:] == ["text_start", "text_delta"]
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_reasoning_chunk_still_opens_reasoning_block(self):
+        proc = _RecordingProcessor()
+        acc = _ToolAccumulator()
+
+        chunks = [
+            FakeStreamChunk(
+                event_type="reasoning",
+                metadata={
+                    "reasoningField": "reasoning_details",
+                    "reasoningDetails": [{"type": "reasoning.summary", "text": "opaque"}],
+                },
+            ),
+            FakeStreamChunk(
+                tool_calls=[{"id": "c1", "function": {"name": "search", "arguments": "{}"}}],
+            ),
+        ]
+
+        counts = await consume_chunks(chunks, proc, acc)
+
+        assert counts == {"reasoning": 1, "text": 0, "tool": 1}
+        assert proc.events[0].kind == "reasoning_start"
+        assert proc.events[0].payload["metadata"]["reasoningField"] == "reasoning_details"
+        assert proc.events[1].kind == "reasoning_end"
+        assert acc.fed[0]["id"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_explicit_reasoning_start_and_end_events_are_respected(self):
+        proc = _RecordingProcessor()
+        acc = _ToolAccumulator()
+
+        chunks = [
+            FakeStreamChunk(event_type="reasoning-start", metadata={"reasoningField": "thinking"}),
+            FakeStreamChunk(event_type="reasoning", reasoning="step 1"),
+            FakeStreamChunk(event_type="reasoning-end", metadata={"thinkingSignature": "sig123"}),
+            FakeStreamChunk(tool_calls=[{"id": "c1", "function": {"name": "search", "arguments": "{}"}}]),
+        ]
+
+        counts = await consume_chunks(chunks, proc, acc)
+
+        assert counts == {"reasoning": 1, "text": 0, "tool": 1}
+        assert [e.kind for e in proc.events[:3]] == [
+            "reasoning_start",
+            "reasoning_delta",
+            "reasoning_end",
+        ]
+        assert acc.fed[0]["id"] == "c1"
 
     @pytest.mark.asyncio
     async def test_usage_only_chunk_does_not_close_reasoning(self):

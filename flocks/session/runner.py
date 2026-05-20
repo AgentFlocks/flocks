@@ -26,7 +26,12 @@ from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message, MessageInfo, MessageRole
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
-from flocks.session.core.defaults import DOOM_LOOP_THRESHOLD
+from flocks.session.core.defaults import (
+    DEFAULT_MAX_TOOL_STEPS,
+    DOOM_LOOP_THRESHOLD,
+    REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
+    SAME_TOOL_STREAK_HALT_THRESHOLD,
+)
 from flocks.session.lifecycle.retry import SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
 from flocks.session.streaming.stream_processor import StreamProcessor
@@ -45,6 +50,7 @@ from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
+from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.tool.catalog import (
     get_always_load_tool_names,
@@ -244,6 +250,123 @@ class SessionRunner:
         self.session_ctx = session_ctx  # SessionContext interface for decoupled access
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
+
+    @staticmethod
+    def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
+        args_json = json.dumps(
+            arguments or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return f"{tool_name}:{args_json}"
+
+    def _reset_tool_loop_guard(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = {
+            "last_user_id": last_user_id or "",
+            "last_signature": "",
+            "last_tool_name": "",
+            "exact_count": 0,
+            "same_tool_count": 0,
+        }
+        self._static_cache["tool_loop_guard"] = state
+        return state
+
+    def _get_tool_loop_guard_state(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = self._static_cache.get("tool_loop_guard")
+        if not isinstance(state, dict):
+            state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+        elif last_user_id is not None:
+            cached_user_id = str(state.get("last_user_id") or "")
+            if cached_user_id and cached_user_id != last_user_id:
+                state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+            else:
+                state["last_user_id"] = last_user_id
+        return state
+
+    def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        return (
+            int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+            or int(state.get("same_tool_count", 0)) >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
+        )
+
+    def _build_tool_loop_halt_message(
+        self,
+        *,
+        tool_name: str,
+        reason: str,
+        count: int,
+    ) -> str:
+        if reason == "repeated_exact_tool_call":
+            return (
+                f"Stopped the loop because `{tool_name}` was called {count} times in a row "
+                "with the same arguments and kept producing a tool-only turn. Change strategy, "
+                "summarize the blocker, or answer directly instead of repeating the exact same call."
+            )
+        return (
+            f"Stopped the loop because `{tool_name}` was the only tool used for {count} consecutive "
+            "tool-only turns. Change strategy, summarize the blocker, or answer directly instead of "
+            "continuing the same tool pattern."
+        )
+
+    def _update_tool_loop_guard(
+        self,
+        result: StepResult,
+        *,
+        last_user_id: str,
+    ) -> Dict[str, Any]:
+        visible_text = bool((result.content or "").strip())
+        if visible_text or len(result.tool_calls) != 1:
+            self._reset_tool_loop_guard(last_user_id=last_user_id)
+            return {"action": "allow"}
+
+        tool_call = result.tool_calls[0]
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        signature = self._canonical_tool_signature(tool_call.name, tool_call.arguments)
+
+        exact_count = 1
+        if state.get("last_signature") == signature:
+            exact_count = int(state.get("exact_count", 0)) + 1
+
+        same_tool_count = 1
+        if state.get("last_tool_name") == tool_call.name:
+            same_tool_count = int(state.get("same_tool_count", 0)) + 1
+
+        state.update({
+            "last_user_id": last_user_id,
+            "last_signature": signature,
+            "last_tool_name": tool_call.name,
+            "exact_count": exact_count,
+            "same_tool_count": same_tool_count,
+        })
+
+        if exact_count >= REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD:
+            return {
+                "action": "halt",
+                "reason": "repeated_exact_tool_call",
+                "tool_name": tool_call.name,
+                "count": exact_count,
+            }
+        if same_tool_count >= SAME_TOOL_STREAK_HALT_THRESHOLD:
+            return {
+                "action": "halt",
+                "reason": "same_tool_streak",
+                "tool_name": tool_call.name,
+                "count": same_tool_count,
+            }
+        if (
+            exact_count >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+            or same_tool_count >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
+        ):
+            return {
+                "action": "warn",
+                "tool_name": tool_call.name,
+                "exact_count": exact_count,
+                "same_tool_count": same_tool_count,
+            }
+        return {"action": "allow"}
 
     async def _list_callable_tool_infos_for_turn(
         self,
@@ -874,7 +997,7 @@ class SessionRunner:
             log.debug("runner.session_agent.error", {"error": str(e)})
         
         # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else float('inf')
+        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
         is_last_step = self._step >= max_steps
         
         # Get provider
@@ -964,37 +1087,16 @@ class SessionRunner:
                 from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
                 system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
             
-            # 检查最近几条消息中是否有重复的工具调用（轻量级警告）
-            if has_tool_result and self._step > 2:
-                # 收集最近的工具调用签名
-                recent_tool_sigs = []
-                for msg in reversed(messages[-3:]):  # 检查最近3条消息
-                    if msg.role == MessageRole.ASSISTANT:
-                        msg_parts = await Message.parts(msg.id, self.session.id)
-                        for p in msg_parts:
-                            if (getattr(p, "type", None) == "tool" and
-                                hasattr(p, 'state') and 
-                                hasattr(p.state, 'status') and
-                                p.state.status == "completed"):
-                                tool_name = getattr(p, 'tool', '')
-                                tool_input = getattr(p.state, 'input', {})
-                                sig = f"{tool_name}:{json.dumps(tool_input, sort_keys=True)}"
-                                recent_tool_sigs.append(sig)
-                
-                # 如果有重复的工具调用签名，添加提示（不禁用工具）
-                if recent_tool_sigs:
-                    sig_counts = {}
-                    for sig in recent_tool_sigs:
-                        sig_counts[sig] = sig_counts.get(sig, 0) + 1
-                    
-                    repeated_sigs = [sig for sig, count in sig_counts.items() if count >= 2]
-                    if repeated_sigs:
-                        log.warn("runner.repeated_tool_calls_detected", {
-                            "repeated_sigs": repeated_sigs,
-                            "step": self._step,
-                        })
-                        from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
-                        system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
+            if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_tool_name"),
+                    "exact_count": state.get("exact_count", 0),
+                    "same_tool_count": state.get("same_tool_count", 0),
+                    "step": self._step,
+                })
+                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+                system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Hook pipeline: chat.message stage
         try:
@@ -1255,6 +1357,33 @@ class SessionRunner:
                             finish="error",
                         )
                         return StepResult(action="stop", error=empty_error_msg)
+
+                tool_loop_guard = self._update_tool_loop_guard(
+                    result,
+                    last_user_id=last_user.id,
+                )
+                if tool_loop_guard.get("action") == "halt":
+                    halt_message = self._build_tool_loop_halt_message(
+                        tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
+                        reason=str(tool_loop_guard.get("reason") or "same_tool_streak"),
+                        count=int(tool_loop_guard.get("count", 0) or 0),
+                    )
+                    log.warn("runner.tool_loop_guard_halt", {
+                        "tool_name": tool_loop_guard.get("tool_name"),
+                        "reason": tool_loop_guard.get("reason"),
+                        "count": tool_loop_guard.get("count"),
+                        "step": self._step,
+                    })
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        content=halt_message,
+                    )
+                    result = StepResult(
+                        action="stop",
+                        content=halt_message,
+                        usage=result.usage,
+                    )
 
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"
@@ -1872,6 +2001,12 @@ class SessionRunner:
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
+        active_model = Provider.resolve_model(self.provider_id, self.model_id)
+        active_interleaved = (
+            getattr(active_model.capabilities, "interleaved", None)
+            if active_model and getattr(active_model, "capabilities", None)
+            else None
+        )
 
         # Identify the last USER message — only that one keeps real image
         # bytes in its content blocks. Earlier turns get a short text
@@ -2050,6 +2185,10 @@ class SessionRunner:
                 
                 assistant_content_parts = []
                 assistant_reasoning_parts = []
+                assistant_reasoning_content_parts = []
+                assistant_reasoning_details: List[Dict[str, Any]] = []
+                assistant_reasoning_sources: set[str] = set()
+                assistant_custom_settings: Dict[str, Any] = {}
                 # Structured tool calls for the assistant message (OpenAI format)
                 structured_tool_calls: List[Dict[str, Any]] = []
                 # Corresponding tool-result messages (role="tool")
@@ -2064,6 +2203,43 @@ class SessionRunner:
                         assistant_content_parts.append(part.text)
                     elif part.type == "reasoning" and hasattr(part, 'text'):
                         assistant_reasoning_parts.append(part.text)
+                        part_metadata = getattr(part, "metadata", None) or {}
+                        reasoning_meta = part_metadata.get("reasoning") if isinstance(part_metadata, dict) else None
+                        reasoning_content = None
+                        reasoning_source = None
+                        reasoning_details = None
+                        if isinstance(reasoning_meta, dict):
+                            reasoning_content = reasoning_meta.get("content")
+                            reasoning_source = reasoning_meta.get("source")
+                            reasoning_details = reasoning_meta.get("details")
+                        if reasoning_content is None and isinstance(part_metadata, dict):
+                            reasoning_content = part_metadata.get("reasoningContent")
+                        if not reasoning_source and isinstance(part_metadata, dict):
+                            reasoning_source = part_metadata.get("reasoningSource")
+                        if reasoning_details is None and isinstance(part_metadata, dict):
+                            reasoning_details = part_metadata.get("reasoningDetails")
+
+                        if reasoning_content is not None:
+                            assistant_reasoning_content_parts.append(reasoning_content)
+                        if reasoning_source:
+                            assistant_reasoning_sources.add(reasoning_source)
+                        if isinstance(reasoning_details, list):
+                            for item in reasoning_details:
+                                if isinstance(item, dict):
+                                    assistant_reasoning_details.append(item)
+                        thinking_signature = part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
+                        redacted_thinking = part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
+                        if redacted_thinking:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "redacted_thinking",
+                                "data": redacted_thinking,
+                            })
+                        elif thinking_signature:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "thinking",
+                                "thinking": part.text,
+                                "signature": thinking_signature,
+                            })
                     
                     # Tool parts - use structured OpenAI function-calling format
                     elif part.type == "tool" and hasattr(part, 'state'):
@@ -2166,12 +2342,23 @@ class SessionRunner:
                 
                 # Add assistant message
                 if assistant_content_parts or structured_tool_calls:
-                    chat_messages.append(ChatMessage(
+                    assistant_message = ChatMessage(
                         role="assistant",
                         content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
                         reasoning="".join(assistant_reasoning_parts) if assistant_reasoning_parts else None,
+                        reasoning_content="".join(assistant_reasoning_content_parts) if assistant_reasoning_content_parts else None,
+                        reasoning_details=assistant_reasoning_details if assistant_reasoning_details else None,
+                        reasoning_source=sorted(assistant_reasoning_sources)[0] if assistant_reasoning_sources else None,
                         tool_calls=structured_tool_calls if structured_tool_calls else None,
-                    ))
+                        custom_settings=assistant_custom_settings,
+                    )
+                    assistant_message = prepare_reasoning_for_replay(
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                        message=assistant_message,
+                        interleaved=active_interleaved,
+                    )
+                    chat_messages.append(assistant_message)
                     # Append tool-result messages immediately after the assistant message
                     chat_messages.extend(pending_tool_results)
                 else:
@@ -2482,40 +2669,66 @@ class SessionRunner:
                 # provider used `event_type == 'reasoning'` to overload `delta` for
                 # reasoning text.
                 event_type = getattr(chunk, 'event_type', None)
+                chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
+
+                if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
+                    reasoning_id_counter += 1
+                    self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                    await processor.process_event(ReasoningStartEvent(
+                        id=self._current_reasoning_id,
+                        metadata=chunk_metadata,
+                    ))
+
+                if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    await processor.process_event(ReasoningEndEvent(
+                        id=self._current_reasoning_id,
+                        metadata=chunk_metadata,
+                    ))
+                    delattr(self, '_current_reasoning_id')
 
                 chunk_reasoning = getattr(chunk, 'reasoning', None) or None
                 if not chunk_reasoning and event_type == 'reasoning':
                     # Older providers signal reasoning via event_type and put the
                     # reasoning text in `delta` (no separate `reasoning` field).
                     chunk_reasoning = getattr(chunk, 'delta', '') or None
+                has_reasoning_metadata = bool(
+                    chunk_metadata.get("reasoningDetails")
+                    or chunk_metadata.get("reasoningContent") is not None
+                    or chunk_metadata.get("reasoningField")
+                )
 
                 # Treat `delta` as text only when it isn't already consumed as
                 # reasoning above.  This preserves backward compatibility with
                 # providers that emit reasoning-only chunks via `event_type`.
                 chunk_text = ''
-                if event_type != 'reasoning' or getattr(chunk, 'reasoning', None):
+                if event_type not in reasoning_event_types or getattr(chunk, 'reasoning', None):
                     chunk_text = getattr(chunk, 'delta', '') or ''
 
                 chunk_tool_calls = getattr(chunk, 'tool_calls', None)
 
                 # 1) Process reasoning delta (start reasoning block on first sight).
-                if chunk_reasoning:
+                if chunk_reasoning or (event_type == 'reasoning' and has_reasoning_metadata):
+                    reasoning_text = chunk_reasoning or ""
                     chunk_counts["reasoning"] += 1
                     log.debug("runner.reasoning.received", {
-                        "length": len(chunk_reasoning),
-                        "text_preview": chunk_reasoning[:50],
+                        "length": len(reasoning_text),
+                        "text_preview": reasoning_text[:50],
                     })
                     if not hasattr(self, '_current_reasoning_id'):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
                         await processor.process_event(ReasoningStartEvent(
-                            id=self._current_reasoning_id
+                            id=self._current_reasoning_id,
+                            metadata=chunk_metadata,
                         ))
 
-                    await processor.process_event(ReasoningDeltaEvent(
-                        id=self._current_reasoning_id,
-                        text=chunk_reasoning,
-                    ))
+                    if chunk_reasoning:
+                        await processor.process_event(ReasoningDeltaEvent(
+                            id=self._current_reasoning_id,
+                            text=chunk_reasoning,
+                            metadata=chunk_metadata,
+                        ))
 
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).

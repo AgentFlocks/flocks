@@ -1396,17 +1396,15 @@ async def _prepare_replay_runtime(
 
     agent_name = getattr(user_message, "agent", None) or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
-
-    model_info = getattr(user_message, "model", None)
-    provider_id = model_info.get("providerID") if isinstance(model_info, dict) else None
-    model_id = model_info.get("modelID") if isinstance(model_info, dict) else None
-    if not provider_id or not model_id:
-        dummy_request = type(
-            "_MessageReplayRequest",
-            (),
-            {"model": None, "agent": agent_name},
-        )()
-        provider_id, model_id, _ = await _resolve_model(dummy_request, agent, session_id)
+    # Replay should follow the model that is active *now* for this session
+    # (current session pin / current default / current agent override), not the
+    # historical model stored on the original user message being replayed.
+    dummy_request = type(
+        "_MessageReplayRequest",
+        (),
+        {"model": None, "agent": agent_name},
+    )()
+    provider_id, model_id, _ = await _resolve_model(dummy_request, agent, session_id)
 
     Provider._ensure_initialized()
     config = await Config.get()
