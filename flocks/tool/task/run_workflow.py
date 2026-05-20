@@ -22,6 +22,7 @@ from flocks.session.recorder import Recorder
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
     compact_outputs_for_storage,
+    compact_step_for_storage,
     create_execution_record,
     normalize_execution_status,
     record_execution_result,
@@ -531,10 +532,7 @@ async def run_workflow_tool(
             step_dict = dict(step_result)
         else:
             step_dict = {"node_id": None, "outputs": {}, "error": str(step_result)}
-        raw_outputs = step_dict.get("outputs")
-        if isinstance(raw_outputs, dict):
-            step_dict["outputs"] = compact_outputs_for_storage(raw_outputs)
-        tracked_history.append(step_dict)
+        tracked_history.append(compact_step_for_storage(step_dict))
         _update_execution_progress({
             "executionLog": list(tracked_history),
             "currentNodeId": step_dict.get("node_id"),
@@ -710,6 +708,9 @@ async def run_workflow_tool(
                 },
             })
 
+        compacted_outputs = compact_outputs_for_storage(result_dict.get("outputs"))
+        compacted_history = compact_history_for_storage(result_dict.get("history"))
+
         # If workflow failed, include error in ToolResult
         if not success and error:
             return ToolResult(
@@ -724,8 +725,8 @@ async def run_workflow_tool(
                     "steps": result_dict.get("steps", 0),
                     "run_id": result_dict.get("run_id"),
                     "last_node_id": result_dict.get("last_node_id"),
-                    "outputs": result_dict.get("outputs", {}),
-                    "history": result_dict.get("history", []),
+                    "outputs": compacted_outputs,
+                    "history": compacted_history,
                 }
             )
         
@@ -740,8 +741,8 @@ async def run_workflow_tool(
                 "steps": result_dict.get("steps", 0),
                 "run_id": result_dict.get("run_id"),
                 "last_node_id": result_dict.get("last_node_id"),
-                "outputs": result_dict.get("outputs", {}),
-                "history": result_dict.get("history", []),
+                "outputs": compacted_outputs,
+                "history": compacted_history,
             }
         )
         

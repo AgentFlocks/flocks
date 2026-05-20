@@ -368,6 +368,7 @@ class TestRunWorkflowToolExecution:
             kwargs["on_step_complete"]({
                 "node_id": "node-1",
                 "node_type": "python",
+                "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
                 "outputs": {"raw_alerts": large_alerts, "message": "ok"},
             })
             return FakeRunWorkflowResult(
@@ -380,6 +381,7 @@ class TestRunWorkflowToolExecution:
                     {
                         "node_id": "node-1",
                         "node_type": "python",
+                        "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
                         "outputs": {"raw_alerts": large_alerts, "message": "ok"},
                     }
                 ],
@@ -422,7 +424,23 @@ class TestRunWorkflowToolExecution:
 
         assert result.success is True
         progress_payload = storage_write.await_args_list[-1].args[1]
+        assert progress_payload["executionLog"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
+        }
         assert progress_payload["executionLog"][0]["outputs"] == {
+            "_raw_alerts_count": 150,
+            "message": "ok",
+        }
+        assert result.metadata["outputs"] == {
+            "_enriched_alerts_count": 150,
+            "message": "done",
+        }
+        assert result.metadata["history"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
+        }
+        assert result.metadata["history"][0]["outputs"] == {
             "_raw_alerts_count": 150,
             "message": "ok",
         }
@@ -431,6 +449,10 @@ class TestRunWorkflowToolExecution:
         assert final_exec_data["outputResults"] == {
             "_enriched_alerts_count": 150,
             "message": "done",
+        }
+        assert final_exec_data["executionLog"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
         }
         assert final_exec_data["executionLog"][0]["outputs"] == {
             "_raw_alerts_count": 150,

@@ -27,6 +27,7 @@ from flocks.workflow.execution_store import (
     _trim_execution_history,
     compact_history_for_storage,
     compact_outputs_for_storage,
+    compact_step_for_storage,
 )
 from flocks.storage.storage import Storage
 
@@ -159,6 +160,20 @@ def test_compact_outputs_drastically_reduces_serialised_size() -> None:
 # ── compact_history_for_storage ───────────────────────────────────────────────
 
 
+def test_compact_step_compacts_inputs_and_outputs() -> None:
+    big = _make_alerts(5_000)
+    step = {
+        "node_id": "normalize",
+        "inputs": {"raw_alerts": big, "source": "syslog"},
+        "outputs": {"normalized_alerts": big, "message": "ok"},
+    }
+
+    compacted = compact_step_for_storage(step)
+
+    assert compacted["inputs"] == {"_raw_alerts_count": 5_000, "source": "syslog"}
+    assert compacted["outputs"] == {"_normalized_alerts_count": 5_000, "message": "ok"}
+
+
 def test_compact_history_compacts_each_step_outputs() -> None:
     big = _make_alerts(5_000)
     history = [
@@ -215,6 +230,22 @@ def test_compact_history_skips_step_with_non_dict_outputs() -> None:
 
     # Non-dict outputs are left as-is (defensive pass-through).
     assert compacted[0]["outputs"] == "string-output"
+
+
+def test_compact_history_compacts_each_step_inputs() -> None:
+    big = _make_alerts(5_000)
+    history = [
+        {
+            "node_id": "dedup",
+            "inputs": {"enriched_alerts": big, "dedup_key": "x"},
+            "outputs": {"unique_alerts": big},
+        },
+    ]
+
+    compacted = compact_history_for_storage(history)
+
+    assert compacted[0]["inputs"] == {"_enriched_alerts_count": 5_000, "dedup_key": "x"}
+    assert compacted[0]["outputs"] == {"_unique_alerts_count": 5_000}
 
 
 # ── Defaults exposed to callers ───────────────────────────────────────────────

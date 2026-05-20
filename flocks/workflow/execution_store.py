@@ -74,13 +74,32 @@ def compact_outputs_for_storage(
     return compacted
 
 
+def compact_step_for_storage(
+    step: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> Any:
+    """Return a copy of one history step with large ``inputs``/``outputs`` compacted."""
+    if not isinstance(step, dict):
+        return step
+    step_copy = dict(step)
+    for field in ("inputs", "outputs"):
+        raw_value = step_copy.get(field)
+        if isinstance(raw_value, dict):
+            step_copy[field] = compact_outputs_for_storage(
+                raw_value, keys=keys, size_threshold=size_threshold
+            )
+    return step_copy
+
+
 def compact_history_for_storage(
     history: Any,
     *,
     keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
 ) -> List[Any]:
-    """Strip large alert lists from step outputs in workflow history.
+    """Strip large alert lists from step inputs/outputs in workflow history.
 
     Returns an empty list when *history* is falsy.  Non-dict step entries
     (defensive: shouldn't happen with normal ``StepResult`` dumps) are
@@ -88,19 +107,10 @@ def compact_history_for_storage(
     """
     if not history:
         return []
-    result: List[Any] = []
-    for step in history:
-        if not isinstance(step, dict):
-            result.append(step)
-            continue
-        step_copy = dict(step)
-        raw_outputs = step_copy.get("outputs")
-        if isinstance(raw_outputs, dict):
-            step_copy["outputs"] = compact_outputs_for_storage(
-                raw_outputs, keys=keys, size_threshold=size_threshold
-            )
-        result.append(step_copy)
-    return result
+    return [
+        compact_step_for_storage(step, keys=keys, size_threshold=size_threshold)
+        for step in history
+    ]
 
 # Maximum number of execution history records retained per workflow.
 # Keep this intentionally small so high-frequency workflows do not keep

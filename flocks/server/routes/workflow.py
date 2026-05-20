@@ -48,6 +48,7 @@ from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
     compact_outputs_for_storage,
+    compact_step_for_storage,
     create_execution_record,
     normalize_execution_status as _normalize_execution_status,
     record_execution_result as _record_execution_result,
@@ -506,10 +507,7 @@ async def _run_workflow_execution_task(
         # that ships it to SQLite) stays bounded, even when a workflow node
         # returns tens of thousands of alerts that are already persisted to
         # JSONL on disk.
-        step_dict = step_result.model_dump(mode="json")
-        raw_outputs = step_dict.get("outputs")
-        if isinstance(raw_outputs, dict):
-            step_dict["outputs"] = compact_outputs_for_storage(raw_outputs)
+        step_dict = compact_step_for_storage(step_result.model_dump(mode="json"))
         step_history.append(step_dict)
         _write_progress({
             "executionLog": list(step_history),

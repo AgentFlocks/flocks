@@ -314,7 +314,7 @@ class TestRecordWorkflowExecution:
                     "executionLog": [
                         {
                             "node_id": "node_1",
-                            "inputs": {"source": "sensor"},
+                            "inputs": {"raw_alerts": large_alerts, "source": "sensor"},
                             "outputs": {"raw_alerts": large_alerts, "message": "ok"},
                             "duration_ms": 12,
                         }
@@ -338,7 +338,7 @@ class TestRecordWorkflowExecution:
             "message": "ok",
         }
         assert "raw_alerts" not in step["outputs"]
-        assert step["inputs"] == {"source": "sensor"}
+        assert step["inputs"] == {"_raw_alerts_count": 150, "source": "sensor"}
 
 
 # ---------------------------------------------------------------------------
