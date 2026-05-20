@@ -3,6 +3,7 @@ Tests for provider module
 """
 
 import pytest
+from types import SimpleNamespace
 from flocks.provider.provider import (
     Provider,
     ChatMessage,
@@ -88,6 +89,79 @@ async def test_get_model():
     # Test unknown model
     unknown = Provider.get_model("unknown-model")
     assert unknown is None
+
+
+def test_resolve_model_prefers_provider_specific_runtime_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="shared-model",
+        capabilities=SimpleNamespace(interleaved={"field": "reasoning_content"}),
+    )
+    wrong_global_model = SimpleNamespace(
+        id="shared-model",
+        capabilities=SimpleNamespace(interleaved={"field": "reasoning_details"}),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"deepseek": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {"shared-model": wrong_global_model})
+
+    resolved = Provider.resolve_model("deepseek", "shared-model")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved["field"] == "reasoning_content"
+
+
+def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="qwen3-max",
+        capabilities=SimpleNamespace(interleaved=None),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+        _config=SimpleNamespace(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"openai-compatible": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("openai-compatible", "qwen3-max")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved == {
+        "field": "reasoning_content",
+        "echo": "tool_calls",
+        "cross_provider_policy": "promote",
+    }
+
+
+def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="deepseek-chat",
+        capabilities=SimpleNamespace(interleaved=None),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+        _config=SimpleNamespace(base_url="https://api.deepseek.com/v1"),
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"custom-demo": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("custom-demo", "deepseek-chat")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved is None
 
 
 @pytest.mark.asyncio

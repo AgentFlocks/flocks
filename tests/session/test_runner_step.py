@@ -31,6 +31,7 @@ from flocks.session.runner import (
     ToolCall,
 )
 from flocks.session.prompt import SessionPrompt
+from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
 
@@ -104,6 +105,63 @@ class TestStepResult:
     def test_error_action(self):
         result = StepResult(action="error", error="LLM failed")
         assert result.error == "LLM failed"
+
+
+class TestToolLoopGuard:
+    def test_halts_after_three_exact_tool_only_steps(self):
+        runner = _make_runner("ses_runner_tool_loop_exact")
+        result = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "loop"})],
+        )
+
+        first = runner._update_tool_loop_guard(result, last_user_id="user-1")
+        second = runner._update_tool_loop_guard(result, last_user_id="user-1")
+        third = runner._update_tool_loop_guard(result, last_user_id="user-1")
+
+        assert first["action"] == "allow"
+        assert second["action"] == "warn"
+        assert third["action"] == "halt"
+        assert third["reason"] == "repeated_exact_tool_call"
+        assert third["count"] == 3
+
+    def test_halts_after_same_tool_streak_with_varying_args(self):
+        runner = _make_runner("ses_runner_tool_loop_same_tool")
+        decision = None
+
+        for idx in range(1, 9):
+            decision = runner._update_tool_loop_guard(
+                StepResult(
+                    action="continue",
+                    tool_calls=[ToolCall(id=f"c{idx}", name="echo_tool", arguments={"text": f"loop-{idx}"})],
+                ),
+                last_user_id="user-1",
+            )
+
+        assert decision is not None
+        assert decision["action"] == "halt"
+        assert decision["reason"] == "same_tool_streak"
+        assert decision["count"] == 8
+
+    def test_resets_after_text_response(self):
+        runner = _make_runner("ses_runner_tool_loop_reset")
+        tool_only = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "loop"})],
+        )
+
+        runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+        warned = runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+        reset = runner._update_tool_loop_guard(
+            StepResult(action="stop", content="done"),
+            last_user_id="user-1",
+        )
+        restarted = runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+
+        assert warned["action"] == "warn"
+        assert reset["action"] == "allow"
+        assert restarted["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -476,7 +534,7 @@ class TestBuildTools:
         assert event_callback.await_args.args[1]["enabledToolCount"] == 3
 
     @pytest.mark.asyncio
-    async def test_build_tools_keeps_registered_skill_description(self):
+    async def test_build_tools_refreshes_skill_description_from_enabled_skills(self):
         runner = _make_runner()
         agent = _make_agent(name="rex")
         skill_tool = ToolInfo(
@@ -491,6 +549,12 @@ class TestBuildTools:
             SessionRunner,
             "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
+        ), patch(
+            "flocks.skill.skill.Skill.list_enabled",
+            AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
+        ), patch(
+            "flocks.tool.system.skill.build_description",
+            return_value="Refreshed skill description",
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
@@ -1272,6 +1336,215 @@ async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_reasoning_metadata_replay",
+        directory="/tmp/runner-reasoning-metadata",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3-max"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to call the tool first.",
+            metadata={
+                "reasoningContent": "Need to call the tool first.",
+                "reasoningSource": "native_reasoning_content",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_reasoning_metadata",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning == "Need to call the tool first."
+    assert chat_messages[0].reasoning_content == "Need to call the tool first."
+    assert chat_messages[0].reasoning_source == "native_reasoning_content"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_redacted_thinking",
+        directory="/tmp/runner-redacted-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_redacted_thinking",
+                "redactedThinkingData": "opaque_blob",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_redacted_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "opaque_blob"}
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_provider_specific_interleaved",
+        directory="/tmp/runner-provider-interleaved",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "deepseek"
+    runner.model_id = "shared-model"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: (
+            SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    interleaved={
+                        "field": "reasoning_content",
+                        "echo": "tool_calls",
+                        "placeholder": " ",
+                        "cross_provider_policy": "placeholder",
+                    }
+                )
+            )
+            if provider_id == "deepseek" and model_id == "shared-model"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_details",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Prior provider chain of thought",
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_provider_specific_interleaved",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning_content == " "
+    assert chat_messages[0].reasoning_details is None
+    assert chat_messages[0].reasoning_source == "placeholder"
+
+
+@pytest.mark.asyncio
 async def test_process_step_creates_assistant_message_with_provider_and_model(monkeypatch):
     runner = _make_runner("ses_runner_provider_model")
     runner.callbacks = RunnerCallbacks(
@@ -1548,6 +1821,172 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     assert record_mock.await_count == 2
     record_mock.assert_any_await(first_usage, message_id=assistant_msg.id)
     record_mock.assert_any_await(second_usage, message_id=assistant_msg.id)
+
+
+@pytest.mark.asyncio
+async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monkeypatch):
+    runner = _make_runner("ses_runner_default_max_steps")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._step = DEFAULT_MAX_TOOL_STEPS
+
+    last_user = UserMessageInfo(
+        id="msg_user_default_max_steps",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=["read"])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_default_max_steps")
+    sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
+    captured = {}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        captured["tools"] = tools
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert captured["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_process_step_respects_explicit_agent_steps_over_default(monkeypatch):
+    runner = _make_runner("ses_runner_explicit_max_steps")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._step = DEFAULT_MAX_TOOL_STEPS
+
+    last_user = UserMessageInfo(
+        id="msg_user_explicit_max_steps",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=DEFAULT_MAX_TOOL_STEPS + 1, mode="primary", prompt="", tools=["read"])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_explicit_max_steps")
+    sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
+    captured = {}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        captured["tools"] = tools
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert captured["tools"] == sentinel_tools
+
+
+@pytest.mark.asyncio
+async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
+    shared_cache = {}
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    update_mock = AsyncMock(return_value=None)
+    create_mock = AsyncMock(
+        side_effect=[
+            SimpleNamespace(id="msg_assistant_tool_loop_1"),
+            SimpleNamespace(id="msg_assistant_tool_loop_2"),
+            SimpleNamespace(id="msg_assistant_tool_loop_3"),
+        ]
+    )
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        del provider, messages, tools, agent, assistant_msg
+        return StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="c-loop", name="echo_tool", arguments={"text": "loop"})],
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=SimpleNamespace(
+        name="rex",
+        steps=None,
+        mode="primary",
+        prompt="",
+        tools=["echo_tool"],
+    )))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_loop_guard",
+        sessionID="ses_runner_tool_loop_guard",
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    for idx in range(1, 4):
+        runner = SessionRunner(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
+        runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[
+            {"type": "function", "function": {"name": "echo_tool", "description": "", "parameters": {}}}
+        ]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        result = await runner._process_step([last_user], last_user)
+        if idx < 3:
+            assert result.action == "continue"
+        else:
+            assert result.action == "stop"
+            assert "Stopped the loop because `echo_tool` was called 3 times in a row" in result.content
+
+    assert update_mock.await_args_list[-2].kwargs["content"].startswith("Stopped the loop because `echo_tool`")
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
 
 
 @pytest.mark.asyncio

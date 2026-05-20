@@ -14,7 +14,13 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 import pytest
 
 import flocks.provider.sdk.openai_base as openai_base_module
-from flocks.provider.sdk.openai_base import OpenAIBaseProvider, extract_reasoning_content
+from flocks.provider.sdk.openai_base import (
+    OpenAIBaseProvider,
+    build_reasoning_metadata,
+    extract_reasoning_content,
+    extract_reasoning_content_with_source,
+    extract_reasoning_details,
+)
 from flocks.provider.provider import ModelInfo, ModelCapabilities, ProviderConfig
 
 
@@ -511,6 +517,26 @@ class TestExtractReasoningContent:
 
     def test_extract_reasoning_content_none_delta(self):
         assert extract_reasoning_content(None) is None
+
+    def test_extract_reasoning_content_with_source_uses_model_extra(self):
+        delta = SimpleNamespace(model_extra={"reasoning_content": "deep thought"})
+        reasoning, source = extract_reasoning_content_with_source(delta)
+        assert reasoning == "deep thought"
+        assert source == "reasoning_content"
+
+    def test_extract_reasoning_details_preserves_dicts(self):
+        details = [{"type": "reasoning.summary", "text": "step", "signature": "sig"}]
+        delta = SimpleNamespace(model_extra={"reasoning_details": details})
+        assert extract_reasoning_details(delta) == details
+
+    def test_build_reasoning_metadata_prefers_reasoning_details_field(self):
+        metadata = build_reasoning_metadata(
+            provider_id="openrouter",
+            model_id="minimax-m2.7",
+            reasoning_details=[{"type": "reasoning.summary", "text": "step"}],
+        )
+        assert metadata["reasoningField"] == "reasoning_details"
+        assert metadata["providerID"] == "openrouter"
 
 
 async def _stream_from_chunks(*chunks):

@@ -24,10 +24,12 @@ from flocks.provider.provider import (
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
     ThinkTagExtractor,
+    build_reasoning_metadata,
     _coerce_bool,
     _normalize_stream_usage,
     _supports_include_usage_fallback,
-    extract_reasoning_content,
+    extract_reasoning_content_with_source,
+    extract_reasoning_details,
     format_openai_content,
     format_openai_messages,
     resolve_verify_ssl,
@@ -326,13 +328,22 @@ class OpenAICompatibleProvider(BaseProvider):
                         })
 
                     # Handle reasoning/thinking content (DeepSeek R1, GLM, Claude proxies, etc.)
-                    reasoning = extract_reasoning_content(delta)
-                    if reasoning:
+                    reasoning, reasoning_source = extract_reasoning_content_with_source(delta)
+                    reasoning_details = extract_reasoning_details(delta)
+                    if reasoning is not None or reasoning_details:
                         emitted_substantive_chunk = True
+                        reasoning_metadata = build_reasoning_metadata(
+                            provider_id=self.id,
+                            model_id=model_id,
+                            reasoning_content=reasoning,
+                            reasoning_source=reasoning_source,
+                            reasoning_details=reasoning_details,
+                        )
                         yield StreamChunk(
                             event_type="reasoning",
-                            reasoning=reasoning,
+                            reasoning=reasoning or "",
                             finish_reason=None,
+                            metadata=reasoning_metadata,
                         )
 
                     # Handle text content – extract inline <think> tags if present
@@ -343,10 +354,17 @@ class OpenAICompatibleProvider(BaseProvider):
                             if seg_type == "reasoning":
                                 if seg_text:
                                     emitted_substantive_chunk = True
+                                reasoning_metadata = build_reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_content=seg_text,
+                                    reasoning_source="think_tag",
+                                )
                                 yield StreamChunk(
                                     event_type="reasoning",
                                     reasoning=seg_text,
                                     finish_reason=None,
+                                    metadata=reasoning_metadata,
                                 )
                             else:
                                 if seg_text:
@@ -362,10 +380,17 @@ class OpenAICompatibleProvider(BaseProvider):
                         if seg_type == "reasoning":
                             if seg_text:
                                 emitted_substantive_chunk = True
+                            reasoning_metadata = build_reasoning_metadata(
+                                provider_id=self.id,
+                                model_id=model_id,
+                                reasoning_content=seg_text,
+                                reasoning_source="think_tag",
+                            )
                             yield StreamChunk(
                                 event_type="reasoning",
                                 reasoning=seg_text,
                                 finish_reason=None,
+                                metadata=reasoning_metadata,
                             )
                         else:
                             if seg_text:

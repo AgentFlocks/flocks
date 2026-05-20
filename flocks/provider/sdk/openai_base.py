@@ -254,8 +254,13 @@ def format_openai_messages(
             d["content"] = content
         if m.tool_calls:
             d["tool_calls"] = m.tool_calls
-        if include_reasoning and role == "assistant" and m.reasoning:
-            d[reasoning_field] = m.reasoning
+        if role == "assistant":
+            if m.reasoning_details:
+                d["reasoning_details"] = m.reasoning_details
+            elif m.reasoning_content is not None:
+                d["reasoning_content"] = m.reasoning_content
+            elif include_reasoning and m.reasoning:
+                d[reasoning_field] = m.reasoning
         if m.tool_call_id:
             d["tool_call_id"] = m.tool_call_id
         if m.name:
@@ -558,6 +563,105 @@ _REASONING_FIELDS = (
     "thinking",
     "reasoning",
 )
+_REASONING_DETAILS_FIELDS = (
+    "reasoning_details",
+)
+
+
+def _normalize_reasoning_details(value: Any) -> Optional[List[Dict[str, Any]]]:
+    """Normalize provider reasoning_details payloads to a list of dicts."""
+    if value is None:
+        return None
+
+    if isinstance(value, tuple):
+        value = list(value)
+    elif hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        if isinstance(dumped, list):
+            value = dumped
+        else:
+            value = [dumped]
+
+    if not isinstance(value, list):
+        return None
+
+    normalized: List[Dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            normalized.append(item)
+        elif hasattr(item, "model_dump"):
+            dumped = item.model_dump()
+            if isinstance(dumped, dict):
+                normalized.append(dumped)
+        elif hasattr(item, "__dict__"):
+            normalized.append(dict(item.__dict__))
+    return normalized or None
+
+
+def extract_reasoning_content_with_source(delta) -> tuple[Optional[str], Optional[str]]:
+    """Extract reasoning text plus the field/source it came from."""
+    if delta is None:
+        return None, None
+    for field in _REASONING_FIELDS:
+        value = getattr(delta, field, None)
+        if value is not None:
+            return value, field
+    extra = getattr(delta, "model_extra", None)
+    if extra and isinstance(extra, dict):
+        for field in _REASONING_FIELDS:
+            value = extra.get(field)
+            if value is not None:
+                return value, field
+    return None, None
+
+
+def extract_reasoning_details(delta) -> Optional[List[Dict[str, Any]]]:
+    """Extract structured reasoning details from streaming delta objects."""
+    if delta is None:
+        return None
+    for field in _REASONING_DETAILS_FIELDS:
+        value = getattr(delta, field, None)
+        normalized = _normalize_reasoning_details(value)
+        if normalized:
+            return normalized
+    extra = getattr(delta, "model_extra", None)
+    if extra and isinstance(extra, dict):
+        for field in _REASONING_DETAILS_FIELDS:
+            normalized = _normalize_reasoning_details(extra.get(field))
+            if normalized:
+                return normalized
+    return None
+
+
+def build_reasoning_metadata(
+    *,
+    provider_id: str,
+    model_id: str,
+    reasoning_content: Optional[str] = None,
+    reasoning_source: Optional[str] = None,
+    reasoning_details: Optional[List[Dict[str, Any]]] = None,
+    reasoning_field: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Build normalized metadata for reasoning chunks."""
+    if not any((reasoning_content is not None, reasoning_source, reasoning_details, reasoning_field)):
+        return None
+
+    field = reasoning_field
+    if field is None:
+        field = "reasoning_details" if reasoning_details else "reasoning_content"
+
+    metadata: Dict[str, Any] = {
+        "providerID": provider_id,
+        "modelID": model_id,
+        "reasoningField": field,
+    }
+    if reasoning_source:
+        metadata["reasoningSource"] = reasoning_source
+    if reasoning_content is not None:
+        metadata["reasoningContent"] = reasoning_content
+    if reasoning_details:
+        metadata["reasoningDetails"] = reasoning_details
+    return metadata
 
 
 def extract_reasoning_content(delta) -> Optional[str]:
@@ -571,19 +675,8 @@ def extract_reasoning_content(delta) -> Optional[str]:
     This is a shared utility used by OpenAIBaseProvider, OpenAIProvider,
     and OpenAICompatibleProvider.
     """
-    if delta is None:
-        return None
-    for field in _REASONING_FIELDS:
-        value = getattr(delta, field, None)
-        if value is not None:
-            return value
-    extra = getattr(delta, "model_extra", None)
-    if extra and isinstance(extra, dict):
-        for field in _REASONING_FIELDS:
-            value = extra.get(field)
-            if value is not None:
-                return value
-    return None
+    reasoning, _source = extract_reasoning_content_with_source(delta)
+    return reasoning
 
 
 class OpenAIBaseProvider(BaseProvider):
@@ -887,13 +980,22 @@ class OpenAIBaseProvider(BaseProvider):
                     })
 
                 # 1) Native reasoning_content field (OpenAI o-series, DeepSeek R1, etc.)
-                reasoning = extract_reasoning_content(delta)
-                if reasoning:
+                reasoning, reasoning_source = extract_reasoning_content_with_source(delta)
+                reasoning_details = extract_reasoning_details(delta)
+                if reasoning is not None or reasoning_details:
                     emitted_substantive_chunk = True
+                    reasoning_metadata = build_reasoning_metadata(
+                        provider_id=self.id,
+                        model_id=model_id,
+                        reasoning_content=reasoning,
+                        reasoning_source=reasoning_source,
+                        reasoning_details=reasoning_details,
+                    )
                     yield StreamChunk(
                         event_type="reasoning",
-                        reasoning=reasoning,
+                        reasoning=reasoning or "",
                         finish_reason=None,
+                        metadata=reasoning_metadata,
                     )
 
                 # 2) Regular content – extract inline <think> tags if present
@@ -904,10 +1006,17 @@ class OpenAIBaseProvider(BaseProvider):
                         if seg_type == "reasoning":
                             if seg_text:
                                 emitted_substantive_chunk = True
+                            reasoning_metadata = build_reasoning_metadata(
+                                provider_id=self.id,
+                                model_id=model_id,
+                                reasoning_content=seg_text,
+                                reasoning_source="think_tag",
+                            )
                             yield StreamChunk(
                                 event_type="reasoning",
                                 reasoning=seg_text,
                                 finish_reason=None,
+                                metadata=reasoning_metadata,
                             )
                         else:
                             if seg_text:
@@ -941,10 +1050,17 @@ class OpenAIBaseProvider(BaseProvider):
                     if seg_type == "reasoning":
                         if seg_text:
                             emitted_substantive_chunk = True
+                        reasoning_metadata = build_reasoning_metadata(
+                            provider_id=self.id,
+                            model_id=model_id,
+                            reasoning_content=seg_text,
+                            reasoning_source="think_tag",
+                        )
                         yield StreamChunk(
                             event_type="reasoning",
                             reasoning=seg_text,
                             finish_reason=None,
+                            metadata=reasoning_metadata,
                         )
                     else:
                         if seg_text:
