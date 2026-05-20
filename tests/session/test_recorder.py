@@ -301,6 +301,45 @@ class TestRecordWorkflowExecution:
         record = json.loads(path.read_text(encoding="utf-8").strip())
         assert record["workflow_id"] is None
 
+    @pytest.mark.asyncio
+    async def test_compacts_large_workflow_outputs_before_writing_jsonl(self, tmp_path):
+        large_alerts = [{"id": idx, "payload": "x" * 20} for idx in range(150)]
+        with patch("flocks.session.recorder._record_dir", return_value=tmp_path):
+            await Recorder.record_workflow_execution(
+                exec_id="exec_004",
+                workflow_id="wf_004",
+                run_result={
+                    "status": "success",
+                    "outputResults": {"enriched_alerts": large_alerts, "message": "done"},
+                    "executionLog": [
+                        {
+                            "node_id": "node_1",
+                            "inputs": {"source": "sensor"},
+                            "outputs": {"raw_alerts": large_alerts, "message": "ok"},
+                            "duration_ms": 12,
+                        }
+                    ],
+                },
+            )
+
+        path = tmp_path / "workflow" / "exec_004.jsonl"
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        records = [json.loads(line) for line in lines]
+        summary = next(record for record in records if record["type"] == "workflow.summary")
+        step = next(record for record in records if record["type"] == "workflow.step")
+
+        assert summary["outputs"] == {
+            "_enriched_alerts_count": 150,
+            "message": "done",
+        }
+        assert "enriched_alerts" not in summary["outputs"]
+        assert step["outputs"] == {
+            "_raw_alerts_count": 150,
+            "message": "ok",
+        }
+        assert "raw_alerts" not in step["outputs"]
+        assert step["inputs"] == {"source": "sensor"}
+
 
 # ---------------------------------------------------------------------------
 # LRU lock eviction

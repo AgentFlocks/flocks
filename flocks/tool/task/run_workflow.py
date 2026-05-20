@@ -20,6 +20,8 @@ from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.session.recorder import Recorder
 from flocks.workflow.execution_store import (
+    compact_history_for_storage,
+    compact_outputs_for_storage,
     create_execution_record,
     normalize_execution_status,
     record_execution_result,
@@ -529,6 +531,9 @@ async def run_workflow_tool(
             step_dict = dict(step_result)
         else:
             step_dict = {"node_id": None, "outputs": {}, "error": str(step_result)}
+        raw_outputs = step_dict.get("outputs")
+        if isinstance(raw_outputs, dict):
+            step_dict["outputs"] = compact_outputs_for_storage(raw_outputs)
         tracked_history.append(step_dict)
         _update_execution_progress({
             "executionLog": list(tracked_history),
@@ -677,11 +682,11 @@ async def run_workflow_tool(
                 )
             status_value, error_message = resolve_execution_outcome(outcome_result)  # type: ignore[arg-type]
             current_data.update({
-                "outputResults": result_dict.get("outputs"),
+                "outputResults": compact_outputs_for_storage(result_dict.get("outputs")),
                 "status": status_value,
                 "finishedAt": int(time.time() * 1000),
                 "duration": time.time() - execution_started_at,
-                "executionLog": result_dict.get("history") or list(tracked_history),
+                "executionLog": compact_history_for_storage(result_dict.get("history")) or list(tracked_history),
                 "errorMessage": error_message,
                 "currentNodeId": result_dict.get("last_node_id"),
                 "currentPhase": status_value,
@@ -752,7 +757,7 @@ async def run_workflow_tool(
                 "status": "error",
                 "finishedAt": int(time.time() * 1000),
                 "errorMessage": error_msg,
-                "executionLog": list(tracked_history),
+                "executionLog": compact_history_for_storage(list(tracked_history)),
                 "currentPhase": "error",
                 "currentStepIndex": len(tracked_history),
             })

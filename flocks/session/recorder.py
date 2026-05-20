@@ -174,9 +174,17 @@ class Recorder:
         workflow_id: Optional[str],
         run_result: Dict[str, Any],
     ) -> None:
+        # Import lazily here to avoid an import cycle:
+        # execution_store -> Recorder, while the recorder only needs the
+        # compaction helpers when serializing workflow audit records.
+        from flocks.workflow.execution_store import compact_outputs_for_storage
+
         paths = cls.paths()
         path = paths.workflow_dir / f"{exec_id}.jsonl"
         history = run_result.get("executionLog") or run_result.get("history") or []
+        summary_outputs = run_result.get("outputResults") or run_result.get("outputs")
+        if isinstance(summary_outputs, dict):
+            summary_outputs = compact_outputs_for_storage(summary_outputs)
         await cls.append_jsonl(
             path,
             {
@@ -187,12 +195,15 @@ class Recorder:
                 "status": run_result.get("status"),
                 "error": _safe_truncate(run_result.get("errorMessage") or run_result.get("error")),
                 "steps": len(history) if isinstance(history, list) else None,
-                "outputs": _safe_truncate(run_result.get("outputResults") or run_result.get("outputs")),
+                "outputs": _safe_truncate(summary_outputs),
             },
         )
 
         if isinstance(history, list):
             for idx, step in enumerate(history, 1):
+                step_outputs = step.get("outputs") if isinstance(step, dict) else None
+                if isinstance(step_outputs, dict):
+                    step_outputs = compact_outputs_for_storage(step_outputs)
                 await cls.append_jsonl(
                     path,
                     {
@@ -203,7 +214,7 @@ class Recorder:
                         "step": idx,
                         "node_id": step.get("node_id") or step.get("nodeId") or step.get("node"),
                         "inputs": _safe_truncate(step.get("inputs")),
-                        "outputs": _safe_truncate(step.get("outputs")),
+                        "outputs": _safe_truncate(step_outputs if step_outputs is not None else step.get("outputs")),
                         "stdout": _safe_truncate(step.get("stdout")),
                         "error": _safe_truncate(step.get("error")),
                         "traceback": _safe_truncate(step.get("traceback")),
