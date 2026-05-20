@@ -28,7 +28,7 @@ DOOM_LOOP_THRESHOLD = 3
 # Default assistant-step budget when an agent does not declare an explicit
 # ``steps`` limit. Keeps tool loops finite without being too aggressive for
 # longer coding/research tasks.
-DEFAULT_MAX_TOOL_STEPS = 100
+DEFAULT_MAX_TOOL_STEPS = 1000
 
 # Cross-step loop guard thresholds. These complement the per-message doom-loop
 # detection in ``stream_processor.py`` by stopping repeated tool-only turns.
