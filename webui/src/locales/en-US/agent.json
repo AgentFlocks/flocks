@@ -18,10 +18,23 @@
       "subtitle": "Specialized executors scheduled by the primary agent, each handling specific tasks"
     }
   },
+  "totalCount": "{{total}} Agents",
   "badge": {
     "native": "Built-in",
+    "custom": "Custom",
     "delegatable": "Delegatable",
-    "delete": "Delete"
+    "delete": "Delete",
+    "edit": "Edit",
+    "nativeDeleteDisabled": "Built-in agents cannot be deleted"
+  },
+  "filter": {
+    "all": "All",
+    "builtin": "Built-in",
+    "custom": "Custom",
+    "aria": "Filter by source"
+  },
+  "pagination": {
+    "info": "{{start}}–{{end}} of {{total}}"
   },
   "form": {
     "name": "Name",

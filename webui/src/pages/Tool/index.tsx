@@ -57,7 +57,6 @@ import LocalTabContent from './components/LocalTabContent';
 import { getToolTabCounts } from './tabCounts';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
-import LogViewerModal from '@/components/common/LogViewerModal';
 
 // ============================================================================
 // Constants & Config
@@ -165,7 +164,6 @@ export default function ToolPage() {
   const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
   const [showAPISheet, setShowAPISheet] = useState(false);
   const [showGenerateSheet, setShowGenerateSheet] = useState(false);
-  const [showLogViewer, setShowLogViewer] = useState(false);
   // Sort: default by 类别 (source) MCP -> API -> 内置
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
@@ -431,7 +429,7 @@ export default function ToolPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-w-0">
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -448,13 +446,6 @@ export default function ToolPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowLogViewer(true)}
-            className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
-            title={t('logs.viewLogs')}
-          >
-            <FileText className="w-4 h-4" />
-          </button>
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -683,7 +674,6 @@ export default function ToolPage() {
         />
       )}
 
-      <LogViewerModal open={showLogViewer} onClose={() => setShowLogViewer(false)} />
 
     </div>
   );
@@ -707,6 +697,7 @@ function SortFilterHeader({
   onToggleFilter,
   onClearFilter,
   renderLabel,
+  asDiv = false,
 }: {
   label: string;
   field: SortField;
@@ -717,10 +708,11 @@ function SortFilterHeader({
   onToggleFilter: (f: keyof ColumnFilters, v: string) => void;
   onClearFilter: (f: keyof ColumnFilters) => void;
   renderLabel?: (v: string) => string;
+  asDiv?: boolean;
 }) {
-  const { t, i18n } = useTranslation('tool');
+  const { t } = useTranslation('tool');
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLTableHeaderCellElement>(null);
+  const ref = useRef<HTMLElement | null>(null);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -734,10 +726,9 @@ function SortFilterHeader({
   const isActive = sort.field === field;
   const hasFilter = activeFilters.size > 0;
 
-  return (
-    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap" ref={ref}>
+  const inner = (
+    <>
       <div className="flex items-center gap-1">
-        {/* Sort button */}
         <button
           onClick={() => onSort(field)}
           className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-slate-700' : ''}`}
@@ -745,8 +736,6 @@ function SortFilterHeader({
           {label}
           {isActive && (sort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
         </button>
-
-        {/* Filter toggle */}
         <button
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-slate-600' : 'text-gray-400'}`}
@@ -755,7 +744,6 @@ function SortFilterHeader({
         </button>
       </div>
 
-      {/* Filter dropdown */}
       {open && (
         <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
           {hasFilter && (
@@ -783,6 +771,26 @@ function SortFilterHeader({
           })}
         </div>
       )}
+    </>
+  );
+
+  if (asDiv) {
+    return (
+      <div
+        className="relative whitespace-nowrap inline-flex"
+        ref={ref as React.RefObject<HTMLDivElement>}
+      >
+        {inner}
+      </div>
+    );
+  }
+
+  return (
+    <th
+      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap"
+      ref={ref as React.RefObject<HTMLTableCellElement>}
+    >
+      {inner}
     </th>
   );
 }
@@ -1609,7 +1617,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && (
               <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>
             )}
@@ -3149,119 +3157,146 @@ function ToolTable({
   onPageChange: (page: number) => void;
   onSelect: (tool: Tool) => void;
 }) {
-  const { t, i18n } = useTranslation('tool');
+  const { t } = useTranslation('tool');
+  // Column layout, left-to-right.  Every data column uses ``minmax(min, fr)``
+  // so any leftover width on wide screens is shared *proportionally* across
+  // the table rather than dumped into a single gap between "name" and
+  // "source".  Long names truncate via ``truncate`` on the inner button.
+  //
+  //   1) 32px                       icon
+  //   2) minmax(220px, 3fr)         tool name (dominant column, truncates)
+  //   3) minmax(80px,  1fr)         source badge
+  //   4) minmax(140px, 1.6fr)       provider / source name
+  //   5) minmax(80px,  1fr)         enabled badge
+  //   6) minmax(90px,  1fr)         actions button
+  //
+  // Ratio 3 : 1 : 1.6 : 1 : 1  ≈ keeps the name comfortably wide while
+  // distributing the rest so the small badge columns don't feel orphaned.
+  const GRID_COLS =
+    '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
-      <div className="overflow-x-auto flex-1">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              {/* category - 1st column */}
-              <SortFilterHeader
-                label={t('table.category')}
-                field="category"
-                sort={sort}
-                filterValues={filterOptions.category}
-                activeFilters={filters.category}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => t(`category.${CATEGORY_I18N_KEY[v] || v}`, { defaultValue: v })}
-              />
-              {/* source */}
-              <SortFilterHeader
-                label={t('table.source')}
-                field="source"
-                sort={sort}
-                filterValues={filterOptions.source}
-                activeFilters={filters.source}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => SOURCE_BADGE[v]?.label || v}
-              />
-              {/* provider (source_name) */}
-              <SortFilterHeader
-                label={t('table.provider')}
-                field="source_name"
-                sort={sort}
-                filterValues={filterOptions.source_name}
-                activeFilters={filters.source_name}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-              />
-              {/* tool name - no sort/filter */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.toolName')}
-              </th>
-              {/* description */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.description')}
-              </th>
-              {/* status (enabled) */}
-              <SortFilterHeader
-                label={t('table.status')}
-                field="enabled"
-                sort={sort}
-                filterValues={filterOptions.enabled}
-                activeFilters={filters.enabled}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => (v === 'true' ? t('enabledBadge.enabled') : t('enabledBadge.disabled'))}
-              />
-              {/* actions */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.actions')}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {tools.map((tool) => {
-              const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
-              return (
-                <tr key={tool.name} className="hover:bg-gray-50 cursor-pointer" onClick={() => onSelect(tool)}>
-                  {/* category */}
-                  <td className="px-6 py-4 whitespace-nowrap min-w-[80px]">
-                    <span className="text-sm text-gray-700">{t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category })}</span>
-                  </td>
-                  {/* source */}
-                  <td className="px-6 py-4 whitespace-nowrap min-w-[80px]">
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${sb.className}`}>
-                      {sb.label}
-                    </span>
-                  </td>
-                  {/* provider */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="text-sm text-gray-700">{tool.source_name || 'Flocks'}</span>
-                  </td>
-                  {/* tool name */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="text-sm font-medium text-gray-900 font-mono">{tool.name}</span>
-                  </td>
-                  {/* description */}
-                  <td className="px-6 py-4">
-                    <span className="text-sm text-gray-600 line-clamp-1 max-w-sm">{tool.description}</span>
-                  </td>
-                  {/* status */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <EnabledBadge enabled={tool.enabled} />
-                  </td>
-                  {/* actions */}
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    <button onClick={(e) => { e.stopPropagation(); onSelect(tool); }} className="text-sky-700 hover:text-sky-950 mr-3">
-                      {t('table.test')}
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); onSelect(tool); }} className="text-gray-600 hover:text-gray-900">
-                      {t('table.detail')}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      {/* Header */}
+      <div
+        className="grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide"
+        style={{ gridTemplateColumns: GRID_COLS }}
+      >
+        <div />
+        <div>{t('table.toolName')}</div>
+        <div className="text-center">
+          <SortFilterHeader
+            label={t('table.source')}
+            field="source"
+            sort={sort}
+            filterValues={filterOptions.source}
+            activeFilters={filters.source}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            renderLabel={(v) => SOURCE_BADGE[v]?.label || v}
+            asDiv
+          />
+        </div>
+        <div>
+          <SortFilterHeader
+            label={t('table.provider')}
+            field="source_name"
+            sort={sort}
+            filterValues={filterOptions.source_name}
+            activeFilters={filters.source_name}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            asDiv
+          />
+        </div>
+        <div className="text-center">
+          <SortFilterHeader
+            label={t('table.status')}
+            field="enabled"
+            sort={sort}
+            filterValues={filterOptions.enabled}
+            activeFilters={filters.enabled}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            renderLabel={(v) => (v === 'true' ? t('enabledBadge.enabled') : t('enabledBadge.disabled'))}
+            asDiv
+          />
+        </div>
+        <div className="text-center">{t('table.actions')}</div>
+      </div>
+
+      {/* Rows */}
+      <div className="flex-1 divide-y divide-gray-100">
+        {tools.map((tool) => {
+          const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+          const categoryLabel = t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category });
+
+          return (
+            <div
+              key={tool.name}
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              style={{ gridTemplateColumns: GRID_COLS }}
+            >
+              {/* Icon */}
+              <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
+                <Wrench className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
+              </div>
+
+              {/* Name (no description, kept compact).
+                  Name is a `<button>` rather than a `<span>` so the click
+                  affordance matches the Hub catalog (see ``Hub/index.tsx``
+                  HubTable row), letting users open the tool detail drawer
+                  without hunting for the "manage" action on the right.
+                  Font is `text-xs` (one step smaller than the previous
+                  `text-sm`) because the Tool list is denser than other tabs
+                  and the mono name otherwise visually overpowers the row. */}
+              <div className="min-w-0 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onSelect(tool)}
+                  title={tool.name}
+                  className="text-xs font-medium text-gray-900 font-mono truncate
+                             hover:text-slate-700 transition-colors
+                             focus:outline-none focus-visible:underline text-left min-w-0"
+                >
+                  {tool.name}
+                </button>
+                <span className="text-[10px] text-gray-400 shrink-0">{categoryLabel}</span>
+              </div>
+
+              {/* Source column */}
+              <div className="text-center">
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${sb.className}`}>
+                  {sb.label}
+                </span>
+              </div>
+
+              {/* Provider column */}
+              <div className="text-xs text-gray-600 truncate">
+                {tool.source_name || 'Flocks'}
+              </div>
+
+              {/* Status column */}
+              <div className="text-center">
+                <EnabledBadge enabled={tool.enabled} />
+              </div>
+
+              {/* Actions column — manage button */}
+              <div className="w-full flex items-center justify-center">
+                <button
+                  onClick={() => onSelect(tool)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"
+                >
+                  <Settings className="w-3 h-3" />
+                  {t('mcp.manage')}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <Pagination
@@ -3404,6 +3439,7 @@ export function ToolDetailDrawer({
       .finally(() => setFixturesLoading(false));
   }, [tool.name]);
 
+
   const handleToggleEnabled = async () => {
     if (toggling) return;
     const next = !enabled;
@@ -3414,8 +3450,8 @@ export function ToolDetailDrawer({
       setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
       onEnabledChange?.(tool.name, updated.enabled);
-    } catch (err: any) {
-      alert(err.response?.data?.message || err.response?.data?.detail || err.message);
+    } catch {
+      // revert on error
     } finally {
       setToggling(false);
     }
@@ -3459,7 +3495,7 @@ export function ToolDetailDrawer({
               <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
                   {sb.label}

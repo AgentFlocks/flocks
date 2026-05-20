@@ -10,6 +10,7 @@ import type { APIServiceSummary, MCPCatalogCategory, MCPCatalogEntry } from '@/t
 import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription } from '@/utils/mcpCatalog';
 import { APIServiceDetailPanel } from './ServiceDetailPanel';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const LANG_COLORS: Record<string, string> = {
@@ -68,7 +69,8 @@ export default function APITabContent({
     try {
       setServicesLoading(true);
       const res = await providerAPI.listApiServices();
-      setServices(res.data || []);
+      // Exclude security device APIs — they live on the Device Integration page
+      setServices((res.data || []).filter((s) => s.integration_type !== 'device'));
     } catch {
       setServices([]);
     } finally {
@@ -302,78 +304,76 @@ export default function APITabContent({
       {services.length === 0 && filteredCatalog.length === 0 && !catalogLoading && !servicesLoading ? (
         <EmptyState icon={<Cloud className="w-16 h-16" />} title={t('api.noTools')} description={t('api.noToolsDesc')} />
       ) : (
-        <div className="grid gap-4 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
           {services.map((service) => {
             const serviceTools = toolsByModule[service.id] || [];
             const isSelected = selectedServiceId === service.id;
-            const borderColor = service.enabled ? '#10B981' : '#9CA3AF';
-            const statusBadgeClass = service.enabled
-              ? 'bg-green-100 text-green-700'
-              : 'bg-gray-100 text-gray-600';
-            const statusLabel = service.enabled
-              ? t('enabledBadge.enabled')
-              : t('enabledBadge.disabled');
-            const cardDescription = getServiceDescription(service) || `${service.name} API service`;
+            const rowDescription = getServiceDescription(service) || `${service.name} API service`;
 
             return (
               <div
                 key={service.id}
-                onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                className={`relative bg-white rounded-xl border overflow-hidden cursor-pointer h-[180px] flex flex-col transition-all duration-150 ${isSelected ? 'border-red-400 shadow-md ring-2 ring-red-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
-                style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}`}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
+                {/* Icon */}
+                <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
+                  <Cloud className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
+                </div>
+
+                {/* Name + description.
+                    Whole block is the click target (mirrors Hub catalog rows
+                    where name+description live inside one `<button>`).  Toggle
+                    is `isSelected ? null : id` so a second click collapses
+                    the panel, matching the "manage" button's behaviour. */}
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (service.builtin) return;
-                    handleDeleteService(service.id);
-                  }}
-                  disabled={!!service.builtin || installing === service.id}
-                  className={`absolute top-2 right-2 z-10 flex items-center justify-center w-6 h-6 rounded-md transition-colors ${service.builtin ? 'text-gray-300 cursor-not-allowed' : 'text-red-400 hover:text-red-600 hover:bg-red-50 cursor-pointer'}`}
-                  title={service.builtin ? t('api.builtinCannotDelete') : t('button.delete')}
+                  type="button"
+                  onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
+                  className="min-w-0 text-left group/name focus:outline-none"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-                <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
-                  <div className="flex items-start gap-1.5 flex-wrap pr-6">
-                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{service.name}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${statusBadgeClass}`}>
-                      {statusLabel}
-                    </span>
-                    <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-purple-700 group-focus-visible/name:underline">{service.name}</span>
                     {service.version && (
-                      <span
-                        className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-200 text-xs font-medium rounded-full shrink-0"
-                        title={t('serviceInfo.version')}
-                      >
+                      <span className="px-1.5 py-0.5 bg-sky-50 text-sky-700 border border-sky-100 text-[10px] font-medium rounded shrink-0" title={t('serviceInfo.version')}>
                         v{service.version.replace(/^v/i, '')}
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed min-h-[40px]">
-                    {cardDescription}
-                  </p>
-                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
-                    <Wrench className="w-3 h-3 shrink-0" />
-                    <span>{serviceTools.length} {t('api.tools')}</span>
-                    {service.latency_ms != null && (
-                      <span className="ml-auto text-[10px] text-gray-400">{service.latency_ms}ms</span>
-                    )}
-                  </div>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{rowDescription}</p>
+                </button>
+
+                {/* Type column */}
+                <div className="text-center">
+                  <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
                 </div>
-                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+
+                {/* Status column */}
+                <div className="text-center">
+                  <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${service.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                    {service.enabled ? t('enabledBadge.enabled') : t('enabledBadge.disabled')}
+                  </span>
+                </div>
+
+                {/* Stats column */}
+                <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
+                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{serviceTools.length}</span>
+                  {service.latency_ms != null && <span>{service.latency_ms}ms</span>}
+                </div>
+
+                {/* Actions column */}
+                <div className="flex items-center justify-end gap-1.5">
                   {service.enabled ? (
                     <>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                        className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <Settings className="w-3 h-3" /> {t('mcp.manage')}
+                        <Settings className="w-3 h-3" />{t('mcp.manage')}
                       </button>
                       <button
                         onClick={(e) => handleToggleEnabled(service.id, false, e)}
                         disabled={installing === service.id}
-                        className="flex items-center justify-center w-7 h-7 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+                        className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors disabled:opacity-50"
                         title={t('detail.disableServer')}
                       >
                         <PowerOff className="w-3.5 h-3.5" />
@@ -384,20 +384,27 @@ export default function APITabContent({
                       <button
                         onClick={(e) => handleToggleEnabled(service.id, true, e)}
                         disabled={installing === service.id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />
-                        {installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
+                        <Power className="w-3 h-3" />{installing === service.id ? t('mcp.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => setSelectedServiceId(isSelected ? null : service.id)}
-                        className={`flex items-center justify-center w-7 h-7 border rounded-lg transition-colors ${isSelected ? 'border-purple-300 text-purple-700 bg-purple-50' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
                         <Settings className="w-3.5 h-3.5" />
                       </button>
                     </>
                   )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); if (!service.builtin) handleDeleteService(service.id); }}
+                    disabled={!!service.builtin || installing === service.id}
+                    className={`p-1.5 rounded-lg border transition-colors ${service.builtin ? 'border-gray-100 text-gray-300 cursor-not-allowed' : 'border-red-100 text-red-400 hover:bg-red-50'}`}
+                    title={service.builtin ? t('api.builtinCannotDelete') : t('button.delete')}
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
                 </div>
               </div>
             );
@@ -406,25 +413,43 @@ export default function APITabContent({
           {filteredCatalog.map((entry) => (
             <div
               key={`catalog-${entry.id}`}
-              className="relative bg-white rounded-xl border overflow-hidden cursor-default h-[180px] flex flex-col transition-all duration-150 border-gray-200 shadow-sm"
-              style={{ borderLeftWidth: 4, borderLeftColor: '#9CA3AF' }}
+              className="grid items-center gap-3 px-4 py-3 cursor-default hover:bg-gray-50 transition-colors"
+              style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
             >
-              <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
-                <div className="flex items-start gap-1.5 flex-wrap">
-                  <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{entry.name}</span>
-                  <span className="px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 bg-gray-100 text-gray-600">{t('enabledBadge.disabled')}</span>
-                  <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-xs font-medium rounded-full shrink-0">API</span>
+              {/* Icon */}
+              <div className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50">
+                <Cloud className="w-4 h-4 text-gray-400" />
+              </div>
+
+              {/* Name + description */}
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm font-semibold text-gray-900 truncate">{entry.name}</span>
                   {PRIORITY_IDS.has(entry.id) && (
-                    <span className="px-1.5 py-0.5 bg-red-100 text-red-700 text-xs font-medium rounded-full shrink-0">{t('api.recommended')}</span>
+                    <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">{t('api.recommended')}</span>
                   )}
                 </div>
-                <p className="text-xs text-gray-500 line-clamp-2 leading-relaxed">{getCatalogDescription(entry, i18n.language)}</p>
-                <div className="flex items-center gap-2 text-xs text-gray-500 mt-auto">
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                  <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{entry.stars}</span>
-                </div>
+                <p className="text-xs text-gray-500 truncate mt-0.5">{getCatalogDescription(entry, i18n.language)}</p>
               </div>
-              <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+
+              {/* Type column */}
+              <div className="text-center">
+                <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 text-[10px] font-medium rounded">API</span>
+              </div>
+
+              {/* Status column */}
+              <div className="text-center">
+                <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[10px] font-medium rounded">{t('statusBadge.inactive')}</span>
+              </div>
+
+              {/* Stats column */}
+              <div className="flex items-center justify-end gap-2 text-xs text-gray-400">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
+                <span className="flex items-center gap-1"><Star className="w-3 h-3" />{entry.stars}</span>
+              </div>
+
+              {/* Actions column */}
+              <div className="flex items-center justify-end gap-1.5">
                 <button
                   onClick={() => {
                     if (entry.requires_auth && !isConfigured(entry.id)) {
@@ -434,20 +459,23 @@ export default function APITabContent({
                     }
                   }}
                   disabled={installing === entry.id}
-                  className={INSTALL_BUTTON_CLASS}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                 >
-                  <Download className="w-3 h-3" />
-                  {installing === entry.id ? t('api.configuring') : t('button.install')}
+                  <Download className="w-3 h-3" />{installing === entry.id ? t('api.configuring') : t('button.install')}
                 </button>
-                <a
-                  href={`https://github.com/${entry.github}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
-                  title="GitHub"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                {entry.github ? (
+                  <a
+                    href={`https://github.com/${entry.github}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
+                    title="GitHub"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                ) : (
+                  <span className="w-7 h-7" aria-hidden="true" />
+                )}
               </div>
             </div>
           ))}

@@ -1,0 +1,184 @@
+name: sangfor_af_v85_monitor
+description: >
+  Sangfor AF v8.0.85 monitoring tool. Provides real-time and historical
+  session data, traffic rankings, network statistics, and packet diagnostics.
+  These APIs are new in v8.0.85 and not available in v8.0.48.
+description_cn: >
+  深信服 AF v8.0.85 监控工具（v8.0.48 中不含此功能）。通过 `action` 参数
+  查询实时/历史会话数据、流量排行、网络统计及报文诊断信息。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_af
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        监控动作名，可选值：
+
+        ## 流量排行
+        - get_user_traffic_rank
+          用途: 获取用户流量排行（Top N 用户）
+          必填: 无
+          常用: topNumber（前N名，默认10）、vsys、line、applicationType
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_ip_traffic_trend
+          用途: 获取 IP 流量趋势曲线（指定前5或10名IP）
+          必填: 无
+          常用: topNumber、vsys、unit、minutes
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_app_traffic_rank
+          用途: 获取应用流量排行（Top N 应用）
+          必填: 无
+          常用: topNumber、vsys、line
+          风险提示: 只读接口
+          是否任务型: 否
+
+        ## 会话排行与统计
+        - get_session_dailys
+          用途: 获取每日新建会话信息
+          必填: 无
+          常用: vsys、ip、_start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_session_details
+          用途: 获取会话详情列表（含5层信息）
+          必填: 无
+          常用: vsys、srcIP、dstIP、protocol、_start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_session_count_trend
+          用途: 获取会话数量趋势折线图数据
+          必填: 无
+          常用: vsys、minutes（最近N分钟，默认60）
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_session_src_ip
+          用途: 获取指定源IP的会话详情（按目的IP分组）
+          必填: 无
+          常用: srcIP、vsys、_start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_session_count_rank
+          用途: 获取会话数量排行（Top N 源IP）
+          必填: 无
+          常用: topNumber、vsys
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_session_summary
+          用途: 获取会话概要信息（总数、协议分布等）
+          必填: 无
+          常用: vsys
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_monitor_ips
+          用途: 获取配置中心监听列表IP范围
+          必填: 无
+          常用: _start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_sessions
+          用途: 获取实时会话列表（当前活跃连接）
+          必填: 无
+          常用: vsys、srcIP、dstIP、protocol、srcPort、dstPort、_start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+
+        ## 统计与诊断
+        - get_packet_drop_stats
+          用途: 获取 mbuf 丢包点统计信息列表
+          必填: 无
+          风险提示: 只读接口
+          是否任务型: 否
+        - clear_packet_drop_stats
+          用途: 清除后台丢包统计信息
+          必填: 无
+          风险提示: 写操作，清除统计数据不可恢复
+          是否任务型: 否
+        - get_mbuf_stats
+          用途: 获取 mbuf 内存统计信息
+          必填: 无
+          风险提示: 只读接口
+          是否任务型: 否
+        - get_hash_table_stats
+          用途: 获取哈希表统计列表
+          必填: 无
+          常用: _start、_length
+          风险提示: 只读接口
+          是否任务型: 否
+      enum:
+        - get_user_traffic_rank
+        - get_ip_traffic_trend
+        - get_app_traffic_rank
+        - get_session_dailys
+        - get_session_details
+        - get_session_count_trend
+        - get_session_src_ip
+        - get_session_count_rank
+        - get_session_summary
+        - get_monitor_ips
+        - get_sessions
+        - get_packet_drop_stats
+        - clear_packet_drop_stats
+        - get_mbuf_stats
+        - get_hash_table_stats
+
+    topNumber:
+      type: integer
+      description: 排行榜取前N名（如5或10）
+    vsys:
+      type: string
+      description: 虚拟系统名称（通常为 public，可省略）
+    line:
+      type: integer
+      description: "线路编号过滤，0=全部（范围0-256）"
+    applicationType:
+      type: array
+      items:
+        type: string
+      description: 应用类型过滤列表
+    filterObject:
+      type: object
+      description: >
+        用户流量排行过滤对象：
+        objectType=GROUP/USER/IP，对应 groups/users/ip 数组
+    unit:
+      type: string
+      description: "流量单位（如 bps, Kbps, Mbps）"
+    minutes:
+      type: integer
+      description: 查询最近N分钟的数据（默认60）
+    ip:
+      type: string
+      description: IP地址过滤（格式：IPv4/IPv6）
+    srcIP:
+      type: string
+      description: 源IP地址过滤（格式：IPv4/IPv6）
+    dstIP:
+      type: string
+      description: 目的IP地址过滤
+    protocol:
+      type: string
+      description: "协议过滤：TCP/UDP/ICMP/OTHER"
+    srcPort:
+      type: integer
+      description: 源端口过滤（0-65535）
+    dstPort:
+      type: integer
+      description: 目的端口过滤（0-65535）
+    _start:
+      type: integer
+      description: 分页起始位置（从0开始）
+    _length:
+      type: integer
+      description: 每页最大返回数量（最大200，默认100）
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_af.handler.py
+  function: monitor

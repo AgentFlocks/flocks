@@ -504,6 +504,7 @@
 
   "logs": {
     "title": "系统日志",
+    "description": "查看后端运行日志，支持多日志文件切换与自动滚动",
     "refresh": "刷新",
     "autoScroll": "自动滚动",
     "file": "文件",

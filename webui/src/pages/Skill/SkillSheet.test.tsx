@@ -120,12 +120,18 @@ describe('SkillSheet', () => {
   });
 
   describe('Edit mode', () => {
+    // Use `source: 'user'` so the sheet renders in editable mode.  Skills
+    // with `source: 'project'` (i.e. checked into the project's
+    // `.flocks/plugins/skills/...` directory) are intentionally read-only in
+    // the UI to prevent users from accidentally rewriting repo-tracked files;
+    // those scenarios are exercised by the read-only branch in
+    // "should show name field in edit mode" below.
     const skill = {
       name: 'test-skill',
       description: 'A test skill',
       content: '# Test skill content',
       location: '/path/to/skill',
-      source: 'project',
+      source: 'user',
     };
 
     it('should show "编辑 技能：test-skill" title', () => {

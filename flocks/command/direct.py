@@ -215,20 +215,44 @@ async def run_direct_command(
         )
 
     if name == "skills":
+        # `surface` distinguishes user-driven calls (CLI/TUI/WebUI input
+        # dispatcher passes its sink surface) from agent-driven calls (the
+        # `slash_command` tool calls `run_direct_command` without a surface).
+        # We want the agent path to be strictly "enabled-only" so a toggled
+        # off skill cannot be rediscovered through this listing, while keeping
+        # the user path showing the full inventory with a `[disabled]` marker
+        # so users can tell at a glance what they have turned off.
+        is_user_surface = surface is not None
         if not args or args == "list":
-            skills = await Skill.all()
+            if is_user_surface:
+                skills = await Skill.all()
+                disabled = Skill.load_disabled()
+            else:
+                skills = await Skill.list_enabled()
+                disabled = set()
             if not skills:
                 return DirectCommandResult(handled=True, text="No skills available.")
             lines = ["Available skills:", ""]
             for index, skill in enumerate(skills, 1):
-                lines.append(f"{index}. {skill.name}: {skill.description}")
+                suffix = " [disabled]" if skill.name in disabled else ""
+                lines.append(f"{index}. {skill.name}{suffix}: {skill.description}")
             return DirectCommandResult(handled=True, text="\n".join(lines))
 
         if args == "refresh":
-            skills = await Skill.refresh()
+            # `Skill.refresh()` repopulates the discovery cache; the user
+            # path then re-lists everything with the `[disabled]` marker so
+            # the refresh output matches what the user actually sees.
+            await Skill.refresh()
+            if is_user_surface:
+                skills = await Skill.all()
+                disabled = Skill.load_disabled()
+            else:
+                skills = await Skill.list_enabled()
+                disabled = set()
             lines = ["Skills refreshed. Current list:", ""]
             for index, skill in enumerate(skills, 1):
-                lines.append(f"{index}. {skill.name}: {skill.description}")
+                suffix = " [disabled]" if skill.name in disabled else ""
+                lines.append(f"{index}. {skill.name}{suffix}: {skill.description}")
             return DirectCommandResult(handled=True, text="\n".join(lines))
 
         return DirectCommandResult(handled=True, text="Usage: /skills [list|refresh]")

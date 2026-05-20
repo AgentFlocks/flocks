@@ -23,6 +23,7 @@ export interface Skill {
   source?: string;
   content?: string;
   category?: string;
+  disabled?: boolean;
   // Eligibility
   eligible?: boolean;
   missing?: string[];
@@ -132,6 +133,13 @@ export const skillAPI = {
       install_id: installId,
       timeout_ms: timeoutMs,
     }),
+
+  /**
+   * Toggle whether a skill is visible in the agent system prompt.
+   * Returns the new disabled state.
+   */
+  toggle: (name: string) =>
+    client.patch<{ name: string; disabled: boolean }>(`/api/skills/${name}/toggle`),
 };
 
 export const commandAPI = {
