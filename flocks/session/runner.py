@@ -1781,24 +1781,6 @@ class SessionRunner:
         tools = []
         for tool_info in selected_tool_infos:
             description = tool_info.description
-            if tool_info.name == "skill":
-                # Import here to avoid circular dependency.
-                from flocks.tool.system.skill import build_description
-                from flocks.skill.skill import Skill
-
-                # `list_enabled()` honors the user's per-skill disable toggle
-                # in ``~/.flocks/config/skill_settings.json``.  We MUST rebuild
-                # the description at schema-build time (not just in the wrapper
-                # invoked when the LLM eventually calls the `skill` tool),
-                # because this description ships as part of the tool index in
-                # every system prompt — without this refresh, a disabled skill
-                # would still appear in the LLM's view of available skills.
-                skills = await Skill.list_enabled()
-                description = build_description(skills)
-                log.info("runner.build_tools.skill_description", {
-                    "skill_count": len(skills),
-                    "description_preview": description[:100],
-                })
 
             # Surface provider/service version to the model so it can pick
             # version-appropriate parameters (e.g. SIP v9.2 vs older spec).

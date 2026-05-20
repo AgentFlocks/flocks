@@ -538,7 +538,7 @@ class TestBuildTools:
         runner = _make_runner()
         agent = _make_agent(name="rex")
         skill_tool = ToolInfo(
-            name="skill",
+            name="skill_load",
             description="Original skill description",
             category=ToolCategory.SYSTEM,
             native=True,
@@ -558,8 +558,8 @@ class TestBuildTools:
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
-        assert tools[0]["function"]["name"] == "skill"
-        assert tools[0]["function"]["description"] == "Refreshed skill description"
+        assert tools[0]["function"]["name"] == "skill_load"
+        assert tools[0]["function"]["description"] == "Original skill description"
 
 
 class TestBuildSystemPrompts:

@@ -359,7 +359,7 @@ async def run_workflow_tool(
     Returns:
         ToolResult with workflow execution results
     """
-    # Update tool description with available workflows on each call (like the skill tool)
+    # Update tool description with available workflows on each call (like the skill_load tool)
     tool = ToolRegistry.get("run_workflow")
     if tool:
         tool.info.description = await _build_description()

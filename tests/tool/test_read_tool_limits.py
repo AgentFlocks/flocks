@@ -22,7 +22,7 @@ def tool_context() -> ToolContext:
 def test_read_tool_limit_constants():
     assert read_tool_module.DEFAULT_READ_LIMIT == 2000
     assert read_tool_module.MAX_LINE_LENGTH == 2000
-    assert read_tool_module.MAX_BYTES == 20 * 1024
+    assert read_tool_module.MAX_BYTES == 50 * 1024
 
 
 @pytest.mark.asyncio
@@ -57,7 +57,7 @@ async def test_long_lines_are_truncated_at_2000_characters(tool_context, tmp_pat
 async def test_byte_limit_truncation_prompts_offset_continue(tool_context, tmp_path):
     file_path = tmp_path / "wide-lines.txt"
     file_path.write_text(
-        "\n".join("x" * 100 for _ in range(300)),
+        "\n".join("x" * 100 for _ in range(600)),
         encoding="utf-8",
     )
 

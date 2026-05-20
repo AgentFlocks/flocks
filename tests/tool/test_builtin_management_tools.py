@@ -11,10 +11,10 @@ def test_flocks_mcp_is_registered_as_builtin_tool() -> None:
     assert tool.info.source in {None, "builtin"}
 
 
-def test_skill_remains_registered_as_builtin_tool() -> None:
+def test_skill_load_remains_registered_as_builtin_tool() -> None:
     ToolRegistry.init()
 
-    tool = ToolRegistry.get("skill")
+    tool = ToolRegistry.get("skill_load")
 
     assert tool is not None
     assert tool.info.native is True

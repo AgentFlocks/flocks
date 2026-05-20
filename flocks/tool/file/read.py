@@ -27,7 +27,7 @@ log = Log.create(service="tool.read")
 # Constants — keep file reads paginated while allowing larger local context.
 DEFAULT_READ_LIMIT = 2000
 MAX_LINE_LENGTH = 2000
-MAX_BYTES = 20 * 1024  # 20 KB
+MAX_BYTES = 50 * 1024  # 50 KB
 
 # Binary file extensions
 BINARY_EXTENSIONS = {
@@ -44,6 +44,9 @@ IMAGE_MIME_TYPES = {
 # Description matching Flocks' read.txt
 DESCRIPTION = """Reads a file from the local filesystem. You can access any file directly by using this tool.
 Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+
+Do not use this tool when a dedicated tool is a better fit:
+- Load SKILL.md for one specific skill -> `skill_load`
 
 Usage:
 - filePath may be absolute, use `~`, or be relative to the current project directory
