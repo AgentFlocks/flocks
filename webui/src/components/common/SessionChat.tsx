@@ -278,31 +278,59 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
   return result;
 }
 
+/** Full-layout user bubbles wider than this use the Rex-sized column. */
+export const USER_MESSAGE_WIDE_CHAR_THRESHOLD = 120;
+/** Single unbroken tokens longer than this (URLs, curl flags) trigger wide layout. */
+export const USER_MESSAGE_WIDE_TOKEN_THRESHOLD = 48;
+/** Cap for auto-expanded user bubbles in full layout (assistant stays full width). */
+export const USER_MESSAGE_WIDE_MAX_WIDTH_CLASS = 'max-w-[80%]';
+
+export function isUserMessageWide({
+  text,
+  hasAttachments = false,
+  isEditing = false,
+}: {
+  text: string;
+  hasAttachments?: boolean;
+  isEditing?: boolean;
+}): boolean {
+  if (isEditing || hasAttachments) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes('\n')) return true;
+  if (trimmed.length > USER_MESSAGE_WIDE_CHAR_THRESHOLD) return true;
+  const longestLine = trimmed.split('\n').reduce((max, line) => Math.max(max, line.length), 0);
+  if (longestLine > USER_MESSAGE_WIDE_TOKEN_THRESHOLD) return true;
+  const longestToken = trimmed.split(/\s+/).reduce((max, token) => Math.max(max, token.length), 0);
+  return longestToken > USER_MESSAGE_WIDE_TOKEN_THRESHOLD;
+}
+
 export function getMessageBubbleClassName({
   compact,
   isUser,
   isEditing,
+  wide = false,
 }: {
   compact: boolean;
   isUser: boolean;
   isEditing: boolean;
+  wide?: boolean;
 }): string {
   if (compact) {
     return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
       isUser
-        ? 'bg-blue-50 border border-blue-100 text-gray-900'
-        : 'bg-white border border-zinc-200'
+        ? 'border border-gray-200 bg-white text-gray-900 shadow-sm'
+        : 'border border-gray-200 bg-white text-gray-900 shadow-sm'
     }`;
   }
 
-  const widthClass = isUser
-    ? (isEditing ? 'w-full' : 'w-auto')
-    : 'w-full';
+  const useFullWidth = !isUser || isEditing || wide;
+  const widthClass = useFullWidth ? 'w-full' : 'w-auto';
 
   return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
     isUser
-      ? 'bg-blue-50 border border-blue-100 text-gray-900'
-      : 'bg-white border border-zinc-200'
+      ? 'border border-gray-200 bg-white text-gray-900 shadow-sm'
+      : 'border border-gray-200 bg-white text-gray-900 shadow-sm'
   }`;
 }
 
@@ -639,7 +667,7 @@ export default function SessionChat({
       try {
         await submitAnswer(callID, requestId, answers);
       } catch (err: unknown) {
-        alert(`Submit failed: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
       }
     },
     [submitAnswer],
@@ -650,7 +678,7 @@ export default function SessionChat({
       try {
         await submitReject(callID, requestId);
       } catch (err: unknown) {
-        alert(`Cancel failed: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
       }
     },
     [submitReject],
@@ -1069,7 +1097,7 @@ export default function SessionChat({
       if (axiosErr?.response?.status === 404) {
         onError?.('Session not found. Please start a new session.');
       } else {
-        alert(`Command failed: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
       }
       throw err;
     } finally {
@@ -1115,7 +1143,7 @@ export default function SessionChat({
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
       } else {
-        alert(`Send failed: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(t('chat.sendFailed', 'Send failed'), err instanceof Error ? err.message : String(err));
       }
       throw err;
     } finally {
@@ -1313,7 +1341,7 @@ export default function SessionChat({
     const message = err instanceof Error ? err.message : fallback;
     onError?.(message);
     if (!onError) {
-      alert(message);
+      toast.error(t('chat.error', 'Error'), message);
     }
   }, [onError]);
 
@@ -1589,9 +1617,9 @@ export default function SessionChat({
             {/* Standalone thinking indicator when no incomplete message exists */}
             {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
               <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-white border border-gray-200 text-sm`}>
-                  <div className="text-xs font-medium mb-1.5 opacity-70 flex items-center gap-1.5">
-                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-600 text-white text-[9px] font-bold">R</span>
+                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} flocks-panel border-l-[3px] border-l-primary-400 text-sm`}>
+                  <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-ink-muted">
+                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary-600 text-[9px] font-bold text-white">R</span>
                     Rex
                   </div>
                   <div className="flex items-center gap-2 text-sm text-gray-500">
@@ -1612,7 +1640,7 @@ export default function SessionChat({
 
       {/* Suggestions — shown before user sends any message */}
       {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
-        <div className="flex-shrink-0 px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white">
+        <div className="flex-shrink-0 border-t border-gray-100 bg-white px-3 pb-2 pt-2.5">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
           </div>
@@ -1633,7 +1661,7 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
+        <div className={`flex-shrink-0 border-t border-gray-200 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
             <input
               ref={fileInputRef}
@@ -1661,14 +1689,14 @@ export default function SessionChat({
               onDragOver={handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
-              className={`rounded-2xl border transition-all ${
+              className={`rounded-2xl border border-gray-200 bg-white shadow-sm transition-colors ${
                 isCompacting
-                  ? 'border-amber-200 bg-amber-50/30'
+                  ? 'border-amber-200 bg-amber-50/50'
                   : isDragOver
-                    ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100'
+                    ? 'border-sky-300 bg-sky-50/50'
                     : isStreaming
-                      ? 'border-zinc-200 bg-zinc-50'
-                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100'
+                      ? 'bg-gray-50'
+                      : 'hover:border-gray-300 focus-within:border-gray-300'
               }`}
             >
                 {/* Node reference chip */}
@@ -1822,8 +1850,8 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
-                      isStreaming ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
+                    className={`w-full resize-none border-0 bg-transparent text-sm shadow-none outline-none ring-0 placeholder:text-gray-400 focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 ${
+                      isStreaming ? 'cursor-not-allowed text-gray-400' : 'text-gray-900'
                     }`}
                     style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
                     disabled={sending || isStreaming}
@@ -2000,7 +2028,20 @@ function ChatMessageBubbleInner({
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
 
-  const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
+  const textContent = getTextContent();
+  const hasFileAttachments = parts.some((part) => part.type === 'file' && part.url);
+  const isWideUserMessage = isUser && !compact && isUserMessageWide({
+    text: isEditing ? editingText : textContent,
+    hasAttachments: hasFileAttachments,
+    isEditing,
+  });
+
+  const bubbleClass = getMessageBubbleClassName({
+    compact,
+    isUser,
+    isEditing,
+    wide: isWideUserMessage,
+  });
   const actionBarClass = `flex items-center gap-1.5`;
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
@@ -2017,36 +2058,80 @@ function ChatMessageBubbleInner({
     </span>
   );
 
-  // 头像高度（不含 compact）= 32px，对应 h-8。让 header 行也 h-8 并且 items-center，
-  // 这样头像中心和名字/时间中心严格对齐
-  const headerHeight = compact ? 'h-7' : 'h-8';
+  const roleLabel = isUser ? t('chat.you') : agentName;
+  const showFooterActions = !compact && showActions && parts.length > 0 && !isEditing;
+
+  const renderUserActionButtons = () => (
+    <>
+      {targetPartId && editableRawText && (
+        <button
+          onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+          disabled={actionsDisabled || isActionPending}
+          className={iconButtonClass}
+          aria-label={t('chat.edit')}
+        >
+          <Pencil className="w-3 h-3" />
+          <span className={tooltipClass}>{t('chat.edit')}</span>
+        </button>
+      )}
+      <button
+        onClick={() => onCopy?.(getTextContent())}
+        disabled={isActionPending}
+        className={iconButtonClass}
+        aria-label={t('chat.copy')}
+      >
+        <Copy className="w-3 h-3" />
+        <span className={tooltipClass}>{t('chat.copy')}</span>
+      </button>
+    </>
+  );
+
+  const renderAssistantActionButtons = () => (
+    <>
+      <button
+        onClick={() => void onRegenerate?.(targetMessageId)}
+        disabled={actionsDisabled || isActionPending}
+        className={iconButtonClass}
+        aria-label={t('chat.regenerate')}
+      >
+        <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+        <span className={tooltipClass}>{t('chat.regenerate')}</span>
+      </button>
+      <button
+        onClick={() => onCopy?.(getTextContent())}
+        disabled={isActionPending}
+        className={iconButtonClass}
+        aria-label={t('chat.copy')}
+      >
+        <Copy className="w-3 h-3" />
+        <span className={tooltipClass}>{t('chat.copy')}</span>
+      </button>
+    </>
+  );
+
+  const userColumnClass = (() => {
+    if (!isUser) return 'w-full';
+    if (compact) return isEditing ? 'w-full max-w-[90%]' : 'max-w-[90%]';
+    return isWideUserMessage
+      ? `w-full ${USER_MESSAGE_WIDE_MAX_WIDTH_CLASS} items-end`
+      : 'max-w-[50%] items-end';
+  })();
+
+  const userMessageShellClass = isUser && !compact && !isWideUserMessage
+    ? 'flex flex-col w-fit max-w-full min-w-0'
+    : 'flex flex-col w-full min-w-0';
 
   return (
-    <div className={`group relative ${!compact ? 'w-full' : ''} flex ${isUser ? 'justify-end' : ''}`}>
-      {/* The whole "avatar + content column" group; for user it floats right */}
-      <div className={`flex gap-2.5 ${isUser ? 'max-w-[50%]' : 'w-full'}`}>
-        {avatar}
-
-        <div className="flex flex-col items-start flex-1 min-w-0">
-          {/* Name header */}
-          <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700">
-              {isUser ? t('chat.you') : agentName}
-            </span>
-          </div>
-
-      {/* Bubble + footer wrapper.
-          ``flex flex-col`` defaults to ``align-items: stretch``, so the
-          footer underneath is automatically pulled to the bubble's intrinsic
-          width.  This is what makes the user-side timestamp sit flush with
-          the bubble's left edge and the action buttons flush with its right
-          edge — without the wrapper, a user bubble (``w-auto``) and a
-          ``w-full`` footer would not share the same width and
-          ``justify-between`` would either look stuck-together (short text)
-          or balloon past the bubble (the actions would drift further right
-          than the bubble's right edge). */}
-      <div className={`flex flex-col min-w-0 ${isUser ? 'max-w-full' : 'w-full'}`}>
-      <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
+    <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
+      {/* User: narrow+right for short text, up to 80% width for long prompts */}
+      <div className={`flex flex-col min-w-0 ${userColumnClass}`}>
+      <div className={userMessageShellClass}>
+      <div className={`${bubbleClass} relative ${isWideUserMessage || !isUser ? 'w-full' : ''}`} style={{ overflowWrap: 'anywhere' }}>
+        {/* Role header inside bubble */}
+        <div className={`flex items-center gap-2 ${parts.length > 0 || isEditing ? 'mb-2' : ''}`}>
+          {avatar}
+          <span className="text-xs font-semibold text-zinc-700">{roleLabel}</span>
+        </div>
 
         {/* Empty / loading state */}
         {parts.length === 0 && (
@@ -2071,7 +2156,7 @@ function ChatMessageBubbleInner({
               value={editingText}
               onChange={(event) => onEditChange?.(event.target.value)}
               rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
-              className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+              className="block w-full min-w-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 resize-y"
             />
           </div>
         ) : (
@@ -2232,114 +2317,59 @@ function ChatMessageBubbleInner({
         })()}
 
 
-        {/* Actions — rendered inside bubble only while editing */}
-        {showActions && parts.length > 0 && isEditing && (
-          <div className={actionBarClass}>
-            {isEditing ? (
-              <>
-                <button
-                  onClick={() => void onEditSave?.()}
-                  disabled={actionsDisabled || isActionPending || !editingText.trim()}
-                  className={iconButtonClass}
-                  aria-label={t('chat.save')}
-                >
-                  <Save className="w-3 h-3" />
-                  <span className={tooltipClass}>{t('chat.save')}</span>
-                </button>
-                {isUser && (
-                  <button
-                    onClick={() => void onEditSend?.()}
-                    disabled={actionsDisabled || isActionPending || !editingText.trim()}
-                    className={iconButtonClass}
-                    aria-label={t('chat.sendEdited')}
-                  >
-                    <Send className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.sendEdited')}</span>
-                  </button>
-                )}
-                <button
-                  onClick={onEditCancel}
-                  disabled={isActionPending}
-                  className={iconButtonClass}
-                  aria-label={t('chat.cancel')}
-                >
-                  <X className="w-3 h-3" />
-                  <span className={tooltipClass}>{t('chat.cancel')}</span>
-                </button>
-              </>
-            ) : (
-              // Non-editing branch: placeholder — never rendered because we
-              // guard `isEditing` above.  Keeps the ternary shape intact.
-              <></>
-            )}
-          </div>
-        )}
       </div>{/* end bubble */}
 
-        {/* Footer below bubble.  Stretched to the bubble's width by the
-            wrapper's default ``align-items: stretch`` (see comment on the
-            wrapper above), so ``justify-between`` pins the timestamp to the
-            bubble's left edge and the action buttons to its right edge for
-            both user and assistant messages — even for very short user
-            inputs where the bubble itself is narrow. */}
-        {!compact && showActions && parts.length > 0 && !isEditing && (
-          <div className="flex items-center justify-between mt-1.5">
+        {/* Edit-mode actions below bubble (user: right-aligned) */}
+        {showActions && parts.length > 0 && isEditing && (
+          <div className={`flex mt-1.5 w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
+            <div className={actionBarClass}>
+              <button
+                onClick={() => void onEditSave?.()}
+                disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                className={iconButtonClass}
+                aria-label={t('chat.save')}
+              >
+                <Save className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.save')}</span>
+              </button>
+              {isUser && (
+                <button
+                  onClick={() => void onEditSend?.()}
+                  disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                  className={iconButtonClass}
+                  aria-label={t('chat.sendEdited')}
+                >
+                  <Send className="w-3 h-3" />
+                  <span className={tooltipClass}>{t('chat.sendEdited')}</span>
+                </button>
+              )}
+              <button
+                onClick={onEditCancel}
+                disabled={isActionPending}
+                className={iconButtonClass}
+                aria-label={t('chat.cancel')}
+              >
+                <X className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.cancel')}</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Footer below bubble: timestamp left, action buttons right */}
+        {showFooterActions && (
+          <div className="flex items-center justify-between mt-1.5 w-full">
             {showTimestamp && message.timestamp
               ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
               : <span />
             }
             <div className={actionBarClass}>
-              {isUser ? (
-                <>
-                  {targetPartId && editableRawText && (
-                    <button
-                      onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
-                      disabled={actionsDisabled || isActionPending}
-                      className={iconButtonClass}
-                      aria-label={t('chat.edit')}
-                    >
-                      <Pencil className="w-3 h-3" />
-                      <span className={tooltipClass}>{t('chat.edit')}</span>
-                    </button>
-                  )}
-                  <button
-                    onClick={() => onCopy?.(getTextContent())}
-                    disabled={isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.copy')}
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.copy')}</span>
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => void onRegenerate?.(targetMessageId)}
-                    disabled={actionsDisabled || isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.regenerate')}
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
-                    <span className={tooltipClass}>{t('chat.regenerate')}</span>
-                  </button>
-                  <button
-                    onClick={() => onCopy?.(getTextContent())}
-                    disabled={isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.copy')}
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.copy')}</span>
-                  </button>
-                </>
-              )}
+              {isUser ? renderUserActionButtons() : renderAssistantActionButtons()}
             </div>
           </div>
         )}
-      </div>{/* end bubble+footer wrapper */}
-        </div>{/* end name+bubble col */}
-      </div>{/* end avatar+content group */}
+      </div>{/* end message shell */}
+      </div>{/* end message column */}
       {previewImage && (
         <ImageLightbox
           src={previewImage.url}

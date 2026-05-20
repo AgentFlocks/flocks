@@ -2,7 +2,6 @@ import { useState, useEffect, createContext, useContext, useCallback, ReactNode 
 import { X, CheckCircle, AlertCircle, AlertTriangle, Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-// Toast 类型
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
 export interface ToastMessage {
@@ -17,7 +16,6 @@ interface ToastContextType {
   toasts: ToastMessage[];
   addToast: (toast: Omit<ToastMessage, 'id'>) => void;
   removeToast: (id: string) => void;
-  // 便捷方法
   success: (title: string, description?: string) => void;
   error: (title: string, description?: string) => void;
   warning: (title: string, description?: string) => void;
@@ -26,10 +24,8 @@ interface ToastContextType {
 
 const ToastContext = createContext<ToastContextType | null>(null);
 
-// 生成唯一 ID
 const generateId = () => `toast-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
-// Toast Provider
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -47,7 +43,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // 便捷方法
   const success = useCallback((title: string, description?: string) => {
     addToast({ type: 'success', title, description });
   }, [addToast]);
@@ -72,7 +67,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// Hook 使用 toast
 export function useToast() {
   const context = useContext(ToastContext);
   if (!context) {
@@ -81,27 +75,25 @@ export function useToast() {
   return context;
 }
 
-// Toast 配置
 const toastConfig: Record<ToastType, { icon: typeof CheckCircle; className: string }> = {
   success: {
     icon: CheckCircle,
-    className: 'bg-green-50 border-green-200 text-green-800',
+    className: 'border-success-muted bg-success-muted text-success',
   },
   error: {
     icon: AlertCircle,
-    className: 'bg-red-50 border-red-200 text-red-800',
+    className: 'border-danger-muted bg-danger-muted text-danger',
   },
   warning: {
     icon: AlertTriangle,
-    className: 'bg-yellow-50 border-yellow-200 text-yellow-800',
+    className: 'border-warning-muted bg-warning-muted text-warning',
   },
   info: {
     icon: Info,
-    className: 'bg-red-50 border-red-200 text-red-800',
+    className: 'border-accent-muted bg-accent-muted text-accent',
   },
 };
 
-// 单个 Toast 组件
 function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void }) {
   const { t } = useTranslation('common');
   const config = toastConfig[toast.type];
@@ -116,28 +108,28 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
 
   return (
     <div
-      className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
+      className={`flex animate-slide-in items-start gap-3 rounded-panel border p-4 shadow-float ${config.className}`}
       role="alert"
     >
-      <Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
-      <div className="flex-1 min-w-0">
-        <p className="font-medium text-sm">{toast.title}</p>
+      <Icon className="mt-0.5 h-5 w-5 flex-shrink-0" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium">{toast.title}</p>
         {toast.description && (
           <p className="mt-1 text-sm opacity-80">{toast.description}</p>
         )}
       </div>
       <button
+        type="button"
         onClick={onRemove}
-        className="flex-shrink-0 p-1 rounded hover:bg-black/10 transition-colors"
+        className="flex-shrink-0 rounded p-1 transition-colors hover:bg-black/5"
         aria-label={t('button.close')}
       >
-        <X className="w-4 h-4" />
+        <X className="h-4 w-4" />
       </button>
     </div>
   );
 }
 
-// Toast 容器
 function ToastContainer({
   toasts,
   removeToast,
@@ -148,7 +140,7 @@ function ToastContainer({
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none">
+    <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-full max-w-sm flex-col gap-2">
       {toasts.map((toast) => (
         <div key={toast.id} className="pointer-events-auto">
           <Toast toast={toast} onRemove={() => removeToast(toast.id)} />
@@ -157,22 +149,3 @@ function ToastContainer({
     </div>
   );
 }
-
-// 添加动画样式
-const style = document.createElement('style');
-style.textContent = `
-  @keyframes slide-in {
-    from {
-      transform: translateX(100%);
-      opacity: 0;
-    }
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
-  }
-  .animate-slide-in {
-    animation: slide-in 0.3s ease-out;
-  }
-`;
-document.head.appendChild(style);

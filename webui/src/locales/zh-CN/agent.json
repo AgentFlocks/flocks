@@ -16,10 +16,12 @@
     "sub": {
       "title": "子 Agent",
       "subtitle": "由主 Agent 调度的专业执行者，各司其职完成特定任务"
-    }
+    },
+    "relationHint": "主 Agent 负责与用户对话并调度下方子 Agent 执行专项任务"
   },
   "totalCount": "共 {{total}} 个 Agent",
   "badge": {
+    "primary": "主控",
     "native": "内置",
     "custom": "自定义",
     "delegatable": "可委托",

@@ -16,10 +16,12 @@
     "sub": {
       "title": "Sub-Agents",
       "subtitle": "Specialized executors scheduled by the primary agent, each handling specific tasks"
-    }
+    },
+    "relationHint": "The primary agent talks to users and delegates specialized work to sub-agents below"
   },
   "totalCount": "{{total}} Agents",
   "badge": {
+    "primary": "Primary",
     "native": "Built-in",
     "custom": "Custom",
     "delegatable": "Delegatable",

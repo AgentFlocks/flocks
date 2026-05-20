@@ -5,6 +5,7 @@ import type { Message } from '@/types';
 import {
   getMessageBubbleClassName,
   getRegenerateTruncateTarget,
+  isUserMessageWide,
   truncateToolDisplayText,
 } from './SessionChat';
 
@@ -19,33 +20,60 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   } as Message;
 }
 
+describe('isUserMessageWide', () => {
+  it('treats short single-line prompts as narrow', () => {
+    expect(isUserMessageWide({ text: '打开 threatbook 看看' })).toBe(false);
+  });
+
+  it('treats multiline, long, or token-heavy prompts as wide', () => {
+    expect(isUserMessageWide({ text: 'line one\nline two' })).toBe(true);
+    expect(isUserMessageWide({ text: 'x'.repeat(121) })).toBe(true);
+    expect(isUserMessageWide({
+      text: 'curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"',
+    })).toBe(true);
+    expect(isUserMessageWide({ text: 'hi', hasAttachments: true })).toBe(true);
+    expect(isUserMessageWide({ text: 'hi', isEditing: true })).toBe(true);
+  });
+});
+
 describe('getMessageBubbleClassName', () => {
-  // The bubble's max width is owned by its outer container (`max-w-[50%]` for
-  // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
-  // only controls its own intrinsic sizing (`w-auto` vs `w-full`).  Previously
-  // the inner bubble also pinned `max-w-2xl`, but the unified chat redesign
-  // moved that responsibility outward.  Tests here therefore assert width
-  // semantics, not the legacy `max-w-2xl` literal.
-  it('keeps non-editing user bubbles auto-sized in full layout', () => {
+  it('keeps short full-layout user bubbles auto-sized', () => {
     const className = getMessageBubbleClassName({
       compact: false,
       isUser: true,
       isEditing: false,
+      wide: false,
     });
 
     expect(className).toContain('w-auto');
     expect(className).not.toContain('w-full');
   });
 
-  it('expands editing user bubbles to full width in full layout', () => {
-    const className = getMessageBubbleClassName({
+  it('expands wide or editing user bubbles to full width', () => {
+    const wide = getMessageBubbleClassName({
+      compact: false,
+      isUser: true,
+      isEditing: false,
+      wide: true,
+    });
+    const editing = getMessageBubbleClassName({
       compact: false,
       isUser: true,
       isEditing: true,
     });
 
-    expect(className).toContain('w-full');
-    expect(className).not.toContain('w-auto');
+    expect(wide).toContain('w-full');
+    expect(editing).toContain('w-full');
+  });
+
+  it('caps compact-layout bubbles at ninety percent width', () => {
+    const className = getMessageBubbleClassName({
+      compact: true,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('max-w-[90%]');
   });
 
   it('keeps assistant bubbles full width regardless of editing state', () => {

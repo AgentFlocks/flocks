@@ -1,6 +1,7 @@
 import { useState, createContext, useContext, useCallback, ReactNode } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { cn } from '@/utils/cn';
 
 interface ConfirmOptions {
   title?: string;
@@ -22,6 +23,12 @@ export function useConfirm() {
   return ctx.confirm;
 }
 
+const confirmVariantStyles = {
+  danger: 'bg-danger hover:bg-primary-700 text-white',
+  warning: 'bg-warning hover:opacity-90 text-white',
+  default: 'flocks-btn-primary',
+};
+
 export function ConfirmProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<{
     options: ConfirmOptions;
@@ -39,41 +46,40 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   const handleConfirm = () => { state?.resolve(true); setState(null); };
   const handleCancel = () => { state?.resolve(false); setState(null); };
 
-  const variantStyles = {
-    danger: 'bg-red-600 hover:bg-red-700 text-white',
-    warning: 'bg-yellow-500 hover:bg-yellow-600 text-white',
-    default: 'bg-red-600 hover:bg-red-700 text-white',
-  };
-
   return (
     <ConfirmContext.Provider value={{ confirm }}>
       {children}
       {state && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm">
+          <div className="flocks-float-panel mx-4 w-full max-w-sm p-6">
             <div className="flex items-start gap-3">
               {state.options.variant === 'danger' && (
-                <div className="p-2 bg-red-100 rounded-lg flex-shrink-0">
-                  <AlertTriangle className="w-5 h-5 text-red-600" />
+                <div className="flex-shrink-0 rounded-lg bg-danger-muted p-2">
+                  <AlertTriangle className="h-5 w-5 text-danger" />
                 </div>
               )}
               <div>
                 {state.options.title && (
-                  <h3 className="font-semibold text-gray-900 mb-1">{state.options.title}</h3>
+                  <h3 className="mb-1 font-semibold text-ink">{state.options.title}</h3>
                 )}
-                <p className="text-sm text-gray-600">{state.options.description}</p>
+                <p className="text-sm text-ink-muted">{state.options.description}</p>
               </div>
             </div>
-            <div className="flex justify-end gap-3 mt-5">
+            <div className="mt-5 flex justify-end gap-3">
               <button
+                type="button"
                 onClick={handleCancel}
-                className="px-4 py-2 text-sm text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200 transition-colors"
+                className="flocks-btn-secondary"
               >
                 {state.options.cancelText ?? t('button.cancel')}
               </button>
               <button
+                type="button"
                 onClick={handleConfirm}
-                className={`px-4 py-2 text-sm rounded-lg transition-colors ${variantStyles[state.options.variant ?? 'default']}`}
+                className={cn(
+                  'rounded-lg px-4 py-2 text-sm font-semibold transition-colors',
+                  confirmVariantStyles[state.options.variant ?? 'default'],
+                )}
               >
                 {state.options.confirmText ?? t('button.confirm')}
               </button>

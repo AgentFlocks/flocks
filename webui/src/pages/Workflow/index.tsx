@@ -10,7 +10,8 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import PageHeader from '@/components/common/PageHeader';
+import OverviewPageShell from '@/components/common/OverviewPageShell';
+import SectionTabs from '@/components/common/SectionTabs';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useWorkflows } from '@/hooks/useWorkflow';
@@ -125,113 +126,80 @@ export default function WorkflowPage() {
   const isEmpty     = !showBuiltin && !showCustom;
 
   return (
-    <div className="h-full flex flex-col">
-      <PageHeader
-        title={t('pageTitle')}
-        description={t('pageDescription')}
-        icon={<WorkflowIcon className="w-8 h-8" />}
-        // Refresh / create actions intentionally moved to the toolbar below so
-        // the page header stays uniform with Skill/Agent pages and the
-        // segmented source filter shares a row with its primary actions.
-      />
-
-      {/* Toolbar */}
-      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">
-        {/* Source filter — same segmented-control style as Skill / Agent pages */}
-        <div
-          role="tablist"
-          aria-label={t('filter.aria')}
-          className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs"
-        >
-          {filterChips.map((chip, idx) => {
-            const active = chip.key === sourceFilter;
-            return (
-              <button
-                key={chip.key}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setSourceFilter(chip.key)}
-                className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-slate-700 text-white'
-                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                } ${idx > 0 ? 'ml-0.5' : ''}`}
-              >
-                <span>{chip.label}</span>
-                <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded text-[10px] tabular-nums ${
-                  active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
-                }`}>
-                  {chip.count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
-            className={`p-1.5 rounded-lg border transition-all ${
-              refreshDone
-                ? 'border-green-200 text-green-600'
-                : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
-            }`}
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-          <button
-            onClick={() => navigate('/workflows/new')}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
-          >
-            <Plus className="w-4 h-4" />
-            {t('createWorkflow')}
-          </button>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-6"
-        style={{ scrollbarGutter: 'stable' }}
-      >
-        {isEmpty ? (
-          <EmptyState
-            icon={<WorkflowIcon className="w-16 h-16" />}
-            title={t('emptyState.title')}
-            description={t('emptyState.description')}
-            action={
-              <button
-                onClick={() => navigate('/workflows/new')}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700"
-              >
-                <Plus className="w-5 h-5" />
-                {t('createWorkflow')}
-              </button>
-            }
+    <OverviewPageShell
+      title={t('pageTitle')}
+      description={t('pageDescription')}
+      icon={<WorkflowIcon className="h-6 w-6" />}
+      toolbar={
+        <div className="flex flex-wrap items-center gap-3">
+          <SectionTabs
+            aria-label={t('filter.aria')}
+            activeKey={sourceFilter}
+            onChange={setSourceFilter}
+            items={filterChips.map((chip) => ({
+              key: chip.key,
+              label: chip.label,
+              count: chip.count,
+            }))}
           />
-        ) : (
-          <>
-            {showCustom && (
-              <WorkflowSection
-                title={t('section.custom')}
-                icon={<FolderOpen className="w-4 h-4" />}
-                workflows={customWorkflows}
-              />
-            )}
-            {showBuiltin && (
-              <WorkflowSection
-                title={t('section.builtin')}
-                icon={<Sparkles className="w-4 h-4" />}
-                workflows={builtinWorkflows}
-              />
-            )}
-          </>
-        )}
-      </div>
-    </div>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
+              className={`rounded-lg border p-1.5 transition-all ${
+                refreshDone
+                  ? 'border-green-200 text-green-600'
+                  : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
+              }`}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/workflows/new')}
+              className="flocks-btn-primary py-1.5 text-sm"
+            >
+              <Plus className="h-4 w-4" />
+              {t('createWorkflow')}
+            </button>
+          </div>
+        </div>
+      }
+      contentClassName="space-y-6"
+    >
+      {isEmpty ? (
+        <EmptyState
+          icon={<WorkflowIcon className="h-16 w-16" />}
+          title={t('emptyState.title')}
+          description={t('emptyState.description')}
+          action={
+            <button type="button" onClick={() => navigate('/workflows/new')} className="flocks-btn-primary">
+              <Plus className="h-5 w-5" />
+              {t('createWorkflow')}
+            </button>
+          }
+        />
+      ) : (
+        <>
+          {showCustom && (
+            <WorkflowSection
+              title={t('section.custom')}
+              icon={<FolderOpen className="h-4 w-4" />}
+              workflows={customWorkflows}
+            />
+          )}
+          {showBuiltin && (
+            <WorkflowSection
+              title={t('section.builtin')}
+              icon={<Sparkles className="h-4 w-4" />}
+              workflows={builtinWorkflows}
+            />
+          )}
+        </>
+      )}
+    </OverviewPageShell>
   );
 }
 

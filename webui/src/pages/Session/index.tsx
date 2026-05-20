@@ -11,6 +11,8 @@ import i18n from '@/i18n';
 import { useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
+import { useConfirm } from '@/components/common/ConfirmDialog';
+import WorkbenchPageShell from '@/components/common/WorkbenchPageShell';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { sessionApi } from '@/api/session';
 import { useSessions } from '@/hooks/useSessions';
@@ -76,6 +78,7 @@ export default function SessionPage() {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
+  const confirmDialog = useConfirm();
 
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
@@ -286,7 +289,11 @@ export default function SessionPage() {
       toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
       return;
     }
-    if (!confirm(t('confirmDelete'))) return;
+    const ok = await confirmDialog({
+      description: t('confirmDelete'),
+      variant: 'danger',
+    });
+    if (!ok) return;
     try {
       await sessionApi.delete(sessionId);
       // Remove from local state first so auto-select won't pick the deleted session.
@@ -395,7 +402,11 @@ export default function SessionPage() {
 
   const handleBatchDelete = useCallback(async () => {
     if (checkedIds.size === 0 || batchDeleting) return;
-    if (!confirm(t('confirmBatchDelete', { count: checkedIds.size }))) return;
+    const ok = await confirmDialog({
+      description: t('confirmBatchDelete', { count: checkedIds.size }),
+      variant: 'danger',
+    });
+    if (!ok) return;
     setBatchDeleting(true);
     const ids = Array.from(checkedIds);
     const succeeded: string[] = [];
@@ -433,10 +444,10 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="h-full w-full flex overflow-hidden">
+    <div className="flex h-full w-full overflow-hidden">
       {/* ── Sidebar ── */}
       <div
-        className={`bg-white border-r border-gray-100 flex flex-col transition-all duration-300 flex-shrink-0 h-full overflow-hidden ${
+        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-white transition-all duration-300 ${
           sidebarCollapsed ? 'w-0' : 'w-64'
         }`}
       >
@@ -449,7 +460,7 @@ export default function SessionPage() {
             <button
               onClick={handleCreateSession}
               disabled={creating}
-              className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium"
+              className="flocks-btn-secondary w-full justify-start py-2 pl-8 pr-3 text-left text-sm disabled:cursor-not-allowed disabled:opacity-60"
             >
               {t('newSession')}
             </button>
@@ -460,7 +471,7 @@ export default function SessionPage() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={t('filterConversations', 'Filter conversations...')}
-              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-100 rounded-lg border-0 outline-none focus:bg-gray-200 transition-colors placeholder:text-gray-400 text-gray-700"
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 py-1.5 pl-8 pr-3 text-sm text-gray-700 outline-none transition-colors placeholder:text-gray-400 focus:border-gray-300 focus:bg-white"
             />
           </div>
         </div>
@@ -495,11 +506,11 @@ export default function SessionPage() {
                   <div
                     key={session.id}
                     onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
-                    className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+                    className={`group relative mx-2 mb-1 cursor-pointer rounded-panel border px-3 py-2.5 transition-all duration-150 ${
                       !selectMode && selectedSessionId === session.id
-                        ? 'bg-gray-100 border-gray-300 shadow-sm'
+                        ? 'border-gray-300 bg-gray-100 shadow-sm'
                         : selectMode && checkedIds.has(session.id)
-                        ? 'bg-blue-50 border-blue-200'
+                        ? 'border-sky-200 bg-sky-50'
                         : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm'
                     }`}
                   >
@@ -645,13 +656,12 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex-1 flex flex-col overflow-hidden h-full min-w-0">
-        {/* Header */}
-        <div className="px-6 h-12 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative">
+      <WorkbenchPageShell className="min-w-0 flex-1">
+        <div className="relative flex h-12 flex-shrink-0 items-center justify-between border-b border-gray-200 bg-white px-6">
           <div className="absolute left-4 top-1/2 -translate-y-1/2">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="p-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 shadow-sm hover:shadow-md transition-all duration-200"
+              className="rounded-lg border border-gray-200 bg-white p-2 shadow-sm transition-all duration-200 hover:bg-gray-50 hover:shadow-md"
               title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
             >
               {sidebarCollapsed ? <PanelLeft className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}
@@ -736,7 +746,7 @@ export default function SessionPage() {
             </div>
           }
         />
-      </div>
+      </WorkbenchPageShell>
 
       {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
       {openMenuSessionId && menuAnchor && (() => {

@@ -33,6 +33,9 @@ import {
 } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import { extractErrorMessage } from '@/utils/error';
+import { useAppFeedback } from '@/hooks/useAppFeedback';
+import WorkbenchPageShell from '@/components/common/WorkbenchPageShell';
+import { cn } from '@/utils/cn';
 
 // 自定义节点组件
 import PythonNode from './nodes/PythonNode';
@@ -61,16 +64,16 @@ const nodeTypes = {
   subworkflow: SubworkflowNode,
 };
 
-// 节点类型颜色配置
-const nodeColors: Record<string, { bg: string; border: string; text: string }> = {
-  python: { bg: 'bg-red-50', border: 'border-red-500', text: 'text-red-700' },
-  logic: { bg: 'bg-green-50', border: 'border-green-500', text: 'text-green-700' },
-  branch: { bg: 'bg-yellow-50', border: 'border-yellow-500', text: 'text-yellow-700' },
-  loop: { bg: 'bg-purple-50', border: 'border-purple-500', text: 'text-purple-700' },
-  tool: { bg: 'bg-violet-50', border: 'border-violet-500', text: 'text-violet-700' },
-  llm: { bg: 'bg-pink-50', border: 'border-pink-500', text: 'text-pink-700' },
-  http_request: { bg: 'bg-teal-50', border: 'border-teal-500', text: 'text-teal-700' },
-  subworkflow: { bg: 'bg-orange-50', border: 'border-orange-400', text: 'text-orange-700' },
+/** Muted node palette for production-style DAG editing */
+const nodeColors: Record<string, { bg: string; border: string; text: string; minimap: string }> = {
+  python: { bg: 'bg-red-50', border: 'border-red-300', text: 'text-red-700', minimap: '#fca5a5' },
+  logic: { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700', minimap: '#6ee7b7' },
+  branch: { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700', minimap: '#fcd34d' },
+  loop: { bg: 'bg-purple-50', border: 'border-purple-300', text: 'text-purple-700', minimap: '#c4b5fd' },
+  tool: { bg: 'bg-violet-50', border: 'border-violet-300', text: 'text-violet-700', minimap: '#c4b5fd' },
+  llm: { bg: 'bg-pink-50', border: 'border-pink-300', text: 'text-pink-700', minimap: '#f9a8d4' },
+  http_request: { bg: 'bg-teal-50', border: 'border-teal-300', text: 'text-teal-700', minimap: '#5eead4' },
+  subworkflow: { bg: 'bg-orange-50', border: 'border-orange-300', text: 'text-orange-700', minimap: '#fdba74' },
 };
 
 // 将后端数据转换为 ReactFlow 格式
@@ -224,6 +227,7 @@ export default function WorkflowEditor() {
   const { t } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const { notifySuccess, notifyError } = useAppFeedback();
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
@@ -295,7 +299,9 @@ export default function WorkflowEditor() {
       setEdges(flowEdges);
     } catch (error: any) {
       console.error('Failed to load workflow:', error);
-      alert(t('editor.loadFailed', { error: error.message || t('editor.unknownError') }));
+      notifyError(
+        t('editor.loadFailed', { error: error.message || t('editor.unknownError') }),
+      );
     } finally {
       setLoading(false);
     }
@@ -419,10 +425,12 @@ export default function WorkflowEditor() {
       setSaving(true);
       const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
       await workflowAPI.update(id!, { workflowJson });
-      alert(t('editor.saveSuccess'));
+      notifySuccess(t('editor.saveSuccess'));
     } catch (error: any) {
       console.error('Failed to save workflow:', error);
-      alert(t('editor.saveFailed', { error: error.message || t('editor.unknownError') }));
+      notifyError(
+        t('editor.saveFailed', { error: error.message || t('editor.unknownError') }),
+      );
     } finally {
       setSaving(false);
     }
@@ -437,13 +445,19 @@ export default function WorkflowEditor() {
       setValidationResult(response.data);
       
       if (response.data.valid) {
-        alert(t('editor.validatePassed'));
+        notifySuccess(t('editor.validatePassed'));
       } else {
-        alert(t('editor.validateFailed', { issues: response.data.issues.map((i: any) => i.message).join('\n') }));
+        notifyError(
+          t('editor.validateFailed', {
+            issues: response.data.issues.map((i: any) => i.message).join('\n'),
+          }),
+        );
       }
     } catch (error: any) {
       console.error('Failed to validate workflow:', error);
-      alert(t('editor.validateError', { error: error.message || t('editor.unknownError') }));
+      notifyError(
+        t('editor.validateError', { error: error.message || t('editor.unknownError') }),
+      );
     }
   };
 
@@ -470,7 +484,9 @@ export default function WorkflowEditor() {
       setShowExecutionPanel(true);
     } catch (error: any) {
       console.error('Failed to run workflow:', error);
-      alert(t('editor.runFailed', { error: error.message || t('editor.unknownError') }));
+      notifyError(
+        t('editor.runFailed', { error: error.message || t('editor.unknownError') }),
+      );
     }
   };
 
@@ -484,7 +500,7 @@ export default function WorkflowEditor() {
       await workflowAPI.cancelExecution(id, currentExecution.id);
     } catch (error) {
       setExecutionStopping(false);
-      alert(extractErrorMessage(error, t('detail.run.stopFailed')));
+      notifyError(extractErrorMessage(error, t('detail.run.stopFailed')));
     }
   };
 
@@ -505,7 +521,9 @@ export default function WorkflowEditor() {
       linkElement.click();
     } catch (error: any) {
       console.error('Failed to export workflow:', error);
-      alert(t('editor.exportFailed', { error: error.message || t('editor.unknownError') }));
+      notifyError(
+        t('editor.exportFailed', { error: error.message || t('editor.unknownError') }),
+      );
     }
   };
 
@@ -535,85 +553,93 @@ export default function WorkflowEditor() {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-gray-50">
-      {/* 顶部工具栏 */}
-      <div className="bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <button
-            onClick={() => navigate('/workflows')}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
-          <div>
-            <h1 className="text-xl font-semibold text-gray-900">{workflow.name}</h1>
-            <p className="text-sm text-gray-500">{workflow.description || t('editor.noDescription')}</p>
-          </div>
-          {validationResult && (
-            <div className="flex items-center gap-2">
-              {validationResult.valid ? (
-                <CheckCircle className="w-5 h-5 text-green-600" />
-              ) : (
-                <AlertCircle className="w-5 h-5 text-red-600" />
-              )}
-              <span className={`text-sm ${validationResult.valid ? 'text-green-600' : 'text-red-600'}`}>
+    <WorkbenchPageShell
+      className="h-screen bg-gray-50"
+      topBar={
+        <div className="flocks-command-bar flex-wrap gap-y-2">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <button
+              type="button"
+              onClick={() => navigate('/workflows')}
+              className="rounded-lg border border-gray-200 p-2 text-gray-600 transition-colors hover:bg-gray-50"
+              aria-label={t('editor.backToList')}
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </button>
+            <div className="min-w-0">
+              <h1 className="truncate text-lg font-semibold text-gray-900">{workflow.name}</h1>
+              <p className="truncate text-xs text-gray-500">
+                {workflow.description || t('editor.noDescription')}
+              </p>
+            </div>
+            {validationResult && (
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium',
+                  validationResult.valid
+                    ? 'border-green-200 bg-green-50 text-green-700'
+                    : 'border-red-200 bg-red-50 text-red-700',
+                )}
+              >
+                {validationResult.valid ? (
+                  <CheckCircle className="h-3.5 w-3.5" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5" />
+                )}
                 {validationResult.valid ? t('editor.validPass') : t('editor.validFail')}
               </span>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowNodeToolbar(!showNodeToolbar)}
-            className={`flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg transition-colors ${
-              showNodeToolbar ? 'bg-red-50 text-red-700 border-red-500' : 'text-gray-700 bg-white hover:bg-gray-50'
-            }`}
-          >
-            <Trash2 className="w-4 h-4" />
-            {showNodeToolbar ? t('editor.hideToolbar') : t('editor.showToolbar')}
-          </button>
-          <button
-            onClick={handleAutoLayout}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            <Layout className="w-4 h-4" />
-            {t('editor.autoLayout')}
-          </button>
-          <button
-            onClick={handleValidate}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            <CheckCircle className="w-4 h-4" />
-            {t('editor.validate')}
-          </button>
-          <button
-            onClick={handleExport}
-            className="flex items-center gap-2 px-4 py-2 text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
-          >
-            <FileJson className="w-4 h-4" />
-            {t('editor.export')}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="flex items-center gap-2 px-4 py-2 text-white bg-red-600 rounded-lg hover:bg-red-700 transition-colors disabled:opacity-50"
-          >
-            <Save className="w-4 h-4" />
-            {saving ? t('editor.saving') : t('common:button.save')}
-          </button>
-          <button
-            onClick={handleRun}
-            className="flex items-center gap-2 px-4 py-2 text-white bg-green-600 rounded-lg hover:bg-green-700 transition-colors"
-          >
-            <Play className="w-4 h-4" />
-            {t('editor.execute')}
-          </button>
-        </div>
-      </div>
+          <div className="flex flex-wrap items-center gap-2 border-l border-gray-200 pl-3">
+            <button
+              type="button"
+              onClick={() => setShowNodeToolbar(!showNodeToolbar)}
+              className={cn(
+                'flocks-btn-secondary py-1.5 text-xs',
+                showNodeToolbar && 'border-red-300 bg-red-50 text-red-700',
+              )}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {showNodeToolbar ? t('editor.hideToolbar') : t('editor.showToolbar')}
+            </button>
+            <button type="button" onClick={handleAutoLayout} className="flocks-btn-secondary py-1.5 text-xs">
+              <Layout className="h-3.5 w-3.5" />
+              {t('editor.autoLayout')}
+            </button>
+          </div>
 
-      {/* ReactFlow 画布 */}
-      <div className="flex-1 relative">
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={handleValidate} className="flocks-btn-secondary py-1.5 text-xs">
+              <CheckCircle className="h-3.5 w-3.5" />
+              {t('editor.validate')}
+            </button>
+            <button type="button" onClick={handleExport} className="flocks-btn-secondary py-1.5 text-xs">
+              <FileJson className="h-3.5 w-3.5" />
+              {t('editor.export')}
+            </button>
+            <button
+              type="button"
+              onClick={handleSave}
+              disabled={saving}
+              className="flocks-btn-primary py-1.5 text-xs disabled:opacity-50"
+            >
+              <Save className="h-3.5 w-3.5" />
+              {saving ? t('editor.saving') : t('common:button.save')}
+            </button>
+            <button
+              type="button"
+              onClick={handleRun}
+              className="inline-flex items-center gap-2 rounded-lg bg-success px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-success/90"
+            >
+              <Play className="h-3.5 w-3.5" />
+              {t('editor.execute')}
+            </button>
+          </div>
+        </div>
+      }
+    >
+      <div className="relative min-h-0 flex-1">
         {/* 节点工具栏 */}
         {showNodeToolbar && <NodeToolbar onAddNode={handleAddNode} />}
 
@@ -669,32 +695,35 @@ export default function WorkflowEditor() {
           attributionPosition="bottom-left"
           deleteKeyCode={null}
         >
-          <Background variant={BackgroundVariant.Dots} gap={12} size={1} />
-          <Controls />
+          <Background variant={BackgroundVariant.Dots} gap={16} size={1} color="#e4e4e7" />
+          <Controls className="!border-line !shadow-panel !rounded-panel" />
           <MiniMap
             nodeColor={(node) => {
               const colors = nodeColors[node.type as keyof typeof nodeColors];
-              return colors ? colors.border.replace('border-', '#') : '#gray';
+              return colors?.minimap ?? '#a1a1aa';
             }}
-            style={{ backgroundColor: '#f9fafb' }}
+            className="!border !border-line !shadow-panel !rounded-panel"
+            maskColor="rgba(244, 245, 247, 0.75)"
           />
-          
-          {/* 图例 */}
-          <Panel position="top-left" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.nodeTypesLabel')}</h3>
+
+          <Panel position="top-left" className="flocks-float-panel p-4 !m-3">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              {t('editor.nodeTypesLabel')}
+            </h3>
             <div className="space-y-2">
               {Object.entries(nodeColors).map(([type, colors]) => (
                 <div key={type} className="flex items-center gap-2">
-                  <div className={`w-4 h-4 rounded border-2 ${colors.border} ${colors.bg}`} />
-                  <span className="text-xs text-gray-700 capitalize">{type}</span>
+                  <div className={cn('h-3.5 w-3.5 rounded border-2', colors.border, colors.bg)} />
+                  <span className="text-xs capitalize text-gray-600">{type}</span>
                 </div>
               ))}
             </div>
           </Panel>
 
-          {/* 统计信息 */}
-          <Panel position="top-right" className="bg-white rounded-lg shadow-lg p-4">
-            <h3 className="text-sm font-semibold text-gray-900 mb-3">{t('editor.statsLabel')}</h3>
+          <Panel position="top-right" className="flocks-float-panel p-4 !m-3">
+            <h3 className="mb-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
+              {t('editor.statsLabel')}
+            </h3>
             <div className="space-y-2 text-xs text-gray-600">
               <div className="flex justify-between gap-4">
                 <span>{t('editor.nodeCountLabel')}</span>
@@ -721,6 +750,6 @@ export default function WorkflowEditor() {
           </Panel>
         </ReactFlow>
       </div>
-    </div>
+    </WorkbenchPageShell>
   );
 }

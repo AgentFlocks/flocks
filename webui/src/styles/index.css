@@ -3,8 +3,138 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --color-surface: 249 250 251;
+    --color-panel: 255 255 255;
+    --color-ink: 16 24 40;
+    --color-line: 228 231 236;
+    --color-primary: 239 68 68;
+    --hero-start: #101828;
+    --hero-mid: #1d2939;
+    --hero-end: #0f172a;
+    --radius-card: 0.75rem;
+    --radius-shell: 1rem;
+  }
+
+  html {
+    @apply antialiased;
+  }
+
   body {
-    @apply bg-gray-50 text-gray-900;
+    @apply bg-surface text-ink font-sans;
+  }
+
+  *:focus-visible {
+    @apply outline-none ring-2 ring-primary-500/30 ring-offset-2 ring-offset-surface;
+  }
+
+  textarea:focus-visible,
+  input:focus-visible {
+    @apply ring-0 ring-offset-0;
+  }
+}
+
+@layer components {
+  /* White card system (reference dashboard) */
+  .flocks-card {
+    @apply rounded-panel border border-line bg-panel shadow-panel;
+  }
+
+  .flocks-shell-card {
+    @apply rounded-2xl border border-line/80 bg-panel shadow-shell transition-all duration-200 hover:-translate-y-0.5 hover:border-line-strong hover:shadow-float;
+  }
+
+  .flocks-stat-card {
+    @apply rounded-2xl border border-line/80 bg-panel p-6 shadow-shell transition-shadow duration-200 hover:shadow-float;
+  }
+
+  .flocks-panel {
+    @apply flocks-card;
+  }
+
+  .flocks-btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-semibold text-white shadow-panel transition-colors hover:bg-primary-500 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .flocks-btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line-strong bg-panel px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-surface-sunken disabled:opacity-50;
+  }
+
+  .flocks-btn-hero-primary {
+    @apply inline-flex items-center rounded-xl bg-primary-500 px-6 py-2.5 text-sm font-semibold text-white transition-all duration-200 hover:bg-primary-400 hover:shadow-[0_8px_24px_rgba(239,68,68,0.35)];
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.28);
+  }
+
+  .flocks-btn-hero-secondary {
+    @apply inline-flex items-center rounded-xl border border-white/20 bg-white/10 px-6 py-2.5 text-sm font-semibold text-slate-100 backdrop-blur-sm transition-colors hover:border-white/30 hover:bg-white/15;
+  }
+
+  .flocks-icon-tile {
+    @apply flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl;
+  }
+
+  .flocks-segmented {
+    @apply inline-flex items-center rounded-lg bg-surface-sunken p-1 text-sm;
+  }
+
+  .flocks-segmented-item {
+    @apply whitespace-nowrap rounded-md px-3 py-1.5 text-ink-muted transition-colors hover:text-ink;
+  }
+
+  .flocks-segmented-item-active {
+    @apply bg-panel font-medium text-ink shadow-panel;
+  }
+
+  .flocks-command-bar {
+    @apply flex items-center gap-3 border-b border-line bg-panel px-4 py-2.5;
+  }
+
+  .flocks-float-panel {
+    @apply rounded-panel border border-line bg-panel shadow-float;
+  }
+
+  .flocks-hero {
+    @apply relative overflow-hidden rounded-3xl px-6 py-9 sm:px-10 sm:py-10 lg:px-12 lg:py-11;
+    background-image: linear-gradient(
+      135deg,
+      var(--hero-start) 0%,
+      var(--hero-mid) 45%,
+      var(--hero-end) 100%
+    );
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.06) inset,
+      0 20px 40px -12px rgba(16, 24, 40, 0.35);
+  }
+
+  .flocks-hero::before {
+    content: '';
+    position: absolute;
+    top: -30%;
+    left: -15%;
+    width: 55%;
+    height: 90%;
+    background: radial-gradient(
+      ellipse at center,
+      rgba(239, 68, 68, 0.22) 0%,
+      rgba(239, 68, 68, 0.06) 40%,
+      transparent 70%
+    );
+    pointer-events: none;
+  }
+
+  .flocks-hero::after {
+    content: '';
+    position: absolute;
+    top: -10%;
+    left: 5%;
+    width: 45%;
+    height: 70%;
+    background: radial-gradient(
+      ellipse at center,
+      rgba(99, 102, 241, 0.14) 0%,
+      transparent 65%
+    );
+    pointer-events: none;
   }
 }
 
@@ -17,110 +147,121 @@
     -ms-overflow-style: none;
     scrollbar-width: none;
   }
+
+  .stagger-1 {
+    animation-delay: 60ms;
+  }
+  .stagger-2 {
+    animation-delay: 120ms;
+  }
+  .stagger-3 {
+    animation-delay: 180ms;
+  }
 }
 
 /* Markdown 渲染样式 */
 @layer components {
   .prose {
     line-height: 1.75;
-    /* 覆盖 @tailwindcss/typography 插件的 CSS 变量，避免插件样式污染自定义样式 */
     --tw-prose-code: inherit;
     --tw-prose-pre-code: #e5e7eb;
     --tw-prose-pre-bg: #1f2937;
   }
-  
-  .prose h1, .prose h2, .prose h3, .prose h4 {
+
+  .prose h1,
+  .prose h2,
+  .prose h3,
+  .prose h4 {
     @apply font-bold mt-4 mb-2;
   }
-  
+
   .prose h2 {
-    @apply text-lg border-b border-gray-200 pb-1;
+    @apply text-lg border-b border-line pb-1;
   }
-  
+
   .prose h3 {
     @apply text-base;
   }
-  
+
   .prose p {
     @apply my-2;
   }
-  
-  .prose ul, .prose ol {
+
+  .prose ul,
+  .prose ol {
     @apply pl-6 my-2;
   }
-  
+
   .prose ul {
     list-style-type: disc;
   }
-  
+
   .prose ol {
     list-style-type: decimal;
   }
-  
+
   .prose li {
     @apply my-1;
   }
-  
-  .prose li > ul, .prose li > ol {
+
+  .prose li > ul,
+  .prose li > ol {
     @apply mt-1;
   }
-  
+
   .prose strong {
     @apply font-semibold;
   }
-  
+
   .prose hr {
-    @apply my-4 border-gray-300;
+    @apply my-4 border-line-strong;
   }
-  
+
   .prose a {
-    @apply text-red-600 hover:underline;
+    @apply text-primary-600 hover:underline;
   }
-  
+
   .prose code {
-    @apply bg-gray-100 px-1 py-0.5 rounded text-sm font-mono;
+    @apply rounded bg-surface-sunken px-1 py-0.5 font-mono text-sm;
   }
-  
+
   .prose pre {
-    @apply bg-gray-800 text-gray-100 p-3 rounded overflow-x-auto my-2;
+    @apply my-2 overflow-x-auto rounded bg-gray-800 p-3 text-gray-100;
     color: #e5e7eb;
   }
-  
+
   .prose pre code {
-    /* 覆盖 typography 插件给 code 设置的深色文字，以及行内代码的浅色背景 */
     background: transparent !important;
     padding: 0 !important;
     color: inherit !important;
     font-size: inherit;
     border-radius: 0;
   }
-  
+
   .prose blockquote {
-    @apply border-l-4 border-gray-300 pl-4 italic my-2;
+    @apply my-2 border-l-4 border-line-strong pl-4 italic;
   }
 
-  /* GFM 表格样式 */
   .prose table {
-    @apply w-full border-collapse my-3 text-sm;
+    @apply my-3 w-full border-collapse text-sm;
   }
 
   .prose thead {
-    @apply bg-gray-100;
+    @apply bg-surface-sunken;
   }
 
   .prose th {
-    @apply border border-gray-200 px-3 py-2 text-left font-semibold text-gray-700;
+    @apply border border-line px-3 py-2 text-left font-semibold text-ink-secondary;
   }
 
   .prose td {
-    @apply border border-gray-200 px-3 py-2 text-gray-700;
+    @apply border border-line px-3 py-2 text-ink-secondary;
   }
 
   .prose tr:nth-child(even) td {
-    @apply bg-gray-50;
+    @apply bg-surface;
   }
 
-  /* 用户消息里的表格反色 */
   .prose-invert thead {
     @apply bg-white/10;
   }
@@ -133,38 +274,36 @@
   .prose-invert tr:nth-child(even) td {
     @apply bg-white/5;
   }
-  
-  /* 让 highlight.js 主题不覆盖我们的 pre 背景 */
+
   .prose pre .hljs,
   .prose .hljs {
     background: transparent !important;
     padding: 0 !important;
   }
 
-  /* 用户消息反色 */
-  .prose-invert h2, .prose-invert h3 {
+  .prose-invert h2,
+  .prose-invert h3 {
     @apply border-red-400;
   }
-  
+
   .prose-invert a {
     @apply text-red-200;
   }
-  
+
   .prose-invert code {
     @apply bg-white/10;
   }
-  
+
   .prose-invert hr {
     @apply border-red-400;
   }
 
-  /* <details> / <summary> 折叠样式 */
   .prose details {
-    @apply border border-gray-200 rounded-lg my-2 overflow-hidden;
+    @apply my-2 overflow-hidden rounded-lg border border-line;
   }
 
   .prose details summary {
-    @apply px-3 py-2 cursor-pointer text-sm font-medium text-gray-700 bg-gray-50 hover:bg-gray-100 transition-colors select-none list-none;
+    @apply cursor-pointer select-none list-none bg-surface-sunken px-3 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-surface;
   }
 
   .prose details summary::-webkit-details-marker {
@@ -172,23 +311,37 @@
   }
 
   .prose details[open] summary {
-    @apply border-b border-gray-200;
+    @apply border-b border-line;
   }
 
   .prose details > *:not(summary) {
     @apply px-3 py-2;
   }
 
-  /* 用户消息里的 details 反色 */
   .prose-invert details {
     @apply border-white/20;
   }
 
   .prose-invert details summary {
-    @apply text-red-100 bg-white/10 hover:bg-white/20;
+    @apply bg-white/10 text-red-100 hover:bg-white/20;
   }
 
   .prose-invert details[open] summary {
     @apply border-white/20;
   }
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slide-in 0.3s ease-out;
 }

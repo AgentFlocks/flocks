@@ -326,7 +326,7 @@ export default function Layout() {
     matchPath('/sessions', location.pathname);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-surface">
       {showOnboarding && (
         <OnboardingModal
           onClose={() => setShowOnboarding(false)}
@@ -351,14 +351,14 @@ export default function Layout() {
 
       {sidebarOpen && (
         <div
-          className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden"
+          className="fixed inset-0 z-40 bg-ink/50 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200
+          fixed inset-y-0 left-0 z-50 border-r border-line bg-surface-sidebar
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
@@ -367,20 +367,20 @@ export default function Layout() {
       >
         <div className="flex flex-col h-full overflow-hidden">
           {/* Logo */}
-          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'px-4'}`}>
+          <div className={`flex h-16 flex-shrink-0 items-center border-b border-line ${collapsed ? 'justify-center px-2' : 'px-4'}`}>
             {collapsed ? (
               <div
-                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm"
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-line bg-panel shadow-panel"
                 title="Flocks"
               >
-                <Sparkles className="w-4 h-4 text-zinc-500" />
+                <Sparkles className="h-4 w-4 text-ink-faint" />
               </div>
             ) : (
               <>
-                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap">Flocks</span>
+                <span className="flex-1 min-w-0 whitespace-nowrap font-display text-xl font-bold text-primary-600">Flocks</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0"
+                  className="flex-shrink-0 rounded p-1 text-ink-faint hover:text-ink-muted lg:hidden"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -393,11 +393,11 @@ export default function Layout() {
             {navigation.map((section) => (
               <div key={section.name} className="mb-6">
                 {!collapsed && section.name && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
+                  <h3 className="mb-2 whitespace-nowrap px-3 text-xs font-semibold uppercase tracking-wider text-ink-faint">
                     {section.name}
                   </h3>
                 )}
-                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none" />}
+                {collapsed && <div className="mb-1 border-t border-line first:border-none" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
                     const isActive = location.pathname === item.href
@@ -412,13 +412,13 @@ export default function Layout() {
                           flex items-center rounded-lg transition-all duration-150
                           ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
                           ${isActive
-                            ? 'bg-white text-zinc-900 shadow-sm'
-                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900'
+                            ? 'bg-panel text-ink shadow-panel'
+                            : 'text-ink-muted hover:bg-panel/60 hover:text-ink'
                           }
                         `}
                       >
                         <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700' : 'text-zinc-400'}`}
+                          className={`h-5 w-5 flex-shrink-0 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-ink-secondary' : 'text-ink-faint'}`}
                         />
                         {!collapsed && (
                           <span className="truncate">{item.name}</span>
@@ -432,7 +432,7 @@ export default function Layout() {
           </nav>
 
           {/* Bottom: Language switcher + version */}
-          <div className={`border-t border-zinc-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
+          <div className={`flex-shrink-0 border-t border-line ${collapsed ? 'flex flex-col items-center gap-2 p-2' : 'p-4'}`}>
             <LanguageSwitcher collapsed={collapsed} />
             {!collapsed && (
               <>
@@ -461,14 +461,14 @@ export default function Layout() {
                 ) : (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors"
+                    className="group mt-3 w-full rounded-lg px-1 py-1 text-left transition-colors hover:bg-panel/60"
                   >
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors">
+                      <span className="text-xs font-medium text-ink-muted transition-colors group-hover:text-ink">
                         Flocks {currentVersion ? `v${currentVersion}` : '...'}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-xs text-zinc-400">AI Native SecOps Platform</div>
+                    <div className="mt-0.5 text-xs text-ink-faint">AI Native SecOps Platform</div>
                   </button>
                 )}
               </>
@@ -480,7 +480,7 @@ export default function Layout() {
                 className={`relative rounded-xl p-2 transition-colors ${
                   hasUpdate
                     ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
-                    : 'text-zinc-400 hover:text-zinc-600 hover:bg-white/60'
+                    : 'text-ink-faint hover:bg-panel/60 hover:text-ink-muted'
                 }`}
               >
                 {hasUpdate ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
@@ -501,8 +501,8 @@ export default function Layout() {
           className="
             hidden lg:flex absolute top-1/2 -translate-y-1/2 right-0 z-10
             w-3 h-20 items-center justify-center
-            bg-zinc-200 hover:bg-zinc-300 border border-r-0 border-zinc-200 rounded-l-lg
-            text-zinc-400 hover:text-zinc-600
+            rounded-l-lg border border-r-0 border-line bg-line-strong text-ink-faint
+            hover:bg-line hover:text-ink-muted
             transition-all duration-200
           "
           title={collapsed ? t('expandNav') : t('collapseNav')}
@@ -515,7 +515,7 @@ export default function Layout() {
       <div className={`lg:hidden fixed top-0 left-0 z-30 flex items-center h-16 px-4 ${sidebarOpen ? 'hidden' : ''}`}>
         <button
           onClick={() => setSidebarOpen(true)}
-          className="p-2 text-gray-500 hover:text-gray-700 bg-white rounded-lg shadow-sm border border-gray-200"
+          className="rounded-lg border border-line bg-panel p-2 text-ink-muted shadow-panel hover:text-ink"
         >
           <Menu className="w-5 h-5" />
         </button>
@@ -525,7 +525,7 @@ export default function Layout() {
       <div
         className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
-        <main className="flex-1 overflow-hidden bg-gray-50">
+        <main className="flex-1 overflow-hidden bg-surface">
           {isFullScreenPage ? (
             <Outlet />
           ) : (

@@ -1,11 +1,18 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap } from 'lucide-react';
+import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, ArrowDown } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import PageHeader from '@/components/common/PageHeader';
+import LoadingSpinner from '@/components/common/LoadingSpinner';
+import EmptyState from '@/components/common/EmptyState';
+import { useAgents } from '@/hooks/useAgents';
+import { agentAPI, Agent } from '@/api/agent';
+import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import AgentSheet from './AgentSheet';
 
 // ---------------------------------------------------------------------------
 // Color helpers
 // ---------------------------------------------------------------------------
 
-// Muted-but-distinct palette — enough personality without being loud.
 const AGENT_PALETTE = [
   '#3b82f6', // blue-500
   '#8b5cf6', // violet-500
@@ -35,14 +42,10 @@ function hexAlpha(hex: string, alpha: number): string {
   const b = parseInt(full.slice(4, 6), 16);
   return `rgba(${r},${g},${b},${alpha})`;
 }
-import { useTranslation } from 'react-i18next';
-import PageHeader from '@/components/common/PageHeader';
-import LoadingSpinner from '@/components/common/LoadingSpinner';
-import EmptyState from '@/components/common/EmptyState';
-import { useAgents } from '@/hooks/useAgents';
-import { agentAPI, Agent } from '@/api/agent';
-import { getAgentDisplayDescription } from '@/utils/agentDisplay';
-import AgentSheet from './AgentSheet';
+
+function formatAgentName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
 
 // ============================================================================
 // Main Page Component
@@ -172,7 +175,7 @@ export default function AgentPage() {
         ) : (
           <>
             {primaryAgents.length > 0 && (
-              <AgentSection
+              <PrimaryAgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
                 icon={<Shield className="w-4 h-4" />}
@@ -180,8 +183,13 @@ export default function AgentPage() {
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
                 onSelect={setEditingAgent}
-                onDelete={handleDelete}
               />
+            )}
+            {primaryAgents.length > 0 && subAgents.length > 0 && (
+              <p className="flex items-center gap-2 text-xs text-gray-400 -mt-2">
+                <ArrowDown className="h-3.5 w-3.5 shrink-0 text-gray-300" aria-hidden />
+                {t('section.relationHint')}
+              </p>
             )}
             {subAgents.length > 0 && (
               <AgentSection
@@ -296,7 +304,150 @@ function PaginationBar({
 }
 
 // ---------------------------------------------------------------------------
-// AgentSection
+// Primary Agent Section (horizontal profile rows)
+// ---------------------------------------------------------------------------
+
+interface PrimaryAgentSectionProps {
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  agents: Agent[];
+  displayLang: string;
+  selectedAgent: Agent | null;
+  onSelect: (agent: Agent) => void;
+}
+
+function PrimaryAgentSection({
+  title,
+  subtitle,
+  icon,
+  agents,
+  displayLang,
+  selectedAgent,
+  onSelect,
+}: PrimaryAgentSectionProps) {
+  return (
+    <div>
+      <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-400">
+        <span className="text-slate-500 mt-0.5">{icon}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
+            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
+              {agents.length}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-col gap-3">
+        {agents.map((agent) => (
+          <PrimaryAgentRow
+            key={agent.name}
+            agent={agent}
+            displayLang={displayLang}
+            isSelected={selectedAgent?.name === agent.name}
+            onClick={() => onSelect(agent)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface PrimaryAgentRowProps {
+  agent: Agent;
+  displayLang: string;
+  isSelected: boolean;
+  onClick: () => void;
+}
+
+function PrimaryAgentRow({ agent, displayLang, isSelected, onClick }: PrimaryAgentRowProps) {
+  const { t } = useTranslation('agent');
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+  const color = resolveAgentColor(agent);
+
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className={`
+        group flex w-full cursor-pointer overflow-hidden rounded-xl border bg-white
+        transition-all duration-150
+        ${isSelected
+          ? 'border-slate-400 shadow-md ring-2 ring-slate-200'
+          : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
+        }
+      `}
+    >
+      <div className="w-1 shrink-0" style={{ backgroundColor: color }} />
+
+      <div className="flex min-w-0 flex-1 items-center gap-4 px-4 py-3.5 sm:px-5">
+        <div
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl"
+          style={{ backgroundColor: hexAlpha(color, 0.12) }}
+        >
+          <Bot className="h-5 w-5" style={{ color }} />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-base font-semibold text-gray-900">
+              {formatAgentName(agent.name)}
+            </span>
+            <span className="inline-flex items-center rounded border border-indigo-200 bg-indigo-50 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700">
+              {t('badge.primary')}
+            </span>
+            {agent.native ? (
+              <span className="inline-flex items-center rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+                {t('badge.native')}
+              </span>
+            ) : (
+              <span className="inline-flex items-center rounded border border-teal-200 bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-600">
+                {t('badge.custom')}
+              </span>
+            )}
+          </div>
+          <p className="mt-1 line-clamp-2 text-sm leading-relaxed text-gray-500">
+            {displayDesc || t('common:empty.noDescription')}
+          </p>
+          {agent.model && (
+            <div
+              className="mt-2 inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[10px] text-gray-500"
+              style={{ backgroundColor: hexAlpha(color, 0.08), border: `1px solid ${hexAlpha(color, 0.2)}` }}
+            >
+              <Cpu className="h-3 w-3 shrink-0" style={{ color }} />
+              <span className="truncate">{agent.model.modelID}</span>
+            </div>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClick();
+          }}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm font-medium text-gray-700 transition-colors hover:bg-white hover:border-gray-300 group-hover:border-gray-300"
+        >
+          <Pencil className="h-4 w-4" />
+          {t('badge.edit')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sub-Agent Section (grid)
 // ---------------------------------------------------------------------------
 
 interface AgentSectionProps {
@@ -499,7 +650,7 @@ function AgentCard({ agent, displayLang, isSelected, onClick, onDelete }: AgentC
 
           <div className="min-w-0 flex-1">
             <span className="block text-sm font-semibold text-gray-900 truncate leading-snug">
-              {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
+              {formatAgentName(agent.name)}
             </span>
             {/* Badges row: source badge (always shown) + delegatable */}
             <div className="flex items-center gap-1 mt-0.5 flex-wrap">

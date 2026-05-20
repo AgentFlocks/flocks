@@ -36,65 +36,65 @@ interface NodeStyle {
 
 const TYPE_CONFIG: Record<string, NodeStyle> = {
   python: {
-    bg: 'bg-white',
-    border: 'border-red-400',
-    text: 'text-red-600',
+    bg: 'bg-panel',
+    border: 'border-red-300',
+    text: 'text-red-700',
     handleColor: '!bg-red-400',
     accentBg: 'bg-red-50',
     dot: 'bg-red-400',
   },
   logic: {
-    bg: 'bg-white',
-    border: 'border-emerald-400',
-    text: 'text-emerald-600',
+    bg: 'bg-panel',
+    border: 'border-emerald-300',
+    text: 'text-emerald-700',
     handleColor: '!bg-emerald-400',
     accentBg: 'bg-emerald-50',
     dot: 'bg-emerald-400',
   },
   branch: {
-    bg: 'bg-white',
-    border: 'border-amber-400',
-    text: 'text-amber-600',
+    bg: 'bg-panel',
+    border: 'border-amber-300',
+    text: 'text-amber-700',
     handleColor: '!bg-amber-400',
     accentBg: 'bg-amber-50',
     dot: 'bg-amber-400',
   },
   loop: {
-    bg: 'bg-white',
-    border: 'border-purple-400',
-    text: 'text-purple-600',
+    bg: 'bg-panel',
+    border: 'border-purple-300',
+    text: 'text-purple-700',
     handleColor: '!bg-purple-400',
     accentBg: 'bg-purple-50',
     dot: 'bg-purple-400',
   },
   tool: {
-    bg: 'bg-white',
-    border: 'border-violet-400',
-    text: 'text-violet-600',
+    bg: 'bg-panel',
+    border: 'border-violet-300',
+    text: 'text-violet-700',
     handleColor: '!bg-violet-400',
     accentBg: 'bg-violet-50',
     dot: 'bg-violet-400',
   },
   llm: {
-    bg: 'bg-white',
-    border: 'border-pink-400',
-    text: 'text-pink-600',
+    bg: 'bg-panel',
+    border: 'border-pink-300',
+    text: 'text-pink-700',
     handleColor: '!bg-pink-400',
     accentBg: 'bg-pink-50',
     dot: 'bg-pink-400',
   },
   http_request: {
-    bg: 'bg-white',
-    border: 'border-teal-400',
-    text: 'text-teal-600',
+    bg: 'bg-panel',
+    border: 'border-teal-300',
+    text: 'text-teal-700',
     handleColor: '!bg-teal-400',
     accentBg: 'bg-teal-50',
     dot: 'bg-teal-400',
   },
   subworkflow: {
-    bg: 'bg-white',
-    border: 'border-orange-400',
-    text: 'text-orange-600',
+    bg: 'bg-panel',
+    border: 'border-orange-300',
+    text: 'text-orange-700',
     handleColor: '!bg-orange-400',
     accentBg: 'bg-orange-50',
     dot: 'bg-orange-400',
@@ -148,7 +148,7 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
         ${cfg.bg} ${cfg.border} border-2 rounded-xl shadow-sm
         w-48 cursor-pointer select-none
         transition-all duration-150
-        ${selected ? 'shadow-md ring-2 ring-offset-1 ring-red-300' : 'hover:shadow-md'}
+        ${selected ? 'shadow-panel ring-2 ring-offset-1 ring-primary-300' : 'hover:shadow-panel'}
       `}
       onClick={() => d.onNodeClick?.(d.label)}
     >
@@ -486,8 +486,8 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         fitViewOptions={{ padding: 0.2 }}
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e2e8f0" />
-        <Controls showInteractive={false} className="!shadow-sm !border !border-gray-200 !rounded-xl" />
+        <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e4e4e7" />
+        <Controls showInteractive={false} className="!shadow-panel !border !border-line !rounded-panel" />
         <MiniMap
           nodeColor={(node) => {
             const colors: Record<string, string> = {
@@ -499,8 +499,8 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
             const d = node.data as unknown as ViewNodeData | undefined;
             return colors[d?.nodeType ?? ''] ?? '#94a3b8';
           }}
-          className="!border !border-gray-200 !shadow-sm !rounded-xl"
-          maskColor="rgba(241, 245, 249, 0.7)"
+          className="!border !border-line !shadow-panel !rounded-panel"
+          maskColor="rgba(244, 245, 247, 0.75)"
         />
       </ReactFlow>
 

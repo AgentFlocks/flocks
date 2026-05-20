@@ -13,6 +13,7 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useToast } from '@/components/common/Toast';
+import { useConfirm } from '@/components/common/ConfirmDialog';
 import EntitySheet from '@/components/common/EntitySheet';
 import { useProviders, type EnrichedProvider } from '@/hooks/useProviders';
 import { useSSE } from '@/hooks/useSSE';
@@ -100,6 +101,7 @@ function getCachedStatus(cache: Record<string, CachedStatus>, providerId: string
 export default function ModelPage() {
   const { providers, connectedIds, loading, error, refetch } = useProviders();
   const toast = useToast();
+  const confirmDialog = useConfirm();
   const { t } = useTranslation('model');
 
   // State
@@ -302,7 +304,11 @@ export default function ModelPage() {
     const confirmMsg = isDefaultAffected
       ? t('confirmDeleteProviderWithDefault', { model: defaultModel.model_id })
       : t('confirmDeleteProvider');
-    if (!confirm(confirmMsg)) return;
+    const ok = await confirmDialog({
+      description: confirmMsg,
+      variant: 'danger',
+    });
+    if (!ok) return;
 
     try {
       // Delete credentials
@@ -388,7 +394,11 @@ export default function ModelPage() {
     const confirmMsg = isDefaultAffected
       ? t('confirmDeleteModelWithDefault', { modelId })
       : t('confirmDeleteModel', { modelId });
-    if (!confirm(confirmMsg)) return;
+    const ok = await confirmDialog({
+      description: confirmMsg,
+      variant: 'danger',
+    });
+    if (!ok) return;
 
     try {
       await modelV2API.deleteDefinition(selectedProvider.id, modelId);
@@ -437,22 +447,16 @@ export default function ModelPage() {
       <PageHeader
         title={t('pageTitle')}
         description={t('pageDescription')}
-        icon={<Brain className="w-8 h-8" />}
+        icon={<Brain className="h-6 w-6" />}
         action={
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowAddProvider(true)}
-              className="flex items-center gap-2 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <Plus className="w-4 h-4" />
+            <button type="button" onClick={() => setShowAddProvider(true)} className="flocks-btn-secondary">
+              <Plus className="h-4 w-4" />
               {t('addProvider')}
             </button>
             {selectedProvider && (
-              <button
-                onClick={() => setShowAddModel(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
-              >
-                <Plus className="w-4 h-4" />
+              <button type="button" onClick={() => setShowAddModel(true)} className="flocks-btn-primary">
+                <Plus className="h-4 w-4" />
                 {t('addModel')}
               </button>
             )}
