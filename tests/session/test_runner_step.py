@@ -476,7 +476,7 @@ class TestBuildTools:
         assert event_callback.await_args.args[1]["enabledToolCount"] == 3
 
     @pytest.mark.asyncio
-    async def test_build_tools_keeps_registered_skill_description(self):
+    async def test_build_tools_refreshes_skill_description_from_enabled_skills(self):
         runner = _make_runner()
         agent = _make_agent(name="rex")
         skill_tool = ToolInfo(
@@ -491,11 +491,17 @@ class TestBuildTools:
             SessionRunner,
             "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
+        ), patch(
+            "flocks.skill.skill.Skill.list_enabled",
+            AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
+        ), patch(
+            "flocks.tool.system.skill.build_description",
+            return_value="Refreshed skill description",
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
         assert tools[0]["function"]["name"] == "skill"
-        assert tools[0]["function"]["description"] == "Original skill description"
+        assert tools[0]["function"]["description"] == "Refreshed skill description"
 
 
 class TestBuildSystemPrompts:
@@ -885,7 +891,7 @@ class TestBuildSystemPrompts:
             "flocks.session.runner.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
-            "flocks.tool.system.slash_command.format_tools_catalog_summary",
+            "flocks.command.direct.format_tools_catalog_summary",
             return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
         ):
             prompt = runner._build_tool_catalog_prompt(agent)
@@ -926,7 +932,7 @@ class TestBuildSystemPrompts:
             "flocks.session.runner.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
-            "flocks.tool.system.slash_command.format_tools_catalog_summary",
+            "flocks.command.direct.format_tools_catalog_summary",
             side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
         ) as formatter_mock:
             prompt = runner._build_tool_catalog_prompt(agent)
@@ -1269,6 +1275,215 @@ async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
     assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
     assert chat_messages[1].role == "tool"
     assert chat_messages[1].tool_call_id == "call_reasoning_replay"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_reasoning_metadata_replay",
+        directory="/tmp/runner-reasoning-metadata",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3-max"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to call the tool first.",
+            metadata={
+                "reasoningContent": "Need to call the tool first.",
+                "reasoningSource": "native_reasoning_content",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_reasoning_metadata",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning == "Need to call the tool first."
+    assert chat_messages[0].reasoning_content == "Need to call the tool first."
+    assert chat_messages[0].reasoning_source == "native_reasoning_content"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_redacted_thinking",
+        directory="/tmp/runner-redacted-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_redacted_thinking",
+                "redactedThinkingData": "opaque_blob",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_redacted_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "opaque_blob"}
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_provider_specific_interleaved",
+        directory="/tmp/runner-provider-interleaved",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "deepseek"
+    runner.model_id = "shared-model"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: (
+            SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    interleaved={
+                        "field": "reasoning_content",
+                        "echo": "tool_calls",
+                        "placeholder": " ",
+                        "cross_provider_policy": "placeholder",
+                    }
+                )
+            )
+            if provider_id == "deepseek" and model_id == "shared-model"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_details",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Prior provider chain of thought",
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_provider_specific_interleaved",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning_content == " "
+    assert chat_messages[0].reasoning_details is None
+    assert chat_messages[0].reasoning_source == "placeholder"
 
 
 @pytest.mark.asyncio

@@ -57,6 +57,12 @@
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -74,6 +80,12 @@
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -92,6 +104,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -110,6 +127,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -128,6 +150,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -146,6 +173,12 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -190,6 +223,12 @@
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -207,6 +246,12 @@
         "family": "minimax",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -225,6 +270,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -243,6 +293,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -261,6 +316,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -893,6 +953,12 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1027,6 +1093,12 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1047,6 +1119,12 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1114,6 +1192,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1149,6 +1232,11 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1198,6 +1286,12 @@
         "family": "minimax-m2",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1215,6 +1309,12 @@
         "family": "minimax-m2",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {

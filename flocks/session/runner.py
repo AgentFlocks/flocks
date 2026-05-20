@@ -45,6 +45,7 @@ from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
+from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.tool.catalog import (
     get_always_load_tool_names,
@@ -1872,6 +1873,12 @@ class SessionRunner:
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
+        active_model = Provider.resolve_model(self.provider_id, self.model_id)
+        active_interleaved = (
+            getattr(active_model.capabilities, "interleaved", None)
+            if active_model and getattr(active_model, "capabilities", None)
+            else None
+        )
 
         # Identify the last USER message — only that one keeps real image
         # bytes in its content blocks. Earlier turns get a short text
@@ -2050,6 +2057,10 @@ class SessionRunner:
                 
                 assistant_content_parts = []
                 assistant_reasoning_parts = []
+                assistant_reasoning_content_parts = []
+                assistant_reasoning_details: List[Dict[str, Any]] = []
+                assistant_reasoning_sources: set[str] = set()
+                assistant_custom_settings: Dict[str, Any] = {}
                 # Structured tool calls for the assistant message (OpenAI format)
                 structured_tool_calls: List[Dict[str, Any]] = []
                 # Corresponding tool-result messages (role="tool")
@@ -2064,6 +2075,43 @@ class SessionRunner:
                         assistant_content_parts.append(part.text)
                     elif part.type == "reasoning" and hasattr(part, 'text'):
                         assistant_reasoning_parts.append(part.text)
+                        part_metadata = getattr(part, "metadata", None) or {}
+                        reasoning_meta = part_metadata.get("reasoning") if isinstance(part_metadata, dict) else None
+                        reasoning_content = None
+                        reasoning_source = None
+                        reasoning_details = None
+                        if isinstance(reasoning_meta, dict):
+                            reasoning_content = reasoning_meta.get("content")
+                            reasoning_source = reasoning_meta.get("source")
+                            reasoning_details = reasoning_meta.get("details")
+                        if reasoning_content is None and isinstance(part_metadata, dict):
+                            reasoning_content = part_metadata.get("reasoningContent")
+                        if not reasoning_source and isinstance(part_metadata, dict):
+                            reasoning_source = part_metadata.get("reasoningSource")
+                        if reasoning_details is None and isinstance(part_metadata, dict):
+                            reasoning_details = part_metadata.get("reasoningDetails")
+
+                        if reasoning_content is not None:
+                            assistant_reasoning_content_parts.append(reasoning_content)
+                        if reasoning_source:
+                            assistant_reasoning_sources.add(reasoning_source)
+                        if isinstance(reasoning_details, list):
+                            for item in reasoning_details:
+                                if isinstance(item, dict):
+                                    assistant_reasoning_details.append(item)
+                        thinking_signature = part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
+                        redacted_thinking = part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
+                        if redacted_thinking:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "redacted_thinking",
+                                "data": redacted_thinking,
+                            })
+                        elif thinking_signature:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "thinking",
+                                "thinking": part.text,
+                                "signature": thinking_signature,
+                            })
                     
                     # Tool parts - use structured OpenAI function-calling format
                     elif part.type == "tool" and hasattr(part, 'state'):
@@ -2166,12 +2214,23 @@ class SessionRunner:
                 
                 # Add assistant message
                 if assistant_content_parts or structured_tool_calls:
-                    chat_messages.append(ChatMessage(
+                    assistant_message = ChatMessage(
                         role="assistant",
                         content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
                         reasoning="".join(assistant_reasoning_parts) if assistant_reasoning_parts else None,
+                        reasoning_content="".join(assistant_reasoning_content_parts) if assistant_reasoning_content_parts else None,
+                        reasoning_details=assistant_reasoning_details if assistant_reasoning_details else None,
+                        reasoning_source=sorted(assistant_reasoning_sources)[0] if assistant_reasoning_sources else None,
                         tool_calls=structured_tool_calls if structured_tool_calls else None,
-                    ))
+                        custom_settings=assistant_custom_settings,
+                    )
+                    assistant_message = prepare_reasoning_for_replay(
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                        message=assistant_message,
+                        interleaved=active_interleaved,
+                    )
+                    chat_messages.append(assistant_message)
                     # Append tool-result messages immediately after the assistant message
                     chat_messages.extend(pending_tool_results)
                 else:
@@ -2482,40 +2541,66 @@ class SessionRunner:
                 # provider used `event_type == 'reasoning'` to overload `delta` for
                 # reasoning text.
                 event_type = getattr(chunk, 'event_type', None)
+                chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
+
+                if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
+                    reasoning_id_counter += 1
+                    self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                    await processor.process_event(ReasoningStartEvent(
+                        id=self._current_reasoning_id,
+                        metadata=chunk_metadata,
+                    ))
+
+                if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    await processor.process_event(ReasoningEndEvent(
+                        id=self._current_reasoning_id,
+                        metadata=chunk_metadata,
+                    ))
+                    delattr(self, '_current_reasoning_id')
 
                 chunk_reasoning = getattr(chunk, 'reasoning', None) or None
                 if not chunk_reasoning and event_type == 'reasoning':
                     # Older providers signal reasoning via event_type and put the
                     # reasoning text in `delta` (no separate `reasoning` field).
                     chunk_reasoning = getattr(chunk, 'delta', '') or None
+                has_reasoning_metadata = bool(
+                    chunk_metadata.get("reasoningDetails")
+                    or chunk_metadata.get("reasoningContent") is not None
+                    or chunk_metadata.get("reasoningField")
+                )
 
                 # Treat `delta` as text only when it isn't already consumed as
                 # reasoning above.  This preserves backward compatibility with
                 # providers that emit reasoning-only chunks via `event_type`.
                 chunk_text = ''
-                if event_type != 'reasoning' or getattr(chunk, 'reasoning', None):
+                if event_type not in reasoning_event_types or getattr(chunk, 'reasoning', None):
                     chunk_text = getattr(chunk, 'delta', '') or ''
 
                 chunk_tool_calls = getattr(chunk, 'tool_calls', None)
 
                 # 1) Process reasoning delta (start reasoning block on first sight).
-                if chunk_reasoning:
+                if chunk_reasoning or (event_type == 'reasoning' and has_reasoning_metadata):
+                    reasoning_text = chunk_reasoning or ""
                     chunk_counts["reasoning"] += 1
                     log.debug("runner.reasoning.received", {
-                        "length": len(chunk_reasoning),
-                        "text_preview": chunk_reasoning[:50],
+                        "length": len(reasoning_text),
+                        "text_preview": reasoning_text[:50],
                     })
                     if not hasattr(self, '_current_reasoning_id'):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
                         await processor.process_event(ReasoningStartEvent(
-                            id=self._current_reasoning_id
+                            id=self._current_reasoning_id,
+                            metadata=chunk_metadata,
                         ))
 
-                    await processor.process_event(ReasoningDeltaEvent(
-                        id=self._current_reasoning_id,
-                        text=chunk_reasoning,
-                    ))
+                    if chunk_reasoning:
+                        await processor.process_event(ReasoningDeltaEvent(
+                            id=self._current_reasoning_id,
+                            text=chunk_reasoning,
+                            metadata=chunk_metadata,
+                        ))
 
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).
