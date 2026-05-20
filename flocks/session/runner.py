@@ -26,7 +26,12 @@ from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message, MessageInfo, MessageRole
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
-from flocks.session.core.defaults import DOOM_LOOP_THRESHOLD
+from flocks.session.core.defaults import (
+    DEFAULT_MAX_TOOL_STEPS,
+    DOOM_LOOP_THRESHOLD,
+    REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
+    SAME_TOOL_STREAK_HALT_THRESHOLD,
+)
 from flocks.session.lifecycle.retry import SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
 from flocks.session.streaming.stream_processor import StreamProcessor
@@ -245,6 +250,123 @@ class SessionRunner:
         self.session_ctx = session_ctx  # SessionContext interface for decoupled access
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
+
+    @staticmethod
+    def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
+        args_json = json.dumps(
+            arguments or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return f"{tool_name}:{args_json}"
+
+    def _reset_tool_loop_guard(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = {
+            "last_user_id": last_user_id or "",
+            "last_signature": "",
+            "last_tool_name": "",
+            "exact_count": 0,
+            "same_tool_count": 0,
+        }
+        self._static_cache["tool_loop_guard"] = state
+        return state
+
+    def _get_tool_loop_guard_state(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = self._static_cache.get("tool_loop_guard")
+        if not isinstance(state, dict):
+            state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+        elif last_user_id is not None:
+            cached_user_id = str(state.get("last_user_id") or "")
+            if cached_user_id and cached_user_id != last_user_id:
+                state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+            else:
+                state["last_user_id"] = last_user_id
+        return state
+
+    def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        return (
+            int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+            or int(state.get("same_tool_count", 0)) >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
+        )
+
+    def _build_tool_loop_halt_message(
+        self,
+        *,
+        tool_name: str,
+        reason: str,
+        count: int,
+    ) -> str:
+        if reason == "repeated_exact_tool_call":
+            return (
+                f"Stopped the loop because `{tool_name}` was called {count} times in a row "
+                "with the same arguments and kept producing a tool-only turn. Change strategy, "
+                "summarize the blocker, or answer directly instead of repeating the exact same call."
+            )
+        return (
+            f"Stopped the loop because `{tool_name}` was the only tool used for {count} consecutive "
+            "tool-only turns. Change strategy, summarize the blocker, or answer directly instead of "
+            "continuing the same tool pattern."
+        )
+
+    def _update_tool_loop_guard(
+        self,
+        result: StepResult,
+        *,
+        last_user_id: str,
+    ) -> Dict[str, Any]:
+        visible_text = bool((result.content or "").strip())
+        if visible_text or len(result.tool_calls) != 1:
+            self._reset_tool_loop_guard(last_user_id=last_user_id)
+            return {"action": "allow"}
+
+        tool_call = result.tool_calls[0]
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        signature = self._canonical_tool_signature(tool_call.name, tool_call.arguments)
+
+        exact_count = 1
+        if state.get("last_signature") == signature:
+            exact_count = int(state.get("exact_count", 0)) + 1
+
+        same_tool_count = 1
+        if state.get("last_tool_name") == tool_call.name:
+            same_tool_count = int(state.get("same_tool_count", 0)) + 1
+
+        state.update({
+            "last_user_id": last_user_id,
+            "last_signature": signature,
+            "last_tool_name": tool_call.name,
+            "exact_count": exact_count,
+            "same_tool_count": same_tool_count,
+        })
+
+        if exact_count >= REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD:
+            return {
+                "action": "halt",
+                "reason": "repeated_exact_tool_call",
+                "tool_name": tool_call.name,
+                "count": exact_count,
+            }
+        if same_tool_count >= SAME_TOOL_STREAK_HALT_THRESHOLD:
+            return {
+                "action": "halt",
+                "reason": "same_tool_streak",
+                "tool_name": tool_call.name,
+                "count": same_tool_count,
+            }
+        if (
+            exact_count >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+            or same_tool_count >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
+        ):
+            return {
+                "action": "warn",
+                "tool_name": tool_call.name,
+                "exact_count": exact_count,
+                "same_tool_count": same_tool_count,
+            }
+        return {"action": "allow"}
 
     async def _list_callable_tool_infos_for_turn(
         self,
@@ -875,7 +997,7 @@ class SessionRunner:
             log.debug("runner.session_agent.error", {"error": str(e)})
         
         # Check if we've reached max steps (matching Flocks logic)
-        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else float('inf')
+        max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
         is_last_step = self._step >= max_steps
         
         # Get provider
@@ -965,37 +1087,16 @@ class SessionRunner:
                 from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
                 system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
             
-            # 检查最近几条消息中是否有重复的工具调用（轻量级警告）
-            if has_tool_result and self._step > 2:
-                # 收集最近的工具调用签名
-                recent_tool_sigs = []
-                for msg in reversed(messages[-3:]):  # 检查最近3条消息
-                    if msg.role == MessageRole.ASSISTANT:
-                        msg_parts = await Message.parts(msg.id, self.session.id)
-                        for p in msg_parts:
-                            if (getattr(p, "type", None) == "tool" and
-                                hasattr(p, 'state') and 
-                                hasattr(p.state, 'status') and
-                                p.state.status == "completed"):
-                                tool_name = getattr(p, 'tool', '')
-                                tool_input = getattr(p.state, 'input', {})
-                                sig = f"{tool_name}:{json.dumps(tool_input, sort_keys=True)}"
-                                recent_tool_sigs.append(sig)
-                
-                # 如果有重复的工具调用签名，添加提示（不禁用工具）
-                if recent_tool_sigs:
-                    sig_counts = {}
-                    for sig in recent_tool_sigs:
-                        sig_counts[sig] = sig_counts.get(sig, 0) + 1
-                    
-                    repeated_sigs = [sig for sig, count in sig_counts.items() if count >= 2]
-                    if repeated_sigs:
-                        log.warn("runner.repeated_tool_calls_detected", {
-                            "repeated_sigs": repeated_sigs,
-                            "step": self._step,
-                        })
-                        from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
-                        system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
+            if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_tool_name"),
+                    "exact_count": state.get("exact_count", 0),
+                    "same_tool_count": state.get("same_tool_count", 0),
+                    "step": self._step,
+                })
+                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+                system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Hook pipeline: chat.message stage
         try:
@@ -1256,6 +1357,33 @@ class SessionRunner:
                             finish="error",
                         )
                         return StepResult(action="stop", error=empty_error_msg)
+
+                tool_loop_guard = self._update_tool_loop_guard(
+                    result,
+                    last_user_id=last_user.id,
+                )
+                if tool_loop_guard.get("action") == "halt":
+                    halt_message = self._build_tool_loop_halt_message(
+                        tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
+                        reason=str(tool_loop_guard.get("reason") or "same_tool_streak"),
+                        count=int(tool_loop_guard.get("count", 0) or 0),
+                    )
+                    log.warn("runner.tool_loop_guard_halt", {
+                        "tool_name": tool_loop_guard.get("tool_name"),
+                        "reason": tool_loop_guard.get("reason"),
+                        "count": tool_loop_guard.get("count"),
+                        "step": self._step,
+                    })
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        content=halt_message,
+                    )
+                    result = StepResult(
+                        action="stop",
+                        content=halt_message,
+                        usage=result.usage,
+                    )
 
                 # Success! Update finish reason
                 finish = "tool-calls" if result.tool_calls else "stop"

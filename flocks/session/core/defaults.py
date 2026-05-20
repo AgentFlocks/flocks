@@ -24,3 +24,13 @@ def fallback_model_id() -> str:
 # Doom-loop detection: if the last N tool calls in a single assistant
 # message are identical (same tool + same input), stop processing.
 DOOM_LOOP_THRESHOLD = 3
+
+# Default assistant-step budget when an agent does not declare an explicit
+# ``steps`` limit. Keeps tool loops finite without being too aggressive for
+# longer coding/research tasks.
+DEFAULT_MAX_TOOL_STEPS = 100
+
+# Cross-step loop guard thresholds. These complement the per-message doom-loop
+# detection in ``stream_processor.py`` by stopping repeated tool-only turns.
+REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD = 3
+SAME_TOOL_STREAK_HALT_THRESHOLD = 8
