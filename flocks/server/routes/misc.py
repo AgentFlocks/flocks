@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ProviderConfig
-from flocks.tool.system.skill import get_all_skills, get_skill
+from flocks.tool.system.skill_load import get_all_skills, get_skill
 from flocks.command.command import Command
 
 

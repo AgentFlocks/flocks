@@ -153,7 +153,7 @@ class TestToolRegistry:
             # P1 tools (6)
             "webfetch", "todoread", "todowrite", "question", "plan_enter", "plan_exit",
             # P2 tools (5)
-            "task", "lsp", "skill",
+            "task", "lsp", "skill_load",
             "background_output", "background_cancel",
             # P3 tools (2)
             "websearch", "apply_patch",
@@ -910,13 +910,13 @@ class TestLSPTool:
         assert tool is not None
 
 
-class TestSkillTool:
-    """Test the skill tool"""
+class TestSkillLoadTool:
+    """Test the skill_load tool"""
     
     @pytest.mark.asyncio
-    async def test_skill_exists(self):
-        """Test that skill tool is registered"""
-        tool = ToolRegistry.get("skill")
+    async def test_skill_load_exists(self):
+        """Test that skill_load tool is registered"""
+        tool = ToolRegistry.get("skill_load")
         assert tool is not None
 
 

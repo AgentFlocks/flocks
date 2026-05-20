@@ -957,6 +957,84 @@ class TestPluginPyRegistration:
             ToolRegistry._plugin_tool_names = old_plugin_names
             ToolRegistry._enabled_defaults = old_enabled_defaults
 
+    def test_load_plugin_tools_does_not_reclassify_builtin_name_collision(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        colliding_tool_path = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "webfetch.py"
+        try:
+            ToolRegistry._tools = {
+                "webfetch": Tool(
+                    info=ToolInfo(
+                        name="webfetch",
+                        description="Builtin webfetch",
+                        category=ToolCategory.SYSTEM,
+                        source="builtin",
+                        native=True,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                )
+            }
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+                with patch(
+                    "flocks.tool.tool_loader.discover_python_tool_sources",
+                    return_value={"webfetch": colliding_tool_path},
+                ):
+                    ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["webfetch"].info.source == "builtin"
+            assert ToolRegistry._tools["webfetch"].info.native is True
+            assert ToolRegistry._plugin_tool_names == []
+
+            ToolRegistry._unregister_plugin_tools()
+            assert "webfetch" in ToolRegistry._tools
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_reconciles_early_registered_python_plugin(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        user_tool_path = tmp_path / "user_flocks" / ".flocks" / "plugins" / "tools" / "python" / "calculator.py"
+        try:
+            ToolRegistry._tools = {
+                "calculator": Tool(
+                    info=ToolInfo(
+                        name="calculator",
+                        description="Calculator",
+                        category=ToolCategory.CUSTOM,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                )
+            }
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
+                with patch("flocks.plugin.PluginLoader.load_all", return_value=None):
+                    with patch(
+                        "flocks.tool.tool_loader.discover_python_tool_sources",
+                        return_value={"calculator": user_tool_path},
+                    ):
+                        ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["calculator"].info.source == "plugin_py"
+            assert ToolRegistry._tools["calculator"].info.native is False
+            assert ToolRegistry._plugin_tool_names == ["calculator"]
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
 
 # ---------------------------------------------------------------------------
 # HTTP handler (integration-style with mocked aiohttp)

@@ -108,7 +108,7 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "run_workflow",
         "run_workflow_node",
         "session_list",
-        "skill",
+        "skill_load",
         "task",
         "todoread",
         "todowrite",

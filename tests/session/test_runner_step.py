@@ -480,7 +480,7 @@ class TestBuildTools:
         runner = _make_runner()
         agent = _make_agent(name="rex")
         skill_tool = ToolInfo(
-            name="skill",
+            name="skill_load",
             description="Original skill description",
             category=ToolCategory.SYSTEM,
             native=True,
@@ -494,7 +494,7 @@ class TestBuildTools:
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
-        assert tools[0]["function"]["name"] == "skill"
+        assert tools[0]["function"]["name"] == "skill_load"
         assert tools[0]["function"]["description"] == "Original skill description"
 
 
@@ -885,7 +885,7 @@ class TestBuildSystemPrompts:
             "flocks.session.runner.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
-            "flocks.tool.system.slash_command.format_tools_catalog_summary",
+            "flocks.command.direct.format_tools_catalog_summary",
             return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
         ):
             prompt = runner._build_tool_catalog_prompt(agent)
@@ -926,7 +926,7 @@ class TestBuildSystemPrompts:
             "flocks.session.runner.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
-            "flocks.tool.system.slash_command.format_tools_catalog_summary",
+            "flocks.command.direct.format_tools_catalog_summary",
             side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
         ) as formatter_mock:
             prompt = runner._build_tool_catalog_prompt(agent)

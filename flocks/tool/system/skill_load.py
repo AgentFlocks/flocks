@@ -1,7 +1,7 @@
 """
 Skill Tool - Load and execute skills.
 
-The `skill` tool is the load-on-demand half of the skill system: keep the
+The `skill_load` tool is the load-on-demand half of the skill system: keep the
 tool schema short, and load the full SKILL.md only after the model has already
 decided which skill applies.
 """
@@ -16,7 +16,7 @@ from flocks.skill.skill import Skill, SkillInfo
 from flocks.utils.log import Log
 
 
-log = Log.create(service="tool.skill")
+log = Log.create(service="tool.skill_load")
 
 
 MAX_SKILL_DESCRIPTION_PREVIEW_CHARS = 500
@@ -28,7 +28,7 @@ SKILL_TOOL_DESCRIPTION = (
     "prompt's available-skills guidance or another discovery step. "
     "If a skills listing tool is available, use that first when unsure which "
     "skill applies. Once you know the name, you must call "
-    "skill(name=\"<skill-name>\") before acting on the skill."
+    "skill_load(name=\"<skill-name>\") before acting on the skill."
 )
 
 
@@ -39,13 +39,13 @@ def _truncate_skill_description(description: str, name: str) -> str:
 
     Uses head + tail truncation so both the opening (scope/triggers) and the
     closing (hard constraints, "must load first") survive. Inserts a marker
-    that tells the model how to fetch the full content via the `skill` tool.
+    that tells the model how to fetch the full content via the `skill_load` tool.
     """
     max_chars = MAX_SKILL_DESCRIPTION_PREVIEW_CHARS
     if len(description) <= max_chars:
         return description
 
-    marker = f' … [truncated; load full SKILL.md via skill(name="{name}") before acting] … '
+    marker = f' … [truncated; load full SKILL.md via skill_load(name="{name}") before acting] … '
     available = max_chars - len(marker)
     if available < 80:
         # Marker alone is unusually long (very long skill name); fall back to
@@ -58,7 +58,7 @@ def _truncate_skill_description(description: str, name: str) -> str:
 
 
 def build_description(skills: List[SkillInfo]) -> str:
-    """Return the stable, token-light `skill` tool description."""
+    """Return the stable, token-light `skill_load` tool description."""
     _ = skills
     return SKILL_TOOL_DESCRIPTION
 
@@ -126,7 +126,7 @@ async def skill_tool_impl(
 
     # ``truncated=True`` here is intentional: it tells ToolRegistry's
     # auto-truncate path (registry.py: "Auto-truncate output unless the tool
-    # already handled it") to leave our payload alone. The `skill` tool is the
+    # already handled it") to leave our payload alone. The `skill_load` tool is the
     # *load-on-demand* counterpart of the tiny preview that ships in the system
     # prompt -- if the model just decided to load this skill, it needs the
     # FULL SKILL.md to act on. Cropping it at 100 KB / 1000 lines (the
@@ -205,7 +205,7 @@ async def get_skill(name: str) -> dict | None:
 
 
 @ToolRegistry.register_function(
-    name="skill",
+    name="skill_load",
     description=SKILL_TOOL_DESCRIPTION,
     category=ToolCategory.SYSTEM,
     native=True,
@@ -222,5 +222,5 @@ async def skill_tool(
     ctx: ToolContext,
     name: str,
 ) -> ToolResult:
-    """Wrapper that keeps `skill` as a pure load-on-demand tool."""
+    """Wrapper that keeps `skill_load` as a pure load-on-demand tool."""
     return await skill_tool_impl(ctx, name)

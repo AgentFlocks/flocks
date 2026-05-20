@@ -21,7 +21,7 @@ tools:
   - bash
   - websearch
   - webfetch
-  - skill
+  - skill_load
   - background_output
   - background_cancel
 prompt_metadata:

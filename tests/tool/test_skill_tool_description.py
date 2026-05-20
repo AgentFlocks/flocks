@@ -1,11 +1,11 @@
-"""Tests for flocks.tool.system.skill.
+"""Tests for flocks.tool.system.skill_load.
 
-Two complementary aspects of the skill tool's load-on-demand design are
+Two complementary aspects of the skill_load tool's load-on-demand design are
 exercised here:
 
 1. ``build_description`` — the tool schema must stay short and stable. It
    should tell the model to discover the right skill first, then call
-   ``skill(name=...)`` to load the full SKILL.md before acting.
+   ``skill_load(name=...)`` to load the full SKILL.md before acting.
 
 2. ``skill_tool`` — when the model actually calls the tool, the FULL SKILL.md
    must come back unredacted. This mirrors hermes-agent's ``skill_view``.
@@ -25,7 +25,7 @@ import pytest
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.tool.registry import ToolContext, ToolRegistry
-from flocks.tool.system.skill import (
+from flocks.tool.system.skill_load import (
     MAX_SKILL_DESCRIPTION_PREVIEW_CHARS,
     _truncate_skill_description,
     build_description,
@@ -82,7 +82,7 @@ class TestTruncateSkillDescription:
         out = _truncate_skill_description(desc, "onesec-use")
         # The truncation marker must point the model at the right tool call,
         # otherwise progressive disclosure breaks.
-        assert 'skill(name="onesec-use")' in out
+        assert 'skill_load(name="onesec-use")' in out
         assert "truncated" in out
 
     def test_chinese_threat_intel_skill_keeps_trailing_constraint(self):
@@ -125,7 +125,7 @@ class TestBuildDescription:
     def test_includes_progressive_disclosure_instruction(self):
         out = build_description([_skill("alpha", "demo")])
         # Must still direct the model at the load-on-demand call pattern.
-        assert "skill(name=" in out
+        assert "skill_load(name=" in out
         assert "load the full skill.md" in out.lower()
         assert "MUST" in out or "must" in out.lower()
 
@@ -236,7 +236,7 @@ class TestSkillLoadNoTruncation:
 
     @pytest.mark.asyncio
     async def test_registry_execute_does_not_truncate_skill_output(self, fake_skill_dir):
-        """End-to-end: when the `skill` tool is executed via ToolRegistry
+        """End-to-end: when the `skill_load` tool is executed via ToolRegistry
         (which is what the real session loop does), the auto-truncate path
         must NOT fire and the tail must survive."""
         skill_info = SkillInfo(
@@ -245,8 +245,8 @@ class TestSkillLoadNoTruncation:
             location=str(fake_skill_dir / "SKILL.md"),
         )
 
-        skill_tool = ToolRegistry.get("skill")
-        assert skill_tool is not None, "skill tool must be registered"
+        skill_tool = ToolRegistry.get("skill_load")
+        assert skill_tool is not None, "skill_load tool must be registered"
 
         with patch.object(Skill, "all", AsyncMock(return_value=[skill_info])), \
              patch.object(Skill, "get", AsyncMock(return_value=skill_info)):

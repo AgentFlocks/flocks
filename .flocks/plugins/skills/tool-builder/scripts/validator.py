@@ -26,11 +26,11 @@ Detects, among other things:
     that is not ``async def``
 
 Usage:
-    uv run python validator.py <path-to-tool-file>
+    uv run python scripts/validator.py <path-to-tool-file>
 
 Exit codes:
-    0 — no FAIL items (WARN allowed)
-    1 — at least one FAIL item OR validator could not run
+    0 - no FAIL items (WARN allowed)
+    1 - at least one FAIL item OR validator could not run
 """
 
 from __future__ import annotations
@@ -73,7 +73,7 @@ RESERVED_TOOL_NAMES = {
     "task", "schedule_task_center", "todo", "plan",
     "run_workflow", "run_workflow_node",
     "echo", "get_time",
-    "skill", "question",
+    "skill_load", "question",
 }
 
 PARAM_PATTERN = re.compile(r"\{([^}]+)\}")
@@ -139,11 +139,11 @@ class Report:
             f"Summary: {self.fail_count} FAIL, {self.warn_count} WARN"
         )
         if self.fail_count == 0 and self.warn_count == 0:
-            lines[-1] += " — looks good."
+            lines[-1] += " - looks good."
         elif self.fail_count == 0:
-            lines[-1] += " — fix WARN items if you want a clean report."
+            lines[-1] += " - fix WARN items if you want a clean report."
         else:
-            lines[-1] += " — fix FAIL items before declaring the tool ready."
+            lines[-1] += " - fix FAIL items before declaring the tool ready."
         return "\n".join(lines)
 
 
@@ -174,7 +174,7 @@ def _provider_dir(yaml_path: Path) -> Optional[Path]:
     """If the YAML is under ``api/{provider}/foo.yaml``, return the provider dir."""
     parent = yaml_path.parent
     if parent.name == "api":
-        # Standalone tool directly under api/ — no provider dir.
+        # Standalone tool directly under api/ - no provider dir.
         return None
     grandparent = parent.parent
     if grandparent.name == "api":
@@ -232,7 +232,7 @@ def _validate_yaml_metadata(
         if name in RESERVED_TOOL_NAMES:
             report.fail(
                 section,
-                f"name '{name}' collides with a built-in tool — pick another",
+                f"name '{name}' collides with a built-in tool - pick another",
             )
         stem = yaml_path.stem
         if stem != name:
@@ -248,7 +248,7 @@ def _validate_yaml_metadata(
     elif len(str(description).strip()) < 20:
         report.warn(
             section,
-            f"description is only {len(str(description).strip())} chars — "
+            f"description is only {len(str(description).strip())} chars - "
             "the LLM uses this to decide when to invoke the tool",
         )
     else:
@@ -259,7 +259,7 @@ def _validate_yaml_metadata(
         # API tools commonly inherit category from _provider.yaml; only warn.
         report.warn(
             section,
-            "no 'category' set — loader will fall back to 'custom' "
+            "no 'category' set - loader will fall back to 'custom' "
             "(or provider defaults if present)",
         )
     elif category not in VALID_CATEGORIES:
@@ -275,19 +275,19 @@ def _validate_yaml_metadata(
     if enabled is None:
         report.warn(
             section,
-            "no 'enabled' field — defaults to true; set explicitly so "
+            "no 'enabled' field - defaults to true; set explicitly so "
             "the tool is unambiguously activated",
         )
     elif enabled is not True:
         report.warn(
             section,
-            f"enabled = {enabled!r} — tool will NOT be active immediately. "
+            f"enabled = {enabled!r} - tool will NOT be active immediately. "
             "Set 'enabled: true' unless the user asked for it disabled.",
         )
     else:
         report.ok(section, "enabled = true")
 
-    # provider field — required for API service card display
+    # provider field - required for API service card display
     if _tool_under_api(yaml_path):
         provider = data.get("provider")
         prov_dir = _provider_dir(yaml_path)
@@ -296,7 +296,7 @@ def _validate_yaml_metadata(
                 section,
                 "tool is under api/ but neither 'provider' field nor "
                 "a provider subdirectory with _provider.yaml is present "
-                "— it will not appear as an API service card",
+                "- it will not appear as an API service card",
             )
         elif provider:
             report.ok(section, f"provider = {provider}")
@@ -313,7 +313,7 @@ def _validate_yaml_parameters(data: Dict[str, Any], report: Report) -> Set[str]:
     if input_schema is None and params_list is None:
         report.warn(
             section,
-            "no inputSchema or parameters declared — "
+            "no inputSchema or parameters declared - "
             "the LLM will not be able to pass arguments",
         )
         return declared
@@ -322,7 +322,7 @@ def _validate_yaml_parameters(data: Dict[str, Any], report: Report) -> Set[str]:
         report.warn(
             section,
             "both 'inputSchema' and 'parameters' are present; "
-            "'inputSchema' wins — drop 'parameters' to avoid confusion",
+            "'inputSchema' wins - drop 'parameters' to avoid confusion",
         )
 
     if isinstance(input_schema, dict):
@@ -411,14 +411,14 @@ def _validate_param_entry(
     if not description or not str(description).strip():
         report.warn(
             section,
-            f"parameter '{pname}' missing 'description' — "
+            f"parameter '{pname}' missing 'description' - "
             "the LLM cannot reliably fill it in",
         )
 
     if is_required and "default" in pinfo:
         report.warn(
             section,
-            f"parameter '{pname}' is required but also has a default — "
+            f"parameter '{pname}' is required but also has a default - "
             "default is ignored when required=true",
         )
 
@@ -437,13 +437,13 @@ def _validate_yaml_handler(
         if isinstance(execution, dict):
             report.fail(
                 section,
-                "uses inline 'execution' block — disabled for safety. "
+                "uses inline 'execution' block - disabled for safety. "
                 "Use handler.type=script with a separate handler file.",
             )
         else:
             report.fail(
                 section,
-                "missing 'handler' section — loader will refuse to register "
+                "missing 'handler' section - loader will refuse to register "
                 "the tool",
             )
         return
@@ -472,13 +472,13 @@ def _validate_http_handler(
 
     method = handler.get("method")
     if not method:
-        report.warn(section, "no 'method' set — loader defaults to GET")
+        report.warn(section, "no 'method' set - loader defaults to GET")
     elif str(method).upper() not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
         report.warn(section, f"unusual HTTP method: {method!r}")
 
     url = handler.get("url")
     if not url:
-        report.fail(section, "handler.url is empty — request would target ''")
+        report.fail(section, "handler.url is empty - request would target ''")
     else:
         report.ok(section, f"handler.url = {url}")
         prov_dir = _provider_dir(yaml_path)
@@ -487,7 +487,7 @@ def _validate_http_handler(
             report.fail(
                 section,
                 "url uses {base_url} but the tool is not under "
-                "api/{provider}/ — there is no _provider.yaml to inject it",
+                "api/{provider}/ - there is no _provider.yaml to inject it",
             )
 
     # Collect placeholders across url/headers/query_params/body
@@ -517,7 +517,7 @@ def _validate_http_handler(
         report.fail(
             section,
             f"placeholder '{{{name}}}' is referenced in url/headers/"
-            f"query_params/body but not declared as a parameter — "
+            f"query_params/body but not declared as a parameter - "
             "loader will substitute an empty string",
         )
 
@@ -560,7 +560,7 @@ def _validate_http_handler(
     for s in sorted(secret_refs):
         report.warn(
             "Secrets",
-            f"references {{secret:{s}}} — confirm it exists in "
+            f"references {{secret:{s}}} - confirm it exists in "
             "~/.flocks/config/.secret.json",
         )
 
@@ -641,7 +641,7 @@ def _validate_script_handler(
                 "Add it to the signature or accept **kwargs.",
             )
 
-    # Detect imports of ToolResult — warn if missing.
+    # Detect imports of ToolResult - warn if missing.
     has_toolresult_import = any(
         isinstance(node, ast.ImportFrom)
         and node.module == "flocks.tool.registry"
@@ -669,7 +669,7 @@ def _validate_provider_yaml(
     if not provider_file.is_file():
         report.fail(
             section,
-            f"_provider.yaml is missing at {provider_file} — required for "
+            f"_provider.yaml is missing at {provider_file} - required for "
             "the API service card to render",
         )
         return
@@ -691,7 +691,7 @@ def _validate_provider_yaml(
     if not prov_data.get("description_cn"):
         report.warn(
             section,
-            "_provider.yaml missing 'description_cn' — Chinese UI will fall "
+            "_provider.yaml missing 'description_cn' - Chinese UI will fall "
             "back to English",
         )
 
@@ -702,21 +702,21 @@ def _validate_provider_yaml(
     if not defaults.get("base_url"):
         report.fail(
             section,
-            "_provider.yaml.defaults.base_url is missing — handler urls "
+            "_provider.yaml.defaults.base_url is missing - handler urls "
             "using {base_url} will resolve to '/path'",
         )
     if "category" not in defaults and not data.get("category"):
         report.warn(
             section,
             "_provider.yaml.defaults.category is missing and the tool also "
-            "has no category — loader falls back to 'custom'",
+            "has no category - loader falls back to 'custom'",
         )
 
     auth = prov_data.get("auth")
     if auth is None:
         report.warn(
             section,
-            "_provider.yaml has no 'auth' block — that is fine for "
+            "_provider.yaml has no 'auth' block - that is fine for "
             "open APIs, but most providers need a credential",
         )
     elif isinstance(auth, dict):
@@ -732,7 +732,7 @@ def _validate_provider_yaml(
         if inject_as == "query_param" and not auth.get("param_name"):
             report.warn(
                 section,
-                "_provider.yaml.auth.param_name missing — defaults to 'api_key'",
+                "_provider.yaml.auth.param_name missing - defaults to 'api_key'",
             )
 
 
@@ -777,7 +777,7 @@ def validate_python_tool(py_path: Path) -> Report:
     if not decorated:
         report.fail(
             "Decorator",
-            "no @ToolRegistry.register_function decorator found — "
+            "no @ToolRegistry.register_function decorator found - "
             "the tool will not be registered on import",
         )
         return report
@@ -841,7 +841,7 @@ def _validate_python_decorated_function(
         if name in RESERVED_TOOL_NAMES:
             report.fail(
                 section,
-                f"name '{name}' collides with a built-in tool — pick another",
+                f"name '{name}' collides with a built-in tool - pick another",
             )
         report.ok(section, f"name = {name}")
 
@@ -850,7 +850,7 @@ def _validate_python_decorated_function(
     elif len(description.strip()) < 20:
         report.warn(
             section,
-            f"description is only {len(description.strip())} chars — "
+            f"description is only {len(description.strip())} chars - "
             "the LLM uses this to decide when to invoke the tool",
         )
     else:
@@ -859,10 +859,10 @@ def _validate_python_decorated_function(
     if category_node is None:
         report.warn(
             section,
-            "no 'category=' set — defaults to ToolCategory.CUSTOM",
+            "no 'category=' set - defaults to ToolCategory.CUSTOM",
         )
     elif isinstance(category_node, ast.Attribute):
-        # ToolCategory.SOMETHING — accept; full validation requires runtime.
+        # ToolCategory.SOMETHING - accept; full validation requires runtime.
         report.ok(section, f"category = ToolCategory.{category_node.attr}")
     elif isinstance(category_node, ast.Constant) and isinstance(category_node.value, str):
         if category_node.value not in VALID_CATEGORIES:
@@ -878,7 +878,7 @@ def _validate_python_decorated_function(
     if parameters_node is None:
         report.warn(
             section,
-            "no 'parameters=' provided — the tool exposes zero arguments",
+            "no 'parameters=' provided - the tool exposes zero arguments",
         )
     elif isinstance(parameters_node, ast.List):
         if not parameters_node.elts:
@@ -900,14 +900,14 @@ def _validate_python_decorated_function(
                     report.warn(
                         section,
                         f"parameter '{pname}' missing 'type=' "
-                        "(defaults will not work — type is required)",
+                        "(defaults will not work - type is required)",
                     )
 
                 pdesc = _const_str(_kwarg_value(elt, "description"))
                 if not pdesc or not pdesc.strip():
                     report.warn(
                         section,
-                        f"parameter '{pname}' missing 'description=' — "
+                        f"parameter '{pname}' missing 'description=' - "
                         "the LLM cannot reliably fill it in",
                     )
         if declared_params:
@@ -969,7 +969,7 @@ def _validate_python_decorated_function(
     if not returns_toolresult:
         report.warn(
             section,
-            "no 'return ToolResult(...)' detected — loader will wrap the "
+            "no 'return ToolResult(...)' detected - loader will wrap the "
             "return value, but explicit ToolResult is recommended",
         )
     else:

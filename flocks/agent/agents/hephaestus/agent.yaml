@@ -17,7 +17,7 @@ tools:
   - apply_patch
   - websearch
   - webfetch
-  - skill
+  - skill_load
   - delegate_task
   - task
   - todoread

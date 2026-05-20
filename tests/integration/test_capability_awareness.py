@@ -136,7 +136,7 @@ class TestToolVisibility:
             "bash": _make_tool_entry("bash", "terminal"),
             "grep": _make_tool_entry("grep", "search"),
             "webfetch": _make_tool_entry("webfetch", "browser"),
-            "skill": _make_tool_entry("skill", "system"),
+            "skill_load": _make_tool_entry("skill_load", "system"),
         }
         with patch("flocks.tool.registry.ToolRegistry.get", side_effect=lambda n: tool_map.get(n)), \
              patch("flocks.tool.registry.ToolRegistry.init"):

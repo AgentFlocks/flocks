@@ -428,8 +428,8 @@ Run the bundled validator before anything else. It is self-contained
 `_provider.yaml` and any script handler:
 
 ```bash
-SKILL_DIR="$(realpath ~/.flocks/plugins/skills/tool-builder)"
-uv run python "$SKILL_DIR/validator.py" "$TOOL_PATH"
+SKILL_DIR="$(git rev-parse --show-toplevel)/.flocks/plugins/skills/tool-builder"
+uv run python "$SKILL_DIR/scripts/validator.py" "$TOOL_PATH"
 ```
 
 The validator checks (this list is enforced, not aspirational):
@@ -487,7 +487,7 @@ them — note the reason when reporting back.
 For a CI-style check that fails on warnings too:
 
 ```bash
-uv run python "$SKILL_DIR/validator.py" --strict "$TOOL_PATH"
+uv run python "$SKILL_DIR/scripts/validator.py" --strict "$TOOL_PATH"
 ```
 
 ### Step 1: Load Test

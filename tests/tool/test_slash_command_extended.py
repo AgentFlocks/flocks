@@ -120,7 +120,7 @@ class TestToolsCommand:
             _make_tool_info("bash", "terminal"),
             _make_tool_info("grep", "search"),
             _make_tool_info("webfetch", "browser"),
-            _make_tool_info("skill", "system"),
+            _make_tool_info("skill_load", "system"),
         ]
 
     async def test_returns_success(self, mock_tools):

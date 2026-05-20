@@ -75,10 +75,10 @@ class TestCategorizeTools:
         assert result[0].category == "system"
 
     def test_returns_avail_tool_objects(self):
-        mapping = {"skill": _make_tool_entry("skill", "system")}
+        mapping = {"skill_load": _make_tool_entry("skill_load", "system")}
         with patch(self._REGISTRY_GET, side_effect=_registry_side_effect(mapping)), \
              patch(self._REGISTRY_INIT):
-            result = categorize_tools(["skill"])
+            result = categorize_tools(["skill_load"])
         assert all(isinstance(t, AvailableTool) for t in result)
 
     def test_preserves_tool_names(self):
@@ -264,9 +264,9 @@ class TestBuildAgentSelectionTable:
         output = build_agent_selection_table([])
         assert "Available Agents" in output
 
-    def test_default_flow_hint_present(self):
+    def test_default_flow_hint_absent(self):
         output = build_agent_selection_table([])
-        assert "Default flow" in output
+        assert "Default flow" not in output
 
     def test_triggers_rendered_when_available(self):
         agent = self._make_agent("explore")
