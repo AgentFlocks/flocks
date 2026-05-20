@@ -362,12 +362,12 @@ export default function Layout() {
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-          ${collapsed ? 'w-16' : 'w-52'}
+          ${collapsed ? 'w-16' : 'w-44'}
         `}
       >
         <div className="flex flex-col h-full overflow-hidden">
           {/* Logo */}
-          <div className={`flex h-16 flex-shrink-0 items-center border-b border-line ${collapsed ? 'justify-center px-2' : 'px-4'}`}>
+          <div className={`relative flex h-14 flex-shrink-0 items-center border-b border-line ${collapsed ? 'justify-center px-2' : 'px-3'}`}>
             {collapsed ? (
               <div
                 className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-line bg-panel shadow-panel"
@@ -377,10 +377,10 @@ export default function Layout() {
               </div>
             ) : (
               <>
-                <span className="flex-1 min-w-0 whitespace-nowrap font-display text-xl font-bold text-primary-600">Flocks</span>
+                <span className="pl-3 whitespace-nowrap font-display text-2xl font-bold tracking-tight text-primary-600">Flocks</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="flex-shrink-0 rounded p-1 text-ink-faint hover:text-ink-muted lg:hidden"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-ink-faint hover:text-ink-muted lg:hidden"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -523,7 +523,7 @@ export default function Layout() {
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
+        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-44'}`}
       >
         <main className="flex-1 overflow-hidden bg-surface">
           {isFullScreenPage ? (

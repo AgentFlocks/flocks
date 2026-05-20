@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -2047,9 +2047,14 @@ function ChatMessageBubbleInner({
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
+  const roleLabel = isUser ? t('chat.you') : agentName;
 
   const avatar = isUser ? (
-    <span className={`inline-flex items-center justify-center rounded-full bg-blue-500 text-white flex-shrink-0 ${avatarSize}`}>
+    <span
+      className={`inline-flex items-center justify-center rounded-full bg-blue-500 text-white flex-shrink-0 ${avatarSize}`}
+      aria-label={roleLabel}
+      title={roleLabel}
+    >
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
@@ -2057,8 +2062,6 @@ function ChatMessageBubbleInner({
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
-
-  const roleLabel = isUser ? t('chat.you') : agentName;
   const showFooterActions = !compact && showActions && parts.length > 0 && !isEditing;
 
   const renderUserActionButtons = () => (
@@ -2109,29 +2112,49 @@ function ChatMessageBubbleInner({
     </>
   );
 
+  /** Full session layout: user avatar sits to the right of the bubble (iMessage-style). */
+  const userSideAvatarLayout = isUser && !compact;
+
   const userColumnClass = (() => {
     if (!isUser) return 'w-full';
+    if (userSideAvatarLayout) {
+      return isWideUserMessage
+        ? `w-full ${USER_MESSAGE_WIDE_MAX_WIDTH_CLASS}`
+        : 'max-w-[50%]';
+    }
     if (compact) return isEditing ? 'w-full max-w-[90%]' : 'max-w-[90%]';
     return isWideUserMessage
       ? `w-full ${USER_MESSAGE_WIDE_MAX_WIDTH_CLASS} items-end`
       : 'max-w-[50%] items-end';
   })();
 
-  const userMessageShellClass = isUser && !compact && !isWideUserMessage
+  const userMessageShellClass = isUser && !compact && !isWideUserMessage && !userSideAvatarLayout
     ? 'flex flex-col w-fit max-w-full min-w-0'
     : 'flex flex-col w-full min-w-0';
 
+  const columnWrapperClass = userSideAvatarLayout
+    ? `flex flex-row-reverse items-start gap-2 min-w-0 ${userColumnClass}`
+    : `flex flex-col min-w-0 ${userColumnClass}`;
+
+  const bubbleWidthClass = userSideAvatarLayout && !isWideUserMessage
+    ? 'w-fit max-w-full'
+    : (isWideUserMessage || !isUser ? 'w-full' : '');
+
   return (
     <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
-      {/* User: narrow+right for short text, up to 80% width for long prompts */}
-      <div className={`flex flex-col min-w-0 ${userColumnClass}`}>
+      <div className={columnWrapperClass}>
+      {userSideAvatarLayout && (
+        <div className="flex-shrink-0 pt-0.5">{avatar}</div>
+      )}
       <div className={userMessageShellClass}>
-      <div className={`${bubbleClass} relative ${isWideUserMessage || !isUser ? 'w-full' : ''}`} style={{ overflowWrap: 'anywhere' }}>
-        {/* Role header inside bubble */}
-        <div className={`flex items-center gap-2 ${parts.length > 0 || isEditing ? 'mb-2' : ''}`}>
-          {avatar}
-          <span className="text-xs font-semibold text-zinc-700">{roleLabel}</span>
-        </div>
+      <div className={`${bubbleClass} relative ${bubbleWidthClass}`} style={{ overflowWrap: 'anywhere' }}>
+        {/* Role header inside bubble (assistant always; user only in compact / non-side layout) */}
+        {!userSideAvatarLayout && (
+          <div className={`flex items-center gap-2 ${parts.length > 0 || isEditing ? 'mb-2' : ''}`}>
+            {avatar}
+            <span className="text-xs font-semibold text-zinc-700">{roleLabel}</span>
+          </div>
+        )}
 
         {/* Empty / loading state */}
         {parts.length === 0 && (
@@ -2247,43 +2270,42 @@ function ChatMessageBubbleInner({
                 const isExpanded = getPartExpanded(partKey);
                 const isThinking = !isReasoningDone;
                 return (
-                  // Vertical spacing is provided by the parent part wrapper
-                  // (see `otherParts.map` above); keep this container neutral
-                  // so wrapper-level `mt-2 first:mt-0` is the single source of
-                  // truth for inter-part gaps.
-                  <div>
+                  <div
+                    className={
+                      isThinking
+                        ? 'rounded-lg border border-sky-100 bg-sky-50/80 overflow-hidden'
+                        : META_ROW_SHELL
+                    }
+                  >
                     <button
+                      type="button"
                       onClick={() => togglePart(partKey)}
                       disabled={isThinking}
-                      className="group/think w-full text-left"
+                      className={`${META_ROW_HEADER} ${THINKING_TEXT_CLASS} ${isThinking ? '' : 'cursor-pointer'}`}
                     >
-                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
-                        isThinking
-                          ? 'bg-sky-50 border-sky-100'
-                          : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
-                      }`}>
-                        {isThinking ? (
-                          <>
-                            <span className="flex gap-0.5 flex-shrink-0">
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                            </span>
-                            <span className="text-sky-600">{t('chat.thinking')}</span>
-                          </>
-                        ) : (
-                          <>
-                            <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
-                            <span className="text-zinc-500 truncate min-w-0">
-                              {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
-                            </span>
-                            <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
-                          </>
-                        )}
-                      </div>
+                      {isThinking ? (
+                        <>
+                          <span className="flex gap-0.5 flex-shrink-0">
+                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                          <span className="font-medium text-sky-700">{t('chat.thinking')}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-400" />
+                          <span className="text-zinc-500 truncate min-w-0">
+                            {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
+                          </span>
+                          <ChevronDown
+                            className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+                          />
+                        </>
+                      )}
                     </button>
-                    {isExpanded && (
-                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
+                    {isExpanded && !isThinking && (
+                      <div className={`${META_ROW_BODY} ${THINKING_TEXT_CLASS} text-zinc-500 whitespace-pre-wrap max-h-52 overflow-y-auto bg-white/60`}>
                         {thinkingText}
                       </div>
                     )}
@@ -2386,6 +2408,14 @@ function ChatMessageBubbleInner({
 // ============================================================================
 
 const TOOL_DISPLAY_MAX_LEN = 120;
+
+/** Shared compact row shell for tool + reasoning blocks inside assistant bubbles. */
+const META_ROW_SHELL = 'rounded-lg border border-zinc-100 bg-zinc-50 overflow-hidden';
+const META_ROW_HEADER =
+  'flex items-center gap-2 px-2.5 py-1.5 min-w-0 text-xs w-full text-left select-none';
+const META_ROW_BODY = 'border-t border-zinc-100 px-2.5 py-2 text-[11px] leading-relaxed';
+/** Reasoning body/header — smaller than bubble text-sm (14px). */
+const THINKING_TEXT_CLASS = 'text-[13px] leading-relaxed';
 
 /** Truncate long tool titles / param summaries shown in the card header. */
 export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
@@ -2490,43 +2520,35 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     // No top margin here — the part wrapper in SessionChat owns vertical
     // spacing so every adjacent tool / thinking / text part is separated by a
     // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
-    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-center gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+    <details className={`group/tool ${META_ROW_SHELL}`}>
+      <summary className={`${META_ROW_HEADER} cursor-pointer list-none`}>
         <span className={`${config.iconColor} flex-shrink-0`}>{config.icon}</span>
-        <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
+        <span className="font-medium text-zinc-700 whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
         {inputSummary && (
-          <span
-            className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-            // Show the un-truncated input on hover so dense tool calls
-            // (e.g. multi-argument MCP invocations) remain inspectable.
-            title={state.input ? buildToolInputSummary(state.input) : undefined}
-          >
+          <span className="text-zinc-400 font-mono truncate min-w-0">
             {inputSummary}
           </span>
         )}
         {displayTitle && !inputSummary && (
-          <span
-            className="text-[11px] text-zinc-400 truncate min-w-0"
-            title={state.title}
-          >
+          <span className="text-zinc-400 truncate min-w-0">
             {displayTitle}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
-          <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}>
+          <span className={`font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}>
             {config.label}
           </span>
           <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
         </div>
       </summary>
 
-      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
+      <div className={`${META_ROW_BODY} space-y-1.5 bg-white/60`}>
         {state.input && (
           <details>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
+            <summary className="cursor-pointer text-zinc-500 font-medium mb-1 list-none [&::-webkit-details-marker]:hidden">
               {t('chat.tool.inputParams')}
             </summary>
-            <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md text-[11px] overflow-x-auto font-mono leading-relaxed">
+            <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md overflow-x-auto font-mono">
               {JSON.stringify(state.input, null, 2)}
             </pre>
           </details>
@@ -2534,10 +2556,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 
         {status === 'completed' && state.output !== undefined && (
           <details open>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
+            <summary className="cursor-pointer text-zinc-500 font-medium mb-1 list-none [&::-webkit-details-marker]:hidden">
               {t('chat.tool.outputResult')}
             </summary>
-            <pre className="p-2 bg-zinc-950 text-green-400 rounded-md text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono leading-relaxed">
+            <pre className="p-2 bg-zinc-950 text-green-400 rounded-md overflow-x-auto max-h-48 overflow-y-auto font-mono">
               {formatOutput(state.output)}
             </pre>
           </details>
