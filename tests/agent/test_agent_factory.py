@@ -219,6 +219,15 @@ class TestLoadAgent:
         assert agent.model.model_id == "gpt-4"
         assert agent.model.provider_id == "openai"
 
+    def test_returns_none_on_invalid_model_config(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: bad_model_agent
+            model:
+              temperature: 0.3
+        """)
+
+        assert load_agent(agent_dir) is None
+
     def test_loads_optional_fields(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
             name: full_agent
@@ -340,6 +349,28 @@ class TestScanAndLoad:
 
         result = scan_and_load(dirs=[extra_dir])
         assert "extra_agent" in result
+
+    def test_skips_invalid_agent_and_continues_scan(self, tmp_path):
+        """A malformed agent config should not prevent other agents from loading."""
+        extra_dir = tmp_path / "extra"
+        bad_dir = extra_dir / "bad_agent"
+        good_dir = extra_dir / "good_agent"
+        bad_dir.mkdir(parents=True)
+        good_dir.mkdir(parents=True)
+        (bad_dir / "agent.yaml").write_text(
+            textwrap.dedent("""
+                name: bad_agent
+                model:
+                  temperature: 0.3
+            """),
+            encoding="utf-8",
+        )
+        (good_dir / "agent.yaml").write_text("name: good_agent\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[extra_dir])
+
+        assert "bad_agent" not in result
+        assert "good_agent" in result
 
     def test_name_conflict_skips_duplicate(self, tmp_path):
         """When two dirs have the same agent name, first wins."""

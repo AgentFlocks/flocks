@@ -493,7 +493,19 @@ class ConfigWriter:
         :func:`flocks.config.api_versioning.resolve_api_service`.
         Falls back to a plain dict lookup if the versioning module is
         unavailable, so a bug there cannot break credential reads.
+
+        Per-device credential context (Method-A multi-instance) takes priority
+        over the shared ``flocks.json`` value when an override is active.
         """
+        # Per-device config override (activated by ToolRegistry for device_id calls)
+        try:
+            from flocks.tool.credential_context import get_config_override
+            override = get_config_override(service_id)
+            if override is not None:
+                return override
+        except Exception:
+            pass
+
         raw = cls._read_raw().get("api_services")
         services = raw if isinstance(raw, dict) else {}
         try:

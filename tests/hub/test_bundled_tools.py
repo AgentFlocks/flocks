@@ -543,6 +543,59 @@ class TestDeleteApiServiceCascade:
         entries = catalog.list_catalog(plugin_type="tool", state=["available"])
         assert any(e.id == "onesig_v2_5_3_D20250710" for e in entries)
 
+    async def test_delete_api_service_rejects_project_level_plugin(self, isolated_hub):
+        """Project-level API plugins stay protected even without relying on
+        the tool registry's in-memory ``native`` flags.
+        """
+        from fastapi import HTTPException
+
+        from flocks.config import api_versioning as versioning
+        from flocks.config.config_writer import ConfigWriter
+        from flocks.server.routes.provider import delete_api_service
+
+        project_plugin_dir = (
+            isolated_hub["project"] / ".flocks" / "plugins" / "tools" / "api" / "project_tool"
+        )
+        project_plugin_dir.mkdir(parents=True)
+        (project_plugin_dir / "_provider.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": "project_tool",
+                    "service_id": "project_api",
+                    "version": "1.0.0",
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        (project_plugin_dir / "project_tool_login.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": "project_tool_login",
+                    "description": "fixture login tool",
+                    "provider": "project_api",
+                    "handler": {
+                        "type": "http",
+                        "method": "POST",
+                        "url": "https://example/login",
+                    },
+                    "parameters": [],
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+        versioning._reset_descriptor_cache()
+
+        storage_key = "project_api_v1_0_0"
+        ConfigWriter.set_api_service(storage_key, {"enabled": True})
+
+        with pytest.raises(HTTPException) as exc_info:
+            await delete_api_service(storage_key)
+
+        assert exc_info.value.status_code == 403
+        assert ConfigWriter.get_api_service_raw(storage_key) == {"enabled": True}
+
 
 # ---------------------------------------------------------------------------
 # Security validation

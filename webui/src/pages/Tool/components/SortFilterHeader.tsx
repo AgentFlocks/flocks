@@ -13,6 +13,8 @@ interface SortFilterHeaderProps {
   onToggleFilter: (f: keyof ColumnFilters, v: string) => void;
   onClearFilter: (f: keyof ColumnFilters) => void;
   renderLabel?: (v: string) => string;
+  /** When true, renders as <div> instead of <th> (for use outside <table>) */
+  asDiv?: boolean;
 }
 
 export default function SortFilterHeader({
@@ -25,10 +27,11 @@ export default function SortFilterHeader({
   onToggleFilter,
   onClearFilter,
   renderLabel,
+  asDiv = false,
 }: SortFilterHeaderProps) {
   const { t } = useTranslation('tool');
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLTableHeaderCellElement>(null);
+  const ref = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -41,11 +44,8 @@ export default function SortFilterHeader({
   const isActive = sort.field === field;
   const hasFilter = activeFilters.size > 0;
 
-  return (
-    <th
-      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap"
-      ref={ref}
-    >
+  const inner = (
+    <>
       <div className="flex items-center gap-1">
         <button
           onClick={() => onSort(field)}
@@ -89,6 +89,26 @@ export default function SortFilterHeader({
           })}
         </div>
       )}
+    </>
+  );
+
+  if (asDiv) {
+    return (
+      <div
+        className="relative whitespace-nowrap inline-flex"
+        ref={ref as React.RefObject<HTMLDivElement>}
+      >
+        {inner}
+      </div>
+    );
+  }
+
+  return (
+    <th
+      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap"
+      ref={ref as React.RefObject<HTMLTableCellElement>}
+    >
+      {inner}
     </th>
   );
 }

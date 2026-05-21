@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, ConfigDict
 
 PRUNE_MINIMUM = 20_000
 PRUNE_PROTECT = 40_000
-PRUNE_PROTECTED_TOOLS = ["skill"]
+PRUNE_PROTECTED_TOOLS = ["skill_load"]
 PRESERVE_LAST_STEPS = 10
 
 DEFAULT_COMPACTION_PROMPT = """\

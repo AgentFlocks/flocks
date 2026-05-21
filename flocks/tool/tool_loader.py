@@ -51,7 +51,12 @@ TOOL_TYPE_MCP = "mcp"
 """MCP server configurations (type: local/remote). Managed by MCP subsystem."""
 
 TOOL_TYPE_API = "api"
-"""YAML-based HTTP/script tools (handler.type: http|script)."""
+"""YAML-based HTTP/script tools for cloud/intelligence APIs (handler.type: http|script)."""
+
+TOOL_TYPE_DEVICE = "device"
+"""YAML-based HTTP/script tools for on-premises security device APIs.
+Tools here behave identically to TOOL_TYPE_API at runtime but are
+discoverable as security-device integrations (source='device')."""
 
 TOOL_TYPE_PYTHON = "python"
 """Python code tools using @ToolRegistry.register_function."""
@@ -59,7 +64,12 @@ TOOL_TYPE_PYTHON = "python"
 TOOL_TYPE_GENERATED = "generated"
 """Auto-generated tools from API specs. Supports hot-reload."""
 
-ALL_TOOL_TYPES = (TOOL_TYPE_MCP, TOOL_TYPE_API, TOOL_TYPE_PYTHON, TOOL_TYPE_GENERATED)
+ALL_TOOL_TYPES = (TOOL_TYPE_MCP, TOOL_TYPE_API, TOOL_TYPE_DEVICE, TOOL_TYPE_PYTHON, TOOL_TYPE_GENERATED)
+
+# Source values that represent pluggable API/device service tools.
+# Used by registry helpers (get_api_service_ids, _bootstrap_user_api_services, …)
+# and server routes to find provider-linked tools regardless of subdirectory.
+API_LIKE_SOURCES = frozenset({"api", "device"})
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +347,24 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
             })
             headers.setdefault("Content-Type", "application/json")
 
+        # Resolve the per-device SSL verification preference so it actually
+        # propagates to the HTTP request. When a `device_id` kwarg was
+        # supplied to this tool, ToolRegistry has already activated a
+        # credential override; we read the toggle from that ContextVar.
+        # Falls back to ``True`` (validate) for non-device tool calls.
+        verify_ssl: bool = True
+        try:
+            from flocks.tool.credential_context import get_verify_ssl_override
+            override = get_verify_ssl_override()
+            if override is not None:
+                verify_ssl = override
+        except Exception:
+            pass
+
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            connector = aiohttp.TCPConnector(ssl=verify_ssl)
+            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params
@@ -594,11 +619,19 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
             requires_confirm = True
 
     tool_type = _infer_tool_type(yaml_path)
-    source = "api" if tool_type == TOOL_TYPE_API else None
+    if tool_type == TOOL_TYPE_API:
+        source: Optional[str] = "api"
+    elif tool_type == TOOL_TYPE_DEVICE:
+        source = "device"
+    else:
+        source = None
+
+    vendor: Optional[str] = provider_cfg.get("vendor") if provider_cfg else None
 
     info = ToolInfo(
         name=name,
         description=raw.get("description", ""),
+        description_cn=raw.get("description_cn", "") or None,
         category=category,
         parameters=parameters,
         enabled=raw.get("enabled", True),
@@ -606,6 +639,7 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
         provider=storage_key,
         provider_version=provider_version,
         source=source,
+        vendor=vendor,
     )
 
     tool = Tool(info=info, handler=handler)
@@ -878,6 +912,29 @@ def _iter_python_tool_files() -> List[Path]:
                 continue
             files.append(path)
     return files
+
+
+def discover_python_tool_sources() -> Dict[str, Path]:
+    """Map registered python tool names to the plugin file that defines them."""
+    tool_sources: Dict[str, Path] = {}
+    for path in _iter_python_tool_files():
+        try:
+            source = path.read_text(encoding="utf-8")
+            module = ast.parse(source)
+        except Exception as e:
+            log.warn("tool.python.parse_failed", {"path": str(path), "error": str(e)})
+            continue
+
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                registered_name = _register_function_name(decorator)
+                if registered_name and registered_name not in tool_sources:
+                    tool_sources[registered_name] = path
+    return tool_sources
 
 
 def _register_function_name(call: ast.Call) -> Optional[str]:

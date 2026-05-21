@@ -424,7 +424,7 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
             name = directory.name
             if name.startswith("_") or name == "__pycache__":
                 continue
-            if directory.parent == tools_root and name in {"api", "python", "mcp", "generated"}:
+            if directory.parent == tools_root and name in {"api", "device", "python", "mcp", "generated"}:
                 continue
             if not _tool_manifest(name, directory):
                 continue

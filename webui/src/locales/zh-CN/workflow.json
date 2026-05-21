@@ -22,6 +22,17 @@
     "nodes": "节点"
   },
   "noDescription": "无描述",
+  "totalCount": "共 {{total}} 个工作流",
+  "filter": {
+    "all": "全部",
+    "builtin": "内置",
+    "custom": "自定义",
+    "aria": "按来源筛选"
+  },
+  "badge": {
+    "builtin": "内置",
+    "custom": "自定义"
+  },
   "detail": {
     "loadFailed": "加载工作流失败",
     "notFound": "工作流不存在",
@@ -193,10 +204,17 @@
       "curlExample": "调用示例（curl）",
       "stopping": "停止中...",
       "stopService": "停止服务",
-      "publishDesc": "将工作流发布为独立的 API 服务（基于 Docker 容器），生成专属调用地址和 API Key。",
+      "publishDesc": "将工作流发布为独立的 API 服务，生成专属调用地址和 API Key。",
       "publishing": "发布中，请稍候...",
       "publishAsApi": "发布为 API 服务",
       "dockerStarting": "正在启动 Docker 容器，可能需要 1-2 分钟...",
+      "localStarting": "正在启动本地 API 服务...",
+      "serviceDriver": "运行方式",
+      "driverLocal": "本地进程",
+      "driverDocker": "Docker 容器",
+      "recommended": "推荐",
+      "driverLocalDesc": "优先推荐，启动更快，适合本机开发和调试",
+      "driverDockerDesc": "隔离运行，适合验证容器化部署",
       "kafkaSection": "Kafka 配置",
       "kafkaExperimental": "（实验性）",
       "inputConfig": "输入配置",

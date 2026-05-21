@@ -18,6 +18,8 @@ import {
   ArrowUpCircle,
   UserCog,
   Archive,
+  ServerCog,
+  ScrollText,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -282,7 +284,7 @@ export default function Layout() {
 
   const navigation = [
     {
-      name: t('home'),
+      name: '',
       items: [
         { name: t('flocksHome'), href: '/', icon: Home },
       ],
@@ -291,26 +293,28 @@ export default function Layout() {
       name: t('aiWorkbench'),
       items: [
         { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-        { name: t('tasks'), href: '/tasks', icon: ListTodo },
         { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+        { name: t('tasks'), href: '/tasks', icon: ListTodo },
+        { name: t('workflows'), href: '/workflows', icon: Workflow },
       ],
     },
     {
       name: t('agentHub'),
       items: [
         { name: t('agents'), href: '/agents', icon: Bot },
-        { name: t('workflows'), href: '/workflows', icon: Workflow },
         { name: t('skills'), href: '/skills', icon: BookOpen },
         { name: t('tools'), href: '/tools', icon: Wrench },
+        { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
         { name: t('hub'), href: '/hub', icon: Archive },
         { name: t('models'), href: '/models', icon: Brain },
         { name: t('channels'), href: '/channels', icon: Radio },
       ],
     },
     {
-      name: t('management'),
+      name: t('systemCenter'),
       items: [
         { name: t('accountManagement'), href: '/config', icon: UserCog },
+        { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
       ],
     },
   ];
@@ -354,31 +358,29 @@ export default function Layout() {
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 bg-white border-r border-gray-200
+          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200
           transition-all duration-300 ease-in-out
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-          ${collapsed ? 'w-16' : 'w-64'}
+          ${collapsed ? 'w-16' : 'w-52'}
         `}
       >
         <div className="flex flex-col h-full overflow-hidden">
           {/* Logo */}
-          <div className={`flex items-center h-16 border-b border-gray-200 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'px-4'}`}>
+          <div className={`flex items-center h-16 border-b border-zinc-200 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'px-4'}`}>
             {collapsed ? (
               <div
-                className="w-8 h-8 rounded-lg border border-gray-200 bg-gray-50 flex items-center justify-center flex-shrink-0"
+                className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm"
                 title="Flocks"
               >
-                <Sparkles className="w-4 h-4 text-gray-600" />
+                <Sparkles className="w-4 h-4 text-zinc-500" />
               </div>
             ) : (
               <>
-                <div className="flex items-center flex-1 min-w-0">
-                  <span className="text-xl font-bold text-gray-900 whitespace-nowrap">Flocks</span>
-                </div>
+                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap">Flocks</span>
                 <button
                   onClick={() => setSidebarOpen(false)}
-                  className="lg:hidden p-1 text-gray-400 hover:text-gray-600 rounded flex-shrink-0"
+                  className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -390,12 +392,12 @@ export default function Layout() {
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
             {navigation.map((section) => (
               <div key={section.name} className="mb-6">
-                {!collapsed && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider whitespace-nowrap">
+                {!collapsed && section.name && (
+                  <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
                     {section.name}
                   </h3>
                 )}
-                {collapsed && <div className="mb-1 border-t border-gray-100 first:border-none" />}
+                {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
                     const isActive = location.pathname === item.href
@@ -407,16 +409,16 @@ export default function Layout() {
                         onClick={() => setSidebarOpen(false)}
                         title={collapsed ? item.name : undefined}
                         className={`
-                          flex items-center rounded-lg transition-colors duration-150
+                          flex items-center rounded-lg transition-all duration-150
                           ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
                           ${isActive
-                            ? 'bg-slate-100 text-slate-800'
-                            : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                            ? 'bg-white text-zinc-900 shadow-sm'
+                            : 'text-zinc-600 hover:bg-white/60 hover:text-zinc-900'
                           }
                         `}
                       >
                         <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-slate-700' : 'text-gray-400'}`}
+                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700' : 'text-zinc-400'}`}
                         />
                         {!collapsed && (
                           <span className="truncate">{item.name}</span>
@@ -430,7 +432,7 @@ export default function Layout() {
           </nav>
 
           {/* Bottom: Language switcher + version */}
-          <div className={`border-t border-gray-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
+          <div className={`border-t border-zinc-200 flex-shrink-0 ${collapsed ? 'p-2 flex flex-col items-center gap-2' : 'p-4'}`}>
             <LanguageSwitcher collapsed={collapsed} />
             {!collapsed && (
               <>
@@ -459,14 +461,14 @@ export default function Layout() {
                 ) : (
                   <button
                     onClick={() => setShowUpdate(true)}
-                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-gray-50 transition-colors"
+                    className="w-full text-left mt-3 group rounded-lg px-1 py-1 hover:bg-white/60 transition-colors"
                   >
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-medium text-gray-500 group-hover:text-gray-700 transition-colors">
+                      <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors">
                         Flocks {currentVersion ? `v${currentVersion}` : '...'}
                       </span>
                     </div>
-                    <div className="mt-0.5 text-xs text-gray-400">AI Native SecOps Platform</div>
+                    <div className="mt-0.5 text-xs text-zinc-400">AI Native SecOps Platform</div>
                   </button>
                 )}
               </>
@@ -478,7 +480,7 @@ export default function Layout() {
                 className={`relative rounded-xl p-2 transition-colors ${
                   hasUpdate
                     ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
-                    : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                    : 'text-zinc-400 hover:text-zinc-600 hover:bg-white/60'
                 }`}
               >
                 {hasUpdate ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
@@ -499,8 +501,8 @@ export default function Layout() {
           className="
             hidden lg:flex absolute top-1/2 -translate-y-1/2 right-0 z-10
             w-3 h-20 items-center justify-center
-            bg-gray-100 hover:bg-gray-200 border border-r-0 border-gray-200 rounded-l-lg
-            text-gray-400 hover:text-gray-600
+            bg-zinc-200 hover:bg-zinc-300 border border-r-0 border-zinc-200 rounded-l-lg
+            text-zinc-400 hover:text-zinc-600
             transition-all duration-200
           "
           title={collapsed ? t('expandNav') : t('collapseNav')}
@@ -521,7 +523,7 @@ export default function Layout() {
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}
+        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
         <main className="flex-1 overflow-hidden bg-gray-50">
           {isFullScreenPage ? (

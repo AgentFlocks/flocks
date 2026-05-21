@@ -11,6 +11,7 @@ import os
 
 from flocks.utils.log import Log
 from flocks.config.config import Config
+from flocks.provider.interleaved import apply_interleaved_capability_defaults
 
 
 log = Log.create(service="provider")
@@ -33,7 +34,6 @@ class ProviderType(str, Enum):
     CEREBRAS = "cerebras"
     PERPLEXITY = "perplexity"
     OPENROUTER = "openrouter"
-    BEDROCK = "amazon-bedrock"
     VERTEX = "google-vertex"
     # Added in Batch 5
     GATEWAY = "gateway"
@@ -57,6 +57,7 @@ class ModelCapabilities(BaseModel):
     supports_tools: bool = True
     supports_vision: bool = False
     supports_reasoning: bool = False
+    interleaved: Optional[Dict[str, Any]] = None
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
 
@@ -87,6 +88,18 @@ class ChatMessage(BaseModel):
     content: Union[str, List[Dict[str, Any]]] = Field("", description="Message content")
     # Reasoning/Thinking content (optional)
     reasoning: Optional[str] = Field(None, description="Reasoning or thinking content")
+    reasoning_content: Optional[str] = Field(
+        None,
+        description="Provider-facing reasoning content for replay",
+    )
+    reasoning_details: Optional[List[Dict[str, Any]]] = Field(
+        None,
+        description="Structured provider-facing reasoning details for replay",
+    )
+    reasoning_source: Optional[str] = Field(
+        None,
+        description="Diagnostic source label for replayed reasoning",
+    )
     # OpenAI function-calling fields (optional)
     tool_calls: Optional[List[Dict[str, Any]]] = Field(None, description="Tool calls for assistant messages")
     tool_call_id: Optional[str] = Field(None, description="Tool call ID for tool-result messages")
@@ -208,7 +221,6 @@ class Provider:
                 ("cerebras", "flocks.provider.sdk.cerebras", "CerebrasProvider"),
                 ("perplexity", "flocks.provider.sdk.perplexity", "PerplexityProvider"),
                 ("openrouter", "flocks.provider.sdk.openrouter", "OpenRouterProvider"),
-                ("amazon-bedrock", "flocks.provider.sdk.bedrock", "BedrockProvider"),
                 ("google-vertex", "flocks.provider.sdk.vertex", "VertexProvider"),
                 ("local", "flocks.provider.sdk.local", "LocalProvider"),
                 # Added in Batch 5
@@ -464,6 +476,79 @@ class Provider:
     def get_model(cls, model_id: str) -> Optional[ModelInfo]:
         """Get model info by ID"""
         return cls._models.get(model_id)
+
+    @classmethod
+    def resolve_model(cls, provider_id: str, model_id: str) -> Optional[Any]:
+        """Resolve model metadata for a specific provider/model pair.
+
+        Hermes-style lookup prefers the active provider's runtime/config state
+        over the global ``model_id -> ModelInfo`` registry so replay decisions
+        (e.g. interleaved reasoning rules) are derived from the current
+        provider, not whichever provider last wrote the shared model ID.
+
+        Lookup order:
+          1. provider.get_model_definitions() (config-aware, catalog-enriched)
+          2. provider._config_models
+          3. provider.get_models()
+          4. Provider._models global registry
+        """
+        cls._ensure_initialized()
+
+        provider = cls._providers.get(provider_id)
+        provider_base_url = None
+        if provider is not None:
+            provider_config = getattr(provider, "_config", None)
+            provider_base_url = (
+                getattr(provider_config, "base_url", None)
+                or getattr(provider, "_base_url", None)
+            )
+        if provider is not None:
+            try:
+                for model in provider.get_model_definitions():
+                    if getattr(model, "id", None) == model_id:
+                        return apply_interleaved_capability_defaults(
+                            model,
+                            provider_id=provider_id,
+                            base_url=provider_base_url,
+                        )
+            except Exception as exc:
+                log.debug("provider.resolve_model.definitions_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+            for model in getattr(provider, "_config_models", []):
+                if getattr(model, "id", None) == model_id:
+                    return apply_interleaved_capability_defaults(
+                        model,
+                        provider_id=provider_id,
+                        base_url=provider_base_url,
+                    )
+
+            try:
+                for model in provider.get_models():
+                    if getattr(model, "id", None) == model_id:
+                        return apply_interleaved_capability_defaults(
+                            model,
+                            provider_id=provider_id,
+                            base_url=provider_base_url,
+                        )
+            except Exception as exc:
+                log.debug("provider.resolve_model.runtime_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+        model = cls._models.get(model_id)
+        if model is None:
+            return None
+        return apply_interleaved_capability_defaults(
+            model,
+            provider_id=provider_id,
+            base_url=provider_base_url,
+        )
     
     @classmethod
     def resolve_model_info(cls, provider_id: str, model_id: str) -> tuple:
@@ -486,19 +571,7 @@ class Provider:
         max_input = None
         
         try:
-            model_info = None
-            
-            # 1. Check provider._config_models first (flocks.json models)
-            provider = cls.get(provider_id)
-            if provider:
-                for m in getattr(provider, "_config_models", []):
-                    if m.id == model_id:
-                        model_info = m
-                        break
-            
-            # 2. Fallback to global model registry
-            if model_info is None:
-                model_info = cls.get_model(model_id)
+            model_info = cls.resolve_model(provider_id, model_id)
             
             if model_info and hasattr(model_info, 'capabilities') and model_info.capabilities:
                 context_window = getattr(model_info.capabilities, 'context_window', 0) or 0
@@ -674,6 +747,7 @@ class Provider:
                                     supports_tools=model_dict.get("supports_tools", True),
                                     supports_vision=model_dict.get("supports_vision", False),
                                     supports_reasoning=model_dict.get("supports_reasoning", False),
+                                    interleaved=model_dict.get("interleaved"),
                                     max_tokens=model_dict.get("max_output_tokens") or model_dict.get("max_tokens"),
                                     context_window=model_dict.get("context_window"),
                                 ),
@@ -1034,6 +1108,7 @@ class BaseProvider:
                 supports_tools=model.capabilities.supports_tools,
                 supports_vision=model.capabilities.supports_vision,
                 supports_reasoning=getattr(model.capabilities, "supports_reasoning", False),
+                interleaved=getattr(model.capabilities, "interleaved", None),
             ),
             limits=ModelLimits(
                 context_window=model.capabilities.context_window or 128000,
@@ -1086,6 +1161,10 @@ class BaseProvider:
             overridden.capabilities.supports_reasoning = getattr(
                 model.capabilities, "supports_reasoning", False
             )
+        if "interleaved" in keys:
+            overridden.capabilities.interleaved = getattr(
+                model.capabilities, "interleaved", None
+            )
 
         # Limits — only override when explicitly stored
         if "context_window" in keys and model.capabilities.context_window is not None:
@@ -1122,8 +1201,12 @@ class BaseProvider:
             except Exception:
                 pass
 
+        source_models = list(getattr(self, "_config_models", []))
+        if not source_models:
+            source_models = list(self.get_models())
+
         result = []
-        for model in getattr(self, "_config_models", []):
+        for model in source_models:
             if model.id in catalog_by_id:
                 # Catalog provides rich metadata (parameter_rules, release_date, …)
                 # but user edits stored in flocks.json always take precedence.

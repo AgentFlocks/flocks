@@ -618,70 +618,67 @@ async def _stream_output(
     timed_out = False
     aborted = False
 
-    async def read_output():
+    def update_output_metadata() -> None:
+        truncated_output = output
+        if len(truncated_output) > MAX_METADATA_LENGTH:
+            truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
+
+        ctx.metadata(
+            {
+                "metadata": {
+                    "output": truncated_output,
+                    "description": description or command,
+                    **(extra_metadata or {}),
+                }
+            }
+        )
+
+    async def read_stream(stream: asyncio.StreamReader) -> None:
         nonlocal output
         while True:
-            # Read from both stdout and stderr
-            stdout_task = asyncio.create_task(proc.stdout.read(4096))
-            stderr_task = asyncio.create_task(proc.stderr.read(4096))
-
-            done, pending = await asyncio.wait([stdout_task, stderr_task], return_when=asyncio.FIRST_COMPLETED)
-
-            for task in pending:
-                task.cancel()
-
-            for task in done:
-                try:
-                    chunk = task.result()
-                    if chunk:
-                        output += chunk.decode("utf-8", errors="replace")
-
-                        # Update metadata with truncated output
-                        truncated_output = output
-                        if len(truncated_output) > MAX_METADATA_LENGTH:
-                            truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
-
-                        ctx.metadata(
-                            {
-                                "metadata": {
-                                    "output": truncated_output,
-                                    "description": description or command,
-                                    **(extra_metadata or {}),
-                                }
-                            }
-                        )
-                except asyncio.CancelledError:
-                    pass
-
-            # Check if process has exited
-            if proc.returncode is not None:
-                # Read any remaining output
-                remaining_stdout = await proc.stdout.read()
-                remaining_stderr = await proc.stderr.read()
-                if remaining_stdout:
-                    output += remaining_stdout.decode("utf-8", errors="replace")
-                if remaining_stderr:
-                    output += remaining_stderr.decode("utf-8", errors="replace")
+            chunk = await stream.read(4096)
+            if not chunk:
                 break
+            output += chunk.decode("utf-8", errors="replace")
+            update_output_metadata()
 
-            # Check for abort
-            if ctx.aborted:
-                break
+    async def wait_for_abort() -> None:
+        while not ctx.aborted:
+            await asyncio.sleep(0.1)
 
-    # Create tasks
-    read_task = asyncio.create_task(read_output())
+    stream_tasks = [
+        asyncio.create_task(read_stream(proc.stdout)),
+        asyncio.create_task(read_stream(proc.stderr)),
+    ]
+    wait_task = asyncio.create_task(proc.wait())
+    completion_task = asyncio.gather(wait_task, *stream_tasks)
+    abort_task = asyncio.create_task(wait_for_abort())
 
     try:
-        await asyncio.wait_for(read_task, timeout=timeout_sec)
+        done, _pending = await asyncio.wait(
+            [completion_task, abort_task],
+            timeout=timeout_sec,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            timed_out = True
+        elif abort_task in done and ctx.aborted:
+            aborted = True
+        else:
+            completion_task.result()
     except asyncio.TimeoutError:
         timed_out = True
-        read_task.cancel()
-        await kill_process_tree(proc)
+    finally:
+        if timed_out or aborted:
+            await kill_process_tree(proc)
+        for task in (completion_task, abort_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(completion_task, abort_task, return_exceptions=True)
 
     # Check for abort
-    if ctx.aborted:
+    if ctx.aborted and not timed_out:
         aborted = True
-        await kill_process_tree(proc)
 
     # Wait for process to finish
     try:

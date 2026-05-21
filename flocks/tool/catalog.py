@@ -50,7 +50,7 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "run_workflow_node": ["workflow", "execution"],
     "question": ["user-interaction", "clarification"],
     "flocks_skills": ["skill", "management"],
-    "skill": ["knowledge", "skill"],
+    "skill_load": ["knowledge", "skill"],
     "tool_search": ["tool-discovery", "capability-search"],
     "session_list": ["session", "history"],
     "session_get": ["session", "history"],

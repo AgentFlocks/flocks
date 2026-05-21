@@ -2,7 +2,7 @@
 Azure OpenAI provider implementation
 """
 
-from typing import List, AsyncIterator
+from typing import Any, Dict, List, AsyncIterator
 import os
 
 from flocks.provider.provider import (
@@ -210,11 +210,62 @@ class AzureProvider(BaseProvider):
             else:
                 raise
         
+        tool_calls: Dict[int, Dict[str, Any]] = {}
+
         async for chunk in stream:
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.delta.content:
+            if not chunk.choices:
+                continue
+
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            if delta is None:
+                if choice.finish_reason:
+                    if tool_calls:
+                        yield StreamChunk(
+                            delta="",
+                            finish_reason="tool_calls",
+                            tool_calls=[tool_calls[i] for i in sorted(tool_calls.keys())],
+                        )
+                    else:
+                        yield StreamChunk(delta="", finish_reason=choice.finish_reason)
+                continue
+
+            delta_text = getattr(delta, "content", None)
+            if delta_text:
+                yield StreamChunk(delta=delta_text, finish_reason=None)
+
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                for tool_call_delta in delta_tool_calls:
+                    index = getattr(tool_call_delta, "index", 0)
+                    if index not in tool_calls:
+                        tool_calls[index] = {
+                            "id": getattr(tool_call_delta, "id", None) or "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+
+                    tool_call_id = getattr(tool_call_delta, "id", None)
+                    if tool_call_id:
+                        tool_calls[index]["id"] = tool_call_id
+
+                    function_delta = getattr(tool_call_delta, "function", None)
+                    if function_delta:
+                        function_name = getattr(function_delta, "name", None)
+                        if function_name:
+                            tool_calls[index]["function"]["name"] = function_name
+
+                        function_arguments = getattr(function_delta, "arguments", None)
+                        if function_arguments:
+                            tool_calls[index]["function"]["arguments"] += function_arguments
+
+            if choice.finish_reason:
+                if tool_calls:
                     yield StreamChunk(
-                        delta=choice.delta.content,
-                        finish_reason=choice.finish_reason,
+                        delta="",
+                        finish_reason="tool_calls",
+                        tool_calls=[tool_calls[i] for i in sorted(tool_calls.keys())],
                     )
+                else:
+                    yield StreamChunk(delta="", finish_reason=choice.finish_reason)

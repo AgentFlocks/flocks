@@ -2142,7 +2142,6 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   if (providerId === 'openai' && ['o1', 'o3', 'gpt-5'].some(tag => lowered.includes(tag))) return true;
   if (providerId === 'google' && lowered.includes('gemini') && (lowered.includes('2.5') || lowered.includes('gemini-3'))) return true;
   if (providerId === 'groq') return true;
-  if (providerId === 'amazon-bedrock' && (lowered.includes('anthropic') || lowered.includes('nova'))) return true;
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
     if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
@@ -2915,7 +2914,7 @@ function SetDefaultModelDialog({
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <h2 className="text-base font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
+          <h2 className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X className="w-5 h-5" />
           </button>

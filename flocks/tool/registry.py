@@ -100,7 +100,7 @@ class ToolInfo(BaseModel):
             "tool description so the model can pick version-appropriate behavior."
         ),
     )
-    source: Optional[str] = Field(None, description="Tool source: builtin, dynamic, plugin_py, plugin_yaml, mcp")
+    source: Optional[str] = Field(None, description="Tool source: builtin, dynamic, plugin_py, plugin_yaml, mcp, api, device")
     native: bool = Field(False, description=(
         "True for built-in tools (registered via @register_function) and project-level "
         "plugin tools (<cwd>/.flocks/plugins/tools/). False for user-level plugin tools "
@@ -113,6 +113,14 @@ class ToolInfo(BaseModel):
     tags: List[str] = Field(
         default_factory=list,
         description="Lightweight retrieval tags used by tool catalog search",
+    )
+    vendor: Optional[str] = Field(
+        None,
+        description=(
+            "Manufacturer / vendor of the security product this tool integrates with. "
+            "Read from `_provider.yaml` → `vendor`. Examples: 'threatbook', 'qianxin', "
+            "'sangfor', 'qingteng'. None for non-device tools."
+        ),
     )
 
     def get_schema(self) -> ToolSchema:
@@ -154,6 +162,21 @@ class ToolInfo(BaseModel):
 
             if param.required:
                 required.append(param.name)
+
+        # For device-integrated tools, surface a synthetic ``device_id`` schema
+        # parameter so the LLM knows it can (and usually must) target a
+        # specific instance. ToolRegistry.execute strips this kwarg before
+        # dispatch and uses it to activate per-device credentials/SSL toggle.
+        # Skipped if the tool's YAML already declares a ``device_id`` param.
+        if self.source == "device" and "device_id" not in properties:
+            properties["device_id"] = {
+                "type": "string",
+                "description": (
+                    "目标设备实例的唯一 ID（UUID），来自 device_context 工具返回的"
+                    " `device_id` 字段。当系统中接入了多台同类型设备（例如多台 TDP）"
+                    "时必须传入；只有单台时也建议显式传入以避免歧义。"
+                ),
+            }
 
         return ToolSchema(properties=properties, required=required)
 
@@ -748,7 +771,40 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        result = await tool.execute(ctx, **kwargs)
+        # Method-A: if caller passes device_id, activate per-device credential override.
+        device_id = kwargs.pop("device_id", None)
+
+        # Fallback: device-source tools without an explicit device_id must
+        # still pick up that device's verify_ssl / credentials. Resolve the
+        # single enabled instance bound to this tool's provider (storage_key)
+        # and activate its credential override transparently. Multiple
+        # instances → require the LLM to disambiguate via device_id.
+        if not device_id and tool.info.source == "device" and tool.info.provider:
+            try:
+                resolved = await cls._resolve_default_device_id(tool.info.provider)
+            except Exception as exc:
+                log.warn("tool.device.default_resolve_failed", {
+                    "tool": tool_name, "provider": tool.info.provider, "error": str(exc),
+                })
+                resolved = None
+            if resolved:
+                log.info("tool.device.default_resolved", {
+                    "tool": tool_name, "provider": tool.info.provider, "device_id": resolved,
+                })
+                device_id = resolved
+
+        if device_id:
+            from flocks.tool.credential_context import activate_device_credentials
+            async with activate_device_credentials(device_id) as activated:
+                if not activated:
+                    return ToolResult(
+                        success=False,
+                        error=f"设备 {device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。",
+                    )
+                result = await tool.execute(ctx, **kwargs)
+        else:
+            result = await tool.execute(ctx, **kwargs)
+
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
@@ -761,6 +817,31 @@ class ToolRegistry:
                 else:
                     result.error = suffix
         return result
+
+    @classmethod
+    async def _resolve_default_device_id(cls, storage_key: str) -> Optional[str]:
+        """Find the unique enabled device row bound to *storage_key*.
+
+        Returns the device_id when exactly one enabled instance exists; None
+        if there is no instance, the lone instance is disabled, or several
+        enabled instances exist (in which case the LLM must disambiguate via
+        an explicit ``device_id`` kwarg).
+        """
+        try:
+            from flocks.tool.device.store import list_devices
+        except Exception:
+            return None
+        try:
+            devices = await list_devices()
+        except Exception:
+            return None
+        candidates = [
+            d for d in devices
+            if d.storage_key == storage_key and d.enabled
+        ]
+        if len(candidates) == 1:
+            return candidates[0].id
+        return None
 
     @classmethod
     async def execute_batch(
@@ -810,16 +891,18 @@ class ToolRegistry:
         """Return all known API service IDs (provider names).
 
         API service discovery must only come from tools loaded through the
-        ``tools/api`` path, i.e. tools whose ``ToolInfo`` is explicitly marked
-        with ``source='api'`` and has a provider name.
+        ``tools/api`` or ``tools/device`` paths, i.e. tools whose ``ToolInfo``
+        is explicitly marked with ``source='api'`` or ``source='device'`` and
+        has a provider name.
 
         This intentionally ignores dynamic module names and other registration
         side effects so non-API helper/security modules cannot appear in the
         API Services UI by mistake.
         """
+        from flocks.tool.tool_loader import API_LIKE_SOURCES
         ids: set = set()
         for tool_info in cls.list_tools():
-            if tool_info.source == "api" and tool_info.provider:
+            if tool_info.source in API_LIKE_SOURCES and tool_info.provider:
                 ids.add(tool_info.provider)
         return ids
 
@@ -861,6 +944,16 @@ class ToolRegistry:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
+        python_tool_sources: Dict[str, Path] = {}
+        try:
+            from flocks.tool.tool_loader import discover_python_tool_sources
+
+            python_tool_sources = discover_python_tool_sources()
+        except Exception as e:
+            log.debug("tool_registry.python_source_discovery_failed", {"error": str(e)})
+
+        user_plugin_root = (Path.home() / ".flocks" / "plugins").resolve()
+        python_plugin_names: set[str] = set()
         for name in new_plugin_tools:
             tool = cls._tools.get(name)
             if tool is None:
@@ -870,7 +963,27 @@ class ToolRegistry:
             # consumer that would normally stamp source="plugin_py".
             if tool.info.source is None:
                 tool.info.source = "plugin_py"
-        cls._plugin_tool_names = new_plugin_tools
+        # Some python plugin tools may be registered as a side effect before
+        # this method captures ``before`` (for example during import chains
+        # kicked off by built-in tool initialization). Do not rely solely on
+        # the ``after - before`` delta; reconcile against the actual plugin
+        # files on disk so refresh/restart keeps their source metadata stable.
+        for name, origin in python_tool_sources.items():
+            tool = cls._tools.get(name)
+            if tool is None:
+                continue
+            existing_source = tool.info.source
+            if existing_source not in (None, "plugin_py"):
+                continue
+            tool.info.source = "plugin_py"
+            python_plugin_names.add(name)
+            origin_path = origin.resolve()
+            try:
+                origin_path.relative_to(user_plugin_root)
+                tool.info.native = False
+            except ValueError:
+                tool.info.native = True
+        cls._plugin_tool_names = sorted(set(new_plugin_tools) | python_plugin_names)
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for
         # ``_enabled_defaults`` but this catches any tool that landed in
@@ -886,7 +999,7 @@ class ToolRegistry:
         """Auto-enable newly loaded user-level API tools in flocks.json.
 
         For each tool that satisfies ALL of:
-          - source == "api"
+          - source in API_LIKE_SOURCES (i.e. "api" or "device")
           - provider is set
           - native is False (user-level plugin)
           - enabled is True (tool-level default)
@@ -898,6 +1011,7 @@ class ToolRegistry:
         """
         try:
             from flocks.config.config_writer import ConfigWriter
+            from flocks.tool.tool_loader import API_LIKE_SOURCES
         except Exception:
             return
 
@@ -905,7 +1019,7 @@ class ToolRegistry:
         for tool in cls._tools.values():
             info = tool.info
             if (
-                info.source != "api"
+                info.source not in API_LIKE_SOURCES
                 or not info.provider
                 or info.native
                 or not info.enabled
@@ -1213,10 +1327,12 @@ class ToolRegistry:
             ("flocks.tool.task", ["task", "schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, skill, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # system/ — background tasks, questions, model config, memory, skill_load, MCP management, session management, slash commands
+            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill_load", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove)
             ("flocks.tool.skill", ["flocks_skills"]),
+            # device/ — security device asset context
+            ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
             ("flocks.tool.channel", ["channel_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）

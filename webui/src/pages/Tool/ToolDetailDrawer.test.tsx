@@ -40,6 +40,11 @@ vi.mock('@/api/tool', () => ({
   toolAPI: {
     setEnabled: vi.fn(),
     resetSetting: vi.fn(),
+    // ToolDetailDrawer mounts a fixtures-loading effect on every render that
+    // pulls test fixtures via this endpoint.  Without a mock the call throws
+    // `toolAPI.listFixtures is not a function` during the test's async tail
+    // and unrelated assertions fail before they ever run.
+    listFixtures: vi.fn(() => Promise.resolve({ data: [] })),
   },
 }));
 

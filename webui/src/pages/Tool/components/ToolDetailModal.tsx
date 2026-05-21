@@ -2,9 +2,9 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Wrench, X, Info, TestTube, Play, RefreshCw,
-  CheckCircle, XCircle, AlertTriangle,
+  CheckCircle, XCircle, AlertTriangle, BookOpen, ChevronDown,
 } from 'lucide-react';
-import type { Tool } from '@/api/tool';
+import type { Tool, ToolFixture } from '@/api/tool';
 import { canDirectlyTestTool, toolAPI } from '@/api/tool';
 import { SOURCE_BADGE, CATEGORY_LABEL_KEY } from '../constants';
 import { EnabledBadge } from './badges';
@@ -29,13 +29,23 @@ function buildParamsTemplate(tool: Tool): string {
 }
 
 export default function ToolDetailModal({ tool, initialSection, onClose }: ToolDetailModalProps) {
-  const { t } = useTranslation('tool');
+  const { t, i18n } = useTranslation('tool');
   const [section, setSection] = useState<'info' | 'test'>(initialSection || 'info');
   const defaultParams = useMemo(() => buildParamsTemplate(tool), [tool]);
   const [testParams, setTestParams] = useState(defaultParams);
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
   const canDirectTest = canDirectlyTestTool(tool);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
+  const [fixturesOpen, setFixturesOpen] = useState(false);
+
+  useEffect(() => {
+    if (canDirectTest) {
+      toolAPI.listFixtures(tool.name)
+        .then((res) => setFixtures(res.data || []))
+        .catch(() => setFixtures([]));
+    }
+  }, [tool.name, canDirectTest]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Escape') onClose();
@@ -177,6 +187,57 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
             </div>
           ) : (
             <div className="space-y-4">
+              {/* Fixtures quick-fill */}
+              {fixtures.length > 0 && (
+                <div className="rounded-lg border border-blue-100 bg-blue-50 overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setFixturesOpen((v) => !v)}
+                    className="w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100 transition-colors"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <BookOpen className="w-3.5 h-3.5" />
+                      测试示例 ({fixtures.length})
+                    </span>
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {fixturesOpen && (
+                    <div className="border-t border-blue-100 divide-y divide-blue-100">
+                      {fixtures.map((fx, idx) => {
+                        const label = (i18n.language.startsWith('zh') && fx.label_cn) ? fx.label_cn : fx.label;
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => {
+                              setTestParams(JSON.stringify(fx.params, null, 2));
+                              setFixturesOpen(false);
+                            }}
+                            className="w-full flex items-start gap-3 px-4 py-2.5 hover:bg-blue-100 transition-colors text-left"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-blue-800 truncate">{label}</p>
+                              <p className="text-xs text-blue-500 font-mono truncate mt-0.5">
+                                {JSON.stringify(fx.params)}
+                              </p>
+                            </div>
+                            {fx.has_assertion && (
+                              <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5">断言</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+              {fixtures.length === 0 && canDirectTest && (
+                <p className="text-xs text-zinc-400 flex items-center gap-1">
+                  <BookOpen className="w-3 h-3" />
+                  此工具暂无预置测试示例，请手动填写参数
+                </p>
+              )}
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
                 <textarea

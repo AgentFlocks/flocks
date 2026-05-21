@@ -8,13 +8,14 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, status
+from typing import List, Optional, Set
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.skill.installer import SkillInstaller, SkillInstallResult, DepInstallResult
 from flocks.command.command import API_SURFACES, Command, CommandInfo
+from flocks.server.auth import require_user
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -87,6 +88,7 @@ class SkillResponse(BaseModel):
     install_specs: Optional[List[SkillInstallSpecResponse]] = Field(
         None, description="Dependency install specs"
     )
+    disabled: bool = Field(False, description="Whether the skill is hidden from agent system prompt")
 
 
 class SkillCreateRequest(BaseModel):
@@ -145,6 +147,12 @@ class DepInstallRequest(BaseModel):
     timeout_ms: int = Field(default=300_000, description="Timeout in milliseconds (default 5 min)")
 
 
+class SkillToggleResponse(BaseModel):
+    """Response from PATCH /api/skills/{name}/toggle."""
+    name: str = Field(..., description="Skill name")
+    disabled: bool = Field(..., description="New disabled state after toggling")
+
+
 class CommandResponse(BaseModel):
     """Command response"""
     name: str = Field(..., description="Command name")
@@ -186,7 +194,11 @@ def _command_to_response(cmd: CommandInfo) -> CommandResponse:
 # Helpers
 # =============================================================================
 
-def _skill_to_response(skill: SkillInfo, include_content: bool = False) -> SkillResponse:
+def _skill_to_response(
+    skill: SkillInfo,
+    include_content: bool = False,
+    disabled_set: Optional[Set[str]] = None,
+) -> SkillResponse:
     content = None
     if include_content:
         try:
@@ -218,6 +230,15 @@ def _skill_to_response(skill: SkillInfo, include_content: bool = False) -> Skill
             for s in skill.install_specs
         ]
 
+    # When the caller knows the full disabled set (e.g. list endpoints
+    # iterating many skills) it passes ``disabled_set`` to avoid one JSON
+    # read per skill.  For single-skill responses we fall back to a direct
+    # ``Skill.is_disabled`` query so callers can't forget the flag.
+    if disabled_set is not None:
+        is_disabled = skill.name in disabled_set
+    else:
+        is_disabled = Skill.is_disabled(skill.name)
+
     return SkillResponse(
         name=skill.name,
         description=skill.description,
@@ -229,6 +250,7 @@ def _skill_to_response(skill: SkillInfo, include_content: bool = False) -> Skill
         missing=skill.missing,
         requires=requires_resp,
         install_specs=install_specs_resp,
+        disabled=is_disabled,
     )
 
 
@@ -245,7 +267,8 @@ async def list_skills():
     """
     try:
         skills = await Skill.all()
-        result = [_skill_to_response(skill) for skill in skills]
+        disabled_set = Skill.load_disabled()
+        result = [_skill_to_response(skill, disabled_set=disabled_set) for skill in skills]
         log.info("skills.list", {"count": len(result)})
         return result
     except Exception as e:
@@ -263,10 +286,11 @@ async def skill_status():
     """
     try:
         skills = await Skill.all()
+        disabled_set = Skill.load_disabled()
         result = []
         for skill in skills:
             checked = Skill.check_eligibility(skill)
-            result.append(_skill_to_response(checked))
+            result.append(_skill_to_response(checked, disabled_set=disabled_set))
         log.info("skills.status", {"count": len(result)})
         return result
     except Exception as e:
@@ -275,7 +299,7 @@ async def skill_status():
 
 
 @router.post("/skills/refresh")
-async def refresh_skills():
+async def refresh_skills(_user=Depends(require_user)):
     """
     Refresh skill list
 
@@ -296,7 +320,7 @@ async def refresh_skills():
 
 
 @router.post("/skills/install", response_model=SkillInstallResponse, status_code=status.HTTP_200_OK)
-async def install_skill(req: SkillInstallRequest):
+async def install_skill(req: SkillInstallRequest, _user=Depends(require_user)):
     """
     Install a skill from an external source
 
@@ -342,7 +366,8 @@ async def get_skill(name: str):
             raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
 
         checked = Skill.check_eligibility(skill)
-        return _skill_to_response(checked, include_content=True)
+        disabled_set = Skill.load_disabled()
+        return _skill_to_response(checked, include_content=True, disabled_set=disabled_set)
     except HTTPException:
         raise
     except Exception as e:
@@ -351,7 +376,7 @@ async def get_skill(name: str):
 
 
 @router.post("/skills/{name}/install-deps", response_model=DepInstallResponse)
-async def install_skill_deps(name: str, req: DepInstallRequest):
+async def install_skill_deps(name: str, req: DepInstallRequest, _user=Depends(require_user)):
     """
     Install a skill's tool dependencies
 
@@ -384,7 +409,7 @@ async def install_skill_deps(name: str, req: DepInstallRequest):
 
 
 @router.post("/skills", response_model=SkillResponse, status_code=status.HTTP_201_CREATED)
-async def create_skill(req: SkillCreateRequest):
+async def create_skill(req: SkillCreateRequest, _user=Depends(require_user)):
     """
     Create a new skill
 
@@ -402,6 +427,11 @@ async def create_skill(req: SkillCreateRequest):
 
         skill_path.write_text(full_content, encoding="utf-8")
 
+        # Defensive cleanup: if a previous skill with this name was disabled
+        # and the JSON record was not purged (e.g. manual edit, partial
+        # delete), drop the stale flag so the freshly-created skill starts
+        # in the enabled state — that is what users expect.
+        Skill.forget_disabled(req.name)
         Skill.clear_cache()
         await _refresh_agents_for_skill_change()
 
@@ -413,6 +443,7 @@ async def create_skill(req: SkillCreateRequest):
             location=str(skill_path),
             source="user",
             content=full_content,
+            disabled=False,
         )
     except HTTPException:
         raise
@@ -422,7 +453,7 @@ async def create_skill(req: SkillCreateRequest):
 
 
 @router.put("/skills/{name}", response_model=SkillResponse)
-async def update_skill(name: str, req: SkillCreateRequest):
+async def update_skill(name: str, req: SkillCreateRequest, _user=Depends(require_user)):
     """
     Update a skill.
 
@@ -464,6 +495,9 @@ async def update_skill(name: str, req: SkillCreateRequest):
                         "remaining_files": [f.name for f in remaining],
                     })
             location = str(new_path)
+            # Carry the disabled flag (if any) across to the new name so the
+            # user's preference survives renames.
+            Skill.rename_disabled(name, req.name)
             log.info("skill.renamed", {"old": name, "new": req.name, "path": location})
         else:
             Path(skill.location).write_text(full_content, encoding="utf-8")
@@ -478,6 +512,10 @@ async def update_skill(name: str, req: SkillCreateRequest):
             location=location,
             source=skill.source,
             content=full_content,
+            # Reflect the post-update disabled state so the UI doesn't
+            # report ``disabled=False`` when the user actually renamed a
+            # disabled skill (Skill.rename_disabled migrates the flag).
+            disabled=Skill.is_disabled(req.name),
         )
     except HTTPException:
         raise
@@ -487,7 +525,7 @@ async def update_skill(name: str, req: SkillCreateRequest):
 
 
 @router.delete("/skills/{name}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_skill(name: str):
+async def delete_skill(name: str, _user=Depends(require_user)):
     """
     Delete a skill
 
@@ -512,6 +550,9 @@ async def delete_skill(name: str):
         from flocks.hub import local as hub_local
 
         hub_local.remove_installed_record("skill", name)
+        # Drop any lingering disabled-flag for this skill so the JSON file
+        # does not accumulate ghost entries.
+        Skill.forget_disabled(name)
         Skill.clear_cache()
         await _refresh_agents_for_skill_change()
 
@@ -522,6 +563,32 @@ async def delete_skill(name: str):
     except Exception as e:
         log.error("skill.delete.error", {"name": name, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to delete skill: {str(e)}")
+
+
+@router.patch("/skills/{name}/toggle", response_model=SkillToggleResponse)
+async def toggle_skill_visibility(name: str, _user=Depends(require_user)):
+    """
+    Toggle skill visibility in agent system prompt.
+
+    Flips the ``disabled`` flag for the given skill.  When disabled, the skill
+    is excluded from the agent system prompt (via :meth:`Skill.list_enabled`)
+    and the ``skill`` tool will refuse to load it.  The state is persisted in
+    ``~/.flocks/config/skill_settings.json``.
+    """
+    try:
+        skill = await Skill.get(name)
+        if not skill:
+            raise HTTPException(status_code=404, detail=f"Skill not found: {name}")
+
+        now_disabled = Skill.toggle_disabled(name)
+        await _refresh_agents_for_skill_change()
+        log.info("skill.toggled", {"name": name, "disabled": now_disabled})
+        return SkillToggleResponse(name=name, disabled=now_disabled)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("skill.toggle.error", {"name": name, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to toggle skill: {str(e)}")
 
 
 # =============================================================================

@@ -1,4 +1,4 @@
-"""Tests for .flocks/plugins/skills/tool-builder/validator.py."""
+"""Tests for .flocks/plugins/skills/tool-builder/scripts/validator.py."""
 import sys
 import textwrap
 from pathlib import Path
@@ -7,7 +7,7 @@ import pytest
 
 # Make the validator importable without installing it.
 SKILL_DIR = Path(__file__).parent.parent.parent / ".flocks" / "plugins" / "skills" / "tool-builder"
-sys.path.insert(0, str(SKILL_DIR))
+sys.path.insert(0, str(SKILL_DIR / "scripts"))
 
 from validator import main, validate_yaml_tool, validate_python_tool  # noqa: E402
 

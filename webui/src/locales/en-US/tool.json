@@ -504,6 +504,7 @@
 
   "logs": {
     "title": "System Logs",
+    "description": "View backend runtime logs with multi-file switching and auto-scroll",
     "refresh": "Refresh",
     "autoScroll": "Auto-scroll",
     "file": "File",

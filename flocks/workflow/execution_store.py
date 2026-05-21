@@ -74,13 +74,32 @@ def compact_outputs_for_storage(
     return compacted
 
 
+def compact_step_for_storage(
+    step: Any,
+    *,
+    keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
+    size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
+) -> Any:
+    """Return a copy of one history step with large ``inputs``/``outputs`` compacted."""
+    if not isinstance(step, dict):
+        return step
+    step_copy = dict(step)
+    for field in ("inputs", "outputs"):
+        raw_value = step_copy.get(field)
+        if isinstance(raw_value, dict):
+            step_copy[field] = compact_outputs_for_storage(
+                raw_value, keys=keys, size_threshold=size_threshold
+            )
+    return step_copy
+
+
 def compact_history_for_storage(
     history: Any,
     *,
     keys: Iterable[str] = DEFAULT_LARGE_LIST_KEYS,
     size_threshold: int = DEFAULT_COMPACT_SIZE_THRESHOLD,
 ) -> List[Any]:
-    """Strip large alert lists from step outputs in workflow history.
+    """Strip large alert lists from step inputs/outputs in workflow history.
 
     Returns an empty list when *history* is falsy.  Non-dict step entries
     (defensive: shouldn't happen with normal ``StepResult`` dumps) are
@@ -88,26 +107,18 @@ def compact_history_for_storage(
     """
     if not history:
         return []
-    result: List[Any] = []
-    for step in history:
-        if not isinstance(step, dict):
-            result.append(step)
-            continue
-        step_copy = dict(step)
-        raw_outputs = step_copy.get("outputs")
-        if isinstance(raw_outputs, dict):
-            step_copy["outputs"] = compact_outputs_for_storage(
-                raw_outputs, keys=keys, size_threshold=size_threshold
-            )
-        result.append(step_copy)
-    return result
+    return [
+        compact_step_for_storage(step, keys=keys, size_threshold=size_threshold)
+        for step in history
+    ]
 
 # Maximum number of execution history records retained per workflow.
-# Older records are pruned automatically to prevent a syslog flood from bloating Storage.
-_MAX_EXECUTION_HISTORY_PER_WORKFLOW = 500
+# Keep this intentionally small so high-frequency workflows do not keep
+# inflating the SQLite row set and matching JSONL audit files indefinitely.
+_MAX_EXECUTION_HISTORY_PER_WORKFLOW = 30
 # Trim is an O(N) scan over all workflow_execution rows; only run it every Nth
 # call per workflow to amortise the cost under high syslog throughput.
-_TRIM_CHECK_INTERVAL = 50
+_TRIM_CHECK_INTERVAL = 5
 _trim_counters: Dict[str, int] = {}
 
 # Per-workflow lock to serialize read-modify-write of stats. Concurrent
@@ -345,6 +356,9 @@ async def _trim_execution_history(workflow_id: str) -> None:
     excess = len(wf_entries) - _MAX_EXECUTION_HISTORY_PER_WORKFLOW
     for key, _ in wf_entries[:excess]:
         try:
+            exec_id = key.rsplit("/", 1)[-1]
             await Storage.remove(key)
+            record_path = Recorder.paths().workflow_dir / f"{exec_id}.jsonl"
+            await asyncio.to_thread(record_path.unlink, missing_ok=True)
         except Exception:
             pass

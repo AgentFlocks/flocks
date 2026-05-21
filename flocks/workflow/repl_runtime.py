@@ -8,14 +8,15 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import traceback
 import uuid
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, TextIO, Tuple
+from typing import Any, Callable, Dict, Optional, TextIO, Tuple
 
-from .errors import NodeExecutionError
+from .errors import NodeExecutionError, RunCancelledError
 from .llm import get_lazy_llm
 from .tools import ToolFacade, get_tool_registry
 
@@ -47,6 +48,7 @@ def _drain_text_stream(stream: TextIO, chunks: list[str]) -> None:
 class PythonExecRuntime(Runtime):
     globals: Dict[str, Any] = field(default_factory=dict)
     tool_registry: Optional[Any] = None  # FlocksToolAdapter or compatible
+    cancel_checker: Optional[Callable[[], bool]] = None
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -59,8 +61,27 @@ class PythonExecRuntime(Runtime):
         g = self.globals
         g["inputs"] = inputs
         g["outputs"] = {}
+
+        def _cancel_requested() -> bool:
+            try:
+                return bool(self.cancel_checker and self.cancel_checker())
+            except Exception:
+                return False
+
+        if _cancel_requested():
+            raise RunCancelledError("<runtime>")
+
+        # Expose a cheap cooperative hook for workflow code, and also install
+        # a line tracer so simple Python loops can be interrupted by UI stop.
+        g["cancelled"] = _cancel_requested
+        g["is_cancelled"] = _cancel_requested
         g.setdefault("llm", get_lazy_llm())
         reg = self.tool_registry or get_tool_registry()
+        if hasattr(reg, "cancel_checker"):
+            try:
+                reg.cancel_checker = self.cancel_checker
+            except Exception:
+                pass
         g.setdefault("tool", ToolFacade(reg) if not isinstance(reg, ToolFacade) else reg)
 
         def get_path(path: str, data: Any = None) -> Any:
@@ -98,7 +119,17 @@ class PythonExecRuntime(Runtime):
         g.setdefault("get_path", get_path)
 
         buf = io.StringIO()
+        previous_trace = None
+
+        def _cancel_trace(_frame: Any, event: str, _arg: Any) -> Any:
+            if event == "line" and _cancel_requested():
+                raise RunCancelledError("<runtime>")
+            return _cancel_trace
+
         try:
+            if self.cancel_checker is not None:
+                previous_trace = sys.gettrace()
+                sys.settrace(_cancel_trace)
             with contextlib.redirect_stdout(buf):
                 exec(code, g, g)
         except SystemExit:
@@ -106,6 +137,8 @@ class PythonExecRuntime(Runtime):
             # whatever has been written to outputs so far.  Do NOT propagate
             # SystemExit; that would kill the asyncio event loop.
             pass
+        except RunCancelledError:
+            raise
         except _FuturesTimeoutError:
             raise
         except SyntaxError as e:
@@ -147,6 +180,9 @@ class PythonExecRuntime(Runtime):
             tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
             error_msg = f"Runtime error ({type(e).__name__}): {e}"
             raise NodeExecutionError(node_id="<runtime>", message=error_msg, stdout=buf.getvalue(), traceback=tb_str) from e
+        finally:
+            if self.cancel_checker is not None:
+                sys.settrace(previous_trace)
 
         out_obj = g.get("outputs", {})
         if out_obj is None:

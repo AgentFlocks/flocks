@@ -13,7 +13,7 @@ from flocks.hub.models import InstalledPluginRecord, PluginType
 from flocks.hub.security import SKIP_NAMES, validate_package
 
 
-_TOOL_TYPE_DIRS = {"api", "python", "mcp", "generated"}
+_TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
 
 
 def _copytree_skip_caches(src: Path, dst: Path) -> None:

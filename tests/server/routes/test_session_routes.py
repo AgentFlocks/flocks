@@ -12,6 +12,9 @@ Covers:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
@@ -585,6 +588,195 @@ class TestSessionMessagesRemaining:
         assert regenerate_resp.status_code == status.HTTP_202_ACCEPTED
         assert len(scheduled_coroutines) == 1
         await scheduled_coroutines.pop(0)
+
+    @pytest.mark.asyncio
+    async def test_prepare_replay_runtime_uses_current_model_resolution(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Replay runtime should ignore the historical user-message model."""
+        from flocks.server.routes import session as session_routes
+
+        user_message = SimpleNamespace(
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "old-message-model"},
+        )
+
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_resolve_model",
+            AsyncMock(return_value=("openai", "gpt-4.1", "session")),
+        )
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+
+        runtime = await session_routes._prepare_replay_runtime("ses_test", user_message)
+
+        assert runtime == {
+            "agent_name": "rex",
+            "provider_id": "openai",
+            "model_id": "gpt-4.1",
+        }
+
+    @pytest.mark.asyncio
+    async def test_resend_uses_current_model_for_replay(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Resend should replay with the session's current model, not the original one."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Original user text"}],
+                "noReply": True,
+                "mockReply": "Initial reply",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        user_message = next(msg for msg in messages if msg["info"]["role"] == "user")
+        user_part = next(part for part in user_message["parts"] if part["type"] == "text")
+
+        scheduled_coroutines = []
+        captured_runtime = {}
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            captured_runtime.update(runtime or {})
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(
+            session_routes,
+            "_resolve_model",
+            AsyncMock(return_value=("openai", "gpt-4.1", "session")),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.revert",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        resend_resp = await client.post(
+            f"/api/session/{session_id}/message/{user_message['info']['id']}/resend",
+            json={"text": "Updated user text", "partID": user_part["id"]},
+        )
+        assert resend_resp.status_code == status.HTTP_202_ACCEPTED
+        assert len(scheduled_coroutines) == 1
+
+        await scheduled_coroutines.pop(0)
+
+        assert captured_runtime["provider_id"] == "openai"
+        assert captured_runtime["model_id"] == "gpt-4.1"
+
+    @pytest.mark.asyncio
+    async def test_regenerate_uses_current_model_for_replay(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regenerate should replay with the session's current model, not the original one."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Question"}],
+                "noReply": True,
+                "mockReply": "Assistant answer",
+            },
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        messages = list_resp.json()
+        assistant_message = next(msg for msg in messages if msg["info"]["role"] == "assistant")
+
+        scheduled_coroutines = []
+        captured_runtime = {}
+
+        async def _fake_instance_provide(*, directory, init, fn):
+            return await fn()
+
+        async def _fake_run_existing_user_message(
+            session_id: str,
+            session,
+            user_message,
+            working_directory: str,
+            runtime=None,
+        ):
+            captured_runtime.update(runtime or {})
+            return {"status": "completed", "sessionID": session_id, "messageID": user_message.id}
+
+        monkeypatch.setattr("flocks.project.instance.Instance.provide", _fake_instance_provide)
+        monkeypatch.setattr(
+            session_routes,
+            "_resolve_model",
+            AsyncMock(return_value=("openai", "gpt-4.1", "session")),
+        )
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.config.config.Config.get", AsyncMock(return_value=SimpleNamespace()))
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: object())
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.revert",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(session_routes, "_run_existing_user_message", _fake_run_existing_user_message)
+        monkeypatch.setattr(
+            session_routes,
+            "_schedule_background_coro",
+            lambda coro, **kwargs: scheduled_coroutines.append(coro),
+        )
+
+        regenerate_resp = await client.post(
+            f"/api/session/{session_id}/message/{assistant_message['info']['id']}/regenerate",
+        )
+        assert regenerate_resp.status_code == status.HTTP_202_ACCEPTED
+        assert len(scheduled_coroutines) == 1
+
+        await scheduled_coroutines.pop(0)
+
+        assert captured_runtime["provider_id"] == "openai"
+        assert captured_runtime["model_id"] == "gpt-4.1"
 
 
 # ===========================================================================

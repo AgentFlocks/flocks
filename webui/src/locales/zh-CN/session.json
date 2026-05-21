@@ -109,5 +109,14 @@
       "errorLabel": "错误",
       "elapsed": "耗时"
     }
-  }
+  },
+  "groupToday": "今天",
+  "groupYesterday": "昨天",
+  "groupThisWeek": "本周",
+  "groupLastWeek": "上周",
+  "groupEarlier": "更早",
+  "filterConversations": "搜索会话...",
+  "noResults": "没有匹配的会话",
+  "showMore": "显示更多 {{count}} 条",
+  "showLess": "收起"
 }

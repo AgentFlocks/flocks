@@ -18,13 +18,18 @@ stripping legitimately small metadata lists.
 from __future__ import annotations
 
 from typing import Any, Dict, List
+from unittest.mock import AsyncMock, patch
 
+import pytest
 from flocks.workflow.execution_store import (
     DEFAULT_COMPACT_SIZE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
+    _trim_execution_history,
     compact_history_for_storage,
     compact_outputs_for_storage,
+    compact_step_for_storage,
 )
+from flocks.storage.storage import Storage
 
 
 def _make_alerts(n: int) -> List[Dict[str, Any]]:
@@ -155,6 +160,20 @@ def test_compact_outputs_drastically_reduces_serialised_size() -> None:
 # ── compact_history_for_storage ───────────────────────────────────────────────
 
 
+def test_compact_step_compacts_inputs_and_outputs() -> None:
+    big = _make_alerts(5_000)
+    step = {
+        "node_id": "normalize",
+        "inputs": {"raw_alerts": big, "source": "syslog"},
+        "outputs": {"normalized_alerts": big, "message": "ok"},
+    }
+
+    compacted = compact_step_for_storage(step)
+
+    assert compacted["inputs"] == {"_raw_alerts_count": 5_000, "source": "syslog"}
+    assert compacted["outputs"] == {"_normalized_alerts_count": 5_000, "message": "ok"}
+
+
 def test_compact_history_compacts_each_step_outputs() -> None:
     big = _make_alerts(5_000)
     history = [
@@ -211,6 +230,22 @@ def test_compact_history_skips_step_with_non_dict_outputs() -> None:
 
     # Non-dict outputs are left as-is (defensive pass-through).
     assert compacted[0]["outputs"] == "string-output"
+
+
+def test_compact_history_compacts_each_step_inputs() -> None:
+    big = _make_alerts(5_000)
+    history = [
+        {
+            "node_id": "dedup",
+            "inputs": {"enriched_alerts": big, "dedup_key": "x"},
+            "outputs": {"unique_alerts": big},
+        },
+    ]
+
+    compacted = compact_history_for_storage(history)
+
+    assert compacted[0]["inputs"] == {"_enriched_alerts_count": 5_000, "dedup_key": "x"}
+    assert compacted[0]["outputs"] == {"_unique_alerts_count": 5_000}
 
 
 # ── Defaults exposed to callers ───────────────────────────────────────────────
@@ -278,3 +313,49 @@ def test_compact_outputs_covers_raw_alerts_in_input_params() -> None:
     assert compacted["_raw_alerts_count"] == 5_000
     assert "raw_alerts" not in compacted
     assert compacted["source_log_type"] == "tdp"
+
+
+@pytest.mark.asyncio
+async def test_trim_execution_history_keeps_only_30_and_deletes_matching_jsonl(
+    tmp_path,
+) -> None:
+    workflow_id = "wf-trim"
+    entries = []
+    for idx in range(32):
+        exec_id = f"exec-{idx:02d}"
+        entries.append((
+            f"workflow_execution/{exec_id}",
+            {
+                "id": exec_id,
+                "workflowId": workflow_id,
+                "startedAt": idx,
+            },
+        ))
+        workflow_record = tmp_path / "workflow" / f"{exec_id}.jsonl"
+        workflow_record.parent.mkdir(parents=True, exist_ok=True)
+        workflow_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
+
+    # Another workflow's record should be ignored entirely.
+    entries.append((
+        "workflow_execution/other-exec",
+        {"id": "other-exec", "workflowId": "wf-other", "startedAt": 0},
+    ))
+    other_record = tmp_path / "workflow" / "other-exec.jsonl"
+    other_record.parent.mkdir(parents=True, exist_ok=True)
+    other_record.write_text('{"type":"workflow.summary"}\n', encoding="utf-8")
+
+    remove_mock = AsyncMock(return_value=None)
+    with patch.object(Storage, "list_entries", AsyncMock(return_value=entries)), \
+         patch.object(Storage, "remove", remove_mock), \
+         patch("flocks.session.recorder._record_dir", return_value=tmp_path):
+        await _trim_execution_history(workflow_id)
+
+    removed_keys = [call.args[0] for call in remove_mock.await_args_list]
+    assert removed_keys == [
+        "workflow_execution/exec-00",
+        "workflow_execution/exec-01",
+    ]
+    assert not (tmp_path / "workflow" / "exec-00.jsonl").exists()
+    assert not (tmp_path / "workflow" / "exec-01.jsonl").exists()
+    assert (tmp_path / "workflow" / "exec-02.jsonl").exists()
+    assert other_record.exists()

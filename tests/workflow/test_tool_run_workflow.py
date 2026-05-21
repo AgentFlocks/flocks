@@ -43,6 +43,10 @@ def _runtime_tuple(*, run_fn: Mock, installer_cls: Mock | None = None):
     return installer, run_fn, FakeRunWorkflowResult
 
 
+def _make_large_alerts(count: int) -> list[dict[str, Any]]:
+    return [{"id": idx, "payload": "x" * 20} for idx in range(count)]
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -348,6 +352,113 @@ class TestRunWorkflowToolExecution:
         record_result.assert_awaited_once()
         assert storage_write.await_count >= 1
         assert any(update.get("workflow_execution_id") == "exec-registered" for update in metadata_updates)
+
+    @pytest.mark.anyio
+    async def test_run_workflow_compacts_large_outputs_for_progress_and_final_record(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        large_alerts = _make_large_alerts(150)
+        metadata_updates: list[dict[str, Any]] = []
+        tool_context_with_permission._metadata_callback = metadata_updates.append
+
+        def run_side_effect(**kwargs):
+            kwargs["on_step_start"]("run-compacted", 1, MagicMock(id="node-1", type="python"), {})
+            kwargs["on_step_complete"]({
+                "node_id": "node-1",
+                "node_type": "python",
+                "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
+                "outputs": {"raw_alerts": large_alerts, "message": "ok"},
+            })
+            return FakeRunWorkflowResult(
+                status="SUCCEEDED",
+                run_id="run-compacted",
+                steps=1,
+                last_node_id="node-1",
+                outputs={"enriched_alerts": large_alerts, "message": "done"},
+                history=[
+                    {
+                        "node_id": "node-1",
+                        "node_type": "python",
+                        "inputs": {"raw_alerts": large_alerts, "source": "syslog"},
+                        "outputs": {"raw_alerts": large_alerts, "message": "ok"},
+                    }
+                ],
+                error=None,
+            )
+
+        mock_run = Mock(name="run_workflow", side_effect=run_side_effect)
+        create_execution = AsyncMock(return_value={
+            "id": "exec-compacted",
+            "workflowId": "test-workflow-001",
+            "inputParams": {},
+            "status": "running",
+            "startedAt": 1,
+            "executionLog": [],
+        })
+        storage_read = AsyncMock(return_value={
+            "id": "exec-compacted",
+            "workflowId": "test-workflow-001",
+            "inputParams": {},
+            "status": "running",
+            "startedAt": 1,
+            "executionLog": [],
+        })
+        storage_write = AsyncMock(return_value=None)
+        record_result = AsyncMock(return_value=None)
+
+        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)), \
+             patch.object(run_workflow_module, "resolve_workflow_id_from_source", return_value="test-workflow-001"), \
+             patch.object(run_workflow_module, "create_execution_record", create_execution), \
+             patch.object(run_workflow_module.Storage, "read", storage_read), \
+             patch.object(run_workflow_module.Storage, "write", storage_write), \
+             patch.object(run_workflow_module, "record_execution_result", record_result), \
+             patch.object(run_workflow_module, "_record_workflow_tool_result", AsyncMock(return_value=None)):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={},
+            )
+
+        assert result.success is True
+        progress_payload = storage_write.await_args_list[-1].args[1]
+        assert progress_payload["executionLog"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
+        }
+        assert progress_payload["executionLog"][0]["outputs"] == {
+            "_raw_alerts_count": 150,
+            "message": "ok",
+        }
+        assert result.metadata["outputs"] == {
+            "_enriched_alerts_count": 150,
+            "message": "done",
+        }
+        assert result.metadata["history"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
+        }
+        assert result.metadata["history"][0]["outputs"] == {
+            "_raw_alerts_count": 150,
+            "message": "ok",
+        }
+
+        final_exec_data = record_result.await_args.args[2]
+        assert final_exec_data["outputResults"] == {
+            "_enriched_alerts_count": 150,
+            "message": "done",
+        }
+        assert final_exec_data["executionLog"][0]["inputs"] == {
+            "_raw_alerts_count": 150,
+            "source": "syslog",
+        }
+        assert final_exec_data["executionLog"][0]["outputs"] == {
+            "_raw_alerts_count": 150,
+            "message": "ok",
+        }
+        assert any(update.get("workflow_execution_id") == "exec-compacted" for update in metadata_updates)
 
     @pytest.mark.anyio
     async def test_run_workflow_uses_isolated_child_tool_context(

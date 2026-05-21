@@ -44,15 +44,15 @@ export default function Home() {
               {t('badge')}
             </div>
 
-            <h1 className="text-4xl lg:text-5xl font-extrabold mb-3 tracking-tight">
+            <h1 className="text-2xl font-extrabold mb-3 tracking-tight">
               <span className="text-red-500">Flocks</span>
             </h1>
 
-            <p className="text-lg lg:text-xl text-white font-semibold mb-2">
+            <p className="text-sm text-white font-semibold mb-2">
               {t('subtitle')}
             </p>
 
-            <p className="text-sm lg:text-base text-slate-400 leading-relaxed max-w-2xl">
+            <p className="text-sm text-slate-400 leading-relaxed max-w-2xl">
               {t('description')}
             </p>
           </div>
@@ -171,7 +171,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.agentCount')}</span>
               <Bot className="w-5 h-5 text-purple-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.agents.total ?? 0}
             </div>
           </div>
@@ -181,7 +181,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.workflowCount')}</span>
               <Workflow className="w-5 h-5 text-teal-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.workflows.total ?? 0}
             </div>
           </div>
@@ -191,7 +191,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.skillCount')}</span>
               <BookOpen className="w-5 h-5 text-green-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.skills.total ?? 0}
             </div>
           </div>
@@ -201,7 +201,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.toolCount')}</span>
               <Wrench className="w-5 h-5 text-orange-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tools.total ?? 0}
             </div>
           </div>
@@ -211,7 +211,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.weeklyTasks')}</span>
               <Zap className="w-5 h-5 text-amber-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tasks.week ?? 0}
             </div>
           </div>
@@ -221,7 +221,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.activeScheduled')}</span>
               <CalendarClock className="w-5 h-5 text-violet-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.tasks.scheduledActive ?? 0}
             </div>
           </div>
@@ -231,7 +231,7 @@ export default function Home() {
               <span className="text-gray-600 text-sm">{t('stats.modelCount')}</span>
               <Cpu className="w-5 h-5 text-pink-500" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">
+            <div className="text-xl font-bold text-gray-900">
               {stats?.models.total ?? 0}
             </div>
           </div>
@@ -243,7 +243,7 @@ export default function Home() {
                 stats?.system.status === 'healthy' ? 'text-green-500' : 'text-red-500'
               }`} />
             </div>
-            <div className={`text-3xl font-bold ${
+            <div className={`text-xl font-bold ${
               stats?.system.status === 'healthy' ? 'text-green-600' : 'text-red-600'
             }`}>
               {stats?.system.status === 'healthy' ? t('stats.normal') : t('stats.abnormal')}
