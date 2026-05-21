@@ -180,11 +180,19 @@ class Daemon:
         try:
             await self.cdp.start()
         except Exception as error:
-            if os.environ.get("BU_CDP_WS"):
+            if os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL"):
+                msg = str(error)
+                hint = (
+                    " If the endpoint comes from a dedicated headless Chrome/Chromium instance and the server returns "
+                    "HTTP 403, restart it with '--remote-allow-origins=*'."
+                    if "403" in msg
+                    else ""
+                )
                 raise RuntimeError(
                     f"CDP WS handshake failed: {error} -- remote browser WebSocket connection failed. "
                     "This can happen when network policy blocks the connection, the WS URL is wrong or expired, "
                     "or the remote endpoint is down. Verify BU_CDP_WS and refresh the remote session if needed."
+                    f"{hint}"
                 ) from error
             raise RuntimeError(
                 f"CDP WS handshake failed: {error} -- click Allow in your browser if prompted, then retry"

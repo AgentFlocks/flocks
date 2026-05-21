@@ -1,6 +1,6 @@
 ---
 name: browser-use
-description: 统一处理浏览器使用任务，支持 CDP 直连用户本机 Chromium 系浏览器与 agent-browser CLI 两种模式。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, access internal/login-only pages, or automate browser actions.
+description: 统一处理浏览器使用任务，支持 CDP 直连用户本机 Chromium 系浏览器。Use when the user asks to browse websites, interact with pages, fill forms, capture screenshots, reuse an existing Chrome/Chromium/Edge login session, access internal/login-only pages, or automate browser actions.
 ---
 
 # Browser Use
@@ -20,15 +20,29 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户本机 C
 | --- | --- | --- |
 | `agent-browser` | 独立浏览器自动化模式 | 用户明确说用 `agent-browser`|
 | `cdp-direct` | 复用本机 Chromium 系浏览器的 CDP 直连模式 | 用户明确说用 CDP 模式|
+| `cdp-headless` | 通过 `BU_CDP_WS` / `BU_CDP_URL` 连接独立 headless Chromium 实例 | 只有用户明确要求 headless，或任务本身是后台任务/定时任务，或系统不支持可视化 |
 
  - 用户明确指出模式后，直接阅读执行规则部分
  - 当用户没有明确指出使用模式时，进入下一步自动判定
+ - 不要默认切到 `cdp-headless`；能用用户正常浏览器完成的任务，优先保持可见浏览器流程
 
 ## 自动判定模式
 
 当用户没有明确指出使用模式时,开始自动判断
 
-### 第一步：先跑 CDP 可用性检测
+如果任务天然是后台执行、定时任务、CI/cron、无界面采集，或者用户明确要求本次用 headless 浏览器：
+
+1. 优先判定为 `cdp-headless`
+2. 先读取 `references/cdp-headless.md`
+3. 依赖显式的 `BU_CDP_WS` / `BU_CDP_URL`，不要引导用户去操作日常浏览器 profile 的 inspect 授权页
+4. 如果没有显式 CDP endpoint，再提示用户按 `references/cdp-headless.md` 中当前平台对应的无头启动方式启动专用 Chromium 实例；优先复用安装脚本设置的 `AGENT_BROWSER_EXECUTABLE_PATH`
+5. 连通后再读取 `references/cdp-direct.md`，后续页面操作沿用通用 CDP 工作流
+
+### 第0 步：先判断任务类型
+
+根据用户意图判断是否需要 headless 模式，如果需要：先按照`references/cdp-headless.md`启动浏览器实例
+
+### 第一步：跑 CDP 可用性检测
 
 先执行：
 
@@ -74,8 +88,9 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 
 ## 执行规则
 
-1. 模式一旦确定，立即只读取对应的 reference。
-2. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
+1. 模式一旦确定，立即读取对应的 reference。
+2. `cdp-headless` 是唯一例外：先读取 `references/cdp-headless.md` 完成浏览器启动与连接，再读取 `references/cdp-direct.md` 执行通用页面操作。
+3. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
 
 ## 产品经验Skill
 
@@ -94,5 +109,6 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 ## References
 
 - `references/browser-experience-in-skill.md`：如何把浏览器经验沉淀到产品 skill，以及推荐记录模板
+- `references/cdp-headless.md`：`cdp-headless` 的全平台启动、连接与排障方式
 - `references/cdp-direct.md`：以 `flocks browser` 作为 CDP 直连入口的启动方式、API、页面探索策略、错误处理
 - `references/agent-browser.md`：agent-browser 的使用说明、错误处理等

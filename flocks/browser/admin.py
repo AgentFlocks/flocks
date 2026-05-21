@@ -53,8 +53,18 @@ def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
     )
 
 
+def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str | None]:
+    """Return the explicit CDP endpoint env var name and value, if configured."""
+    merged_env = {**os.environ, **(env or {})}
+    if value := merged_env.get("BU_CDP_WS"):
+        return "BU_CDP_WS", value
+    if value := merged_env.get("BU_CDP_URL"):
+        return "BU_CDP_URL", value
+    return None, None
+
+
 def _is_local_chrome_mode(env: dict | None = None) -> bool:
-    return not (env or {}).get("BU_CDP_WS") and not os.environ.get("BU_CDP_WS")
+    return _configured_cdp_endpoint(env)[0] is None
 
 
 def daemon_alive(name: str | None = None) -> bool:
@@ -393,11 +403,15 @@ def run_setup() -> int:
     """Interactively attach to the running browser."""
     import sys
 
-    print(f"{BROWSER_LABEL} setup: attaching to your browser...")
+    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
+    if endpoint_name:
+        print(f"{BROWSER_LABEL} setup: attaching via {endpoint_name}...")
+    else:
+        print(f"{BROWSER_LABEL} setup: attaching to your browser...")
     if daemon_alive():
         print("daemon already running; nothing to do.")
         return 0
-    if not _chrome_running():
+    if not endpoint_name and not _chrome_running():
         print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1
     try:
@@ -442,6 +456,7 @@ def run_doctor() -> int:
     current = _version()
     mode = _install_mode()
     browser_running = _chrome_running()
+    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
     daemon = daemon_alive()
     connections = browser_connections()
     latest = _latest_release_tag()
@@ -460,11 +475,14 @@ def run_doctor() -> int:
         print(f"  latest release    {latest}" + (" (update available)" if newer else ""))
     else:
         print("  latest release    (not configured)")
-    row(
-        "browser running",
-        browser_running,
-        "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
-    )
+    if endpoint_name:
+        row("browser target", True, f"configured via {endpoint_name}")
+    else:
+        row(
+            "browser running",
+            browser_running,
+            "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
+        )
     row("daemon alive", daemon, "" if daemon else "run `flocks browser --setup` to attach")
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
@@ -475,4 +493,4 @@ def run_doctor() -> int:
             print(f"        {conn['name']} — active page: {title} — {url}")
         else:
             print(f"        {conn['name']} — active page: (no real page)")
-    return 0 if (browser_running and daemon) else 1
+    return 0 if ((browser_running or endpoint_name) and daemon) else 1

@@ -27,6 +27,15 @@ def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp(monkeyp
     assert not admin._is_local_chrome_mode()
 
 
+def test_local_chrome_mode_is_false_when_env_provides_remote_cdp_url() -> None:
+    assert not admin._is_local_chrome_mode({"BU_CDP_URL": "http://127.0.0.1:9222"})
+
+
+def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp_url(monkeypatch) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    assert not admin._is_local_chrome_mode()
+
+
 def test_handshake_timeout_needs_chrome_remote_debugging_prompt() -> None:
     msg = "CDP WS handshake failed: timed out during opening handshake"
     assert admin._needs_chrome_remote_debugging_prompt(msg)
@@ -257,6 +266,21 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     assert "if the browser shows the profile picker" in out
 
 
+def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_WS", "ws://example.test/devtools/browser/1")
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    ensure_calls = []
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "attaching via BU_CDP_WS" in out
+    assert "daemon is up." in out
+    assert ensure_calls == [{"wait": 20.0}]
+
+
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
     monkeypatch.setattr(admin, "_install_mode", lambda: "git")
@@ -270,6 +294,22 @@ def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "[FAIL] browser running" in out
     assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
+
+
+def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 0
+
+    out = capsys.readouterr().out
+    assert "[ok  ] browser target — configured via BU_CDP_URL" in out
+    assert "[ok  ] daemon alive" in out
 
 
 def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:
