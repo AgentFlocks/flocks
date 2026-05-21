@@ -183,7 +183,7 @@ async def test_pro_package_status_reports_installed_marker(
     assert payload["flockspro_component_version"] == "1.2.3"
 
 
-async def _disabled_test_sync_console_license_revocations_without_pro_package_only_syncs_console_records(
+async def test_sync_console_license_revocations_without_pro_package_only_syncs_console_records(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -259,7 +259,7 @@ async def _disabled_test_sync_console_license_revocations_without_pro_package_on
     assert stored["max_members"] == 9
 
 
-async def _disabled_test_sync_console_license_revocations_imports_into_checker(
+async def test_sync_console_license_revocations_imports_into_checker(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -312,7 +312,7 @@ async def _disabled_test_sync_console_license_revocations_imports_into_checker(
     assert imported == ["lic_revoked"]
 
 
-async def _disabled_test_sync_console_license_revocations_switches_from_revoked_runtime_license(
+async def test_sync_console_license_revocations_switches_from_revoked_runtime_license(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
 ):
