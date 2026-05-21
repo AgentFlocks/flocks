@@ -77,6 +77,57 @@ def test_anthropic_formatter_includes_redacted_thinking_blocks():
     assert formatted[0]["content"][1] == {"type": "text", "text": "Done"}
 
 
+def test_anthropic_formatter_strips_stale_signed_thinking_from_older_turns():
+    older = ChatMessage(
+        role="assistant",
+        content="Older",
+        custom_settings={
+            "anthropic_thinking_blocks": [
+                {"type": "thinking", "thinking": "old-plan", "signature": "sig-old"}
+            ]
+        },
+    )
+    latest = ChatMessage(
+        role="assistant",
+        content="Latest",
+        custom_settings={
+            "anthropic_thinking_blocks": [
+                {"type": "thinking", "thinking": "latest-plan", "signature": "sig-new"}
+            ]
+        },
+    )
+
+    formatted = AnthropicProvider._format_messages_anthropic([older, latest])
+
+    assert formatted[0]["content"] == [{"type": "text", "text": "Older"}]
+    assert formatted[1]["content"][0]["signature"] == "sig-new"
+
+
+def test_anthropic_formatter_preserves_unsigned_thinking_for_deepseek_compatible_endpoint():
+    message = ChatMessage(
+        role="assistant",
+        content="Done",
+        custom_settings={
+            "anthropic_thinking_blocks": [
+                {"type": "thinking", "thinking": "unsigned-plan"},
+                {"type": "thinking", "thinking": "signed-plan", "signature": "sig123"},
+            ]
+        },
+    )
+
+    formatted = AnthropicProvider._format_messages_anthropic(
+        [message],
+        base_url="https://api.deepseek.com/anthropic",
+        model_id="deepseek-chat",
+    )
+
+    assert formatted[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "unsigned-plan",
+    }
+    assert all(block.get("signature") != "sig123" for block in formatted[0]["content"])
+
+
 @pytest.mark.asyncio
 async def test_anthropic_stream_uses_beta_interleaved_and_yields_tools_on_block_stop():
     provider = AnthropicProvider()

@@ -34,7 +34,6 @@ class ProviderType(str, Enum):
     CEREBRAS = "cerebras"
     PERPLEXITY = "perplexity"
     OPENROUTER = "openrouter"
-    BEDROCK = "amazon-bedrock"
     VERTEX = "google-vertex"
     # Added in Batch 5
     GATEWAY = "gateway"
@@ -222,7 +221,6 @@ class Provider:
                 ("cerebras", "flocks.provider.sdk.cerebras", "CerebrasProvider"),
                 ("perplexity", "flocks.provider.sdk.perplexity", "PerplexityProvider"),
                 ("openrouter", "flocks.provider.sdk.openrouter", "OpenRouterProvider"),
-                ("amazon-bedrock", "flocks.provider.sdk.bedrock", "BedrockProvider"),
                 ("google-vertex", "flocks.provider.sdk.vertex", "VertexProvider"),
                 ("local", "flocks.provider.sdk.local", "LocalProvider"),
                 # Added in Batch 5
@@ -1203,8 +1201,12 @@ class BaseProvider:
             except Exception:
                 pass
 
+        source_models = list(getattr(self, "_config_models", []))
+        if not source_models:
+            source_models = list(self.get_models())
+
         result = []
-        for model in getattr(self, "_config_models", []):
+        for model in source_models:
             if model.id in catalog_by_id:
                 # Catalog provides rich metadata (parameter_rules, release_date, …)
                 # but user edits stored in flocks.json always take precedence.

@@ -62,6 +62,36 @@ def test_prepare_reasoning_uses_placeholder_for_strict_echo_provider():
     assert prepared.reasoning_source == "placeholder"
 
 
+def test_prepare_reasoning_upgrades_whitespace_only_reasoning_content():
+    message = ChatMessage(
+        role="assistant",
+        content="",
+        reasoning_content=" \t\n ",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "search", "arguments": "{}"},
+            }
+        ],
+    )
+
+    prepared = prepare_reasoning_for_replay(
+        provider_id="deepseek",
+        model_id="deepseek-reasoner",
+        message=message,
+        interleaved={
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder",
+        },
+    )
+
+    assert prepared.reasoning_content == " "
+    assert prepared.reasoning_source == "placeholder"
+
+
 def test_prepare_reasoning_preserves_reasoning_details():
     details = [{"type": "reasoning.summary", "text": "step", "signature": "sig"}]
     message = ChatMessage(
@@ -178,3 +208,33 @@ def test_format_openai_messages_serializes_reasoning_content_without_include_rea
     )
 
     assert formatted[0]["reasoning_content"] == "native scratchpad"
+
+
+def test_prepare_reasoning_then_format_openai_messages_emits_provider_payload():
+    prepared = prepare_reasoning_for_replay(
+        provider_id="alibaba",
+        model_id="qwen3-max",
+        message=ChatMessage(
+            role="assistant",
+            content="",
+            reasoning="Need to inspect the tool result.",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": "{}"},
+                }
+            ],
+        ),
+        interleaved={
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote",
+        },
+    )
+
+    formatted = format_openai_messages([prepared])
+
+    assert formatted[0]["tool_calls"][0]["function"]["name"] == "search"
+    assert formatted[0]["reasoning_content"] == "Need to inspect the tool result."
+    assert "reasoning_details" not in formatted[0]

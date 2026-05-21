@@ -9,7 +9,13 @@ Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
 so that provider rules are maintained in exactly one place.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+from flocks.provider.interleaved import (
+    REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+    resolve_interleaved_capability,
+    resolve_reasoning_transport,
+)
 
 from flocks.utils.log import Log
 
@@ -20,6 +26,15 @@ log = Log.create(service="provider.options")
 # ---------------------------------------------------------------------------
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
+
+_ENABLE_THINKING_EXTRA_BODY_TOKENS = (
+    "qwen3",
+    "qwq",
+    "qwen-max",
+    "kimi",
+    "k2-thinking",
+    "mimo",
+)
 
 
 def _coerce_optional_bool(value: Any) -> Optional[bool]:
@@ -59,6 +74,115 @@ def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool
         return None
 
 
+def _lookup_raw_model_metadata(provider_id: str, model_id: str) -> Optional[Any]:
+    """Return provider/model metadata without applying inferred defaults."""
+    try:
+        from flocks.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is not None:
+            try:
+                for model in provider.get_model_definitions():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.definitions_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+            for model in getattr(provider, "_config_models", []):
+                if getattr(model, "id", None) == model_id:
+                    return model
+
+            try:
+                for model in provider.get_models():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.runtime_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+        return Provider.get_model(model_id)
+    except Exception as exc:
+        log.debug("options.raw_model_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_provider_base_url(provider_id: str) -> Optional[str]:
+    """Return the active provider base URL when configured."""
+    try:
+        from flocks.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is None:
+            return None
+        provider_config = getattr(provider, "_config", None)
+        return (
+            getattr(provider_config, "base_url", None)
+            or getattr(provider, "_base_url", None)
+        )
+    except Exception as exc:
+        log.debug("options.provider_base_url_lookup_failed", {
+            "provider_id": provider_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_model_reasoning_context(
+    provider_id: str,
+    model_id: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Resolve replay capability and transport through separate paths."""
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    capabilities = getattr(model, "capabilities", None) if model else None
+    explicit_interleaved = (
+        getattr(capabilities, "interleaved", None) if capabilities else None
+    )
+    base_url = _resolve_provider_base_url(provider_id)
+    interleaved = resolve_interleaved_capability(
+        provider_id=provider_id,
+        model_id=model_id,
+        explicit_capability=explicit_interleaved,
+        base_url=base_url,
+    )
+    transport = resolve_reasoning_transport(
+        provider_id=provider_id,
+        model_id=model_id,
+        base_url=base_url,
+    )
+    return interleaved, transport
+
+
+def _resolve_interleaved_capability(
+    provider_id: str,
+    model_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the active model's interleaved replay capability."""
+    interleaved, _transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return interleaved
+
+
+def _resolve_reasoning_transport(provider_id: str, model_id: str) -> str:
+    """Resolve the active model's request transport family."""
+    _interleaved, transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return transport
+
+
+def _needs_enable_thinking_extra_body(model_id: str) -> bool:
+    lowered = model_id.lower()
+    return any(token in lowered for token in _ENABLE_THINKING_EXTRA_BODY_TOKENS)
+
+
 def build_provider_options(
     provider_id: str,
     model_id: str,
@@ -87,14 +211,22 @@ def build_provider_options(
     """
     options: Dict[str, Any] = {}
     model_lower = model_id.lower()
+    interleaved_capability = _resolve_interleaved_capability(provider_id, model_id)
+    reasoning_transport = _resolve_reasoning_transport(provider_id, model_id)
     reasoning_enabled = (
         _coerce_optional_bool(reasoning_enabled)
         if reasoning_enabled is not None
         else _resolve_reasoning_enabled(provider_id, model_id)
     )
+    interleaved_enabled = interleaved_capability is not None
+    if interleaved_enabled and reasoning_enabled is None:
+        reasoning_enabled = True
 
-    # -- Claude extended thinking (any provider, including proxies) ----------
-    if "claude" in model_lower:
+    # -- Anthropic Messages thinking -----------------------------------------
+    if (
+        reasoning_transport == REASONING_TRANSPORT_ANTHROPIC_MESSAGES
+        and "claude" in model_lower
+    ):
         # Use the model's catalog API limit as max_tokens so the full output
         # capacity is available after thinking.  Provider.get_model() returns
         # the catalog entry (catalog takes priority over flocks.json overrides
@@ -134,30 +266,21 @@ def build_provider_options(
             options["thinkingLevel"] = "high"
 
     # -- Qwen reasoning (ThreatBook-hosted or Alibaba DashScope) -------------
-    elif provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba", "moonshot"):
-        if "qwen3-max" in model_lower or "qwen3.6-plus" in model_lower:
+    elif (
+        provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba", "moonshot")
+        or (
+            interleaved_enabled
+            and _needs_enable_thinking_extra_body(model_id)
+            and provider_id not in {"openai", "anthropic", "google"}
+        )
+    ):
+        if "qwen" in model_lower or "qwq" in model_lower:
             options["extra_body"] = {
                 "enable_thinking": True if reasoning_enabled is None else reasoning_enabled
             }
-        elif "kimi-k2.5" in model_lower or "kimi-k2.6" in model_lower:
-            # ThreatBook CN defaults hybrid-thinking models to reasoning-on.
-            # Other compatible providers keep direct reply as the default.
-            default_enabled = provider_id == "threatbook-cn-llm"
+        elif any(token in model_lower for token in ("kimi", "k2-thinking", "mimo")):
             options["extra_body"] = {
-                "enable_thinking": default_enabled if reasoning_enabled is None else reasoning_enabled
-            }
-
-    # -- Amazon Bedrock reasoning -------------------------------------------
-    elif provider_id == "amazon-bedrock":
-        if reasoning_enabled is not False and "anthropic" in model_lower:
-            options["reasoningConfig"] = {
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            }
-        elif reasoning_enabled is not False and "nova" in model_lower:
-            options["reasoningConfig"] = {
-                "type": "enabled",
-                "maxReasoningEffort": "high",
+                "enable_thinking": True if reasoning_enabled is None else reasoning_enabled
             }
 
     # -- max_tokens fallback from model config ------------------------------

@@ -429,9 +429,17 @@ class SessionRunner:
         log.debug(event, payload)
 
     def _provider_capability_key(self) -> str:
+        interleaved = None
+        try:
+            active_model = Provider.resolve_model(self.provider_id, self.model_id)
+            if active_model and getattr(active_model, "capabilities", None):
+                interleaved = getattr(active_model.capabilities, "interleaved", None)
+        except Exception:
+            interleaved = None
         return (
             f"{self.provider_id}:{self.model_id}:"
-            f"vision={int(self._model_supports_vision())}"
+            f"vision={int(self._model_supports_vision())}:"
+            f"interleaved={json.dumps(interleaved, ensure_ascii=False, sort_keys=True, default=str)}"
         )
 
     def _tool_schema_cache_key(
@@ -2209,6 +2217,7 @@ class SessionRunner:
                             for item in reasoning_details:
                                 if isinstance(item, dict):
                                     assistant_reasoning_details.append(item)
+                        reasoning_field = part_metadata.get("reasoningField") if isinstance(part_metadata, dict) else None
                         thinking_signature = part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
                         redacted_thinking = part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
                         if redacted_thinking:
@@ -2221,6 +2230,11 @@ class SessionRunner:
                                 "type": "thinking",
                                 "thinking": part.text,
                                 "signature": thinking_signature,
+                            })
+                        elif reasoning_field == "thinking" and getattr(part, "text", None):
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "thinking",
+                                "thinking": part.text,
                             })
                     
                     # Tool parts - use structured OpenAI function-calling format
@@ -2322,8 +2336,14 @@ class SessionRunner:
                                 "call_id": call_id,
                             })
                 
+                has_assistant_reasoning = bool(
+                    assistant_reasoning_parts
+                    or assistant_reasoning_content_parts
+                    or assistant_reasoning_details
+                    or assistant_custom_settings
+                )
                 # Add assistant message
-                if assistant_content_parts or structured_tool_calls:
+                if assistant_content_parts or structured_tool_calls or has_assistant_reasoning:
                     assistant_message = ChatMessage(
                         role="assistant",
                         content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
@@ -2455,6 +2475,8 @@ class SessionRunner:
         # Clean up any leftover reasoning state from a previous (failed) call
         if hasattr(self, '_current_reasoning_id'):
             delattr(self, '_current_reasoning_id')
+        if hasattr(self, '_current_reasoning_metadata'):
+            delattr(self, '_current_reasoning_metadata')
 
         from flocks.session.streaming.tool_accumulator import ToolCallAccumulator
         tool_accumulator = ToolCallAccumulator(processor)
@@ -2654,20 +2676,29 @@ class SessionRunner:
                 chunk_metadata = getattr(chunk, 'metadata', None) or {}
                 reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
 
+                if hasattr(self, '_current_reasoning_id') and chunk_metadata:
+                    current_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                    current_metadata.update(chunk_metadata)
+                    self._current_reasoning_metadata = current_metadata
+
                 if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
                     reasoning_id_counter += 1
                     self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                    self._current_reasoning_metadata = dict(chunk_metadata)
                     await processor.process_event(ReasoningStartEvent(
                         id=self._current_reasoning_id,
                         metadata=chunk_metadata,
                     ))
 
                 if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
                         id=self._current_reasoning_id,
-                        metadata=chunk_metadata,
+                        metadata=reasoning_end_metadata,
                     ))
                     delattr(self, '_current_reasoning_id')
+                    if hasattr(self, '_current_reasoning_metadata'):
+                        delattr(self, '_current_reasoning_metadata')
 
                 chunk_reasoning = getattr(chunk, 'reasoning', None) or None
                 if not chunk_reasoning and event_type == 'reasoning':
@@ -2700,6 +2731,7 @@ class SessionRunner:
                     if not hasattr(self, '_current_reasoning_id'):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                        self._current_reasoning_metadata = dict(chunk_metadata)
                         await processor.process_event(ReasoningStartEvent(
                             id=self._current_reasoning_id,
                             metadata=chunk_metadata,
@@ -2715,10 +2747,14 @@ class SessionRunner:
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).
                 if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
+                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
-                        id=self._current_reasoning_id
+                        id=self._current_reasoning_id,
+                        metadata=reasoning_end_metadata,
                     ))
                     delattr(self, '_current_reasoning_id')
+                    if hasattr(self, '_current_reasoning_metadata'):
+                        delattr(self, '_current_reasoning_metadata')
 
                 # 3) Process text delta.
                 if chunk_text:
@@ -2779,10 +2815,14 @@ class SessionRunner:
         
         # End any remaining reasoning block
         if hasattr(self, '_current_reasoning_id'):
+            reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
             await processor.process_event(ReasoningEndEvent(
-                id=self._current_reasoning_id
+                id=self._current_reasoning_id,
+                metadata=reasoning_end_metadata,
             ))
             delattr(self, '_current_reasoning_id')
+            if hasattr(self, '_current_reasoning_metadata'):
+                delattr(self, '_current_reasoning_metadata')
         
         # Emit finish event
         await processor.process_event(FinishEvent(

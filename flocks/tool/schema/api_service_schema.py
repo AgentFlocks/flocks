@@ -101,10 +101,22 @@ def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
     """
     try:
         descriptor = next(
-            (d for d in discover_api_service_descriptors()
-             if provider_id in (d.storage_key, d.service_id)),
+            (
+                d
+                for d in discover_api_service_descriptors()
+                if provider_id in (d.storage_key, d.service_id)
+            ),
             None,
         )
+        if descriptor is None:
+            descriptor = next(
+                (
+                    d
+                    for d in discover_api_service_descriptors(refresh=True)
+                    if provider_id in (d.storage_key, d.service_id)
+                ),
+                None,
+            )
         if descriptor is None:
             return None
 

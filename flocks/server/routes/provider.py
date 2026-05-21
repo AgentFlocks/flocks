@@ -20,6 +20,7 @@ from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
 from flocks.tool.tool_loader import extract_provider_version
+from flocks.tool.schema import api_service_schema as api_service_schema_helpers
 
 # Schema helpers are re-exported from flocks.tool.schema.api_service_schema (canonical
 # home). Existing callers — tests, onboarding, device migration — keep importing
@@ -34,8 +35,6 @@ from flocks.tool.schema.api_service_schema import (
     _get_api_service_secret_candidates,
     _get_api_service_secret_field_names,
     _get_compound_secret_metadata,
-    _load_api_service_metadata_data,
-    _load_provider_yaml_metadata,
     _normalize_api_service_credential_field,
     _should_persist_secondary_secret,
 )
@@ -43,6 +42,33 @@ from flocks.tool.schema.api_service_schema import (
 
 router = APIRouter()
 log = Log.create(service="provider-routes")
+
+
+def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper for callers patching provider-route helpers."""
+    return api_service_schema_helpers._load_provider_yaml_metadata(provider_id)
+
+
+def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper preserving the historical patch seam in this module."""
+    merged: Dict[str, Any] = {}
+
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
+    if isinstance(config_data, dict):
+        merged.update(config_data)
+
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if meta_file.is_file():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata_data = api_service_schema_helpers.json.load(f)
+        if isinstance(metadata_data, dict):
+            merged = {**metadata_data, **merged}
+
+    yaml_data = _load_provider_yaml_metadata(provider_id)
+    if isinstance(yaml_data, dict):
+        merged = {**yaml_data, **merged}
+
+    return merged or None
 
 
 _EMAIL_KEY_PAIR_PATTERN = re.compile(

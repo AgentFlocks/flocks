@@ -160,6 +160,8 @@ class TestCuratedCatalogModels:
         }
 
         flash = next(m for m in models if m.id == "qwen3.5-flash-02-23")
+        assert flash.capabilities.supports_reasoning is True
+        assert flash.capabilities.interleaved["field"] == "reasoning_content"
         assert flash.limits.context_window == 1000000
         assert flash.pricing.currency == "CNY"
 
@@ -182,6 +184,9 @@ class TestCuratedCatalogModels:
 
         thinking = next(m for m in models if m.id == "kimi-k2-thinking")
         assert thinking.capabilities.supports_reasoning is True
+        k25 = next(m for m in models if m.id == "kimi-k2.5")
+        assert k25.capabilities.supports_reasoning is True
+        assert k25.capabilities.interleaved["field"] == "reasoning_content"
 
     def test_zhipu_catalog(self):
         models = get_provider_model_definitions("zhipu")
@@ -195,6 +200,9 @@ class TestCuratedCatalogModels:
         assert turbo.capabilities.interleaved["field"] == "reasoning_content"
         assert turbo.pricing.output == 26.0
         assert turbo.limits.context_window == 202752
+        glm47 = next(m for m in models if m.id == "glm-4.7")
+        assert glm47.capabilities.supports_reasoning is True
+        assert glm47.capabilities.interleaved["field"] == "reasoning_content"
 
     def test_minimax_catalog(self):
         models = get_provider_model_definitions("minimax")
@@ -211,6 +219,8 @@ class TestCuratedCatalogModels:
         assert len(models) == 1
         model = models[0]
         assert model.id == "step-3.5-flash"
+        assert model.capabilities.supports_reasoning is True
+        assert model.capabilities.interleaved["field"] == "reasoning_content"
         assert model.pricing.currency == "CNY"
         assert model.limits.max_output_tokens == 256000
 

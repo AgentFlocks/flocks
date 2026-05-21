@@ -7,6 +7,11 @@ from typing import Any, Dict, List, Optional
 from flocks.provider.provider import ChatMessage
 
 
+def _is_blank_reasoning_text(value: Any) -> bool:
+    """Return True when a reasoning text is empty or only whitespace."""
+    return isinstance(value, str) and value.strip() == ""
+
+
 def _message_requires_echo(message: ChatMessage, interleaved: Dict[str, Any]) -> bool:
     """Return True when the current provider requires a replay field."""
     echo_mode = interleaved.get("echo", "when_present")
@@ -59,6 +64,14 @@ def prepare_reasoning_for_replay(
     requires_echo = _message_requires_echo(prepared, interleaved)
     promoted_text, promoted_source = _promotable_reasoning_text(prepared)
 
+    # Some providers (for example Anthropic-native thinking blocks) use the
+    # interleaved capability only as a signal for provider options / replay
+    # policy selection. Their provider-specific payload is reconstructed from
+    # custom metadata elsewhere, so there is no generic reasoning_* field to
+    # materialize here.
+    if field not in {"reasoning_content", "reasoning_details"}:
+        return prepared
+
     if field == "reasoning_details":
         prepared.reasoning_content = None
         if prepared.reasoning_details:
@@ -76,7 +89,7 @@ def prepare_reasoning_for_replay(
 
     prepared.reasoning_details = None
     if isinstance(prepared.reasoning_content, str):
-        if prepared.reasoning_content == "" and requires_echo:
+        if _is_blank_reasoning_text(prepared.reasoning_content) and requires_echo:
             prepared.reasoning_content = placeholder
             prepared.reasoning_source = "placeholder"
         return prepared

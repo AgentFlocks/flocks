@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import flocks.session.runner as runner_mod
+from flocks.provider.sdk.anthropic import AnthropicProvider
 from flocks.session.message import (
     Message,
     MessageRole,
@@ -553,7 +554,7 @@ class TestBuildTools:
             "flocks.skill.skill.Skill.list_enabled",
             AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
         ), patch(
-            "flocks.tool.system.skill.build_description",
+            "flocks.tool.system.skill_load.build_description",
             return_value="Refreshed skill description",
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
@@ -1465,6 +1466,201 @@ async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monk
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_signed_thinking",
+        directory="/tmp/runner-signed-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+                "thinkingSignature": "sig123",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_signed_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {
+            "type": "thinking",
+            "thinking": "Plan before tool use.",
+            "signature": "sig123",
+        }
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_unsigned_thinking",
+        directory="/tmp/runner-unsigned-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Unsigned plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_unsigned_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {
+            "type": "thinking",
+            "thinking": "Unsigned plan before tool use.",
+        }
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_runner_history_round_trip_formats_anthropic_payload(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_anthropic_payload_roundtrip",
+        directory="/tmp/runner-anthropic-payload-roundtrip",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Done",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+                "thinkingSignature": "sig123",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_signed_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+    formatted = AnthropicProvider._format_messages_anthropic(chat_messages[:1])
+
+    assert formatted[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "Plan before tool use.",
+        "signature": "sig123",
+    }
+    assert formatted[0]["content"][1] == {"type": "text", "text": "Done"}
+    assert formatted[0]["content"][2]["type"] == "tool_use"
+
+
+@pytest.mark.asyncio
 async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution(monkeypatch):
     session = await Session.create(
         project_id="test_runner_provider_specific_interleaved",
@@ -1542,6 +1738,84 @@ async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution
     assert chat_messages[0].reasoning_content == " "
     assert chat_messages[0].reasoning_details is None
     assert chat_messages[0].reasoning_source == "placeholder"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_keeps_reasoning_only_assistant_message(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_reasoning_only_assistant",
+        directory="/tmp/runner-reasoning-only",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3-max"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to think before replying.",
+            time=PartTime(start=1),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "assistant"
+    assert chat_messages[0].content == ""
+    assert chat_messages[0].reasoning == "Need to think before replying."
+    assert chat_messages[0].reasoning_content == "Need to think before replying."
+    assert chat_messages[0].reasoning_source == "promoted_reasoning"
+
+
+def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
+    runner = _make_runner("ses_runner_interleaved_capability_key")
+    runner.provider_id = "deepseek"
+    runner.model_id = "deepseek-reasoner"
+
+    monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "placeholder": " ",
+                    "cross_provider_policy": "placeholder",
+                }
+            )
+        ),
+    )
+
+    capability_key = runner._provider_capability_key()
+
+    assert "interleaved=" in capability_key
+    assert '"field": "reasoning_content"' in capability_key
+    assert '"cross_provider_policy": "placeholder"' in capability_key
 
 
 @pytest.mark.asyncio

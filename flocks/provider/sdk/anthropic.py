@@ -27,6 +27,7 @@ class AnthropicProvider(BaseProvider):
     CATALOG_ID = "anthropic"
     _INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
     _FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
+    _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
     def __init__(self):
         super().__init__(provider_id="anthropic", name="Anthropic")
@@ -91,6 +92,71 @@ class AnthropicProvider(BaseProvider):
                 anthropic_tools.append(anthropic_tool)
         
         return anthropic_tools if anthropic_tools else None
+
+    def _resolved_base_url(self) -> Optional[str]:
+        if self._config and self._config.base_url:
+            return self._config.base_url
+        return "https://api.anthropic.com"
+
+    @staticmethod
+    def _is_native_anthropic_base_url(base_url: Optional[str]) -> bool:
+        if not isinstance(base_url, str) or not base_url.strip():
+            return True
+        return "anthropic.com" in base_url.lower()
+
+    @staticmethod
+    def _preserve_unsigned_thinking(base_url: Optional[str], model_id: Optional[str]) -> bool:
+        target = f"{base_url or ''} {model_id or ''}".lower()
+        return any(token in target for token in ("api.kimi.com", "moonshot", "deepseek"))
+
+    @classmethod
+    def _filter_assistant_thinking_blocks(
+        cls,
+        content_blocks: List[Dict[str, Any]],
+        *,
+        base_url: Optional[str],
+        model_id: Optional[str],
+        is_latest_assistant: bool,
+    ) -> List[Dict[str, Any]]:
+        """Apply Hermes-style thinking replay rules for Anthropic-compatible targets."""
+        if not content_blocks:
+            return content_blocks
+
+        native_anthropic = cls._is_native_anthropic_base_url(base_url)
+        preserve_unsigned = cls._preserve_unsigned_thinking(base_url, model_id)
+        filtered: List[Dict[str, Any]] = []
+
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type not in cls._THINKING_BLOCK_TYPES:
+                filtered.append(block)
+                continue
+
+            if preserve_unsigned:
+                # Kimi / DeepSeek-style Anthropics want unsigned thinking echoed
+                # back, but signed / opaque Anthropic-native payloads cannot be
+                # verified by the third-party endpoint.
+                if block.get("signature") or block.get("data"):
+                    continue
+                filtered.append(block)
+                continue
+
+            if not native_anthropic or not is_latest_assistant:
+                # Third-party targets and older assistant turns should not
+                # receive stale thinking blocks.
+                continue
+
+            if block_type == "redacted_thinking" or block.get("signature"):
+                filtered.append(block)
+                continue
+
+            thinking_text = block.get("thinking")
+            if isinstance(thinking_text, str) and thinking_text:
+                filtered.append({"type": "text", "text": thinking_text})
+
+        return filtered
     
     @staticmethod
     def _format_user_content(content: Any) -> Any:
@@ -115,8 +181,14 @@ class AnthropicProvider(BaseProvider):
                 })
         return blocks
 
-    @staticmethod
-    def _format_messages_anthropic(messages: List[ChatMessage]) -> list:
+    @classmethod
+    def _format_messages_anthropic(
+        cls,
+        messages: List[ChatMessage],
+        *,
+        base_url: Optional[str] = None,
+        model_id: Optional[str] = None,
+    ) -> list:
         """Convert ChatMessage list to Anthropic API format.
 
         Anthropic requires:
@@ -126,7 +198,12 @@ class AnthropicProvider(BaseProvider):
         - Alternating user/assistant turns
         """
         formatted: list = []
-        for msg in messages:
+        assistant_indexes = [
+            index for index, message in enumerate(messages)
+            if message.role == "assistant"
+        ]
+        last_assistant_index = assistant_indexes[-1] if assistant_indexes else -1
+        for index, msg in enumerate(messages):
             if msg.role == "system":
                 continue
 
@@ -155,6 +232,13 @@ class AnthropicProvider(BaseProvider):
                             "name": fn.get("name", ""),
                             "input": input_obj,
                         })
+                content_blocks = cls._filter_assistant_thinking_blocks(
+                    content_blocks,
+                    base_url=base_url,
+                    model_id=model_id,
+                    is_latest_assistant=index == last_assistant_index,
+                )
+
                 formatted.append({
                     "role": "assistant",
                     "content": content_blocks if content_blocks else msg.content,
@@ -180,7 +264,7 @@ class AnthropicProvider(BaseProvider):
                 # user messages
                 formatted.append({
                     "role": msg.role,
-                    "content": AnthropicProvider._format_user_content(msg.content),
+                    "content": cls._format_user_content(msg.content),
                 })
         return formatted
 
@@ -234,7 +318,11 @@ class AnthropicProvider(BaseProvider):
         client = self._get_client()
         
         # Convert messages to Anthropic format
-        anthropic_messages = self._format_messages_anthropic(messages)
+        anthropic_messages = self._format_messages_anthropic(
+            messages,
+            base_url=self._resolved_base_url(),
+            model_id=model_id,
+        )
         
         # Check if we have any non-system messages
         if not anthropic_messages:
@@ -327,7 +415,11 @@ class AnthropicProvider(BaseProvider):
         client = self._get_client()
         
         # Convert messages
-        anthropic_messages = self._format_messages_anthropic(messages)
+        anthropic_messages = self._format_messages_anthropic(
+            messages,
+            base_url=self._resolved_base_url(),
+            model_id=model_id,
+        )
         
         # Check if we have any non-system messages
         if not anthropic_messages:

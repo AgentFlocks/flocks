@@ -1009,6 +1009,12 @@
         "family": "qwen3",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1026,6 +1032,12 @@
         "family": "qwen3.5",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1075,6 +1087,13 @@
         "family": "kimi-k2.5",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1214,6 +1233,12 @@
         "family": "glm-4.7",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1364,6 +1389,12 @@
         "family": "step-3.5",
         "capabilities": {
           "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
           "supports_streaming": true
         },
         "limits": {
