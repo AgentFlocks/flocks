@@ -64,6 +64,8 @@ mkdir -p "$CAPTURE_ROOT/captures"
 
 ## 标准流程
 
+> 按照以下 1-12 的操作流程完成任务
+
 ### 1. 打开浏览器或创建 Tab
 
 `agent-browser` 模式：

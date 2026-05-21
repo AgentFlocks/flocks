@@ -138,9 +138,30 @@ class Daemon:
         self.cdp = None
         self.session = None
         self.target_id = None
+        self.managed_tabs = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
         self.stop = None
+
+    async def _enable_session_domains(self) -> None:
+        for domain in ("Page", "DOM", "Runtime", "Network"):
+            try:
+                await asyncio.wait_for(self.cdp.send_raw(f"{domain}.enable", session_id=self.session), timeout=5)
+            except Exception as error:
+                log(f"enable {domain}: {error}")
+
+    async def _attach_target(self, target_id: str) -> dict:
+        self.session = (
+            await self.cdp.send_raw("Target.attachToTarget", {"targetId": target_id, "flatten": True})
+        )["sessionId"]
+        self.target_id = target_id
+        try:
+            info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": target_id}))["targetInfo"]
+        except Exception:
+            info = {"targetId": target_id, "url": "", "title": "(unknown)", "type": "page"}
+        log(f"attached {target_id} ({info.get('url', '')[:80]}) session={self.session}")
+        await self._enable_session_domains()
+        return info
 
     async def attach_first_page(self):
         targets = (await self.cdp.send_raw("Target.getTargets"))["targetInfos"]
@@ -149,17 +170,7 @@ class Daemon:
             target_id = (await self.cdp.send_raw("Target.createTarget", {"url": "about:blank"}))["targetId"]
             log(f"no real pages found, created about:blank ({target_id})")
             pages = [{"targetId": target_id, "url": "about:blank", "type": "page"}]
-        self.session = (
-            await self.cdp.send_raw("Target.attachToTarget", {"targetId": pages[0]["targetId"], "flatten": True})
-        )["sessionId"]
-        self.target_id = pages[0]["targetId"]
-        log(f"attached {pages[0]['targetId']} ({pages[0].get('url', '')[:80]}) session={self.session}")
-        for domain in ("Page", "DOM", "Runtime", "Network"):
-            try:
-                await asyncio.wait_for(self.cdp.send_raw(f"{domain}.enable", session_id=self.session), timeout=5)
-            except Exception as error:
-                log(f"enable {domain}: {error}")
-        return pages[0]
+        return await self._attach_target(pages[0]["targetId"])
 
     async def start(self) -> None:
         self.stop = asyncio.Event()
@@ -227,6 +238,8 @@ class Daemon:
         if meta == "set_session":
             self.session = req.get("session_id")
             self.target_id = req.get("target_id") or self.target_id
+            if self.target_id in self.managed_tabs:
+                self.managed_tabs[self.target_id]["last_accessed"] = time.time()
             try:
                 await asyncio.wait_for(self.cdp.send_raw("Page.enable", session_id=self.session), timeout=3)
                 await asyncio.wait_for(
@@ -242,11 +255,44 @@ class Daemon:
             except Exception:
                 pass
             return {"session_id": self.session}
+        if meta == "managed_tabs":
+            return {
+                "tabs": [{"targetId": target_id, **entry} for target_id, entry in sorted(self.managed_tabs.items())]
+            }
+        if meta == "register_managed_tab":
+            target_id = req.get("target_id")
+            if not target_id:
+                return {"error": "target_id is required"}
+            now = time.time()
+            existing = self.managed_tabs.get(target_id, {})
+            url = req.get("url") or existing.get("url") or ""
+            self.managed_tabs[target_id] = {
+                "url": url,
+                "current_url": existing.get("current_url", url),
+                "created_at": existing.get("created_at", now),
+                "last_accessed": now,
+            }
+            return {"tab": {"targetId": target_id, **self.managed_tabs[target_id]}}
+        if meta == "touch_managed_tab":
+            target_id = req.get("target_id")
+            entry = self.managed_tabs.get(target_id)
+            if not entry:
+                return {"tab": None}
+            entry["last_accessed"] = time.time()
+            if "url" in req and req.get("url") is not None:
+                entry["current_url"] = req.get("url") or ""
+            return {"tab": {"targetId": target_id, **entry}}
+        if meta == "remove_managed_tab":
+            target_id = req.get("target_id")
+            removed = self.managed_tabs.pop(target_id, None)
+            return {"removed": bool(removed)}
         if meta == "pending_dialog":
             return {"dialog": self.dialog}
         if meta == "shutdown":
             self.stop.set()
             return {"ok": True}
+        if meta is not None:
+            return {"error": f"unknown meta request: {meta}"}
 
         method = req["method"]
         params = req.get("params") or {}
@@ -257,6 +303,13 @@ class Daemon:
             msg = str(error)
             if "Session with given id not found" in msg and session_id == self.session and session_id:
                 log(f"stale session {session_id}, re-attaching")
+                if self.target_id:
+                    try:
+                        await self._attach_target(self.target_id)
+                    except Exception as reattach_error:
+                        log(f"reattach {self.target_id}: {reattach_error}")
+                    else:
+                        return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
                 if await self.attach_first_page():
                     return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
             return {"error": msg}

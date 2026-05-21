@@ -18,9 +18,9 @@
 
 ## 操作原则
 
-- 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
+- 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，或者用 `open_or_attach_tab(url, activate=True)` 复用当前任务自己已经创建的 tab。
 - 后续命令恢复同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(target_id)` 抢用户当前浏览器焦点。只有需要让用户看到页面、登录、授权或手动操作时才使用 `switch_tab(target_id)`。
-- 只关闭自己创建的 tab，不关闭用户原有 tab。
+- 只关闭自己创建的 tab，不关闭用户原有 tab。`close_tab()` 默认会拒绝关闭未托管 tab。
 - 不要主动停止或重启浏览器。daemon stale 时可以 `restart_daemon()` 一次；杀浏览器只能作为最后排障手段并先说明影响。
 - 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权浏览器调试连接。
 - 每个可见动作后立即用 `page_info()` 或 `js(...)` 重新观察并验证，不要凭假设继续。
@@ -56,10 +56,10 @@ print(page_info())
 
 常用 helpers：
 
-- `new_tab(url, activate=True)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
+- `new_tab(url, activate=True)`, `open_or_attach_tab(url, activate=True)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
 - `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(x, y, dy=-300)`
 - `js(expression)`, `cdp("Domain.method", **params)`, `drain_events()`
-- `list_tabs(include_chrome=False)`, `current_tab()`, `attach_tab(target_id)`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
+- `list_tabs(include_chrome=False)`, `managed_tabs(include_chrome=False)`, `current_tab()`, `attach_tab(target_id)`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
 - `upload_file(selector, path)`, `http_get(url, headers=None)`
 - `capture_screenshot(path="/tmp/shot.png", full=False, max_dim=1800)` 仅用于可查看图片文件的调试或交付场景
 
@@ -68,7 +68,7 @@ print(page_info())
 `flocks browser` 的基础循环是：打开页面 -> 读取结构化状态 -> 执行动作 -> 重新读取状态验证。
 
 1. 如果是具体网站任务，先搜索已存在的站点经验。优先看 `~/.flocks/workspace/domain-skills/`；如果没有，再自己探索。
-2. 创建自己的 tab，等待加载，并读取页面基础状态与候选交互元素：
+2. 创建自己的 tab，保存 `targetId`，等待加载，并读取页面基础状态与候选交互元素：
 
 ```bash
 flocks browser -c '
@@ -95,6 +95,15 @@ print(state)
 '
 ```
 
+后续步骤继续使用同一个 tab 时，先恢复它：
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(page_info())
+'
+```
+
 3. 执行动作并验证。能稳定定位 DOM 时，优先用 `js(...)`；必须操作可见但 DOM 难以稳定定位的控件时，再使用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
 
 ```bash
@@ -118,13 +127,15 @@ print(page_info())
 ## Tab 与可见性
 
 - `new_tab(url, activate=True)` 会创建并 attach 到新 tab，默认同时让 tab 在浏览器中可见；这是需要用户登录或观察页面时的默认入口。
+- `open_or_attach_tab(url, activate=True)` 只会复用当前任务自己创建过的同 URL tab；不会按 URL 复用用户已有 tab。
 - `new_tab(url, activate=False)` 会创建后台 tab 并 attach，不主动抢当前可见 tab。
 - `attach_tab(target_id)` 只 attach 到目标 tab，不激活浏览器 UI；后续读取页面状态、导出数据、保存认证状态等命令优先使用它。
 - `switch_tab(target_id)` 会 attach 到目标 tab 并执行 `Target.activateTarget`，让目标 tab 在浏览器中可见；只在需要用户看到或手动操作时使用。
-- `close_tab(target_id, activate_next=False)` 可关闭自己创建的 tab 且不自动切到其他已打开 tab。
+- `managed_tabs()` 只列出当前任务创建并仍然存在的 tab，可用于调试和确认复用目标。
+- `close_tab(target_id, activate_next=False)` 默认只允许关闭自己创建的 tab，且不自动切到其他已打开 tab；确实需要关闭用户 tab 时必须显式传 `allow_unmanaged=True`。
 - `list_tabs()` 默认会包含 `chrome://`、`about:` 等内部页面；要面向用户页面时用 `list_tabs(include_chrome=False)`。
 - 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
-- 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户可见页面时，先 `ensure_real_tab()`。
+- 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户页面时，先 `ensure_real_tab()`；它会先 attach 到非内部页而不是主动激活浏览器 UI。
 
 ## 结构化观察与点击
 

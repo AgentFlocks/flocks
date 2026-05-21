@@ -85,6 +85,14 @@ def test_page_info_raises_clear_error_on_js_exception() -> None:
             helpers.page_info()
 
 
+def test_managed_tab_meta_degrades_when_daemon_is_old() -> None:
+    with patch("flocks.browser.helpers._send", side_effect=RuntimeError("'method'")):
+        assert helpers._managed_tabs() == []
+        helpers._register_managed_tab("target-1", "https://example.com")
+        helpers._touch_managed_tab("target-1")
+        helpers._remove_managed_tab("target-1")
+
+
 def test_attach_tab_does_not_activate_target() -> None:
     calls = []
     sent = []
@@ -103,7 +111,8 @@ def test_attach_tab_does_not_activate_target() -> None:
 
     assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
     assert ("Target.attachToTarget", {"targetId": "target-1", "flatten": True}) in calls
-    assert sent == [{"meta": "set_session", "session_id": "session-1", "target_id": "target-1"}]
+    assert sent[0] == {"meta": "set_session", "session_id": "session-1", "target_id": "target-1"}
+    assert sent[1] == {"meta": "touch_managed_tab", "target_id": "target-1"}
 
 
 def test_switch_tab_activates_then_attaches_target() -> None:
@@ -127,6 +136,7 @@ def test_switch_tab_activates_then_attaches_target() -> None:
 
 def test_new_tab_can_attach_in_background() -> None:
     calls = []
+    sent = []
 
     def fake_cdp(method, **kwargs):
         calls.append((method, kwargs))
@@ -138,35 +148,208 @@ def test_new_tab_can_attach_in_background() -> None:
 
     with (
         patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
-        patch("flocks.browser.helpers._send", return_value={"session_id": "session-1"}),
+        patch("flocks.browser.helpers._send", side_effect=lambda req: sent.append(req) or {"session_id": "session-1"}),
     ):
         assert helpers.new_tab("https://example.com", activate=False) == "target-1"
 
     assert calls[0] == ("Target.createTarget", {"url": "about:blank", "background": True})
     assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
     assert ("Page.navigate", {"url": "https://example.com"}) in calls
+    assert {"meta": "register_managed_tab", "target_id": "target-1", "url": "https://example.com"} in sent
+
+
+def test_close_tab_rejects_unmanaged_tabs_by_default() -> None:
+    with (
+        patch("flocks.browser.helpers._send", return_value={"tabs": []}),
+        patch("flocks.browser.helpers.cdp", return_value={"targetInfos": []}),
+    ):
+        with pytest.raises(RuntimeError, match="refusing to close unmanaged tab"):
+            helpers.close_tab("target-2")
 
 
 def test_close_tab_can_skip_activating_next_tab() -> None:
     calls = []
+    state = {
+        "managed": [{"targetId": "target-2", "url": "https://example.com", "current_url": "https://example.com"}],
+        "closed": False,
+    }
 
     def fake_cdp(method, **kwargs):
         calls.append((method, kwargs))
         if method == "Target.closeTarget":
+            state["closed"] = True
             return {"success": True}
         if method == "Target.getTargets":
             return {
-                "targetInfos": [
-                    {"type": "page", "targetId": "target-1", "url": "https://example.com", "title": "Example"}
-                ]
+                "targetInfos": (
+                    [{"type": "page", "targetId": "target-1", "url": "https://next.example.com", "title": "Next"}]
+                    if state["closed"]
+                    else [
+                        {"type": "page", "targetId": "target-2", "url": "https://example.com", "title": "Example"},
+                        {"type": "page", "targetId": "target-1", "url": "https://next.example.com", "title": "Next"},
+                    ]
+                )
             }
         return {}
 
-    with patch("flocks.browser.helpers.cdp", side_effect=fake_cdp):
-        assert helpers.close_tab("target-2", activate_next=False) == {"success": True}
+    def fake_send(req):
+        meta = req["meta"]
+        if meta == "managed_tabs":
+            return {"tabs": list(state["managed"])}
+        if meta == "remove_managed_tab":
+            state["managed"] = [tab for tab in state["managed"] if tab["targetId"] != req["target_id"]]
+            return {"removed": True}
+        raise AssertionError(req)
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", side_effect=fake_send),
+    ):
+        assert helpers.close_tab("target-2") == {"success": True}
 
     assert ("Target.closeTarget", {"targetId": "target-2"}) in calls
     assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
+
+
+def test_close_tab_can_activate_next_when_requested() -> None:
+    calls = []
+    state = {
+        "managed": [{"targetId": "target-2", "url": "https://example.com", "current_url": "https://example.com"}],
+        "closed": False,
+    }
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.closeTarget":
+            state["closed"] = True
+            return {"success": True}
+        if method == "Target.getTargets":
+            return {
+                "targetInfos": (
+                    [{"type": "page", "targetId": "target-1", "url": "https://next.example.com", "title": "Next"}]
+                    if state["closed"]
+                    else [
+                        {"type": "page", "targetId": "target-2", "url": "https://example.com", "title": "Example"},
+                        {"type": "page", "targetId": "target-1", "url": "https://next.example.com", "title": "Next"},
+                    ]
+                )
+            }
+        if method == "Target.attachToTarget":
+            return {"sessionId": "session-1"}
+        return {}
+
+    def fake_send(req):
+        meta = req["meta"]
+        if meta == "managed_tabs":
+            return {"tabs": list(state["managed"])}
+        if meta == "remove_managed_tab":
+            state["managed"] = []
+            return {"removed": True}
+        if meta == "set_session":
+            return {"session_id": req["session_id"]}
+        if meta == "touch_managed_tab":
+            return {"tab": None}
+        raise AssertionError(req)
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", side_effect=fake_send),
+    ):
+        assert helpers.close_tab("target-2", activate_next=True) == {"success": True}
+
+    assert ("Target.activateTarget", {"targetId": "target-1"}) in calls
+
+
+def test_open_or_attach_tab_reuses_matching_managed_tab() -> None:
+    calls = []
+    state = {
+        "managed": [
+            {
+                "targetId": "target-1",
+                "url": "https://example.com",
+                "current_url": "https://example.com/dashboard",
+                "created_at": 1.0,
+                "last_accessed": 1.0,
+            }
+        ]
+    }
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.getTargets":
+            return {
+                "targetInfos": [
+                    {
+                        "type": "page",
+                        "targetId": "target-1",
+                        "url": "https://example.com/dashboard",
+                        "title": "Example",
+                    }
+                ]
+            }
+        if method == "Target.attachToTarget":
+            return {"sessionId": "session-1"}
+        return {}
+
+    def fake_send(req):
+        meta = req["meta"]
+        if meta == "managed_tabs":
+            return {"tabs": list(state["managed"])}
+        if meta == "set_session":
+            return {"session_id": req["session_id"]}
+        if meta == "touch_managed_tab":
+            return {"tab": {"targetId": req["target_id"]}}
+        raise AssertionError(req)
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", side_effect=fake_send),
+    ):
+        assert helpers.open_or_attach_tab("https://example.com", activate=False) == "target-1"
+
+    assert ("Target.createTarget", {"url": "about:blank"}) not in calls
+    assert ("Target.attachToTarget", {"targetId": "target-1", "flatten": True}) in calls
+
+
+def test_open_or_attach_tab_does_not_reuse_unmanaged_user_tab() -> None:
+    calls = []
+    sent = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.getTargets":
+            return {
+                "targetInfos": [
+                    {"type": "page", "targetId": "user-tab", "url": "https://example.com", "title": "Example"}
+                ]
+            }
+        if method == "Target.createTarget":
+            return {"targetId": "managed-tab"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "session-1"}
+        return {}
+
+    def fake_send(req):
+        sent.append(req)
+        meta = req["meta"]
+        if meta == "managed_tabs":
+            return {"tabs": []}
+        if meta == "set_session":
+            return {"session_id": req["session_id"]}
+        if meta == "touch_managed_tab":
+            return {"tab": None}
+        if meta == "register_managed_tab":
+            return {"tab": {"targetId": req["target_id"]}}
+        raise AssertionError(req)
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", side_effect=fake_send),
+    ):
+        assert helpers.open_or_attach_tab("https://example.com", activate=False) == "managed-tab"
+
+    assert ("Target.createTarget", {"url": "about:blank", "background": True}) in calls
+    assert {"meta": "register_managed_tab", "target_id": "managed-tab", "url": "https://example.com"} in sent
 
 
 def test_list_tabs_excludes_edge_internal_pages_when_requested() -> None:
@@ -188,6 +371,44 @@ def test_list_tabs_excludes_edge_internal_pages_when_requested() -> None:
         tabs = helpers.list_tabs(include_chrome=False)
 
     assert tabs == [{"targetId": "real-page", "title": "Example", "url": "https://example.com"}]
+
+
+def test_ensure_real_tab_attaches_instead_of_switching() -> None:
+    calls = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.getTargets":
+            return {
+                "targetInfos": [
+                    {"type": "page", "targetId": "target-1", "url": "https://example.com", "title": "Example"}
+                ]
+            }
+        if method == "Target.attachToTarget":
+            return {"sessionId": "session-1"}
+        return {}
+
+    def fake_send(req):
+        meta = req["meta"]
+        if meta == "connection_status":
+            return {"target_id": "internal-tab", "page": {"targetId": "internal-tab", "url": "chrome://settings"}}
+        if meta == "set_session":
+            return {"session_id": req["session_id"]}
+        if meta == "touch_managed_tab":
+            return {"tab": None}
+        raise AssertionError(req)
+
+    with (
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", side_effect=fake_send),
+    ):
+        assert helpers.ensure_real_tab() == {
+            "targetId": "target-1",
+            "url": "https://example.com",
+            "title": "Example",
+        }
+
+    assert ("Target.activateTarget", {"targetId": "target-1"}) not in calls
 
 
 def test_save_state_writes_portable_schema(tmp_path) -> None:

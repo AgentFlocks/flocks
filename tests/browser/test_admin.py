@@ -138,6 +138,37 @@ def test_browser_connections_returns_attached_page(monkeypatch) -> None:
     ]
 
 
+def test_stop_all_daemons_restarts_every_visible_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "remote_1"])
+    restarted = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+
+    assert admin.stop_all_daemons() == ["default", "remote_1"]
+    assert restarted == ["default", "remote_1"]
+
+
+def test_daemon_protocol_probe_accepts_current_daemon(monkeypatch) -> None:
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"tabs":[]}\n']
+
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+
+    assert admin._daemon_has_current_protocol()
+
+
+def test_daemon_protocol_probe_rejects_old_managed_tab_protocol(monkeypatch) -> None:
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"error":"\'method\'"}\n']
+
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+
+    assert not admin._daemon_has_current_protocol()
+
+
 def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
     monkeypatch.setattr(admin, "_install_mode", lambda: "git")

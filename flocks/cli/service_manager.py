@@ -25,6 +25,8 @@ from typing import Iterable, Sequence
 
 import httpx
 
+from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - unavailable on Windows
@@ -1302,9 +1304,14 @@ def _stop_all_locked(
 ) -> None:
     """Stop frontend then backend while reusing the caller's lock."""
     fe_port, be_port = _resolve_stop_ports(paths, config)
-    _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
-    stop_one(fe_port, paths.frontend_pid, "WebUI", console)
-    stop_one(be_port, paths.backend_pid, "后端", console)
+    try:
+        _resolve_upgrade_runtime(console, frontend_port=fe_port, attempt_recover=False)
+        stop_one(fe_port, paths.frontend_pid, "WebUI", console)
+        stop_one(be_port, paths.backend_pid, "后端", console)
+    finally:
+        browser_daemons = stop_all_browser_daemons()
+        if browser_daemons and console is not None:
+            console.print(f"[flocks] 已停止 browser daemons: {', '.join(browser_daemons)}")
 
 
 def stop_all(console) -> None:

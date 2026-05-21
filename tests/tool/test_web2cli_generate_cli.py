@@ -128,7 +128,7 @@ class _FakeSession:
         self.cookies = _FakeCookieJar()
         self.headers = {}
 
-    def request(self, method, url, json=None):
+    def request(self, method, url, json=None, params=None, headers=None):
         raise AssertionError("request should not be called in cookie-loading tests")
 
 
@@ -228,6 +228,50 @@ def _sample_spec():
     }
 
 
+def _multi_operation_spec():
+    spec = _sample_spec()
+    spec["operations"] = [
+        {
+            "command": "alert-list",
+            "description": "List alerts",
+            "operation": {
+                "method": "POST",
+                "endpoint": "/api/alerts/list",
+                "queryTemplate": {},
+                "bodyTemplate": {"page": "${page}", "size": "${limit}"},
+                "headers": {"Content-Type": "application/json"},
+            },
+            "rowSource": {"path": "$.data.items[]", "collectionPath": "$.data.items[]"},
+            "args": spec["args"],
+            "columns": spec["columns"],
+            "verify": spec["verify"],
+        },
+        {
+            "command": "alarm-count",
+            "description": "Count alarms",
+            "operation": {
+                "method": "GET",
+                "endpoint": "/api/alarms/count",
+                "queryTemplate": {"page": "${page}"},
+                "bodyTemplate": {},
+                "headers": {"Accept": "application/json"},
+            },
+            "rowSource": {"path": "$", "collectionPath": "$"},
+            "args": [{"name": "page", "type": "int", "default": 1, "help": "Page number"}],
+            "columns": [{"name": "count", "path": "$.count", "relativePath": "count", "type": "int"}],
+            "verify": {
+                "args": {"page": 1},
+                "rowCount": {"min": 1},
+                "columns": ["count"],
+                "types": {"count": "int"},
+                "notEmpty": ["count"],
+                "patterns": {},
+            },
+        },
+    ]
+    return spec
+
+
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -245,8 +289,8 @@ class _FakeRequestSession(_FakeSession):
         self._payload = payload
         self.request_calls = []
 
-    def request(self, method, url, json=None, params=None):
-        self.request_calls.append({"method": method, "url": url, "json": json, "params": params})
+    def request(self, method, url, json=None, params=None, headers=None):
+        self.request_calls.append({"method": method, "url": url, "json": json, "params": params, "headers": headers})
         return _FakeResponse(self._payload)
 
 
@@ -270,6 +314,23 @@ def test_generate_python_cli_from_spec_supports_argparse_and_verify():
     assert 'parser.add_argument("--verify", action="store_true"' in output
     assert 'SPEC = {' in output
     assert 'def verify_rows(rows: List[Dict[str, Any]], verify_spec: Dict[str, Any])' in output
+
+
+def test_generate_python_cli_from_multi_operation_spec_registers_subcommands():
+    module = _load_module()
+
+    namespace = {"__name__": "generated_multi_cli"}
+    exec(module.generate_python_cli_from_spec(_multi_operation_spec()), namespace)
+
+    parser = namespace["build_parser"]()
+    help_text = parser.format_help()
+    parsed = parser.parse_args(["alert-list", "--page", "4", "--limit", "10"])
+
+    assert "alert-list" in help_text
+    assert "alarm-count" in help_text
+    assert parsed.command == "alert-list"
+    assert parsed.page == 4
+    assert parsed.limit == 10
 
 
 def test_generated_spec_cli_executes_request_and_projects_rows(tmp_path, monkeypatch):
@@ -301,10 +362,36 @@ def test_generated_spec_cli_executes_request_and_projects_rows(tmp_path, monkeyp
             "url": "https://example.com/api/items/list",
             "json": {"page": 3, "size": 5},
             "params": None,
+            "headers": {"Content-Type": "application/json"},
         }
     ]
     assert fake_session.cookies.set_calls == [
         {"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"}
+    ]
+
+
+def test_generated_multi_operation_cli_runs_selected_subcommand(monkeypatch):
+    module = _load_module()
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_multi_cli"}
+    exec(module.generate_python_cli_from_spec(_multi_operation_spec()), namespace)
+
+    client = namespace["APIClient"]()
+    entry = namespace["_operation_by_command"]("alert-list")
+    rows = client.run({"page": 2, "limit": 10}, entry)
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert fake_session.request_calls == [
+        {
+            "method": "POST",
+            "url": "https://example.com/api/alerts/list",
+            "json": {"page": 2, "size": 10},
+            "params": None,
+            "headers": {"Content-Type": "application/json"},
+        }
     ]
 
 

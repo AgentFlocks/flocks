@@ -12,7 +12,7 @@ import time
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 from . import DEFAULT_AGENT_WORKSPACE, INTERNAL_URL_PREFIXES
 from . import _ipc as ipc
@@ -64,6 +64,20 @@ def _send(req: dict) -> dict:
     if "error" in response:
         raise RuntimeError(response["error"])
     return response
+
+
+def _is_managed_tab_meta_unsupported(error: RuntimeError) -> bool:
+    msg = str(error)
+    return msg in {"'method'", "method"} or msg.startswith("unknown meta")
+
+
+def _send_managed_tab_meta(req: dict) -> dict:
+    try:
+        return _send(req)
+    except RuntimeError as error:
+        if _is_managed_tab_meta_unsupported(error):
+            return {}
+        raise
 
 
 def cdp(method: str, session_id: str | None = None, **params):
@@ -547,6 +561,75 @@ def list_tabs(include_chrome: bool = True) -> list[dict]:
     return output
 
 
+def _resolve_target_id(target) -> str | None:
+    if isinstance(target, dict):
+        return target.get("targetId")
+    return target
+
+
+def _normalize_tab_url(url: str | None) -> str:
+    parsed = urlparse(url or "")
+    if not parsed.scheme and not parsed.netloc:
+        return url or ""
+    netloc = parsed.netloc.lower()
+    if parsed.scheme == "http" and netloc.endswith(":80"):
+        netloc = netloc[:-3]
+    elif parsed.scheme == "https" and netloc.endswith(":443"):
+        netloc = netloc[:-4]
+    return urlunparse((parsed.scheme.lower(), netloc, parsed.path or "/", parsed.params, parsed.query, ""))
+
+
+def _managed_tabs() -> list[dict[str, Any]]:
+    return _send_managed_tab_meta({"meta": "managed_tabs"}).get("tabs", [])
+
+
+def _register_managed_tab(target_id: str, url: str) -> None:
+    _send_managed_tab_meta({"meta": "register_managed_tab", "target_id": target_id, "url": url})
+
+
+def _touch_managed_tab(target_id: str, url: str | None = None) -> None:
+    req = {"meta": "touch_managed_tab", "target_id": target_id}
+    if url is not None:
+        req["url"] = url
+    _send_managed_tab_meta(req)
+
+
+def _remove_managed_tab(target_id: str) -> None:
+    _send_managed_tab_meta({"meta": "remove_managed_tab", "target_id": target_id})
+
+
+def managed_tabs(include_chrome: bool = True) -> list[dict[str, Any]]:
+    """Return managed tabs that are still alive in the browser."""
+    registry = {tab["targetId"]: tab for tab in _managed_tabs() if tab.get("targetId")}
+    live_tabs = {tab["targetId"]: tab for tab in list_tabs(include_chrome=True)}
+    stale_ids = set(registry) - set(live_tabs)
+    for target_id in stale_ids:
+        _remove_managed_tab(target_id)
+        registry.pop(target_id, None)
+
+    output = []
+    for target_id, entry in registry.items():
+        live_tab = live_tabs.get(target_id)
+        if not live_tab:
+            continue
+        current_url = live_tab.get("url", "")
+        if current_url and current_url != entry.get("current_url"):
+            _touch_managed_tab(target_id, current_url)
+            entry = {**entry, "current_url": current_url}
+        if not include_chrome and current_url.startswith(INTERNAL):
+            continue
+        output.append(
+            {
+                **live_tab,
+                "url": entry.get("url", ""),
+                "current_url": entry.get("current_url", current_url),
+                "created_at": entry.get("created_at"),
+                "last_accessed": entry.get("last_accessed"),
+            }
+        )
+    return output
+
+
 def current_tab() -> dict:
     status = _send({"meta": "connection_status"})
     page = status.get("page") or {}
@@ -580,17 +663,18 @@ def _unmark_tab() -> None:
 
 def attach_tab(target) -> str:
     """Attach to a tab without making it the visible browser tab."""
-    target_id = target.get("targetId") if isinstance(target, dict) else target
+    target_id = _resolve_target_id(target)
     _unmark_tab()
     session_id = cdp("Target.attachToTarget", targetId=target_id, flatten=True)["sessionId"]
     _send({"meta": "set_session", "session_id": session_id, "target_id": target_id})
+    _touch_managed_tab(target_id)
     _mark_tab()
     return session_id
 
 
 def switch_tab(target) -> str:
     """Attach to a tab and make it the visible browser tab."""
-    target_id = target.get("targetId") if isinstance(target, dict) else target
+    target_id = _resolve_target_id(target)
     cdp("Target.activateTarget", targetId=target_id)
     return attach_tab(target_id)
 
@@ -604,20 +688,46 @@ def new_tab(url: str = "about:blank", activate: bool = True) -> str:
         switch_tab(target_id)
     else:
         attach_tab(target_id)
+    _register_managed_tab(target_id, url)
     if url != "about:blank":
         goto_url(url)
+        _touch_managed_tab(target_id, url)
     return target_id
 
 
-def close_tab(target=None, activate_next: bool = True):
+def open_or_attach_tab(url: str, activate: bool = True) -> str:
+    """Reuse a managed tab for the URL when possible, otherwise create one."""
+    normalized_target_url = _normalize_tab_url(url)
+    for tab in managed_tabs(include_chrome=True):
+        managed_url = _normalize_tab_url(tab.get("url"))
+        current_url = _normalize_tab_url(tab.get("current_url"))
+        if normalized_target_url not in {managed_url, current_url}:
+            continue
+        if activate:
+            switch_tab(tab["targetId"])
+        else:
+            attach_tab(tab["targetId"])
+        _touch_managed_tab(tab["targetId"], tab.get("current_url") or url)
+        return tab["targetId"]
+    return new_tab(url, activate=activate)
+
+
+def close_tab(target=None, activate_next: bool = False, allow_unmanaged: bool = False):
     """Close the specified tab or the currently attached tab."""
     if target is None:
         target_id = current_tab().get("targetId")
     else:
-        target_id = target.get("targetId") if isinstance(target, dict) else target
+        target_id = _resolve_target_id(target)
     if not target_id:
         raise RuntimeError("no current tab to close")
+    managed_ids = {tab["targetId"] for tab in managed_tabs(include_chrome=True)}
+    if not allow_unmanaged and target_id not in managed_ids:
+        raise RuntimeError(
+            f"refusing to close unmanaged tab {target_id}; pass allow_unmanaged=True to close a user tab explicitly"
+        )
     result = cdp("Target.closeTarget", targetId=target_id)
+    if target_id in managed_ids:
+        _remove_managed_tab(target_id)
     try:
         tabs = [tab for tab in list_tabs(include_chrome=False) if tab["targetId"] != target_id]
         if tabs and activate_next:
@@ -638,7 +748,7 @@ def ensure_real_tab():
             return current
     except Exception:
         pass
-    switch_tab(tabs[0]["targetId"])
+    attach_tab(tabs[0]["targetId"])
     return tabs[0]
 
 

@@ -1,3 +1,74 @@
+import pytest
+
+from flocks.browser.daemon import Daemon
+
+
+@pytest.mark.asyncio
+async def test_daemon_managed_tab_registry_round_trip() -> None:
+    daemon = Daemon()
+
+    registered = await daemon.handle({"meta": "register_managed_tab", "target_id": "target-1", "url": "https://example.com"})
+    assert registered["tab"]["targetId"] == "target-1"
+    assert registered["tab"]["url"] == "https://example.com"
+    assert registered["tab"]["current_url"] == "https://example.com"
+
+    touched = await daemon.handle(
+        {"meta": "touch_managed_tab", "target_id": "target-1", "url": "https://example.com/dashboard"}
+    )
+    assert touched["tab"]["current_url"] == "https://example.com/dashboard"
+
+    listed = await daemon.handle({"meta": "managed_tabs"})
+    assert listed["tabs"] == [
+        {
+            "targetId": "target-1",
+            "url": "https://example.com",
+            "current_url": "https://example.com/dashboard",
+            "created_at": registered["tab"]["created_at"],
+            "last_accessed": touched["tab"]["last_accessed"],
+        }
+    ]
+
+    removed = await daemon.handle({"meta": "remove_managed_tab", "target_id": "target-1"})
+    assert removed == {"removed": True}
+    assert (await daemon.handle({"meta": "managed_tabs"})) == {"tabs": []}
+
+
+@pytest.mark.asyncio
+async def test_daemon_retries_stale_session_on_same_target_before_fallback(monkeypatch) -> None:
+    daemon = Daemon()
+    daemon.session = "session-1"
+    daemon.target_id = "target-1"
+
+    class FakeCDP:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send_raw(self, method, params=None, session_id=None):
+            self.calls.append((method, params or {}, session_id))
+            if method == "Page.navigate" and session_id == "session-1":
+                raise RuntimeError("Session with given id not found")
+            if method == "Target.attachToTarget":
+                assert params == {"targetId": "target-1", "flatten": True}
+                return {"sessionId": "session-2"}
+            if method == "Target.getTargetInfo":
+                return {"targetInfo": {"targetId": "target-1", "url": "https://example.com", "type": "page"}}
+            if method in {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}:
+                return {}
+            if method == "Page.navigate" and session_id == "session-2":
+                return {"frameId": "frame-1"}
+            raise AssertionError((method, params, session_id))
+
+    async def fail_if_called():
+        raise AssertionError("attach_first_page should not be used when re-attaching the original target succeeds")
+
+    daemon.cdp = FakeCDP()
+    monkeypatch.setattr(daemon, "attach_first_page", fail_if_called)
+
+    response = await daemon.handle({"method": "Page.navigate", "params": {"url": "https://example.com/next"}})
+
+    assert response == {"result": {"frameId": "frame-1"}}
+    assert daemon.session == "session-2"
+    assert daemon.target_id == "target-1"
 from flocks.browser import daemon
 
 

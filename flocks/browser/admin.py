@@ -129,6 +129,51 @@ def active_browser_connections() -> int:
     return len(browser_connections())
 
 
+def _daemon_probe(name: str | None, req: dict) -> dict | None:
+    conn = None
+    try:
+        conn = ipc.connect(name or NAME, timeout=3.0)
+        conn.sendall((json.dumps(req) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(1 << 16)
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data)
+    except (
+        FileNotFoundError,
+        ConnectionRefusedError,
+        TimeoutError,
+        socket.timeout,
+        OSError,
+        KeyError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def _daemon_has_current_protocol(name: str | None = None) -> bool:
+    """Return True when the daemon supports the helper IPC protocol in this checkout."""
+    targets = _daemon_probe(name, {"method": "Target.getTargets", "params": {}})
+    if not targets or "result" not in targets:
+        return False
+    managed_tabs = _daemon_probe(name, {"meta": "managed_tabs"})
+    return bool(managed_tabs is not None and "tabs" in managed_tabs)
+
+
+def stop_all_daemons() -> list[str]:
+    """Stop all browser daemons visible from the current environment."""
+    names = _daemon_endpoint_names()
+    for name in names:
+        restart_daemon(name)
+    return names
+
+
 def _doctor_short_text(value, limit: int | None = None) -> str:
     limit = limit or DOCTOR_TEXT_LIMIT
     value = str(value)
@@ -140,19 +185,8 @@ def ensure_daemon(
 ) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
     if daemon_alive(name):
-        try:
-            sock = ipc.connect(name or NAME, timeout=3.0)
-            sock.sendall(b'{"method":"Target.getTargets","params":{}}\n')
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = sock.recv(1 << 16)
-                if not chunk:
-                    break
-                data += chunk
-            if b'"result"' in data:
-                return
-        except Exception:
-            pass
+        if _daemon_has_current_protocol(name):
+            return
         restart_daemon(name)
 
     import subprocess
