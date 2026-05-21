@@ -367,15 +367,28 @@ def _normalize_param_key(name: str) -> str:
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
+_SCOPED_SCHEMA_ALIASES: Dict[str, Dict[str, str]] = {
+    # SkyEye historically surfaced "威胁级别", which some callers guessed as
+    # threat_level. Keep the schema canonical on hazard_level, but accept the
+    # legacy guess only for this tool so we do not affect other products.
+    "skyeye_alarm_list": {
+        "threat_level": "hazard_level",
+    },
+}
+
+
 def _remap_schema_kwargs(
     kwargs: Dict[str, Any],
     declared_param_names: List[str],
+    *,
+    tool_name: str | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, str]]:
     """Remap guessed argument keys to declared schema keys when unambiguous.
 
     Only applies conservative normalization (case / separators), and only when
     a normalized key maps to exactly one declared parameter name.
     """
+    scoped_aliases = _SCOPED_SCHEMA_ALIASES.get(tool_name or "", {})
     declared_lookup: Dict[str, List[str]] = {}
     for name in declared_param_names:
         declared_lookup.setdefault(_normalize_param_key(name), []).append(name)
@@ -386,6 +399,12 @@ def _remap_schema_kwargs(
     for key, value in kwargs.items():
         if key in declared_param_names:
             remapped[key] = value
+            continue
+        scoped_target = scoped_aliases.get(key)
+        if scoped_target in declared_param_names:
+            aliases[key] = scoped_target
+            if scoped_target not in remapped:
+                remapped[scoped_target] = value
             continue
         normalized = _normalize_param_key(key)
         candidates = declared_lookup.get(normalized, [])
@@ -451,6 +470,7 @@ class Tool:
                 effective_kwargs, remap_aliases = _remap_schema_kwargs(
                     effective_kwargs,
                     declared_param_names,
+                    tool_name=self.info.name,
                 )
                 if remap_aliases:
                     log.info("tool.execute.param_remapped", {

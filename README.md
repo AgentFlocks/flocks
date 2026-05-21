@@ -180,9 +180,12 @@ default = true
 ### 4.2 Docker Issues
 
 Docker registry mirror in China
-``` bash
-ghcr.nju.edu.cn/agentflocks/flocks:latest
-```
+
+- 1ms GHCR: `docker pull ghcr.1ms.run/agentflocks/flocks:latest`
+- dockerproxy GHCR: `docker pull ghcr.dockerproxy.net/agentflocks/flocks:latest`
+- gh-proxy prefix: `docker pull docker.gh-proxy.com/ghcr.io/agentflocks/flocks:latest`
+- milu GHCR: `docker pull ghcr.milu.moe/agentflocks/flocks:latest`
+- NJU GHCR: `docker pull ghcr.nju.edu.cn/agentflocks/flocks:latest`
 
 Permission issues for `/home/flocks/.flocks` after startup:
 
