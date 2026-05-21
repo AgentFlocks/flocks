@@ -595,7 +595,6 @@ export default function FlocksproUpgradePage() {
     setRefreshingInstalled(true);
     setRequestError(null);
     try {
-      await consoleUpgradeApi.syncRevocations().catch(() => undefined);
       await refreshRequests();
       const packageStatus = await consoleUpgradeApi.getProPackageStatus();
       setProPackageStatus(packageStatus);

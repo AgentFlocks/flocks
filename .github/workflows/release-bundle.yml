@@ -3,9 +3,6 @@ name: Publish core artifact to Console
 on:
   release:
     types: [published]
-  push:
-    branches:
-      - feat/auth_hook
 
 permissions:
   id-token: write
@@ -47,22 +44,10 @@ jobs:
             exit 1
           fi
 
-          if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
-            OSS_VERSION="${RELEASE_TAG}"
-            RELEASE_NOTES="${RELEASE_NOTES_EVENT}"
-            RELEASE_ID="${RELEASE_ID_EVENT}"
-            ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
-            TRIGGER_KIND="release"
-            DEV_ONLY="false"
-          else
-            SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
-            OSS_VERSION="dev-feat-auth-hook-${SHORT_SHA}"
-            RELEASE_NOTES="dev push: ${GITHUB_REF_NAME}@${SHORT_SHA}"
-            RELEASE_ID="push-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/${GITHUB_SHA}.tar.gz"
-            TRIGGER_KIND="push"
-            DEV_ONLY="true"
-          fi
+          OSS_VERSION="${RELEASE_TAG}"
+          RELEASE_NOTES="${RELEASE_NOTES_EVENT}"
+          RELEASE_ID="${RELEASE_ID_EVENT}"
+          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
 
           TMP_ARCHIVE="$(mktemp)"
           curl -fSL "${ARCHIVE_URL}" -o "${TMP_ARCHIVE}"
@@ -71,14 +56,13 @@ jobs:
           METADATA_JSON="$(jq -nc \
             --arg archive_url "${ARCHIVE_URL}" \
             --arg archive_sha256 "${ARCHIVE_SHA256}" \
-            --arg trigger_kind "${TRIGGER_KIND}" \
+            --arg trigger_kind "release" \
             --arg ref_name "${GITHUB_REF_NAME}" \
             --arg commit_sha "${GITHUB_SHA}" \
             --arg run_id "${GITHUB_RUN_ID}" \
             --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
             --arg actor "${GITHUB_ACTOR}" \
             --arg workflow_ref "${GITHUB_WORKFLOW_REF}" \
-            --arg dev_only "${DEV_ONLY}" \
             '{
               schema_version:1,
               artifact_type:"flocks-core",
@@ -89,7 +73,7 @@ jobs:
               run_attempt:$run_attempt,
               actor:$actor,
               workflow_ref:$workflow_ref,
-              dev_only:($dev_only == "true"),
+              dev_only:false,
               source_archive_url:$archive_url,
               source_archive_sha256:$archive_sha256
             }')"

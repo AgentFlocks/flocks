@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform
 import secrets
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +16,40 @@ import httpx
 
 from flocks import __version__
 from flocks.storage.storage import Storage
+
+
+def _shared_console_session_path() -> Path:
+    raw = os.getenv("FLOCKS_ROOT", str(Path.home() / ".flocks"))
+    return Path(raw).expanduser() / "run" / "console-session.json"
+
+
+def _write_shared_console_session(session: dict[str, Any]) -> None:
+    path = _shared_console_session_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "console_session_token": session.get("console_session_token"),
+        "fingerprint": session.get("fingerprint"),
+        "install_id": session.get("install_id"),
+        "passport_uid": session.get("passport_uid"),
+        "expires_at": session.get("expires_at"),
+        "updated_at": session.get("updated_at") or _now_iso(),
+        "console_base_url": ConsoleLoginService.console_base_url(),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _delete_shared_console_session() -> None:
+    path = _shared_console_session_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
 
 
 def _now_iso() -> str:
@@ -133,6 +169,7 @@ class ConsoleLoginService:
         }
         await Storage.set("console:session", console_session, "json")
         await Storage.set(f"console:login:{console_login_id}", {**pending, "status": "exchanged"}, "json")
+        _write_shared_console_session(console_session)
         return console_session
 
     @classmethod
@@ -145,9 +182,11 @@ class ConsoleLoginService:
             try:
                 if _parse_iso(expires_at) <= datetime.now(UTC):
                     await Storage.delete("console:session")
+                    _delete_shared_console_session()
                     return None
             except ValueError:
                 await Storage.delete("console:session")
+                _delete_shared_console_session()
                 return None
         return raw
 
@@ -166,6 +205,7 @@ class ConsoleLoginService:
             )
             if resp.status_code in {400, 401, 403, 404}:
                 await Storage.delete("console:session")
+                _delete_shared_console_session()
                 raise ValueError("console 会话已失效，请重新登录")
             resp.raise_for_status()
             data = resp.json()
@@ -181,6 +221,7 @@ class ConsoleLoginService:
             "updated_at": now,
         }
         await Storage.set("console:session", refreshed_session, "json")
+        _write_shared_console_session(refreshed_session)
         return refreshed_session
 
     @classmethod
@@ -200,6 +241,7 @@ class ConsoleLoginService:
                 except Exception:
                     pass
         await Storage.delete("console:session")
+        _delete_shared_console_session()
 
     @classmethod
     async def require_console_session(cls) -> dict[str, Any]:

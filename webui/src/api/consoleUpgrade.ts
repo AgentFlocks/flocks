@@ -86,17 +86,6 @@ export const consoleUpgradeApi = {
     return response.data;
   },
 
-  syncRevocations: async (): Promise<{
-    revoked_license_ids: string[];
-    imported: boolean;
-    synced_license_ids?: string[];
-    activated_license_id?: string | null;
-    refreshed_license_id?: string | null;
-  }> => {
-    const response = await client.post('/api/console/licenses/sync-revocations');
-    return response.data;
-  },
-
   getRequest: async (requestId: string): Promise<UpgradeRequestStatus> => {
     const response = await client.get(`/api/console/upgrade-requests/${requestId}`);
     return response.data;

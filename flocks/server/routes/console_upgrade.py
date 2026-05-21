@@ -673,104 +673,6 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/licenses/sync-revocations")
-async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
-    require_admin(request)
-    console_base = _console_base_url()
-    if not console_base:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="FLOCKS_CONSOLE_BASE_URL 未配置")
-    try:
-        console_session = await ConsoleLoginService.require_console_session()
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
-    account_key = _console_session_account_key(console_session)
-    synced_license_ids: list[str] = []
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(f"{console_base}/v1/licenses/revocations", headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-
-            for request_id in await _list_request_ids():
-                raw = await Storage.get(_request_key(request_id))
-                if not isinstance(raw, dict):
-                    continue
-                record_account_key = _record_account_key(raw)
-                if account_key and record_account_key and record_account_key != account_key:
-                    continue
-                license_id = _record_license_id(raw)
-                if not license_id:
-                    continue
-                license_resp = await client.get(f"{console_base}/v1/licenses/{license_id}", headers=headers)
-                if license_resp.status_code == status.HTTP_404_NOT_FOUND:
-                    continue
-                license_resp.raise_for_status()
-                license_data = license_resp.json()
-                if isinstance(license_data, dict):
-                    _apply_console_license_data(raw, license_data)
-                    synced_license_ids.append(license_id)
-                    await Storage.set(_request_key(request_id), raw, "json")
-    except httpx.HTTPError as exc:
-        _raise_console_service_error(exc)
-
-    revoked_license_ids = data.get("revoked_license_ids", [])
-    if not isinstance(revoked_license_ids, list):
-        revoked_license_ids = []
-
-    imported = False
-    activated_license_id: str | None = None
-    refreshed_license_id: str | None = None
-    if not _is_pro_component_installed():
-        return {
-            "revoked_license_ids": [str(item) for item in revoked_license_ids],
-            "imported": imported,
-            "synced_license_ids": synced_license_ids,
-            "activated_license_id": activated_license_id,
-            "refreshed_license_id": refreshed_license_id,
-            "inactive_reason": "flockspro_not_installed",
-        }
-    try:
-        from flockspro.license.runtime import get_license_checker  # type: ignore[import-not-found]
-
-        checker = get_license_checker()
-        import_fn = getattr(checker, "import_revocation", None)
-        if callable(import_fn):
-            import_fn([str(item) for item in revoked_license_ids])
-            imported = True
-
-        current_status = _get_pro_capability_status()
-        current_license_id = str(current_status.get("license_id") or "")
-        current_inactive = (
-            current_license_id in {str(item) for item in revoked_license_ids}
-            or str(current_status.get("license_status") or "").lower() in _INACTIVE_LICENSE_STATUSES
-            or not current_status.get("pro_enabled")
-        )
-        if current_inactive:
-            target = await _latest_usable_issued_record(
-                {str(item) for item in revoked_license_ids},
-                account_key=_console_session_account_key(console_session),
-            )
-            target_license_id = _record_license_id(target) if target else ""
-            if target and target_license_id and target_license_id != current_license_id:
-                await _maybe_activate_pro_license(target, force=True)
-                await _maybe_refresh_pro_license(target)
-                activated_license_id = target_license_id
-                refreshed_license_id = target_license_id
-                await Storage.set(_request_key(str(target["request_id"])), target, "json")
-    except Exception as exc:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
-
-    return {
-        "revoked_license_ids": [str(item) for item in revoked_license_ids],
-        "imported": imported,
-        "synced_license_ids": synced_license_ids,
-        "activated_license_id": activated_license_id,
-        "refreshed_license_id": refreshed_license_id,
-    }
-
-
 @router.get("/upgrade-requests/{request_id}", response_model=UpgradeRequestStatus)
 async def get_upgrade_request(request_id: str, request: Request) -> UpgradeRequestStatus:
     require_admin(request)
@@ -790,8 +692,16 @@ async def refresh_upgrade_request(request_id: str, request: Request) -> UpgradeR
     console_base = _console_base_url()
     if console_base:
         try:
+            console_session = await ConsoleLoginService.require_console_session()
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
+        try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{console_base}/v1/upgrade-requests/{request_id}")
+                resp = await client.get(
+                    f"{console_base}/v1/upgrade-requests/{request_id}",
+                    headers=headers,
+                )
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
@@ -900,12 +810,22 @@ async def cancel_upgrade_request(request_id: str, request: Request) -> UpgradeRe
     console_base = _console_base_url()
     if console_base:
         try:
+            console_session = await ConsoleLoginService.require_console_session()
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        headers = {"Authorization": f"Bearer {console_session['console_session_token']}"}
+        try:
             async with httpx.AsyncClient(timeout=10) as client:
                 data: dict[str, Any] | None = None
-                resp = await client.post(f"{console_base}/v1/upgrade-requests/{request_id}/withdraw")
+                resp = await client.post(
+                    f"{console_base}/v1/upgrade-requests/{request_id}/withdraw",
+                    headers=headers,
+                )
                 if resp.status_code == status.HTTP_400_BAD_REQUEST:
-                    # Idempotent cancel UX: if console already changed state, sync latest instead of surfacing 400.
-                    latest_resp = await client.get(f"{console_base}/v1/upgrade-requests/{request_id}")
+                    latest_resp = await client.get(
+                        f"{console_base}/v1/upgrade-requests/{request_id}",
+                        headers=headers,
+                    )
                     if latest_resp.status_code == status.HTTP_200_OK:
                         latest_data = latest_resp.json()
                         latest_status = str(latest_data.get("status", "")).strip().lower()
