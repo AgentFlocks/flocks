@@ -35,7 +35,7 @@ description: 统一处理浏览器使用任务，支持 CDP 直连用户本机 C
 1. 优先判定为 `cdp-headless`
 2. 先读取 `references/cdp-headless.md`
 3. 依赖显式的 `BU_CDP_WS` / `BU_CDP_URL`，不要引导用户去操作日常浏览器 profile 的 inspect 授权页
-4. 如果没有显式 CDP endpoint，再提示用户按 `references/cdp-headless.md` 中当前平台对应的无头启动方式启动专用 Chromium 实例；优先复用安装脚本设置的 `AGENT_BROWSER_EXECUTABLE_PATH`
+4. 如果没有显式 CDP endpoint，再按 `references/cdp-headless.md` 中当前平台对应的后台启动方式启动专用 Chromium 实例；必须让浏览器进程脱离当前 shell 独立存活，并为它分配未被占用的专用 remote debugging 端口，优先复用安装脚本设置的 `AGENT_BROWSER_EXECUTABLE_PATH`
 5. 连通后再读取 `references/cdp-direct.md`，后续页面操作沿用通用 CDP 工作流
 
 ### 第0 步：先判断任务类型
@@ -90,7 +90,8 @@ browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后
 
 1. 模式一旦确定，立即读取对应的 reference。
 2. `cdp-headless` 是唯一例外：先读取 `references/cdp-headless.md` 完成浏览器启动与连接，再读取 `references/cdp-direct.md` 执行通用页面操作。
-3. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
+3. 在 `cdp-headless` 中，如果当前任务自己启动了专用浏览器实例，必须记录 PID / 日志 / 专用 profile，并只在任务结束或明确放弃后清理自己启动的实例；不要关闭用户提供的远程浏览器。
+4. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
 
 ## 产品经验Skill
 

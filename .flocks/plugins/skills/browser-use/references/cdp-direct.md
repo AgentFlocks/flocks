@@ -15,7 +15,7 @@
 - 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，或者用 `open_or_attach_tab(url, activate=True)` 复用当前任务自己已经创建的 tab。
 - 后续命令恢复同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(target_id)` 抢用户当前浏览器焦点。只有需要让用户看到页面、登录、授权或手动操作时才使用 `switch_tab(target_id)`。
 - 只关闭自己创建的 tab，不关闭用户原有 tab。`close_tab()` 默认会拒绝关闭未托管 tab。
-- 不要主动停止或重启浏览器。daemon stale 时可以 `restart_daemon()` 一次；
+- 不要主动停止或重启浏览器。唯一例外是 `cdp-headless` 场景下由当前任务临时启动的专用实例，这种实例可以在任务完全结束后按 `references/cdp-headless.md` 的生命周期约定关闭；daemon stale 时可以 `restart_daemon()` 一次；
 - 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权浏览器调试连接。
 - 每个可见动作后立即用 `page_info()` 或 `js(...)` 重新观察并验证，不要凭假设继续。
 - 优先读取 DOM、文本、可交互元素、URL、网络状态等结构化信息。
@@ -82,7 +82,7 @@ print(page_info())
 ```
 
 4. 需要提取数据时用 `js(...)` 或 `http_get(...)`。静态页面/接口批量抓取优先 `http_get`，不要浪费浏览器。
-5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明。
+5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明；如果当前任务还临时拉起了专用 headless 浏览器实例，tab 清理完后再按 `references/cdp-headless.md` 的约定决定是否关闭整个浏览器进程。
 
 注意：
 
