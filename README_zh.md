@@ -183,9 +183,12 @@ default = true
 ### 4.2 Docker 问题
 
 Docker 国内镜像地址
-``` bash
-ghcr.nju.edu.cn/agentflocks/flocks:latest
-```
+
+- 1ms GHCR：`docker pull ghcr.1ms.run/agentflocks/flocks:latest`
+- dockerproxy GHCR：`docker pull ghcr.dockerproxy.net/agentflocks/flocks:latest`
+- gh-proxy prefix：`docker pull docker.gh-proxy.com/ghcr.io/agentflocks/flocks:latest`
+- milu GHCR：`docker pull ghcr.milu.moe/agentflocks/flocks:latest`
+- NJU GHCR：`docker pull ghcr.nju.edu.cn/agentflocks/flocks:latest`
 
 启动后 `/home/flocks/.flocks` 权限问题
 

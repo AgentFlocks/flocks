@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "skills" / "skyeye-sensor-data-fetch" / "scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "skills" / "skyeye-sensor-data-fetch" / "scripts"
 
 
 @pytest.fixture
@@ -73,14 +73,14 @@ def _run_cli(cli_module, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> st
 
     result = CliRunner().invoke(cli_module.cli, args)
     assert result.exit_code == 0, result.output
-    return output.getvalue()
+    return output.getvalue() + result.output
 
 
 @pytest.mark.parametrize(
     ("args", "expected_fragment"),
     [
-        (["alarm", "count", "--days", "1"], "告警趋势"),
-        (["alarm", "list", "--days", "1"], "测试告警"),
+        (["alarm", "count", "--table", "--days", "1"], "告警趋势"),
+        (["alarm", "list", "--table", "--days", "1"], "测试告警"),
     ],
 )
 def test_skyeye_sensor_skill_cli_commands(
