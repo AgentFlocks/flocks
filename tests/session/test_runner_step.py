@@ -126,7 +126,7 @@ class TestToolLoopGuard:
         assert third["reason"] == "repeated_exact_tool_call"
         assert third["count"] == 3
 
-    def test_halts_after_same_tool_streak_with_varying_args(self):
+    def test_allows_same_tool_streak_with_varying_args(self):
         runner = _make_runner("ses_runner_tool_loop_same_tool")
         decision = None
 
@@ -140,9 +140,8 @@ class TestToolLoopGuard:
             )
 
         assert decision is not None
-        assert decision["action"] == "halt"
-        assert decision["reason"] == "same_tool_streak"
-        assert decision["count"] == 8
+        assert decision["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 1
 
     def test_resets_after_text_response(self):
         runner = _make_runner("ses_runner_tool_loop_reset")

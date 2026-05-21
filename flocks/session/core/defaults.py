@@ -33,4 +33,3 @@ DEFAULT_MAX_TOOL_STEPS = 1000
 # Cross-step loop guard thresholds. These complement the per-message doom-loop
 # detection in ``stream_processor.py`` by stopping repeated tool-only turns.
 REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD = 3
-SAME_TOOL_STREAK_HALT_THRESHOLD = 8
