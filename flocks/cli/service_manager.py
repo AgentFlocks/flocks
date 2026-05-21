@@ -1309,9 +1309,7 @@ def _stop_all_locked(
         stop_one(fe_port, paths.frontend_pid, "WebUI", console)
         stop_one(be_port, paths.backend_pid, "后端", console)
     finally:
-        browser_daemons = stop_all_browser_daemons()
-        if browser_daemons and console is not None:
-            console.print(f"[flocks] 已停止 browser daemons: {', '.join(browser_daemons)}")
+        stop_all_browser_daemons()
 
 
 def stop_all(console) -> None:

@@ -1611,7 +1611,7 @@ def test_stop_all_also_cleans_browser_daemons(monkeypatch, tmp_path: Path) -> No
     service_manager.stop_all(console=console)
 
     assert calls == ["WebUI", "后端", "browser"]
-    assert console.messages[-1] == "[flocks] 已停止 browser daemons: default, remote"
+    assert console.messages == []
 
 
 def test_build_status_lines_reads_port_from_runtime_record(monkeypatch, tmp_path: Path) -> None:

@@ -409,8 +409,12 @@ def run_setup() -> int:
     else:
         print(f"{BROWSER_LABEL} setup: attaching to your browser...")
     if daemon_alive():
-        print("daemon already running; nothing to do.")
-        return 0
+        if endpoint_name:
+            print(f"daemon already running; restarting to attach via {endpoint_name}.")
+            restart_daemon()
+        else:
+            print("daemon already running; nothing to do.")
+            return 0
     if not endpoint_name and not _chrome_running():
         print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1

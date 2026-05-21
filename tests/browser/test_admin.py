@@ -281,6 +281,25 @@ def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch,
     assert ensure_calls == [{"wait": 20.0}]
 
 
+def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:19222")
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: (_ for _ in ()).throw(AssertionError("should not probe browser")))
+    restarted = []
+    ensure_calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "attaching via BU_CDP_URL" in out
+    assert "restarting to attach via BU_CDP_URL" in out
+    assert "daemon is up." in out
+    assert restarted == [None]
+    assert ensure_calls == [{"wait": 20.0}]
+
+
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
     monkeypatch.setattr(admin, "_install_mode", lambda: "git")

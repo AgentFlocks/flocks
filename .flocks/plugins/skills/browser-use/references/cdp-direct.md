@@ -32,10 +32,31 @@ flocks browser --doctor
 
 通过`flocks browser -c '...'` 操作浏览器
 
-注意：
+## 语法说明
+
 - `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
 - 多行代码请直接写成真正的多行 shell 字符串或 heredoc；不要把 `\n` 当字面量塞进单引号参数里。
-- 在 `Windows PowerShell` 中，优先把 `flocks browser -c` 写成单行并用分号分隔；多行单引号字符串的换行/转义处理不稳定，容易让代码没有完整传给 Python。
+- 在 `Windows PowerShell` 中，默认写法是：把整段 Python 代码放进一对外层双引号里，并尽量压成单行，用分号分隔语句。
+- 在 `Windows PowerShell` 中，内层字符串尽量统一改用单引号，例如 `js('document.body.innerText.slice(0, 5000)')`；这样可以减少外层双引号、内层双引号互相打架导致的截断或变形。
+- 如果代码里本身包含很多引号、反引号、`$`，或者已经长到不适合单行，先写到临时 `.py` 文件，再用 `Get-Content -Raw` 读出后传给 `-c`；不要硬拼多行单引号字符串。
+
+Windows PowerShell 推荐示例：
+
+```powershell
+flocks browser -c "r = js('document.body.innerText.slice(0, 5000)'); print(r)"
+```
+
+Windows PowerShell 多行代码推荐写法：
+
+```powershell
+@'
+tid = new_tab("https://example.com", activate=True)
+wait_for_load()
+print(page_info())
+'@ | Set-Content "$env:TEMP\flocks-browser-cmd.py"
+
+flocks browser -c (Get-Content -Raw "$env:TEMP\flocks-browser-cmd.py")
+```
 
 ## 核心操作循环
 > 打开页面 -> 观察当前状态 -> 执行动作 -> 再观察验证

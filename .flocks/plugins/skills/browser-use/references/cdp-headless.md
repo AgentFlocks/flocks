@@ -177,6 +177,8 @@ flocks browser --setup
 flocks browser -c 'print(page_info())'
 ```
 
+如果当前 `BU_NAME` 下已有旧 daemon，显式设置 `BU_CDP_URL` / `BU_CDP_WS` 后再次执行 `flocks browser --setup`，应让 daemon 重新按当前 endpoint 建连，而不是继续复用旧连接。若仍怀疑有残留状态，先执行一次 `flocks browser -c 'restart_daemon()'` 再重试。
+
 如果验证成功，再继续读取 `references/cdp-direct.md` 并进入正常页面操作流程。
 
 ## 生命周期与关闭时机
@@ -224,6 +226,6 @@ fi
 - 无头专用 Chrome 与用户日常 Chrome 同时存在时，不要依赖 `DevToolsActivePort` 自动发现；它可能让 daemon 连到错误的浏览器实例
 - 这种场景必须显式设置 `BU_CDP_WS` 或 `BU_CDP_URL`，让 `flocks browser` 直连你启动的 headless 实例
 - 如果 `9222` 已被其他浏览器实例占用，不要复用它；改用新的专用端口，并同步更新浏览器启动参数与 `BU_CDP_URL` / `BU_CDP_WS`
-- 如果只是旧 daemon 残留，优先尝试 `flocks browser -c 'restart_daemon()'`
+- 如果显式切换到了新的 `BU_CDP_URL` / `BU_CDP_WS`，但当前 `BU_NAME` 下还有旧 daemon，优先让 `flocks browser --setup` 重新建连；若仍异常，再执行 `flocks browser -c 'restart_daemon()'`
 - 当 daemon 已经死掉但 POSIX socket 文件还留在 `/tmp/` 时，再手动删除 `/tmp/bu-default.sock`；Windows 不需要这一步
 - 如果失败并出现 `HTTP 403`，优先回头检查 headless Chrome 是否带了 `--remote-allow-origins=*`
