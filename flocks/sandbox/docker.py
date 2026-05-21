@@ -32,6 +32,7 @@ HOT_CONTAINER_WINDOW_MS = 5 * 60 * 1000
 async def exec_docker(
     args: List[str],
     allow_failure: bool = False,
+    timeout_s: Optional[float] = None,
 ) -> Tuple[str, str, int]:
     """
     执行 docker CLI 命令。
@@ -54,7 +55,20 @@ async def exec_docker(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout_bytes, stderr_bytes = await proc.communicate()
+    try:
+        if timeout_s is not None and timeout_s > 0:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        else:
+            stdout_bytes, stderr_bytes = await proc.communicate()
+    except asyncio.TimeoutError:
+        proc.kill()
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
+        timeout_msg = f"docker {' '.join(args)} timed out after {timeout_s}s"
+        if not allow_failure:
+            raise RuntimeError(timeout_msg)
+        return stdout, stderr.strip() or timeout_msg, 124
     stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
     stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
     exit_code = proc.returncode or 0

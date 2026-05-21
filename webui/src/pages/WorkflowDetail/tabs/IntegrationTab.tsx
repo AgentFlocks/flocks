@@ -8,6 +8,7 @@ import {
   workflowAPI,
   Workflow,
   WorkflowService,
+  WorkflowServiceDriver,
   SyslogListenerStatus,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
@@ -62,11 +63,17 @@ function PublishSection({ workflowId }: { workflowId: string }) {
   const [stopping, setStopping] = useState(false);
   const [error, setError] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [serviceDriver, setServiceDriver] = useState<WorkflowServiceDriver>('local');
 
   const fetchService = useCallback(async () => {
     try {
       const res = await workflowAPI.getService(workflowId);
       setService(res.data);
+      if (res.data?.status === 'running' && (res.data.driver === 'local' || res.data.driver === 'docker')) {
+        setServiceDriver(res.data.driver);
+      } else {
+        setServiceDriver('local');
+      }
     } catch {
       setService(null);
     } finally {
@@ -82,8 +89,11 @@ function PublishSection({ workflowId }: { workflowId: string }) {
     setError('');
     setPublishing(true);
     try {
-      const res = await workflowAPI.publish(workflowId);
+      const res = await workflowAPI.publish(workflowId, { driver: serviceDriver });
       setService(res.data);
+      if (res.data.driver === 'local' || res.data.driver === 'docker') {
+        setServiceDriver(res.data.driver);
+      }
     } catch (err: unknown) {
       setError(extractErrorMessage(err, t('detail.run.publishFailed')));
     } finally {
@@ -127,6 +137,12 @@ function PublishSection({ workflowId }: { workflowId: string }) {
             </div>
           ) : service && service.status !== 'stopped' ? (
             <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2">
+                <span className="text-xs text-gray-500">{t('detail.run.serviceDriver')}</span>
+                <span className="text-xs font-medium text-gray-700">
+                  {service.driver === 'docker' ? t('detail.run.driverDocker') : t('detail.run.driverLocal')}
+                </span>
+              </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">Invoke URL</label>
                 <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
@@ -177,6 +193,39 @@ function PublishSection({ workflowId }: { workflowId: string }) {
               <p className="text-xs text-gray-500 leading-relaxed">
                 {t('detail.run.publishDesc')}
               </p>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">{t('detail.run.serviceDriver')}</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(['local', 'docker'] as WorkflowServiceDriver[]).map(driver => {
+                    const selected = serviceDriver === driver;
+                    return (
+                      <button
+                        key={driver}
+                        type="button"
+                        onClick={() => setServiceDriver(driver)}
+                        disabled={publishing}
+                        className={`rounded-lg border px-3 py-2 text-left transition-colors ${
+                          selected
+                            ? 'border-red-500 bg-red-50 text-red-700'
+                            : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'
+                        } disabled:opacity-60`}
+                      >
+                        <span className="flex items-center gap-1 text-xs font-semibold">
+                          {driver === 'local' ? t('detail.run.driverLocal') : t('detail.run.driverDocker')}
+                          {driver === 'local' && (
+                            <span className="rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700">
+                              {t('detail.run.recommended')}
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-[11px] text-gray-500 mt-0.5">
+                          {driver === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={handlePublish}
@@ -187,7 +236,9 @@ function PublishSection({ workflowId }: { workflowId: string }) {
                 {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
               </button>
               {publishing && (
-                <p className="text-xs text-gray-400 text-center">{t('detail.run.dockerStarting')}</p>
+                <p className="text-xs text-gray-400 text-center">
+                  {serviceDriver === 'docker' ? t('detail.run.dockerStarting') : t('detail.run.localStarting')}
+                </p>
               )}
             </div>
           )}

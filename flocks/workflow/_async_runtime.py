@@ -33,9 +33,9 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import threading
-from typing import Any, Coroutine
+from typing import Any, Callable, Coroutine
 
-__all__ = ["run_sync", "_get_loop_for_testing"]
+__all__ = ["run_sync", "run_sync_cancellable", "_get_loop_for_testing"]
 
 
 _lock = threading.Lock()
@@ -82,19 +82,7 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
     return _loop
 
 
-def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
-    """Run *coro* on the shared background loop and return its result.
-
-    Blocks the caller's thread until the coroutine completes, mirroring the
-    semantics of the previous ``asyncio.run``-based implementation.
-
-    Raises:
-        RuntimeError: invoked from the dedicated loop's own thread (would
-            self-deadlock). Call sites from inside the loop should simply
-            ``await`` the coroutine directly.
-    """
-    loop = _ensure_loop()
-
+def _assert_not_workflow_loop(coro: Coroutine[Any, Any, Any], loop: asyncio.AbstractEventLoop) -> None:
     try:
         current = asyncio.get_running_loop()
     except RuntimeError:
@@ -111,6 +99,21 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
             "(would self-deadlock); await the coroutine directly instead."
         )
 
+
+def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
+    """Run *coro* on the shared background loop and return its result.
+
+    Blocks the caller's thread until the coroutine completes, mirroring the
+    semantics of the previous ``asyncio.run``-based implementation.
+
+    Raises:
+        RuntimeError: invoked from the dedicated loop's own thread (would
+            self-deadlock). Call sites from inside the loop should simply
+            ``await`` the coroutine directly.
+    """
+    loop = _ensure_loop()
+    _assert_not_workflow_loop(coro, loop)
+
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     try:
         return future.result()
@@ -124,6 +127,29 @@ def run_sync(coro: Coroutine[Any, Any, Any]) -> Any:
         # and would otherwise be silently swallowed and retried / rewrapped
         # as ValueError by workflow fallback logic.
         raise asyncio.CancelledError() from exc
+
+
+def run_sync_cancellable(
+    coro: Coroutine[Any, Any, Any],
+    cancel_checker: Callable[[], bool],
+    *,
+    poll_interval_s: float = 0.1,
+) -> Any:
+    """Run *coro* on the shared loop while polling a sync cancellation hook."""
+    loop = _ensure_loop()
+    _assert_not_workflow_loop(coro, loop)
+
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    while True:
+        if cancel_checker():
+            future.cancel()
+            raise asyncio.CancelledError()
+        try:
+            return future.result(timeout=poll_interval_s)
+        except concurrent.futures.TimeoutError:
+            continue
+        except concurrent.futures.CancelledError as exc:
+            raise asyncio.CancelledError() from exc
 
 
 def _get_loop_for_testing() -> tuple[asyncio.AbstractEventLoop | None, threading.Thread | None]:

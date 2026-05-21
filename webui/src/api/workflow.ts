@@ -145,7 +145,10 @@ export interface WorkflowService {
   status: 'publishing' | 'running' | 'stopped' | 'error';
   publishedAt: number;
   containerName?: string;
+  driver?: 'local' | 'docker';
 }
+
+export type WorkflowServiceDriver = 'local' | 'docker';
 
 /** Saved syslog listener config (per workflow). */
 export interface SyslogConfig {
@@ -233,8 +236,8 @@ export const workflowAPI = {
   export: (id: string) =>
     client.get<WorkflowJSON>(`/api/workflow/${id}/export`),
 
-  publish: (id: string) =>
-    client.post<WorkflowService>(`/api/workflow/${id}/publish`, undefined, { timeout: 300000 }),
+  publish: (id: string, data?: { driver?: WorkflowServiceDriver }) =>
+    client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 300000 }),
 
   unpublish: (id: string) =>
     client.post<{ ok: boolean }>(`/api/workflow/${id}/unpublish`),
