@@ -46,7 +46,6 @@ jobs:
 
           OSS_VERSION="${RELEASE_TAG}"
           RELEASE_NOTES="${RELEASE_NOTES_EVENT}"
-          RELEASE_ID="${RELEASE_ID_EVENT}"
           ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
 
           TMP_ARCHIVE="$(mktemp)"
@@ -81,8 +80,6 @@ jobs:
             -H "authorization: Bearer ${OPS_TOKEN}" \
             -F "oss_version=${OSS_VERSION}" \
             -F "release_notes=${RELEASE_NOTES}" \
-            -F "source_repo=${{ github.repository }}" \
-            -F "github_release_id=${RELEASE_ID}" \
             -F "published_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
             -F "metadata=${METADATA_JSON}" \
             -F "file=@${TMP_ARCHIVE};filename=${ARCHIVE_FILENAME};type=application/gzip"
