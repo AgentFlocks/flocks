@@ -1,15 +1,15 @@
-import { useState, useEffect, useRef } from 'react';
-import ReactMarkdown from 'react-markdown';
-import rehypeHighlight from 'rehype-highlight';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import remarkBreaks from 'remark-breaks';
-import remarkGfm from 'remark-gfm';
-import 'highlight.js/styles/github-dark.css';
+import { useState, useEffect, useRef } from "react";
+import ReactMarkdown from "react-markdown";
+import rehypeHighlight from "rehype-highlight";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+import "highlight.js/styles/github-dark.css";
 
 const sanitizeSchema = {
   ...defaultSchema,
-  strip: [...(defaultSchema.strip || []), 'style'],
+  strip: [...(defaultSchema.strip || []), "style"],
 };
 
 /**
@@ -64,6 +64,8 @@ export interface StreamingMarkdownProps {
   content: string;
   /** When true, content updates are throttled to one per animation frame */
   isStreaming: boolean;
+  /** Optional wrapper classes for surface-specific typography tuning */
+  className?: string;
 }
 
 /**
@@ -71,14 +73,22 @@ export interface StreamingMarkdownProps {
  * Content updates are throttled via requestAnimationFrame while streaming,
  * limiting ReactMarkdown re-parses to ~60fps instead of every SSE chunk.
  */
-export function StreamingMarkdown({ content, isStreaming }: StreamingMarkdownProps) {
+export function StreamingMarkdown({
+  content,
+  isStreaming,
+  className = "",
+}: StreamingMarkdownProps) {
   const displayContent = useStreamingContent(content, isStreaming);
 
   return (
-    <div className="prose prose-sm max-w-none">
+    <div className={`prose prose-sm max-w-none ${className}`.trim()}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [rehypeHighlight, { detect: false, ignoreMissing: true }]]}
+        rehypePlugins={[
+          rehypeRaw,
+          [rehypeSanitize, sanitizeSchema],
+          [rehypeHighlight, { detect: false, ignoreMissing: true }],
+        ]}
         components={{
           code({ className, children, ...props }) {
             // Detect block-level code (fenced code block):
@@ -86,9 +96,9 @@ export function StreamingMarkdown({ content, isStreaming }: StreamingMarkdownPro
             // 2. Has the hljs class (added by rehype-highlight)
             // 3. Children end with \n (react-markdown appends trailing newline for blocks)
             const isBlock =
-              /language-/.test(className || '') ||
-              /\bhljs\b/.test(className || '') ||
-              String(children ?? '').endsWith('\n');
+              /language-/.test(className || "") ||
+              /\bhljs\b/.test(className || "") ||
+              String(children ?? "").endsWith("\n");
             if (!isBlock) {
               return (
                 <code

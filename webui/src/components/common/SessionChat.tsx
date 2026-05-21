@@ -16,25 +16,51 @@
  * - 消息复制、时间戳等可选功能
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain } from 'lucide-react';
-import { StreamingMarkdown } from './StreamingMarkdown';
-import { useTranslation } from 'react-i18next';
-import LoadingSpinner from './LoadingSpinner';
-import { QuestionTool } from './QuestionTool';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
-import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
-import ImageLightbox from './ImageLightbox';
-import { useSessionMessages } from '@/hooks/useSessions';
-import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
-import { useReasoningToggle } from '@/hooks/useReasoningToggle';
-import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
-import { sessionApi } from '@/api/session';
-import client, { getApiBase } from '@/api/client';
-import { commandAPI, type Command } from '@/api/skill';
-import { useToast } from './Toast';
-import { workspaceAPI } from '@/api/workspace';
-import { formatSmartTime } from '@/utils/time';
+import { useState, useCallback, useRef, useEffect, useMemo, memo } from "react";
+import {
+  Send,
+  Loader2,
+  ChevronDown,
+  Square,
+  Copy,
+  User,
+  FileText,
+  AlertCircle,
+  X,
+  RefreshCw,
+  Pencil,
+  Save,
+  ImageIcon,
+  Paperclip,
+  ArrowUp,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  Brain,
+} from "lucide-react";
+import { StreamingMarkdown } from "./StreamingMarkdown";
+import { useTranslation } from "react-i18next";
+import LoadingSpinner from "./LoadingSpinner";
+import { QuestionTool } from "./QuestionTool";
+import DelegateTaskCard, {
+  isDelegateTool,
+  shouldRenderDelegateTaskCard,
+} from "./DelegateTaskCard";
+import CommandDropdown, { parseSlashCommand } from "./CommandDropdown";
+import ImageLightbox from "./ImageLightbox";
+import { useSessionMessages } from "@/hooks/useSessions";
+import { useSSE, type SSEConnectionStatus } from "@/hooks/useSSE";
+import { useReasoningToggle } from "@/hooks/useReasoningToggle";
+import {
+  usePendingQuestions,
+  type PendingQuestion,
+} from "@/hooks/usePendingQuestions";
+import { sessionApi } from "@/api/session";
+import client, { getApiBase } from "@/api/client";
+import { commandAPI, type Command } from "@/api/skill";
+import { useToast } from "./Toast";
+import { workspaceAPI } from "@/api/workspace";
+import { formatSmartTime } from "@/utils/time";
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -44,8 +70,8 @@ import {
   isImageFile,
   readFileAsDataUrl,
   type ImagePartData,
-} from '@/utils/imageUpload';
-import type { Message, MessagePart, ToolState } from '@/types';
+} from "@/utils/imageUpload";
+import type { Message, MessagePart, ToolState } from "@/types";
 
 export { formatSmartTime };
 export type { SSEConnectionStatus };
@@ -108,7 +134,9 @@ export interface SessionChatProps {
   /** Display configuration (compact, showActions, showTimestamp) */
   display?: SessionChatDisplay;
   /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
-  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  welcomeContent?:
+    | React.ReactNode
+    | ((setInput: (text: string) => void) => React.ReactNode);
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -130,7 +158,10 @@ export interface SessionChatProps {
    * session id) directly without an empty ``async (..) => { await ... }``
    * shim.
    */
-  onCreateAndSend?: (text: string, imageParts?: ImagePartData[]) => Promise<unknown> | unknown;
+  onCreateAndSend?: (
+    text: string,
+    imageParts?: ImagePartData[],
+  ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
   /**
@@ -140,7 +171,7 @@ export interface SessionChatProps {
   supportsVision?: boolean | null;
 }
 
-type AttachmentStatus = 'uploading' | 'success' | 'error';
+type AttachmentStatus = "uploading" | "success" | "error";
 
 interface ComposerAttachment {
   id: string;
@@ -160,19 +191,19 @@ interface ComposerAttachment {
 // the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
 // back doesn't lose the half-typed message. Keyed per session so two sessions
 // don't share a draft, and namespaced to avoid colliding with other features.
-import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
+import { readChatDraft, writeChatDraft } from "@/utils/chatDraft";
 
 // Backend stages emitted by ``SessionCompaction.process`` /
 // ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
 // Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
 type CompactionStage =
-  | 'load'
-  | 'strategy'
-  | 'chunk_done'
-  | 'merge_started'
-  | 'merge_done'
-  | 'summarize_done'
-  | 'complete';
+  | "load"
+  | "strategy"
+  | "chunk_done"
+  | "merge_started"
+  | "merge_done"
+  | "summarize_done"
+  | "complete";
 
 interface CompactionStageEntry {
   stage: CompactionStage;
@@ -196,43 +227,48 @@ function describeCompactionStage(
 ): string | null {
   const data = entry.data;
   const num = (k: string): number | undefined =>
-    typeof data[k] === 'number' ? (data[k] as number) : undefined;
+    typeof data[k] === "number" ? (data[k] as number) : undefined;
   switch (entry.stage) {
-    case 'load': {
-      const count = num('message_count');
-      return t('chat.compactionStage.load', { count: count ?? '?' });
+    case "load": {
+      const count = num("message_count");
+      return t("chat.compactionStage.load", { count: count ?? "?" });
     }
-    case 'strategy': {
-      const decision = typeof data.decision === 'string' ? data.decision : 'single_pass';
-      const chunks = num('chunks');
+    case "strategy": {
+      const decision =
+        typeof data.decision === "string" ? data.decision : "single_pass";
+      const chunks = num("chunks");
       if (chunks && chunks > 1) {
-        return t('chat.compactionStage.strategyChunked', { count: chunks });
+        return t("chat.compactionStage.strategyChunked", { count: chunks });
       }
       return t(`chat.compactionStage.strategy_${decision}`, {
-        defaultValue: t('chat.compactionStage.strategyGeneric'),
+        defaultValue: t("chat.compactionStage.strategyGeneric"),
       });
     }
-    case 'chunk_done':
+    case "chunk_done":
       // Per-chunk events drive the percentage bar but are intentionally
       // hidden from the milestone list — users asked for a single
       // overall progress signal rather than N noisy "chunk X/N done"
       // lines that arrive out of order under ``asyncio.gather``.
       return null;
-    case 'merge_started':
-      return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
-    case 'merge_done': {
+    case "merge_started":
+      return t("chat.compactionStage.mergeStarted", {
+        count: num("chunks_merged") ?? "?",
+      });
+    case "merge_done": {
       const ok = data.ok !== false;
-      const ms = num('duration_ms');
+      const ms = num("duration_ms");
       return ok
-        ? t('chat.compactionStage.mergeDone', {
-            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+        ? t("chat.compactionStage.mergeDone", {
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : "?",
           })
-        : t('chat.compactionStage.mergeFailed');
+        : t("chat.compactionStage.mergeFailed");
     }
-    case 'summarize_done':
-      return t('chat.compactionStage.summarizeDone', { chars: num('summary_chars') ?? 0 });
-    case 'complete':
-      return t('chat.compactionStage.complete');
+    case "summarize_done":
+      return t("chat.compactionStage.summarizeDone", {
+        chars: num("summary_chars") ?? 0,
+      });
+    case "complete":
+      return t("chat.compactionStage.complete");
     default:
       return null;
   }
@@ -246,16 +282,18 @@ function describeCompactionStage(
  * Merge consecutive assistant messages into single display items.
  * Summary messages (finish === 'summary') and compacted messages are kept as-is.
  */
-export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMessage[] {
+export function mergeConsecutiveAssistantMessages(
+  messages: Message[],
+): MergedMessage[] {
   const result: MergedMessage[] = [];
 
   for (const msg of messages) {
-    if (msg.finish === 'summary') {
+    if (msg.finish === "summary") {
       result.push({ ...msg, parts: [...msg.parts], _merged: false });
       continue;
     }
 
-    if (msg.role !== 'assistant') {
+    if (msg.role !== "assistant") {
       result.push(msg);
       continue;
     }
@@ -263,9 +301,9 @@ export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMe
     const last = result[result.length - 1];
     if (
       last &&
-      last.role === 'assistant' &&
+      last.role === "assistant" &&
       last._merged &&
-      last.finish !== 'summary' &&
+      last.finish !== "summary" &&
       !!last.compacted === !!msg.compacted
     ) {
       last.parts = [...last.parts, ...msg.parts];
@@ -283,7 +321,7 @@ export const USER_MESSAGE_WIDE_CHAR_THRESHOLD = 120;
 /** Single unbroken tokens longer than this (URLs, curl flags) trigger wide layout. */
 export const USER_MESSAGE_WIDE_TOKEN_THRESHOLD = 48;
 /** Cap for auto-expanded user bubbles in full layout (assistant stays full width). */
-export const USER_MESSAGE_WIDE_MAX_WIDTH_CLASS = 'max-w-[80%]';
+export const USER_MESSAGE_WIDE_MAX_WIDTH_CLASS = "max-w-[80%]";
 
 export function isUserMessageWide({
   text,
@@ -297,11 +335,15 @@ export function isUserMessageWide({
   if (isEditing || hasAttachments) return true;
   const trimmed = text.trim();
   if (!trimmed) return false;
-  if (trimmed.includes('\n')) return true;
+  if (trimmed.includes("\n")) return true;
   if (trimmed.length > USER_MESSAGE_WIDE_CHAR_THRESHOLD) return true;
-  const longestLine = trimmed.split('\n').reduce((max, line) => Math.max(max, line.length), 0);
+  const longestLine = trimmed
+    .split("\n")
+    .reduce((max, line) => Math.max(max, line.length), 0);
   if (longestLine > USER_MESSAGE_WIDE_TOKEN_THRESHOLD) return true;
-  const longestToken = trimmed.split(/\s+/).reduce((max, token) => Math.max(max, token.length), 0);
+  const longestToken = trimmed
+    .split(/\s+/)
+    .reduce((max, token) => Math.max(max, token.length), 0);
   return longestToken > USER_MESSAGE_WIDE_TOKEN_THRESHOLD;
 }
 
@@ -317,20 +359,20 @@ export function getMessageBubbleClassName({
   wide?: boolean;
 }): string {
   if (compact) {
-    return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
+    return `max-w-[90%] break-words ${
       isUser
-        ? 'border border-gray-200 bg-white text-gray-900 shadow-sm'
-        : 'border border-gray-200 bg-white text-gray-900 shadow-sm'
+        ? "rounded-[22px] border border-sky-100 bg-sky-50/85 px-3.5 py-2.5 text-slate-900 shadow-[0_12px_24px_-22px_rgba(14,165,233,0.85)]"
+        : "rounded-xl border border-gray-200/90 bg-white px-4 py-3 text-gray-900 shadow-[0_16px_30px_-24px_rgba(15,23,42,0.3)]"
     }`;
   }
 
   const useFullWidth = !isUser || isEditing || wide;
-  const widthClass = useFullWidth ? 'w-full' : 'w-auto';
+  const widthClass = useFullWidth ? "w-full" : "w-auto";
 
-  return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
+  return `${widthClass} break-words ${
     isUser
-      ? 'border border-gray-200 bg-white text-gray-900 shadow-sm'
-      : 'border border-gray-200 bg-white text-gray-900 shadow-sm'
+      ? "rounded-[28px] border border-sky-100/90 bg-sky-50/80 px-5 py-3.5 text-slate-900 shadow-[0_18px_42px_-30px_rgba(14,165,233,0.4)]"
+      : "rounded-2xl border border-gray-200/90 bg-white/95 px-6 py-4 text-gray-900 shadow-[0_1px_2px_rgba(15,23,42,0.05),0_18px_40px_-28px_rgba(15,23,42,0.26)]"
   }`;
 }
 
@@ -339,12 +381,11 @@ export function getRegenerateTruncateTarget(
   messageId: string,
 ): { messageId: string; includeTarget?: boolean } {
   const targetMessage = messages.find((message) => message.id === messageId);
-  if (targetMessage?.role === 'assistant' && targetMessage.parentID) {
+  if (targetMessage?.role === "assistant" && targetMessage.parentID) {
     return { messageId: targetMessage.parentID };
   }
   return { messageId, includeTarget: true };
 }
-
 
 // ============================================================================
 // Main component
@@ -353,12 +394,27 @@ export function getRegenerateTruncateTarget(
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
-const WORKSPACE_UPLOAD_DEST = 'uploads';
-const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
+const WORKSPACE_UPLOAD_DEST = "uploads";
+const FILE_INPUT_ACCEPT_DOCS =
+  ".txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx";
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
 const ALLOWED_UPLOAD_EXTENSIONS = new Set([
-  'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
-  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx',
+  "txt",
+  "md",
+  "json",
+  "yaml",
+  "yml",
+  "xml",
+  "csv",
+  "pdf",
+  "doc",
+  "docx",
+  "html",
+  "htm",
+  "ppt",
+  "pptx",
+  "xls",
+  "xlsx",
 ]);
 
 function isAllowedUploadFile(file: File): boolean {
@@ -370,7 +426,7 @@ export default function SessionChat({
   live = false,
   placeholder,
   hideInput = false,
-  className = '',
+  className = "",
   emptyText,
   suggestions,
   nodeRef,
@@ -389,13 +445,13 @@ export default function SessionChat({
   supportsVision,
   toolbarSlot,
 }: SessionChatProps) {
-  const { t } = useTranslation('session');
+  const { t } = useTranslation("session");
   const toast = useToast();
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
-  const effectivePlaceholder = placeholder ?? t('chat.placeholder');
-  const effectiveEmptyText = emptyText ?? t('chat.emptyText');
+  const effectivePlaceholder = placeholder ?? t("chat.placeholder");
+  const effectiveEmptyText = emptyText ?? t("chat.emptyText");
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
@@ -407,9 +463,12 @@ export default function SessionChat({
   // Lightbox preview for composer thumbnails. Shares the same overlay
   // component used by message bubbles so the click-to-enlarge gesture is
   // consistent across the upload tray and the rendered chat history.
-  const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
+  const [composerPreview, setComposerPreview] = useState<{
+    url: string;
+    alt?: string;
+  } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
-  const [compactingMessage, setCompactingMessage] = useState('');
+  const [compactingMessage, setCompactingMessage] = useState("");
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -417,7 +476,9 @@ export default function SessionChat({
   // source via useMemo below — keeping a parallel state would risk drift if
   // either updater missed an event (and earlier did: a stale closure read
   // froze ``done`` at 1 for multi-chunk runs).
-  const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
+  const [compactionStages, setCompactionStages] = useState<
+    CompactionStageEntry[]
+  >([]);
   // Single weighted progress percentage (0–100) covering the whole
   // compaction pipeline. Per-chunk events drive the parallel-summary
   // band (10–70%); merge owns 70–95%; summary write + completion
@@ -432,47 +493,47 @@ export default function SessionChat({
   const compactionPercent = useMemo<number | null>(() => {
     if (compactionStages.length === 0) return null;
     const seenStage = new Set(compactionStages.map((e) => e.stage));
-    if (seenStage.has('complete')) return 100;
+    if (seenStage.has("complete")) return 100;
 
-    const strategyEvent = compactionStages.find((e) => e.stage === 'strategy');
+    const strategyEvent = compactionStages.find((e) => e.stage === "strategy");
     const useChunked = strategyEvent
       ? Boolean((strategyEvent.data as { use_chunked?: boolean }).use_chunked)
       : false;
 
     if (useChunked) {
-      if (seenStage.has('summarize_done')) return 97;
-      if (seenStage.has('merge_done')) return 95;
-      if (seenStage.has('merge_started')) return 75;
+      if (seenStage.has("summarize_done")) return 97;
+      if (seenStage.has("merge_done")) return 95;
+      if (seenStage.has("merge_started")) return 75;
       let total = 0;
       const seenChunks = new Set<number>();
       for (const entry of compactionStages) {
-        if (entry.stage !== 'chunk_done') continue;
+        if (entry.stage !== "chunk_done") continue;
         const d = entry.data as { chunk?: number; total?: number };
-        if (typeof d.chunk === 'number') seenChunks.add(d.chunk);
-        if (typeof d.total === 'number' && d.total > total) total = d.total;
+        if (typeof d.chunk === "number") seenChunks.add(d.chunk);
+        if (typeof d.total === "number" && d.total > total) total = d.total;
       }
       if (total > 0) {
         return Math.min(70, 10 + Math.round((seenChunks.size / total) * 60));
       }
-      if (seenStage.has('strategy')) return 10;
-      if (seenStage.has('load')) return 5;
+      if (seenStage.has("strategy")) return 10;
+      if (seenStage.has("load")) return 5;
       return 1;
     }
 
-    if (seenStage.has('summarize_done')) return 95;
-    if (seenStage.has('strategy')) return 20;
-    if (seenStage.has('load')) return 10;
+    if (seenStage.has("summarize_done")) return 95;
+    if (seenStage.has("strategy")) return 20;
+    if (seenStage.has("load")) return 10;
     return 1;
   }, [compactionStages]);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingPartId, setEditingPartId] = useState<string | null>(null);
-  const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
-  const [editingText, setEditingText] = useState('');
+  const [editingRole, setEditingRole] = useState<Message["role"] | null>(null);
+  const [editingText, setEditingText] = useState("");
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
-  const initialMessageSentRef = useRef('');
+  const initialMessageSentRef = useRef("");
   const abortingRef = useRef(false);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
@@ -496,15 +557,21 @@ export default function SessionChat({
   // Slash command autocomplete state
   const [commands, setCommands] = useState<Command[]>([]);
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
-  const [commandQuery, setCommandQuery] = useState('');
+  const [commandQuery, setCommandQuery] = useState("");
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const commandsLoadedRef = useRef(false);
   const successfulDocAttachments = useMemo(
-    () => attachments.filter((a) => a.status === 'success' && a.workspacePath && !a.isImage),
+    () =>
+      attachments.filter(
+        (a) => a.status === "success" && a.workspacePath && !a.isImage,
+      ),
     [attachments],
   );
   const successfulImageAttachments = useMemo(
-    () => attachments.filter((a) => a.status === 'success' && a.isImage && a.dataUrl),
+    () =>
+      attachments.filter(
+        (a) => a.status === "success" && a.isImage && a.dataUrl,
+      ),
     [attachments],
   );
   // Keep backward-compat alias (used in slash-command guard)
@@ -512,14 +579,21 @@ export default function SessionChat({
     () => [...successfulDocAttachments, ...successfulImageAttachments],
     [successfulDocAttachments, successfulImageAttachments],
   );
-  const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !isStreaming && !hasUploadingFiles &&
-    (!!input.trim() || successfulDocAttachments.length > 0 || successfulImageAttachments.length > 0);
+  const hasUploadingFiles = attachments.some(
+    (attachment) => attachment.status === "uploading",
+  );
+  const canSend =
+    !sending &&
+    !isStreaming &&
+    !hasUploadingFiles &&
+    (!!input.trim() ||
+      successfulDocAttachments.length > 0 ||
+      successfulImageAttachments.length > 0);
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
     requestAnimationFrame(() => {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
+      messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     });
   }, []);
 
@@ -530,7 +604,9 @@ export default function SessionChat({
     requestAnimationFrame(() => {
       const el = scrollContainerRef.current;
       if (el) {
-        isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+        isAtBottomRef.current =
+          el.scrollHeight - el.scrollTop - el.clientHeight <=
+          SCROLL_BOTTOM_THRESHOLD_PX;
       }
       rafScheduledRef.current = false;
     });
@@ -545,14 +621,18 @@ export default function SessionChat({
     updateMessagePart,
     replaceMessageText,
     truncateAfterMessage,
-  } =
-    useSessionMessages(sessionId || undefined);
+  } = useSessionMessages(sessionId || undefined);
 
   // Keep a ref to latest messages so handleAbort can read it without stale closure
   const messagesRef = useRef(messages);
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
-  const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
+  const hasUserMessage = useMemo(
+    () => messages.some((m) => m.role === "user"),
+    [messages],
+  );
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -566,13 +646,19 @@ export default function SessionChat({
 
       if (!properties || !sessionId) return;
 
-      if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
+      if (
+        type === "message.updated" &&
+        properties.info?.sessionID === sessionId
+      ) {
         updateMessage(properties.info);
         if (properties.info.finish || properties.info.time?.completed) {
           refetch();
           // If this is the message we aborted, don't stop streaming — the user may have
           // already sent a new message whose response is now arriving.
-          if (abortedMessageIdRef.current && abortedMessageIdRef.current === properties.info.id) {
+          if (
+            abortedMessageIdRef.current &&
+            abortedMessageIdRef.current === properties.info.id
+          ) {
             abortedMessageIdRef.current = null;
             abortingRef.current = false;
           } else {
@@ -581,16 +667,22 @@ export default function SessionChat({
             abortedMessageIdRef.current = null;
           }
         } else if (
-          properties.info.role === 'assistant' &&
+          properties.info.role === "assistant" &&
           !properties.info.finish &&
           !abortingRef.current
         ) {
           setIsStreaming(true);
         }
-      } else if (type === 'message.part.updated' && properties.part?.sessionID === sessionId) {
+      } else if (
+        type === "message.part.updated" &&
+        properties.part?.sessionID === sessionId
+      ) {
         updateMessagePart(properties.part, properties.delta);
         scrollToBottom();
-      } else if (type === 'question.asked' && properties.sessionID === sessionId) {
+      } else if (
+        type === "question.asked" &&
+        properties.sessionID === sessionId
+      ) {
         const callID: string | undefined = properties.tool?.callID;
         const requestId: string | undefined = properties.id;
         if (callID && requestId) {
@@ -598,18 +690,23 @@ export default function SessionChat({
           scrollToBottom();
         }
       } else if (
-        (type === 'question.replied' || type === 'question.rejected') &&
+        (type === "question.replied" || type === "question.rejected") &&
         properties.sessionID === sessionId
       ) {
         const requestId: string | undefined = properties.requestID;
         if (requestId) {
           removeByRequestId(requestId);
         }
-      } else if (type === 'session.status' && properties.sessionID === sessionId) {
-        if (properties.status?.type === 'compacting') {
+      } else if (
+        type === "session.status" &&
+        properties.sessionID === sessionId
+      ) {
+        if (properties.status?.type === "compacting") {
           setIsCompacting(true);
           isCompactingRef.current = true;
-          setCompactingMessage(properties.status.message || t('chat.compacting'));
+          setCompactingMessage(
+            properties.status.message || t("chat.compacting"),
+          );
           // Reset progress state on each new compaction cycle so a stale
           // run's stages do not leak into a fresh "Compacting..." panel.
           setCompactionStages([]);
@@ -617,11 +714,14 @@ export default function SessionChat({
           const wasCompacting = isCompactingRef.current;
           setIsCompacting(false);
           isCompactingRef.current = false;
-          setCompactingMessage('');
+          setCompactingMessage("");
           setCompactionStages([]);
           if (wasCompacting) refetch();
         }
-      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
+      } else if (
+        type === "session.compaction_progress" &&
+        properties.sessionID === sessionId
+      ) {
         const stage = properties.stage as CompactionStage | undefined;
         const data = (properties.data ?? {}) as Record<string, unknown>;
         if (!stage) return;
@@ -631,22 +731,31 @@ export default function SessionChat({
         // ``asyncio.gather``; deduplicate by chunk index here so SSE
         // reconnects / accidental re-deliveries are idempotent.
         setCompactionStages((prev) => {
-          if (stage === 'chunk_done') {
-            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
-            if (chunkIdx !== undefined && prev.some(
-              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
-            )) {
+          if (stage === "chunk_done") {
+            const chunkIdx =
+              typeof data.chunk === "number" ? data.chunk : undefined;
+            if (
+              chunkIdx !== undefined &&
+              prev.some(
+                (e) =>
+                  e.stage === "chunk_done" &&
+                  (e.data as { chunk?: number }).chunk === chunkIdx,
+              )
+            ) {
               return prev;
             }
           }
           return [...prev, { stage, data, ts: Date.now() }];
         });
-      } else if (type === 'session.error' && properties.sessionID === sessionId) {
+      } else if (
+        type === "session.error" &&
+        properties.sessionID === sessionId
+      ) {
         setIsStreaming(false);
         setIsCompacting(false);
         setCompactionStages([]);
         abortingRef.current = false;
-        onError?.(properties.error?.message || t('chat.placeholder'));
+        onError?.(properties.error?.message || t("chat.placeholder"));
       }
     },
     [
@@ -667,7 +776,10 @@ export default function SessionChat({
       try {
         await submitAnswer(callID, requestId, answers);
       } catch (err: unknown) {
-        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
+        toast.error(
+          t("chat.error", "Error"),
+          err instanceof Error ? err.message : String(err),
+        );
       }
     },
     [submitAnswer],
@@ -678,7 +790,10 @@ export default function SessionChat({
       try {
         await submitReject(callID, requestId);
       } catch (err: unknown) {
-        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
+        toast.error(
+          t("chat.error", "Error"),
+          err instanceof Error ? err.message : String(err),
+        );
       }
     },
     [submitReject],
@@ -691,11 +806,19 @@ export default function SessionChat({
       if (!sessionId) return;
       refetch();
       fetchPendingQuestions(sessionId).catch((err) => {
-        console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
+        console.warn(
+          "[SessionChat] Failed to recover pending questions after reconnect:",
+          err,
+        );
       });
     },
     enabled: sseEnabled,
-    reconnect: { enabled: true, maxRetries: 5, initialDelay: 1000, maxDelay: 10000 },
+    reconnect: {
+      enabled: true,
+      maxRetries: 5,
+      initialDelay: 1000,
+      maxDelay: 10000,
+    },
   });
 
   // Forward SSE connection status to parent
@@ -712,10 +835,12 @@ export default function SessionChat({
   const autoResize = useCallback(() => {
     const el = textareaRef.current;
     if (!el) return;
-    el.style.height = 'auto';
+    el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, compact ? 96 : 200)}px`;
   }, [compact]);
-  useEffect(() => { autoResize(); }, [input, autoResize]);
+  useEffect(() => {
+    autoResize();
+  }, [input, autoResize]);
 
   // Reset state on session change
   useEffect(() => {
@@ -723,7 +848,7 @@ export default function SessionChat({
     setAttachments([]);
     setIsDragOver(false);
     setIsCompacting(false);
-    setCompactingMessage('');
+    setCompactingMessage("");
     setCompactionStages([]);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -752,20 +877,20 @@ export default function SessionChat({
 
     const checkStatus = async () => {
       try {
-        const res = await client.get('/api/session/status');
+        const res = await client.get("/api/session/status");
         const status = res.data[sessionId];
-        if (status?.type === 'busy') {
+        if (status?.type === "busy") {
           setIsStreaming(true);
-        } else if (status?.type === 'compacting') {
+        } else if (status?.type === "compacting") {
           setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
-          setCompactingMessage(status.message || t('chat.compacting'));
+          setCompactingMessage(status.message || t("chat.compacting"));
         }
       } catch {
         if (messages.length > 0) {
           const lastMsg = messages[messages.length - 1];
-          if (lastMsg.role === 'assistant' && !lastMsg.finish) {
+          if (lastMsg.role === "assistant" && !lastMsg.finish) {
             setIsStreaming(true);
           }
         }
@@ -774,7 +899,7 @@ export default function SessionChat({
       try {
         await fetchPendingQuestions(sessionId);
       } catch (err) {
-        console.warn('[SessionChat] Failed to recover pending questions:', err);
+        console.warn("[SessionChat] Failed to recover pending questions:", err);
       }
     };
     checkStatus();
@@ -784,10 +909,10 @@ export default function SessionChat({
   useEffect(() => {
     if (!sessionId) return;
     const handler = () => {
-      if (document.visibilityState === 'visible') refetch();
+      if (document.visibilityState === "visible") refetch();
     };
-    document.addEventListener('visibilitychange', handler);
-    return () => document.removeEventListener('visibilitychange', handler);
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
   }, [sessionId, refetch]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
@@ -802,7 +927,9 @@ export default function SessionChat({
       timer = setTimeout(() => refetch(), 1500);
     }
     prevIsCompactingRef.current = isCompacting;
-    return () => { if (timer) clearTimeout(timer); };
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
   }, [isCompacting, sessionId, refetch]);
 
   /** Lazily load slash commands on first use (for autocomplete dropdown). */
@@ -815,14 +942,14 @@ export default function SessionChat({
       // Merge client-side /new command into the autocomplete list
       setCommands([
         {
-          name: 'new',
-          canonical_name: 'new',
-          description: 'Create a new session',
-          template: '',
+          name: "new",
+          canonical_name: "new",
+          description: "Create a new session",
+          template: "",
           hidden: false,
           aliases: [],
           visible_surfaces: [],
-          execution_kind: 'session_control',
+          execution_kind: "session_control",
           allow_attachments: false,
           requires_existing_session: false,
           channel_safe: false,
@@ -835,229 +962,320 @@ export default function SessionChat({
   }, []);
 
   const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
-    if (items.length === 0) return '';
+    if (items.length === 0) return "";
     const lines = items
       .map((attachment) => attachment.workspacePath)
       .filter((path): path is string => Boolean(path))
       .map((path) => `- ${path}`);
-    if (lines.length === 0) return '';
-    return `Attached files:\n${lines.join('\n')}`;
+    if (lines.length === 0) return "";
+    return `Attached files:\n${lines.join("\n")}`;
   }, []);
 
-  const buildMessageText = useCallback((rawText: string, items: ComposerAttachment[]) => {
-    const attachmentBlock = buildAttachmentBlock(items);
-    const content = rawText
-      ? attachmentBlock
-        ? `${rawText}\n\n${attachmentBlock}`
-        : rawText
-      : attachmentBlock;
+  const buildMessageText = useCallback(
+    (rawText: string, items: ComposerAttachment[]) => {
+      const attachmentBlock = buildAttachmentBlock(items);
+      const content = rawText
+        ? attachmentBlock
+          ? `${rawText}\n\n${attachmentBlock}`
+          : rawText
+        : attachmentBlock;
 
-    if (!content) return '';
-    return nodeRef
-      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${content}`
-      : content;
-  }, [buildAttachmentBlock, nodeRef]);
+      if (!content) return "";
+      return nodeRef
+        ? `@@node:${nodeRef.id}|${nodeRef.type}\n${content}`
+        : content;
+    },
+    [buildAttachmentBlock, nodeRef],
+  );
 
-  const updateAttachment = useCallback((id: string, updater: (attachment: ComposerAttachment) => ComposerAttachment) => {
-    setAttachments((prev) => prev.map((attachment) => (
-      attachment.id === id ? updater(attachment) : attachment
-    )));
-  }, []);
-
-  const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
-    if (entries.length === 0) return;
-    try {
-      const response = await workspaceAPI.upload(
-        entries.map((entry) => entry.file),
-        WORKSPACE_UPLOAD_DEST,
-        'chat',
+  const updateAttachment = useCallback(
+    (
+      id: string,
+      updater: (attachment: ComposerAttachment) => ComposerAttachment,
+    ) => {
+      setAttachments((prev) =>
+        prev.map((attachment) =>
+          attachment.id === id ? updater(attachment) : attachment,
+        ),
       );
-      const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => prev.map((attachment) => {
-        const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
-        if (entryIndex < 0) return attachment;
-        const result = uploaded[entryIndex];
-        if (!result || result.error || !result.path) {
-          return {
-            ...attachment,
-            status: 'error',
-            error: result?.error || t('chat.upload.errorGeneric'),
-          };
-        }
-        return {
-          ...attachment,
-          name: result.name || attachment.name,
-          status: 'success',
-          workspacePath: result.abs_path ?? result.path,
-          error: undefined,
-        };
-      }));
-    } catch (err: any) {
-      const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
-      setAttachments((prev) => prev.map((attachment) => (
-        entries.some((entry) => entry.id === attachment.id)
-          ? { ...attachment, status: 'error', error: detail }
-          : attachment
-      )));
-    }
-  }, [t]);
+    },
+    [],
+  );
 
-  const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
-    if (files.length === 0) return;
-    const validDocEntries: Array<{ id: string; file: File }> = [];
-    const validImageFiles: Array<{ id: string; file: File }> = [];
-    const invalidAttachments: ComposerAttachment[] = [];
-    let imageRejectedToastShown = false;
+  const uploadSelectedFiles = useCallback(
+    async (entries: Array<{ id: string; file: File }>) => {
+      if (entries.length === 0) return;
+      try {
+        const response = await workspaceAPI.upload(
+          entries.map((entry) => entry.file),
+          WORKSPACE_UPLOAD_DEST,
+          "chat",
+        );
+        const uploaded = response.data.uploaded ?? [];
+        setAttachments((prev) =>
+          prev.map((attachment) => {
+            const entryIndex = entries.findIndex(
+              (entry) => entry.id === attachment.id,
+            );
+            if (entryIndex < 0) return attachment;
+            const result = uploaded[entryIndex];
+            if (!result || result.error || !result.path) {
+              return {
+                ...attachment,
+                status: "error",
+                error: result?.error || t("chat.upload.errorGeneric"),
+              };
+            }
+            return {
+              ...attachment,
+              name: result.name || attachment.name,
+              status: "success",
+              workspacePath: result.abs_path ?? result.path,
+              error: undefined,
+            };
+          }),
+        );
+      } catch (err: any) {
+        const detail =
+          err?.response?.data?.detail ??
+          err?.message ??
+          t("chat.upload.errorGeneric");
+        setAttachments((prev) =>
+          prev.map((attachment) =>
+            entries.some((entry) => entry.id === attachment.id)
+              ? { ...attachment, status: "error", error: detail }
+              : attachment,
+          ),
+        );
+      }
+    },
+    [t],
+  );
 
-    files.forEach((file, index) => {
-      const id = `attachment-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+  const queueFilesForUpload = useCallback(
+    (
+      files: File[],
+      { imageBlocked = false }: { imageBlocked?: boolean } = {},
+    ) => {
+      if (files.length === 0) return;
+      const validDocEntries: Array<{ id: string; file: File }> = [];
+      const validImageFiles: Array<{ id: string; file: File }> = [];
+      const invalidAttachments: ComposerAttachment[] = [];
+      let imageRejectedToastShown = false;
 
-      if (isImageFile(file)) {
-        if (imageBlocked || supportsVision === false) {
-          // Show a toast once for the whole batch of rejected images
-          if (!imageRejectedToastShown) {
-            imageRejectedToastShown = true;
-            toast.error(t('chat.upload.imageNotSupported'));
+      files.forEach((file, index) => {
+        const id = `attachment-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+
+        if (isImageFile(file)) {
+          if (imageBlocked || supportsVision === false) {
+            // Show a toast once for the whole batch of rejected images
+            if (!imageRejectedToastShown) {
+              imageRejectedToastShown = true;
+              toast.error(t("chat.upload.imageNotSupported"));
+            }
+          } else {
+            validImageFiles.push({ id, file });
           }
-        } else {
-          validImageFiles.push({ id, file });
+          return;
         }
-        return;
+
+        if (!isAllowedUploadFile(file)) {
+          invalidAttachments.push({
+            id,
+            file,
+            name: file.name,
+            status: "error",
+            error: t("chat.upload.invalidType"),
+          });
+          return;
+        }
+        validDocEntries.push({ id, file });
+      });
+
+      if (invalidAttachments.length > 0) {
+        setAttachments((prev) => [...prev, ...invalidAttachments]);
       }
 
-      if (!isAllowedUploadFile(file)) {
-        invalidAttachments.push({
-          id,
-          file,
-          name: file.name,
-          status: 'error',
-          error: t('chat.upload.invalidType'),
+      // Handle document uploads (server upload)
+      if (validDocEntries.length > 0) {
+        setAttachments((prev) => [
+          ...prev,
+          ...validDocEntries.map(({ id, file }) => ({
+            id,
+            file,
+            name: file.name,
+            status: "uploading" as const,
+          })),
+        ]);
+        void uploadSelectedFiles(validDocEntries);
+      }
+
+      // Handle image files (read as base64, no server upload)
+      if (validImageFiles.length > 0) {
+        setAttachments((prev) => [
+          ...prev,
+          ...validImageFiles.map(({ id, file }) => ({
+            id,
+            file,
+            name: file.name,
+            status: "uploading" as const,
+            isImage: true,
+          })),
+        ]);
+        // Pick compression aggressiveness from how many images are arriving
+        // together. A 4-image drop gets a tighter cap than a single image so
+        // the combined base64 body still fits inside upstream gateway limits.
+        const batchOpts = batchCompressOptions(validImageFiles.length);
+        validImageFiles.forEach(({ id, file }) => {
+          compressImageFile(file, batchOpts)
+            .then((compressed) =>
+              readFileAsDataUrl(compressed).then((dataUrl) => ({
+                compressed,
+                dataUrl,
+              })),
+            )
+            .then(({ compressed, dataUrl }) => {
+              setAttachments((prev) =>
+                prev.map((a) =>
+                  a.id === id
+                    ? {
+                        ...a,
+                        file: compressed,
+                        name: compressed.name,
+                        status: "success" as const,
+                        dataUrl,
+                        isImage: true,
+                      }
+                    : a,
+                ),
+              );
+            })
+            .catch(() => {
+              setAttachments((prev) =>
+                prev.map((a) =>
+                  a.id === id
+                    ? {
+                        ...a,
+                        status: "error" as const,
+                        error: t("chat.upload.errorGeneric"),
+                      }
+                    : a,
+                ),
+              );
+            });
         });
-        return;
       }
-      validDocEntries.push({ id, file });
-    });
+    },
+    [t, toast, uploadSelectedFiles, supportsVision],
+  );
 
-    if (invalidAttachments.length > 0) {
-      setAttachments((prev) => [...prev, ...invalidAttachments]);
-    }
+  const handleFileSelection = useCallback(
+    (fileList: FileList | null) => {
+      if (!fileList || fileList.length === 0) return;
+      queueFilesForUpload(Array.from(fileList));
+    },
+    [queueFilesForUpload],
+  );
 
-    // Handle document uploads (server upload)
-    if (validDocEntries.length > 0) {
-      setAttachments((prev) => [
-        ...prev,
-        ...validDocEntries.map(({ id, file }) => ({
-          id,
-          file,
-          name: file.name,
-          status: 'uploading' as const,
-        })),
-      ]);
-      void uploadSelectedFiles(validDocEntries);
-    }
-
-    // Handle image files (read as base64, no server upload)
-    if (validImageFiles.length > 0) {
-      setAttachments((prev) => [
-        ...prev,
-        ...validImageFiles.map(({ id, file }) => ({
-          id,
-          file,
-          name: file.name,
-          status: 'uploading' as const,
-          isImage: true,
-        })),
-      ]);
-      // Pick compression aggressiveness from how many images are arriving
-      // together. A 4-image drop gets a tighter cap than a single image so
-      // the combined base64 body still fits inside upstream gateway limits.
-      const batchOpts = batchCompressOptions(validImageFiles.length);
-      validImageFiles.forEach(({ id, file }) => {
-        compressImageFile(file, batchOpts)
-          .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
+  const handleRetryAttachment = useCallback(
+    (attachmentId: string) => {
+      const attachment = attachments.find((item) => item.id === attachmentId);
+      if (!attachment) return;
+      updateAttachment(attachmentId, (current) => ({
+        ...current,
+        status: "uploading",
+        error: undefined,
+      }));
+      if (attachment.isImage) {
+        compressImageFile(attachment.file)
+          .then((compressed) =>
+            readFileAsDataUrl(compressed).then((dataUrl) => ({
+              compressed,
+              dataUrl,
+            })),
+          )
           .then(({ compressed, dataUrl }) => {
-            setAttachments((prev) => prev.map((a) =>
-              a.id === id
-                ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, isImage: true }
-                : a
-            ));
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.id === attachmentId
+                  ? {
+                      ...a,
+                      file: compressed,
+                      name: compressed.name,
+                      status: "success" as const,
+                      dataUrl,
+                      error: undefined,
+                    }
+                  : a,
+              ),
+            );
           })
           .catch(() => {
-            setAttachments((prev) => prev.map((a) =>
-              a.id === id
-                ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
-                : a
-            ));
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.id === attachmentId
+                  ? {
+                      ...a,
+                      status: "error" as const,
+                      error: t("chat.upload.errorGeneric"),
+                    }
+                  : a,
+              ),
+            );
           });
-      });
-    }
-  }, [t, toast, uploadSelectedFiles, supportsVision]);
-
-  const handleFileSelection = useCallback((fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-    queueFilesForUpload(Array.from(fileList));
-  }, [queueFilesForUpload]);
-
-  const handleRetryAttachment = useCallback((attachmentId: string) => {
-    const attachment = attachments.find((item) => item.id === attachmentId);
-    if (!attachment) return;
-    updateAttachment(attachmentId, (current) => ({
-      ...current,
-      status: 'uploading',
-      error: undefined,
-    }));
-    if (attachment.isImage) {
-      compressImageFile(attachment.file)
-        .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
-        .then(({ compressed, dataUrl }) => {
-          setAttachments((prev) => prev.map((a) =>
-            a.id === attachmentId
-              ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, error: undefined }
-              : a
-          ));
-        })
-        .catch(() => {
-          setAttachments((prev) => prev.map((a) =>
-            a.id === attachmentId
-              ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
-              : a
-          ));
-        });
-    } else {
-      void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
-    }
-  }, [attachments, updateAttachment, uploadSelectedFiles, t]);
+      } else {
+        void uploadSelectedFiles([
+          { id: attachment.id, file: attachment.file },
+        ]);
+      }
+    },
+    [attachments, updateAttachment, uploadSelectedFiles, t],
+  );
 
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
-    setAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+    setAttachments((prev) =>
+      prev.filter((attachment) => attachment.id !== attachmentId),
+    );
   }, []);
 
-  const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(event.clipboardData?.files ?? []);
-    if (files.length === 0) return;
-    event.preventDefault();
-    queueFilesForUpload(files);
-  }, [queueFilesForUpload]);
+  const handleComposerPaste = useCallback(
+    (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = Array.from(event.clipboardData?.files ?? []);
+      if (files.length === 0) return;
+      event.preventDefault();
+      queueFilesForUpload(files);
+    },
+    [queueFilesForUpload],
+  );
 
+  const handleComposerDragOver = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!Array.from(event.dataTransfer?.types ?? []).includes("Files"))
+        return;
+      event.preventDefault();
+      setIsDragOver(true);
+    },
+    [],
+  );
 
-  const handleComposerDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
-    event.preventDefault();
-    setIsDragOver(true);
-  }, []);
+  const handleComposerDragLeave = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        setIsDragOver(false);
+      }
+    },
+    [],
+  );
 
-  const handleComposerDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+  const handleComposerDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      if (event.dataTransfer.files.length === 0) return;
+      event.preventDefault();
       setIsDragOver(false);
-    }
-  }, []);
-
-  const handleComposerDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (event.dataTransfer.files.length === 0) return;
-    event.preventDefault();
-    setIsDragOver(false);
-    handleFileSelection(event.dataTransfer.files);
-  }, [handleFileSelection]);
+      handleFileSelection(event.dataTransfer.files);
+    },
+    [handleFileSelection],
+  );
 
   /**
    * Execute a slash command via the dedicated command API.
@@ -1080,8 +1298,8 @@ export default function SessionChat({
     addMessage({
       id: tempId,
       sessionID: sessionId,
-      role: 'user',
-      parts: [{ id: `${tempId}-part`, type: 'text', text: displayText }],
+      role: "user",
+      parts: [{ id: `${tempId}-part`, type: "text", text: displayText }],
       timestamp: Date.now(),
     } as Message);
 
@@ -1095,9 +1313,12 @@ export default function SessionChat({
       setIsStreaming(false);
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
-        onError?.('Session not found. Please start a new session.');
+        onError?.("Session not found. Please start a new session.");
       } else {
-        toast.error(t('chat.error', 'Error'), err instanceof Error ? err.message : String(err));
+        toast.error(
+          t("chat.error", "Error"),
+          err instanceof Error ? err.message : String(err),
+        );
       }
       throw err;
     } finally {
@@ -1117,16 +1338,25 @@ export default function SessionChat({
 
     const tempId = `temp-${Date.now()}`;
     const tempParts: MessagePart[] = [];
-    if (text) tempParts.push({ id: `${tempId}-text`, type: 'text', text });
+    if (text) tempParts.push({ id: `${tempId}-text`, type: "text", text });
     imageParts.forEach((img, i) => {
-      tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+      tempParts.push({
+        id: `${tempId}-img-${i}`,
+        type: "file",
+        url: img.url,
+        mime: img.mime,
+        filename: img.filename,
+      });
     });
 
     addMessage({
       id: tempId,
       sessionID: sessionId,
-      role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text }],
+      role: "user",
+      parts:
+        tempParts.length > 0
+          ? tempParts
+          : [{ id: `${tempId}-part`, type: "text", text }],
       timestamp: Date.now(),
     } as Message);
 
@@ -1143,7 +1373,10 @@ export default function SessionChat({
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
       } else {
-        toast.error(t('chat.sendFailed', 'Send failed'), err instanceof Error ? err.message : String(err));
+        toast.error(
+          t("chat.sendFailed", "Send failed"),
+          err instanceof Error ? err.message : String(err),
+        );
       }
       throw err;
     } finally {
@@ -1161,7 +1394,7 @@ export default function SessionChat({
     // Need either text content or image attachments
     if (!text && imageAttachmentsToSend.length === 0) return;
 
-    setInput('');
+    setInput("");
     setShowCommandDropdown(false);
 
     const imageParts: ImagePartData[] = imageAttachmentsToSend.map((a) => ({
@@ -1171,11 +1404,13 @@ export default function SessionChat({
     }));
 
     // Route slash commands through the command API (requires an active session, no images)
-    const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
-      ? parseSlashCommand(rawText) : null;
+    const parsed =
+      docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
+        ? parseSlashCommand(rawText)
+        : null;
     if (parsed) {
       // Handle /new command locally: create a new session
-      if (parsed.command === 'new') {
+      if (parsed.command === "new") {
         if (onCreateNewSession) {
           await onCreateNewSession();
         }
@@ -1238,11 +1473,14 @@ export default function SessionChat({
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (showCommandDropdown) {
       const filtered = commands.filter(
-        (cmd) => !cmd.hidden && (commandQuery === '' || cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase()))
+        (cmd) =>
+          !cmd.hidden &&
+          (commandQuery === "" ||
+            cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase())),
       );
       const filteredCount = filtered.length;
 
-      if (e.key === 'Escape') {
+      if (e.key === "Escape") {
         e.preventDefault();
         setShowCommandDropdown(false);
         return;
@@ -1250,19 +1488,26 @@ export default function SessionChat({
 
       if (filteredCount === 0) {
         // No candidates — let Enter/Tab fall through to normal behavior
-        if (e.key === 'Tab') { e.preventDefault(); }
-      } else {
-        if (e.key === 'ArrowUp') {
+        if (e.key === "Tab") {
           e.preventDefault();
-          setSelectedCommandIndex((i) => (i - 1 + filteredCount) % filteredCount);
+        }
+      } else {
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setSelectedCommandIndex(
+            (i) => (i - 1 + filteredCount) % filteredCount,
+          );
           return;
         }
-        if (e.key === 'ArrowDown') {
+        if (e.key === "ArrowDown") {
           e.preventDefault();
           setSelectedCommandIndex((i) => (i + 1) % filteredCount);
           return;
         }
-        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current)) {
+        if (
+          e.key === "Tab" ||
+          (e.key === "Enter" && !e.shiftKey && !isComposingRef.current)
+        ) {
           e.preventDefault();
           const chosen = filtered[selectedCommandIndex] ?? filtered[0];
           if (chosen) {
@@ -1274,7 +1519,7 @@ export default function SessionChat({
       }
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) {
+    if (e.key === "Enter" && !e.shiftKey && !isComposingRef.current) {
       e.preventDefault();
       handleSend();
     }
@@ -1284,16 +1529,18 @@ export default function SessionChat({
     if (!sessionId) return;
     try {
       // Record the ID of the message being aborted so we can ignore its finish event later
-      const lastAsstMsg = [...messagesRef.current].reverse().find(
-        (m) => m.role === 'assistant' && !m.finish,
-      );
+      const lastAsstMsg = [...messagesRef.current]
+        .reverse()
+        .find((m) => m.role === "assistant" && !m.finish);
       abortedMessageIdRef.current = lastAsstMsg?.id || null;
       abortingRef.current = true;
       await client.post(`/api/session/${sessionId}/abort`);
       setIsStreaming(false);
-      setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
+      setTimeout(() => {
+        abortingRef.current = false;
+      }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
-      console.error('[SessionChat] Abort failed:', err);
+      console.error("[SessionChat] Abort failed:", err);
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
     }
@@ -1315,11 +1562,16 @@ export default function SessionChat({
         const res = await client.get(`/api/session/${sessionId}/message`);
         const msgs: any[] = res.data || [];
         const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
+        if (
+          lastMsg?.info?.role === "assistant" &&
+          (lastMsg.info.finish || lastMsg.info.time?.completed)
+        ) {
           refetch();
           setIsStreaming(false);
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }, FALLBACK_POLL_MS);
     return () => clearInterval(timer);
   }, [isStreaming, sessionId, refetch]);
@@ -1333,49 +1585,61 @@ export default function SessionChat({
     setEditingMessageId(null);
     setEditingPartId(null);
     setEditingRole(null);
-    setEditingText('');
+    setEditingText("");
     setActionMessageId(null);
   }, []);
 
-  const reportActionError = useCallback((fallback: string, err: unknown) => {
-    const message = err instanceof Error ? err.message : fallback;
-    onError?.(message);
-    if (!onError) {
-      toast.error(t('chat.error', 'Error'), message);
-    }
-  }, [onError]);
+  const reportActionError = useCallback(
+    (fallback: string, err: unknown) => {
+      const message = err instanceof Error ? err.message : fallback;
+      onError?.(message);
+      if (!onError) {
+        toast.error(t("chat.error", "Error"), message);
+      }
+    },
+    [onError],
+  );
 
-  const beginMessageEdit = useCallback((
-    targetMessageId: string,
-    targetPartId: string,
-    role: Message['role'],
-    rawText: string,
-  ) => {
-    setEditingMessageId(targetMessageId);
-    setEditingPartId(targetPartId);
-    setEditingRole(role);
-    setEditingText(rawText);
-    setActionMessageId(null);
-  }, []);
+  const beginMessageEdit = useCallback(
+    (
+      targetMessageId: string,
+      targetPartId: string,
+      role: Message["role"],
+      rawText: string,
+    ) => {
+      setEditingMessageId(targetMessageId);
+      setEditingPartId(targetPartId);
+      setEditingRole(role);
+      setEditingText(rawText);
+      setActionMessageId(null);
+    },
+    [],
+  );
 
   const handleSaveEditedMessage = useCallback(async () => {
-    if (!sessionId || !editingMessageId || !editingPartId || !editingRole) return;
+    if (!sessionId || !editingMessageId || !editingPartId || !editingRole)
+      return;
     const text = editingText.trim();
     if (!text) return;
 
     setActionMessageId(editingMessageId);
     try {
-      await sessionApi.updateMessagePart(sessionId, editingMessageId, editingPartId, {
-        id: editingPartId,
-        messageID: editingMessageId,
-        sessionID: sessionId,
-        type: 'text',
-        text,
-      });
+      await sessionApi.updateMessagePart(
+        sessionId,
+        editingMessageId,
+        editingPartId,
+        {
+          id: editingPartId,
+          messageID: editingMessageId,
+          sessionID: sessionId,
+          type: "text",
+          text,
+        },
+      );
       replaceMessageText(editingMessageId, editingPartId, text);
       resetEditingState();
     } catch (err) {
-      reportActionError(t('chat.errors.saveFailed'), err);
+      reportActionError(t("chat.errors.saveFailed"), err);
     } finally {
       setActionMessageId(null);
     }
@@ -1392,7 +1656,13 @@ export default function SessionChat({
   ]);
 
   const handleSendEditedUserMessage = useCallback(async () => {
-    if (!sessionId || !editingMessageId || !editingPartId || editingRole !== 'user') return;
+    if (
+      !sessionId ||
+      !editingMessageId ||
+      !editingPartId ||
+      editingRole !== "user"
+    )
+      return;
     const text = editingText.trim();
     if (!text) return;
 
@@ -1400,13 +1670,18 @@ export default function SessionChat({
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
     try {
-      await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
+      await sessionApi.resendMessage(
+        sessionId,
+        editingMessageId,
+        editingPartId,
+        text,
+      );
       replaceMessageText(editingMessageId, editingPartId, text);
       truncateAfterMessage(editingMessageId);
       setIsStreaming(true);
       resetEditingState();
     } catch (err) {
-      reportActionError(t('chat.errors.resendFailed'), err);
+      reportActionError(t("chat.errors.resendFailed"), err);
     } finally {
       setActionMessageId(null);
     }
@@ -1423,29 +1698,42 @@ export default function SessionChat({
     truncateAfterMessage,
   ]);
 
-  const handleRegenerateMessage = useCallback(async (messageId: string) => {
-    if (!sessionId) return;
+  const handleRegenerateMessage = useCallback(
+    async (messageId: string) => {
+      if (!sessionId) return;
 
-    abortingRef.current = false;
-    isAtBottomRef.current = true;
-    setActionMessageId(messageId);
-    try {
-      await sessionApi.regenerateMessage(sessionId, messageId);
-      const truncateTarget = getRegenerateTruncateTarget(messagesRef.current, messageId);
-      truncateAfterMessage(
-        truncateTarget.messageId,
-        truncateTarget.includeTarget ? { includeTarget: true } : undefined,
-      );
-      setIsStreaming(true);
-      if (editingMessageId === messageId) {
-        resetEditingState();
+      abortingRef.current = false;
+      isAtBottomRef.current = true;
+      setActionMessageId(messageId);
+      try {
+        await sessionApi.regenerateMessage(sessionId, messageId);
+        const truncateTarget = getRegenerateTruncateTarget(
+          messagesRef.current,
+          messageId,
+        );
+        truncateAfterMessage(
+          truncateTarget.messageId,
+          truncateTarget.includeTarget ? { includeTarget: true } : undefined,
+        );
+        setIsStreaming(true);
+        if (editingMessageId === messageId) {
+          resetEditingState();
+        }
+      } catch (err) {
+        reportActionError(t("chat.errors.regenerateFailed"), err);
+      } finally {
+        setActionMessageId(null);
       }
-    } catch (err) {
-      reportActionError(t('chat.errors.regenerateFailed'), err);
-    } finally {
-      setActionMessageId(null);
-    }
-  }, [editingMessageId, reportActionError, resetEditingState, sessionId, t, truncateAfterMessage]);
+    },
+    [
+      editingMessageId,
+      reportActionError,
+      resetEditingState,
+      sessionId,
+      t,
+      truncateAfterMessage,
+    ],
+  );
 
   useEffect(() => {
     if (!editingMessageId) return;
@@ -1458,80 +1746,98 @@ export default function SessionChat({
   // The compaction divider is rendered at the position of the FIRST
   // compacted message (not the summary), so it appears before the
   // preserved messages rather than after them.
-  const { merged, compactedGroupMap, summaryRedirectMap, skipIndices } = useMemo(() => {
-    const merged = mergeConsecutiveAssistantMessages(messages);
-    const compactedGroupMap = new Map<number, MergedMessage[]>();
-    // Maps: first-compacted-index → summary-message-index, so we can
-    // render the summary message at the earlier position.
-    const summaryRedirectMap = new Map<number, number>();
-    const compactedBuffer: MergedMessage[] = [];
-    let firstCompactedIdx = -1;
-    const skipIndices = new Set<number>();
+  const { merged, compactedGroupMap, summaryRedirectMap, skipIndices } =
+    useMemo(() => {
+      const merged = mergeConsecutiveAssistantMessages(messages);
+      const compactedGroupMap = new Map<number, MergedMessage[]>();
+      // Maps: first-compacted-index → summary-message-index, so we can
+      // render the summary message at the earlier position.
+      const summaryRedirectMap = new Map<number, number>();
+      const compactedBuffer: MergedMessage[] = [];
+      let firstCompactedIdx = -1;
+      const skipIndices = new Set<number>();
 
-    for (let idx = 0; idx < merged.length; idx++) {
-      const msg = merged[idx];
-      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
-        skipIndices.add(idx);
-        continue;
+      for (let idx = 0; idx < merged.length; idx++) {
+        const msg = merged[idx];
+        if (msg.parts.length > 0 && msg.parts.every((p) => p.synthetic)) {
+          skipIndices.add(idx);
+          continue;
+        }
+        if (msg.compacted) {
+          if (compactedBuffer.length === 0) firstCompactedIdx = idx;
+          compactedBuffer.push(msg);
+          skipIndices.add(idx);
+        } else if (msg.finish === "summary" && compactedBuffer.length > 0) {
+          // Render the divider at the first compacted message's position
+          skipIndices.delete(firstCompactedIdx);
+          compactedGroupMap.set(firstCompactedIdx, [...compactedBuffer]);
+          summaryRedirectMap.set(firstCompactedIdx, idx);
+          // Skip the summary at its natural (later) position
+          skipIndices.add(idx);
+          compactedBuffer.length = 0;
+          firstCompactedIdx = -1;
+        }
       }
-      if (msg.compacted) {
-        if (compactedBuffer.length === 0) firstCompactedIdx = idx;
-        compactedBuffer.push(msg);
-        skipIndices.add(idx);
-      } else if (msg.finish === 'summary' && compactedBuffer.length > 0) {
-        // Render the divider at the first compacted message's position
-        skipIndices.delete(firstCompactedIdx);
-        compactedGroupMap.set(firstCompactedIdx, [...compactedBuffer]);
-        summaryRedirectMap.set(firstCompactedIdx, idx);
-        // Skip the summary at its natural (later) position
-        skipIndices.add(idx);
+
+      // Orphaned compacted messages (no summary found yet — e.g. compaction
+      // still in progress or summary missed during SSE race).  Un-skip them
+      // so they remain visible rather than silently disappearing.
+      if (compactedBuffer.length > 0) {
+        for (const orphan of compactedBuffer) {
+          const orphanIdx = merged.indexOf(orphan);
+          if (orphanIdx >= 0) skipIndices.delete(orphanIdx);
+        }
         compactedBuffer.length = 0;
-        firstCompactedIdx = -1;
       }
-    }
 
-    // Orphaned compacted messages (no summary found yet — e.g. compaction
-    // still in progress or summary missed during SSE race).  Un-skip them
-    // so they remain visible rather than silently disappearing.
-    if (compactedBuffer.length > 0) {
-      for (const orphan of compactedBuffer) {
-        const orphanIdx = merged.indexOf(orphan);
-        if (orphanIdx >= 0) skipIndices.delete(orphanIdx);
-      }
-      compactedBuffer.length = 0;
-    }
-
-    return { merged, compactedGroupMap, summaryRedirectMap, skipIndices };
-  }, [messages]);
+      return { merged, compactedGroupMap, summaryRedirectMap, skipIndices };
+    }, [messages]);
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3 scrollbar-hide'
-    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 scrollbar-hide';
+    ? "flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3 scrollbar-hide"
+    : "flex-1 min-h-0 overflow-y-auto bg-gray-50/80 py-8 scrollbar-hide";
 
-  const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+  const msgListClass = compact
+    ? ""
+    : "space-y-6 w-[min(82%,68rem)] mx-auto px-6";
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
-      <div ref={scrollContainerRef} className={msgAreaClass} onScroll={handleScroll}>
+      <div
+        ref={scrollContainerRef}
+        className={msgAreaClass}
+        onScroll={handleScroll}
+      >
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
             <LoadingSpinner />
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
-            typeof welcomeContent === 'function' ? (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
-                {welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); })}
+            typeof welcomeContent === "function" ? (
+              <div
+                className="flex items-center justify-center"
+                style={{ minHeight: "100%" }}
+              >
+                {welcomeContent((text) => {
+                  setInput(text);
+                  textareaRef.current?.focus();
+                })}
               </div>
             ) : (
-              <div className="flex items-center justify-center" style={{ minHeight: '100%' }}>
+              <div
+                className="flex items-center justify-center"
+                style={{ minHeight: "100%" }}
+              >
                 {welcomeContent}
               </div>
             )
           ) : (
-            <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
+            <div className="text-center py-8 text-gray-400 text-sm">
+              {effectiveEmptyText}
+            </div>
           )
         ) : (
           <div className={msgListClass}>
@@ -1539,7 +1845,8 @@ export default function SessionChat({
               if (skipIndices.has(i)) return null;
               // If this position is a redirect, render the summary message here
               const redirectIdx = summaryRedirectMap.get(i);
-              const messageToRender = redirectIdx !== undefined ? merged[redirectIdx] : msg;
+              const messageToRender =
+                redirectIdx !== undefined ? merged[redirectIdx] : msg;
               return (
                 <ChatMessageBubble
                   key={messageToRender.id}
@@ -1547,7 +1854,7 @@ export default function SessionChat({
                   isActive={
                     isStreaming &&
                     i === merged.length - 1 &&
-                    messageToRender.role === 'assistant' &&
+                    messageToRender.role === "assistant" &&
                     !messageToRender.finish
                   }
                   pendingQuestions={pendingQuestions}
@@ -1574,16 +1881,22 @@ export default function SessionChat({
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
-              <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
+              <div
+                className={`flex justify-start ${!compact ? "group w-full" : ""}`}
+              >
+                <div
+                  className={`${compact ? "max-w-[90%] px-4 py-3 rounded-xl" : "max-w-2xl w-full px-6 py-4 rounded-2xl"} border border-amber-200/90 bg-amber-50/95 text-sm shadow-[0_18px_36px_-28px_rgba(217,119,6,0.42)]`}
+                >
                   <div className="flex items-center gap-2 text-sm text-amber-700">
                     <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-                    <span>{compactingMessage || t('chat.compacting')}</span>
+                    <span>{compactingMessage || t("chat.compacting")}</span>
                   </div>
                   {compactionPercent !== null && (
                     <div className="mt-2">
                       <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
-                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                        <span>
+                          {t("chat.compactionStage.overallProgressLabel")}
+                        </span>
                         <span>{compactionPercent}%</span>
                       </div>
                       <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
@@ -1601,7 +1914,10 @@ export default function SessionChat({
                           const text = describeCompactionStage(entry, t);
                           if (!text) return null;
                           return (
-                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                            <li
+                              key={`${entry.stage}-${idx}-${entry.ts}`}
+                              className="flex gap-1.5"
+                            >
                               <span className="text-amber-400">·</span>
                               <span>{text}</span>
                             </li>
@@ -1615,54 +1931,84 @@ export default function SessionChat({
             )}
 
             {/* Standalone thinking indicator when no incomplete message exists */}
-            {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
-              <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} flocks-panel border-l-[3px] border-l-primary-400 text-sm`}>
-                  <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-ink-muted">
-                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-primary-600 text-[9px] font-bold text-white">R</span>
-                    Rex
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-gray-500">
-                    <div className="flex gap-0.5">
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            {(isStreaming || sending) &&
+              !isCompacting &&
+              !(
+                messages.length > 0 &&
+                messages[messages.length - 1].role === "assistant" &&
+                !messages[messages.length - 1].finish
+              ) && (
+                <div
+                  className={`flex justify-start ${!compact ? "group w-full" : ""}`}
+                >
+                  <div
+                    className={`${compact ? "max-w-[90%] px-4 py-3 rounded-xl" : "max-w-2xl w-full px-6 py-4 rounded-2xl"} border border-gray-200/90 bg-white/95 text-sm shadow-[0_1px_2px_rgba(15,23,42,0.05),0_18px_40px_-28px_rgba(15,23,42,0.26)]`}
+                  >
+                    <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold tracking-[0.02em] text-zinc-500">
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-red-600 text-[9px] font-bold text-white shadow-sm ring-2 ring-white">
+                        R
+                      </span>
+                      Rex
                     </div>
-                    <span>{t('chat.thinking')}</span>
+                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                      <div className="flex gap-0.5">
+                        <div
+                          className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "0ms" }}
+                        />
+                        <div
+                          className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "150ms" }}
+                        />
+                        <div
+                          className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                          style={{ animationDelay: "300ms" }}
+                        />
+                      </div>
+                      <span>{t("chat.thinking")}</span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            )}
+              )}
           </div>
         )}
         <div ref={messagesEndRef} className="h-0" />
       </div>
 
       {/* Suggestions — shown before user sends any message */}
-      {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
-        <div className="flex-shrink-0 border-t border-gray-100 bg-white px-3 pb-2 pt-2.5">
-          <div className="flex items-center gap-1.5 mb-2">
-            <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
+      {suggestions &&
+        suggestions.length > 0 &&
+        !hasUserMessage &&
+        !hideInput && (
+          <div className="flex-shrink-0 border-t border-gray-100 bg-white px-3 pb-2 pt-2.5">
+            <div className="flex items-center gap-1.5 mb-2">
+              <span className="text-xs font-medium text-gray-400">
+                {t("chat.suggestions")}
+              </span>
+            </div>
+            <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
+              {suggestions.map((q, i) => (
+                <button
+                  key={i}
+                  onClick={() => setInput(q)}
+                  disabled={sending}
+                  className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors line-clamp-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {q}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
-            {suggestions.map((q, i) => (
-              <button
-                key={i}
-                onClick={() => setInput(q)}
-                disabled={sending}
-                className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors line-clamp-2 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {q}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+        )}
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 border-t border-gray-200 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
-          <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
+        <div
+          className={`flex-shrink-0 border-t border-gray-100 bg-white/90 backdrop-blur-sm ${compact ? "px-4 py-3" : "py-4"}`}
+        >
+          <div
+            className={`relative min-w-0 ${!compact ? "w-[min(82%,68rem)] mx-auto px-6" : ""}`}
+          >
             <input
               ref={fileInputRef}
               type="file"
@@ -1671,7 +2017,7 @@ export default function SessionChat({
               multiple
               onChange={(event) => {
                 handleFileSelection(event.target.files);
-                event.target.value = '';
+                event.target.value = "";
               }}
             />
             <CommandDropdown
@@ -1689,221 +2035,267 @@ export default function SessionChat({
               onDragOver={handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
-              className={`rounded-2xl border border-gray-200 bg-white shadow-sm transition-colors ${
+              className={`rounded-[26px] border border-gray-200/90 bg-white/95 shadow-[0_1px_2px_rgba(15,23,42,0.04),0_20px_44px_-32px_rgba(15,23,42,0.24)] transition-[border-color,box-shadow,background-color] ${
                 isCompacting
-                  ? 'border-amber-200 bg-amber-50/50'
+                  ? "border-amber-200 bg-amber-50/80"
                   : isDragOver
-                    ? 'border-sky-300 bg-sky-50/50'
+                    ? "border-sky-300 bg-sky-50/80 shadow-[0_20px_44px_-30px_rgba(14,165,233,0.28)]"
                     : isStreaming
-                      ? 'bg-gray-50'
-                      : 'hover:border-gray-300 focus-within:border-gray-300'
+                      ? "bg-gray-50/90"
+                      : "hover:border-gray-300 focus-within:border-sky-300 focus-within:shadow-[0_0_0_4px_rgba(186,230,253,0.6),0_20px_44px_-32px_rgba(15,23,42,0.24)]"
               }`}
             >
-                {/* Node reference chip */}
-                {nodeRef && (
-                  <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
-                    <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1">{nodeRef.id}</code>
-                    <span className="text-[10px] text-slate-400 flex-shrink-0">{nodeRef.type}</span>
-                    {onNodeRefDismiss && (
-                      <button
-                        onClick={onNodeRefDismiss}
-                        className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
-                        title={t('chat.removeNodeRef')}
+              {/* Node reference chip */}
+              {nodeRef && (
+                <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
+                  <code className="text-[11px] font-mono font-semibold text-slate-700 truncate flex-1">
+                    {nodeRef.id}
+                  </code>
+                  <span className="text-[10px] text-slate-400 flex-shrink-0">
+                    {nodeRef.type}
+                  </span>
+                  {onNodeRefDismiss && (
+                    <button
+                      onClick={onNodeRefDismiss}
+                      className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+                      title={t("chat.removeNodeRef")}
+                    >
+                      <svg
+                        className="w-3 h-3"
+                        viewBox="0 0 16 16"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
                       >
-                        <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5">
-                          <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-                )}
-                {attachments.length > 0 && (
-                  <div className={`flex flex-wrap gap-2 px-3 ${nodeRef ? 'pb-2' : 'pt-2'} ${attachments.length > 0 ? '' : 'hidden'}`}>
-                    {attachments.map((attachment) => {
-                      const isUploading = attachment.status === 'uploading';
-                      const isError = attachment.status === 'error';
-                      const attachmentPath = attachment.workspacePath ?? null;
+                        <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+              )}
+              {attachments.length > 0 && (
+                <div
+                  className={`flex flex-wrap gap-2 px-3 ${nodeRef ? "pb-2" : "pt-2"} ${attachments.length > 0 ? "" : "hidden"}`}
+                >
+                  {attachments.map((attachment) => {
+                    const isUploading = attachment.status === "uploading";
+                    const isError = attachment.status === "error";
+                    const attachmentPath = attachment.workspacePath ?? null;
 
-                      // Image thumbnail display
-                      if (attachment.isImage && attachment.dataUrl && !isError) {
-                        return (
-                          <div
-                            key={attachment.id}
-                            className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
-                              isUploading ? 'border-sky-200 bg-sky-50' : 'border-gray-200 bg-gray-50'
-                            }`}
-                          >
-                            {isUploading ? (
-                              <div className="w-16 h-16 flex items-center justify-center">
-                                <Loader2 className="w-5 h-5 animate-spin text-sky-500" />
-                              </div>
-                            ) : (
-                              <img
-                                src={attachment.dataUrl}
-                                alt={attachment.name}
-                                className="w-16 h-16 object-cover cursor-zoom-in"
-                                title={attachment.name}
-                                onClick={() =>
-                                  setComposerPreview({ url: attachment.dataUrl!, alt: attachment.name })
-                                }
-                              />
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveAttachment(attachment.id)}
-                              className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
-                              title={t('chat.upload.remove')}
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          </div>
-                        );
-                      }
-
+                    // Image thumbnail display
+                    if (attachment.isImage && attachment.dataUrl && !isError) {
                       return (
                         <div
                           key={attachment.id}
-                          className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
-                            isError
-                              ? 'border-red-200 bg-red-50 text-red-700'
-                              : isUploading
-                                ? 'border-sky-200 bg-sky-50 text-sky-700'
-                                : 'border-gray-200 bg-gray-50 text-gray-700'
+                          className={`relative flex-shrink-0 rounded-lg border overflow-hidden ${
+                            isUploading
+                              ? "border-sky-200 bg-sky-50"
+                              : "border-gray-200 bg-gray-50"
                           }`}
                         >
                           {isUploading ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
-                          ) : isError ? (
-                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
-                          ) : attachment.isImage ? (
-                            <ImageIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                            <div className="w-16 h-16 flex items-center justify-center">
+                              <Loader2 className="w-5 h-5 animate-spin text-sky-500" />
+                            </div>
                           ) : (
-                            <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                          )}
-                          <div className="min-w-0">
-                            <div className="truncate font-medium">{attachment.name}</div>
-                            {attachmentPath && (
-                              <div className="truncate text-[11px] opacity-70">{attachmentPath}</div>
-                            )}
-                            {attachment.error && (
-                              <div className="truncate text-[11px]">{attachment.error}</div>
-                            )}
-                          </div>
-                          {isError && !attachment.isImage && (
-                            <button
-                              type="button"
-                              onClick={() => handleRetryAttachment(attachment.id)}
-                              className="rounded p-0.5 hover:bg-white/70 transition-colors"
-                              title={t('chat.upload.retry')}
-                            >
-                              <RefreshCw className="w-3.5 h-3.5" />
-                            </button>
+                            <img
+                              src={attachment.dataUrl}
+                              alt={attachment.name}
+                              className="w-16 h-16 object-cover cursor-zoom-in"
+                              title={attachment.name}
+                              onClick={() =>
+                                setComposerPreview({
+                                  url: attachment.dataUrl!,
+                                  alt: attachment.name,
+                                })
+                              }
+                            />
                           )}
                           <button
                             type="button"
-                            onClick={() => handleRemoveAttachment(attachment.id)}
-                            className="rounded p-0.5 hover:bg-white/70 transition-colors"
-                            title={t('chat.upload.remove')}
+                            onClick={() =>
+                              handleRemoveAttachment(attachment.id)
+                            }
+                            className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
+                            title={t("chat.upload.remove")}
                           >
-                            <X className="w-3.5 h-3.5" />
+                            <X className="w-3 h-3" />
                           </button>
                         </div>
                       );
-                    })}
-                  </div>
-                )}
-                {isDragOver && (
-                  <div className="px-4 pb-1 text-[11px] text-sky-600">
-                    {t('chat.upload.dropHint')}
-                  </div>
-                )}
-                <div className="px-4 pt-3 pb-1">
-                  <textarea
-                    ref={textareaRef}
-                    value={input}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setInput(val);
-                      const trimmed = val.trimStart();
-                      if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
-                        void loadCommandsIfNeeded();
-                        const q = trimmed.slice(1);
-                        setCommandQuery(q);
-                        setSelectedCommandIndex(0);
-                        setShowCommandDropdown(true);
-                      } else {
-                        setShowCommandDropdown(false);
-                      }
-                    }}
-                    onBlur={() => { setTimeout(() => setShowCommandDropdown(false), 100); }}
-                    onCompositionStart={() => { isComposingRef.current = true; }}
-                    onCompositionEnd={() => { isComposingRef.current = false; }}
-                    onPaste={handleComposerPaste}
-                    onKeyDown={handleKeyDown}
-                    placeholder={
-                      isCompacting
-                        ? t('chat.placeholderCompacting')
-                        : isStreaming
-                          ? t('chat.placeholderStreaming')
-                          : nodeRef
-                            ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
-                            : effectivePlaceholder
                     }
-                    className={`w-full resize-none border-0 bg-transparent text-sm shadow-none outline-none ring-0 placeholder:text-gray-400 focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 ${
-                      isStreaming ? 'cursor-not-allowed text-gray-400' : 'text-gray-900'
-                    }`}
-                    style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
-                    disabled={sending || isStreaming}
-                    rows={1}
-                  />
-                </div>
 
-                {/* Bottom toolbar inside the composer card */}
-                <div className="flex items-center gap-1 px-2 pb-2">
+                    return (
+                      <div
+                        key={attachment.id}
+                        className={`inline-flex max-w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs ${
+                          isError
+                            ? "border-red-200 bg-red-50 text-red-700"
+                            : isUploading
+                              ? "border-sky-200 bg-sky-50 text-sky-700"
+                              : "border-gray-200 bg-gray-50 text-gray-700"
+                        }`}
+                      >
+                        {isUploading ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                        ) : isError ? (
+                          <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                        ) : attachment.isImage ? (
+                          <ImageIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                        ) : (
+                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <div className="truncate font-medium">
+                            {attachment.name}
+                          </div>
+                          {attachmentPath && (
+                            <div className="truncate text-[11px] opacity-70">
+                              {attachmentPath}
+                            </div>
+                          )}
+                          {attachment.error && (
+                            <div className="truncate text-[11px]">
+                              {attachment.error}
+                            </div>
+                          )}
+                        </div>
+                        {isError && !attachment.isImage && (
+                          <button
+                            type="button"
+                            onClick={() => handleRetryAttachment(attachment.id)}
+                            className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                            title={t("chat.upload.retry")}
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveAttachment(attachment.id)}
+                          className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                          title={t("chat.upload.remove")}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {isDragOver && (
+                <div className="px-4 pb-1 text-[11px] text-sky-600">
+                  {t("chat.upload.dropHint")}
+                </div>
+              )}
+              <div className="px-5 pt-4 pb-1">
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setInput(val);
+                    const trimmed = val.trimStart();
+                    if (
+                      trimmed.startsWith("/") &&
+                      !trimmed.includes(" ") &&
+                      successfulAttachments.length === 0
+                    ) {
+                      void loadCommandsIfNeeded();
+                      const q = trimmed.slice(1);
+                      setCommandQuery(q);
+                      setSelectedCommandIndex(0);
+                      setShowCommandDropdown(true);
+                    } else {
+                      setShowCommandDropdown(false);
+                    }
+                  }}
+                  onBlur={() => {
+                    setTimeout(() => setShowCommandDropdown(false), 100);
+                  }}
+                  onCompositionStart={() => {
+                    isComposingRef.current = true;
+                  }}
+                  onCompositionEnd={() => {
+                    isComposingRef.current = false;
+                  }}
+                  onPaste={handleComposerPaste}
+                  onKeyDown={handleKeyDown}
+                  placeholder={
+                    isCompacting
+                      ? t("chat.placeholderCompacting")
+                      : isStreaming
+                        ? t("chat.placeholderStreaming")
+                        : nodeRef
+                          ? t("chat.placeholderNodeRef", { nodeId: nodeRef.id })
+                          : effectivePlaceholder
+                  }
+                  className={`w-full resize-none border-0 bg-transparent text-sm shadow-none outline-none ring-0 placeholder:text-gray-400 focus:outline-none focus:ring-0 focus-visible:ring-0 focus-visible:ring-offset-0 ${
+                    isStreaming
+                      ? "cursor-not-allowed text-gray-400"
+                      : "text-gray-900"
+                  }`}
+                  style={{
+                    minHeight: "24px",
+                    maxHeight: compact ? "120px" : "240px",
+                  }}
+                  disabled={sending || isStreaming}
+                  rows={1}
+                />
+              </div>
+
+              {/* Bottom toolbar inside the composer card */}
+              <div className="flex items-center gap-1 px-3 pb-3 pt-1">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={sending || isStreaming}
+                  title={t("chat.upload.selectWithImage")}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                >
+                  <Paperclip className="w-4 h-4" />
+                </button>
+
+                {/* divider + injected slot (e.g. agent selector) */}
+                {toolbarSlot && (
+                  <>
+                    <div className="w-px h-4 bg-zinc-200 mx-1 flex-shrink-0" />
+                    {toolbarSlot}
+                  </>
+                )}
+
+                <div className="flex-1" />
+
+                {isStreaming ? (
                   <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={sending || isStreaming}
-                    title={t('chat.upload.selectWithImage')}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                    onClick={handleAbort}
+                    title={t("chat.stopTitle")}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
                   >
-                    <Paperclip className="w-4 h-4" />
+                    <Square className="w-3 h-3 fill-current" />
                   </button>
-
-                  {/* divider + injected slot (e.g. agent selector) */}
-                  {toolbarSlot && (
-                    <>
-                      <div className="w-px h-4 bg-zinc-200 mx-1 flex-shrink-0" />
-                      {toolbarSlot}
-                    </>
-                  )}
-
-                  <div className="flex-1" />
-
-                  {isStreaming ? (
-                    <button
-                      onClick={handleAbort}
-                      title={t('chat.stopTitle')}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
-                    >
-                      <Square className="w-3 h-3 fill-current" />
-                    </button>
-                  ) : (
-                    <button
-                      onClick={handleSend}
-                      disabled={!canSend}
-                      title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                        canSend
-                          ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                          : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
-                      }`}
-                    >
-                      {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                    </button>
-                  )}
-                </div>
+                ) : (
+                  <button
+                    onClick={handleSend}
+                    disabled={!canSend}
+                    title={
+                      hasUploadingFiles ? t("chat.upload.waiting") : undefined
+                    }
+                    className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                      canSend
+                        ? "bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow"
+                        : "bg-zinc-200 text-zinc-400 cursor-not-allowed"
+                    }`}
+                  >
+                    {sending || hasUploadingFiles ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <ArrowUp className="w-4 h-4" strokeWidth={2.5} />
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1927,7 +2319,11 @@ export interface ChatMessageBubbleProps {
   message: MergedMessage;
   isActive?: boolean;
   pendingQuestions?: Record<string, PendingQuestion>;
-  onQuestionAnswer?: (callID: string, requestId: string, answers: string[][]) => Promise<void>;
+  onQuestionAnswer?: (
+    callID: string,
+    requestId: string,
+    answers: string[][],
+  ) => Promise<void>;
   onQuestionReject?: (callID: string, requestId: string) => Promise<void>;
   showActions?: boolean;
   showTimestamp?: boolean;
@@ -1937,7 +2333,12 @@ export interface ChatMessageBubbleProps {
   editingText?: string;
   actionsDisabled?: boolean;
   actionMessageId?: string | null;
-  onEditStart?: (messageId: string, partId: string, role: Message['role'], rawText: string) => void;
+  onEditStart?: (
+    messageId: string,
+    partId: string,
+    role: Message["role"],
+    rawText: string,
+  ) => void;
   onEditChange?: (text: string) => void;
   onEditCancel?: () => void;
   onEditSave?: () => Promise<void>;
@@ -1958,7 +2359,7 @@ function ChatMessageBubbleInner({
   compact = true,
   onCopy,
   editingMessageId,
-  editingText = '',
+  editingText = "",
   actionsDisabled = false,
   actionMessageId,
   onEditStart,
@@ -1969,16 +2370,24 @@ function ChatMessageBubbleInner({
   onRegenerate,
   compactedMessages,
 }: ChatMessageBubbleProps) {
-  const { t } = useTranslation('session');
-  const isUser = message.role === 'user';
-  const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-  const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
+  const { t } = useTranslation("session");
+  const isUser = message.role === "user";
+  const parts: MessagePart[] = Array.isArray(message.parts)
+    ? message.parts
+    : [];
+  const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(
+    parts,
+    message.finish,
+  );
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
   // ``window.open`` would land on a blank page. We open an in-app overlay
   // instead — same UX, no popup blocker / data-URL restriction headaches.
-  const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
-  if (message.finish === 'summary') {
+  const [previewImage, setPreviewImage] = useState<{
+    url: string;
+    alt?: string;
+  } | null>(null);
+  if (message.finish === "summary") {
     const hasArchived = compactedMessages && compactedMessages.length > 0;
     return (
       <div className="my-3 px-1">
@@ -2009,32 +2418,44 @@ function ChatMessageBubbleInner({
       </div>
     );
   }
-  const rawAgentName = message.agent || 'rex';
-  const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
+  const rawAgentName = message.agent || "rex";
+  const agentName =
+    rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
   const getTextContent = () =>
     parts
-      .filter((p) => p.type === 'text' && p.text)
+      .filter((p) => p.type === "text" && p.text)
       .map((p) => p.text)
-      .join('\n\n');
+      .join("\n\n");
 
-  const editableTextParts = parts.filter((part): part is MessagePart & { text: string } =>
-    part.type === 'text' && typeof part.text === 'string',
+  const editableTextParts = parts.filter(
+    (part): part is MessagePart & { text: string } =>
+      part.type === "text" && typeof part.text === "string",
   );
-  const latestEditablePart = editableTextParts.length > 0 ? editableTextParts[editableTextParts.length - 1] : null;
-  const targetMessageId = String((latestEditablePart as any)?.messageID || message.id);
+  const latestEditablePart =
+    editableTextParts.length > 0
+      ? editableTextParts[editableTextParts.length - 1]
+      : null;
+  const targetMessageId = String(
+    (latestEditablePart as any)?.messageID || message.id,
+  );
   const targetPartId = latestEditablePart?.id || null;
-  const editableRawText = latestEditablePart?.text || '';
+  const editableRawText = latestEditablePart?.text || "";
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
 
   const textContent = getTextContent();
-  const hasFileAttachments = parts.some((part) => part.type === 'file' && part.url);
-  const isWideUserMessage = isUser && !compact && isUserMessageWide({
-    text: isEditing ? editingText : textContent,
-    hasAttachments: hasFileAttachments,
-    isEditing,
-  });
+  const hasFileAttachments = parts.some(
+    (part) => part.type === "file" && part.url,
+  );
+  const isWideUserMessage =
+    isUser &&
+    !compact &&
+    isUserMessageWide({
+      text: isEditing ? editingText : textContent,
+      hasAttachments: hasFileAttachments,
+      isEditing,
+    });
 
   const bubbleClass = getMessageBubbleClassName({
     compact,
@@ -2043,48 +2464,64 @@ function ChatMessageBubbleInner({
     wide: isWideUserMessage,
   });
   const actionBarClass = `flex items-center gap-1.5`;
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
-  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
+  const iconButtonClass =
+    "group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-gray-400 transition-colors duration-150 hover:border-gray-200 hover:bg-white hover:text-gray-700 hover:shadow-sm disabled:opacity-40 disabled:cursor-not-allowed";
+  const tooltipClass =
+    "pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100";
 
-  const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
-  const roleLabel = isUser ? t('chat.you') : agentName;
+  const avatarSize = compact
+    ? "w-7 h-7 text-xs"
+    : isUser
+      ? "w-9 h-9 text-sm"
+      : "w-8 h-8 text-sm";
+  const roleLabel = isUser ? t("chat.you") : agentName;
 
   const avatar = isUser ? (
     <span
-      className={`inline-flex items-center justify-center rounded-full bg-blue-500 text-white flex-shrink-0 ${avatarSize}`}
+      className={`inline-flex items-center justify-center rounded-full bg-gradient-to-br from-sky-500 to-sky-600 text-white shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}
       aria-label={roleLabel}
       title={roleLabel}
     >
-      <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
+      <User className={compact ? "w-3 h-3" : "w-3.5 h-3.5"} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-600 text-white font-bold flex-shrink-0 ${avatarSize}`}>
+    <span
+      className={`inline-flex items-center justify-center rounded-full bg-gradient-to-br from-rose-500 to-red-600 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}
+    >
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
-  const showFooterActions = !compact && showActions && parts.length > 0 && !isEditing;
+  const showFooterActions =
+    !compact && showActions && parts.length > 0 && !isEditing;
 
   const renderUserActionButtons = () => (
     <>
       {targetPartId && editableRawText && (
         <button
-          onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+          onClick={() =>
+            onEditStart?.(
+              targetMessageId,
+              targetPartId,
+              message.role,
+              editableRawText,
+            )
+          }
           disabled={actionsDisabled || isActionPending}
           className={iconButtonClass}
-          aria-label={t('chat.edit')}
+          aria-label={t("chat.edit")}
         >
           <Pencil className="w-3 h-3" />
-          <span className={tooltipClass}>{t('chat.edit')}</span>
+          <span className={tooltipClass}>{t("chat.edit")}</span>
         </button>
       )}
       <button
         onClick={() => onCopy?.(getTextContent())}
         disabled={isActionPending}
         className={iconButtonClass}
-        aria-label={t('chat.copy')}
+        aria-label={t("chat.copy")}
       >
         <Copy className="w-3 h-3" />
-        <span className={tooltipClass}>{t('chat.copy')}</span>
+        <span className={tooltipClass}>{t("chat.copy")}</span>
       </button>
     </>
   );
@@ -2095,303 +2532,426 @@ function ChatMessageBubbleInner({
         onClick={() => void onRegenerate?.(targetMessageId)}
         disabled={actionsDisabled || isActionPending}
         className={iconButtonClass}
-        aria-label={t('chat.regenerate')}
+        aria-label={t("chat.regenerate")}
       >
-        <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
-        <span className={tooltipClass}>{t('chat.regenerate')}</span>
+        <RefreshCw
+          className={`w-3 h-3 ${isActionPending ? "animate-spin" : ""}`}
+        />
+        <span className={tooltipClass}>{t("chat.regenerate")}</span>
       </button>
       <button
         onClick={() => onCopy?.(getTextContent())}
         disabled={isActionPending}
         className={iconButtonClass}
-        aria-label={t('chat.copy')}
+        aria-label={t("chat.copy")}
       >
         <Copy className="w-3 h-3" />
-        <span className={tooltipClass}>{t('chat.copy')}</span>
+        <span className={tooltipClass}>{t("chat.copy")}</span>
       </button>
     </>
   );
 
-  /** Full session layout: user avatar sits to the right of the bubble (iMessage-style). */
+  /** Full session layout: user avatar sits beside the bubble on the right. */
   const userSideAvatarLayout = isUser && !compact;
 
   const userColumnClass = (() => {
-    if (!isUser) return 'w-full';
+    if (!isUser) return "w-full";
     if (userSideAvatarLayout) {
       return isWideUserMessage
         ? `w-full ${USER_MESSAGE_WIDE_MAX_WIDTH_CLASS}`
-        : 'max-w-[50%]';
+        : "max-w-[50%]";
     }
-    if (compact) return isEditing ? 'w-full max-w-[90%]' : 'max-w-[90%]';
+    if (compact) return isEditing ? "w-full max-w-[90%]" : "max-w-[90%]";
     return isWideUserMessage
       ? `w-full ${USER_MESSAGE_WIDE_MAX_WIDTH_CLASS} items-end`
-      : 'max-w-[50%] items-end';
+      : "max-w-[50%] items-end";
   })();
 
-  const userMessageShellClass = isUser && !compact && !isWideUserMessage && !userSideAvatarLayout
-    ? 'flex flex-col w-fit max-w-full min-w-0'
-    : 'flex flex-col w-full min-w-0';
+  const userMessageShellClass = userSideAvatarLayout
+    ? isWideUserMessage
+      ? "flex flex-col min-w-0 w-full items-end"
+      : "flex flex-col min-w-0 max-w-full items-end"
+    : isUser && !compact && !isWideUserMessage
+      ? "flex flex-col w-fit max-w-full min-w-0"
+      : "flex flex-col w-full min-w-0";
 
   const columnWrapperClass = userSideAvatarLayout
-    ? `flex flex-row-reverse items-start gap-2 min-w-0 ${userColumnClass}`
+    ? `flex flex-row-reverse items-start gap-3 min-w-0 ${userColumnClass}`
     : `flex flex-col min-w-0 ${userColumnClass}`;
 
-  const bubbleWidthClass = userSideAvatarLayout && !isWideUserMessage
-    ? 'w-fit max-w-full'
-    : (isWideUserMessage || !isUser ? 'w-full' : '');
+  const bubbleWidthClass =
+    userSideAvatarLayout && !isWideUserMessage
+      ? "w-fit max-w-full"
+      : isWideUserMessage || !isUser
+        ? "w-full"
+        : "";
 
   return (
-    <div className={`group relative flex ${isUser ? 'justify-end' : 'justify-start'} ${!compact ? 'w-full' : ''}`}>
+    <div
+      className={`group relative flex ${isUser ? "justify-end" : "justify-start"} ${!compact ? "w-full" : ""}`}
+    >
       <div className={columnWrapperClass}>
-      {userSideAvatarLayout && (
-        <div className="flex-shrink-0 pt-0.5">{avatar}</div>
-      )}
-      <div className={userMessageShellClass}>
-      <div className={`${bubbleClass} relative ${bubbleWidthClass}`} style={{ overflowWrap: 'anywhere' }}>
-        {/* Role header inside bubble (assistant always; user only in compact / non-side layout) */}
-        {!userSideAvatarLayout && (
-          <div className={`flex items-center gap-2 ${parts.length > 0 || isEditing ? 'mb-2' : ''}`}>
-            {avatar}
-            <span className="text-xs font-semibold text-zinc-700">{roleLabel}</span>
-          </div>
+        {userSideAvatarLayout && (
+          <div className="flex-shrink-0 pt-1">{avatar}</div>
         )}
+        <div className={userMessageShellClass}>
+          <div
+            className={`${bubbleClass} relative ${bubbleWidthClass}`}
+            style={{ overflowWrap: "anywhere" }}
+          >
+            {/* Role header inside bubble (assistant always; user only in compact / non-side layout) */}
+            {!userSideAvatarLayout && (
+              <div
+                className={`flex items-center gap-2 ${parts.length > 0 || isEditing ? "mb-2" : ""}`}
+              >
+                {avatar}
+                <span className="text-xs font-semibold tracking-[0.02em] text-zinc-500">
+                  {roleLabel}
+                </span>
+              </div>
+            )}
 
-        {/* Empty / loading state */}
-        {parts.length === 0 && (
-          isUser ? (
-            <div className="flex items-center gap-2 opacity-60">
-              <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-              {t('chat.sending')}
-            </div>
-          ) : (
-            <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
-            </div>
-          )
-        )}
+            {/* Empty / loading state */}
+            {parts.length === 0 &&
+              (isUser ? (
+                <div className="flex items-center gap-2 opacity-60">
+                  <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+                  {t("chat.sending")}
+                </div>
+              ) : (
+                <div
+                  className="flex items-center gap-1 py-1"
+                  aria-label={t("chat.thinking")}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
+                </div>
+              ))}
 
-        {/* Parts */}
-        {isEditing ? (
-          <div className="space-y-3">
-            <textarea
-              value={editingText}
-              onChange={(event) => onEditChange?.(event.target.value)}
-              rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
-              className="block w-full min-w-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 resize-y"
-            />
-          </div>
-        ) : (
-          (() => {
-            // Render attachments (file/image parts) first so the bubble shows
-            // image previews above the textual prompt — matches typical chat
-            // UX for "look at this image and …" style messages.
-            const fileParts = parts.filter((p) => p.type === 'file' && p.url);
-            const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
-            return (
-              <>
-                {fileParts.length > 0 && (
-                  <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
-                    {fileParts.map((part, i) => {
-                      const isImage = (part.mime || '').startsWith('image/');
-                      if (isImage && part.url) {
-                        return (
-                          <img
-                            key={part.id || `file-${i}`}
-                            src={part.url}
-                            alt={part.filename || ''}
-                            className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                            onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
-                          />
-                        );
-                      }
-                      return (
-                        <div
-                          key={part.id || `file-${i}`}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
-                        >
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                {otherParts.map((part: MessagePart, i: number) => (
-                  // Spacing between consecutive parts is owned by this wrapper,
-                  // not by individual part components. Each part used to set its
-                  // own `mt-2 first:mt-0`, but since every part lives in its own
-                  // wrapper div, `first:` always matched and the gap collapsed
-                  // to zero between, e.g., a tool card and the next thinking
-                  // block, making them look glued together.
-                  <div key={part.id || i} className="mt-2 first:mt-0">
-                    {/* Text */}
-                    {part.type === 'text' && part.text && (() => {
-                      const nodeRefMatch = isUser
-                        ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-                        : null;
-                      const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
-                      return (
-                        <>
-                          {nodeRefMatch && (
-                            <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
-                              <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                              <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
-                              <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
-                            </div>
-                          )}
-                          <StreamingMarkdown
-                            content={displayText}
-                            isStreaming={isActive && !isUser}
-                          />
-                        </>
-                      );
-                    })()}
-
-                    {/* Tool call */}
-              {part.type === 'tool' && (
-                <ChatToolPart
-                  part={part}
-                  pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
-                  onAnswer={onQuestionAnswer && part.callID
-                    ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
-                    : undefined}
-                  onReject={onQuestionReject && part.callID
-                    ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
-                    : undefined}
+            {/* Parts */}
+            {isEditing ? (
+              <div className="w-full space-y-3">
+                <textarea
+                  value={editingText}
+                  onChange={(event) => onEditChange?.(event.target.value)}
+                  rows={Math.min(
+                    12,
+                    Math.max(4, editingText.split("\n").length + 1),
+                  )}
+                  className="block w-full min-w-0 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100 resize-y"
                 />
-              )}
-
-              {/* Reasoning / thinking */}
-              {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
-                const thinkingText = part.text || part.thinking || '';
-                const partKey = part.id || `reasoning-${i}`;
-                const isExpanded = getPartExpanded(partKey);
-                const isThinking = !isReasoningDone;
+              </div>
+            ) : (
+              (() => {
+                // Render attachments (file/image parts) first so the bubble shows
+                // image previews above the textual prompt — matches typical chat
+                // UX for "look at this image and …" style messages.
+                const fileParts = parts.filter(
+                  (p) => p.type === "file" && p.url,
+                );
+                const otherParts = parts.filter(
+                  (p) => !(p.type === "file" && p.url),
+                );
                 return (
-                  <div
-                    className={
-                      isThinking
-                        ? 'rounded-lg border border-sky-100 bg-sky-50/80 overflow-hidden'
-                        : META_ROW_SHELL
-                    }
-                  >
-                    <button
-                      type="button"
-                      onClick={() => togglePart(partKey)}
-                      disabled={isThinking}
-                      className={`${META_ROW_HEADER} ${THINKING_TEXT_CLASS} ${isThinking ? '' : 'cursor-pointer'}`}
-                    >
-                      {isThinking ? (
-                        <>
-                          <span className="flex gap-0.5 flex-shrink-0">
-                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                            <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                          </span>
-                          <span className="font-medium text-sky-700">{t('chat.thinking')}</span>
-                        </>
-                      ) : (
-                        <>
-                          <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-400" />
-                          <span className="text-zinc-500 truncate min-w-0">
-                            {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
-                          </span>
-                          <ChevronDown
-                            className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? 'rotate-180' : ''}`}
-                          />
-                        </>
-                      )}
-                    </button>
-                    {isExpanded && !isThinking && (
-                      <div className={`${META_ROW_BODY} ${THINKING_TEXT_CLASS} text-zinc-500 whitespace-pre-wrap max-h-52 overflow-y-auto bg-white/60`}>
-                        {thinkingText}
+                  <>
+                    {fileParts.length > 0 && (
+                      <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
+                        {fileParts.map((part, i) => {
+                          const isImage = (part.mime || "").startsWith(
+                            "image/",
+                          );
+                          if (isImage && part.url) {
+                            return (
+                              <img
+                                key={part.id || `file-${i}`}
+                                src={part.url}
+                                alt={part.filename || ""}
+                                className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
+                                onClick={() =>
+                                  setPreviewImage({
+                                    url: part.url!,
+                                    alt: part.filename,
+                                  })
+                                }
+                              />
+                            );
+                          }
+                          return (
+                            <div
+                              key={part.id || `file-${i}`}
+                              className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
+                            >
+                              <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                              <span className="truncate max-w-[240px]">
+                                {part.filename || "file"}
+                              </span>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
+                    {otherParts.map((part: MessagePart, i: number) => (
+                      // Spacing between consecutive parts is owned by this wrapper,
+                      // not by individual part components. Each part used to set its
+                      // own `mt-2 first:mt-0`, but since every part lives in its own
+                      // wrapper div, `first:` always matched and the gap collapsed
+                      // to zero between, e.g., a tool card and the next thinking
+                      // block, making them look glued together.
+                      <div key={part.id || i} className="mt-2 first:mt-0">
+                        {/* Text */}
+                        {part.type === "text" &&
+                          part.text &&
+                          (() => {
+                            const nodeRefMatch = isUser
+                              ? part.text.match(
+                                  /^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/,
+                                )
+                              : null;
+                            const displayText = nodeRefMatch
+                              ? nodeRefMatch[3]
+                              : part.text;
+                            return (
+                              <>
+                                {nodeRefMatch && (
+                                  <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                                    <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">
+                                      {nodeRefMatch[1]}
+                                    </code>
+                                    <span className="text-[9px] text-gray-500 flex-shrink-0">
+                                      {nodeRefMatch[2]}
+                                    </span>
+                                  </div>
+                                )}
+                                <StreamingMarkdown
+                                  content={displayText}
+                                  isStreaming={isActive && !isUser}
+                                  className={
+                                    isUser
+                                      ? "[&_p]:my-0 [&_p]:leading-6 [&_ul]:my-2 [&_ol]:my-2"
+                                      : ""
+                                  }
+                                />
+                              </>
+                            );
+                          })()}
+
+                        {/* Tool call */}
+                        {part.type === "tool" && (
+                          <ChatToolPart
+                            part={part}
+                            pendingQuestion={
+                              part.callID
+                                ? pendingQuestions?.[part.callID]
+                                : undefined
+                            }
+                            onAnswer={
+                              onQuestionAnswer && part.callID
+                                ? (answers) =>
+                                    onQuestionAnswer(
+                                      part.callID!,
+                                      pendingQuestions![part.callID!].requestId,
+                                      answers,
+                                    )
+                                : undefined
+                            }
+                            onReject={
+                              onQuestionReject && part.callID
+                                ? () =>
+                                    onQuestionReject(
+                                      part.callID!,
+                                      pendingQuestions![part.callID!].requestId,
+                                    )
+                                : undefined
+                            }
+                          />
+                        )}
+
+                        {/* Reasoning / thinking */}
+                        {(part.type === "reasoning" ||
+                          part.type === "thinking") &&
+                          (part.text || part.thinking) &&
+                          (() => {
+                            const thinkingText =
+                              part.text || part.thinking || "";
+                            const partKey = part.id || `reasoning-${i}`;
+                            const isExpanded = getPartExpanded(partKey);
+                            const isThinking = !isReasoningDone;
+                            return (
+                              <div
+                                className={
+                                  isThinking
+                                    ? "rounded-lg border border-sky-100 bg-sky-50/80 overflow-hidden"
+                                    : META_ROW_SHELL
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => togglePart(partKey)}
+                                  disabled={isThinking}
+                                  className={`${META_ROW_HEADER} ${THINKING_TEXT_CLASS} ${isThinking ? "" : "cursor-pointer"}`}
+                                >
+                                  {isThinking ? (
+                                    <>
+                                      <span className="flex gap-0.5 flex-shrink-0">
+                                        <span
+                                          className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce"
+                                          style={{ animationDelay: "0ms" }}
+                                        />
+                                        <span
+                                          className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce"
+                                          style={{ animationDelay: "150ms" }}
+                                        />
+                                        <span
+                                          className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce"
+                                          style={{ animationDelay: "300ms" }}
+                                        />
+                                      </span>
+                                      <span className="font-medium text-sky-700">
+                                        {t("chat.thinking")}
+                                      </span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-400" />
+                                      <span className="text-zinc-500 truncate min-w-0">
+                                        {thinkingText.slice(0, 80)}
+                                        {thinkingText.length > 80 ? "…" : ""}
+                                      </span>
+                                      <ChevronDown
+                                        className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                                      />
+                                    </>
+                                  )}
+                                </button>
+                                {isExpanded && !isThinking && (
+                                  <div
+                                    className={`${META_ROW_BODY} ${THINKING_TEXT_CLASS} text-zinc-500 whitespace-pre-wrap max-h-52 overflow-y-auto bg-white/60`}
+                                  >
+                                    {thinkingText}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()}
+                      </div>
+                    ))}
+                  </>
+                );
+              })()
+            )}
+
+            {/* Streaming indicator */}
+            {isActive &&
+              !isUser &&
+              parts.length > 0 &&
+              (() => {
+                const lastPart = parts[parts.length - 1];
+                const isDelegating =
+                  lastPart?.type === "tool" &&
+                  isDelegateTool(lastPart.tool || "") &&
+                  lastPart.state?.status === "running";
+                if (isDelegating) return null;
+                return (
+                  <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
+                    <div className="flex gap-0.5">
+                      <div
+                        className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                        style={{ animationDelay: "0ms" }}
+                      />
+                      <div
+                        className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                        style={{ animationDelay: "150ms" }}
+                      />
+                      <div
+                        className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce"
+                        style={{ animationDelay: "300ms" }}
+                      />
+                    </div>
+                    <span>{t("chat.streaming")}</span>
                   </div>
                 );
               })()}
-                  </div>
-                ))}
-              </>
-            );
-          })()
-        )}
+          </div>
+          {/* end bubble */}
 
-        {/* Streaming indicator */}
-        {isActive && !isUser && parts.length > 0 && (() => {
-          const lastPart = parts[parts.length - 1];
-          const isDelegating = lastPart?.type === 'tool'
-            && isDelegateTool(lastPart.tool || '')
-            && lastPart.state?.status === 'running';
-          if (isDelegating) return null;
-          return (
-            <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
-              <div className="flex gap-0.5">
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </div>
-              <span>{t('chat.streaming')}</span>
-            </div>
-          );
-        })()}
-
-
-      </div>{/* end bubble */}
-
-        {/* Edit-mode actions below bubble (user: right-aligned) */}
-        {showActions && parts.length > 0 && isEditing && (
-          <div className={`flex mt-1.5 w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
-            <div className={actionBarClass}>
-              <button
-                onClick={() => void onEditSave?.()}
-                disabled={actionsDisabled || isActionPending || !editingText.trim()}
-                className={iconButtonClass}
-                aria-label={t('chat.save')}
-              >
-                <Save className="w-3 h-3" />
-                <span className={tooltipClass}>{t('chat.save')}</span>
-              </button>
-              {isUser && (
+          {/* Edit-mode actions below bubble (user: right-aligned) */}
+          {showActions && parts.length > 0 && isEditing && (
+            <div
+              className={`flex mt-1.5 w-full ${isUser ? "justify-end" : "justify-start"}`}
+            >
+              <div className={actionBarClass}>
                 <button
-                  onClick={() => void onEditSend?.()}
-                  disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                  onClick={() => void onEditSave?.()}
+                  disabled={
+                    actionsDisabled || isActionPending || !editingText.trim()
+                  }
                   className={iconButtonClass}
-                  aria-label={t('chat.sendEdited')}
+                  aria-label={t("chat.save")}
                 >
-                  <Send className="w-3 h-3" />
-                  <span className={tooltipClass}>{t('chat.sendEdited')}</span>
+                  <Save className="w-3 h-3" />
+                  <span className={tooltipClass}>{t("chat.save")}</span>
                 </button>
-              )}
-              <button
-                onClick={onEditCancel}
-                disabled={isActionPending}
-                className={iconButtonClass}
-                aria-label={t('chat.cancel')}
-              >
-                <X className="w-3 h-3" />
-                <span className={tooltipClass}>{t('chat.cancel')}</span>
-              </button>
+                {isUser && (
+                  <button
+                    onClick={() => void onEditSend?.()}
+                    disabled={
+                      actionsDisabled || isActionPending || !editingText.trim()
+                    }
+                    className={iconButtonClass}
+                    aria-label={t("chat.sendEdited")}
+                  >
+                    <Send className="w-3 h-3" />
+                    <span className={tooltipClass}>{t("chat.sendEdited")}</span>
+                  </button>
+                )}
+                <button
+                  onClick={onEditCancel}
+                  disabled={isActionPending}
+                  className={iconButtonClass}
+                  aria-label={t("chat.cancel")}
+                >
+                  <X className="w-3 h-3" />
+                  <span className={tooltipClass}>{t("chat.cancel")}</span>
+                </button>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* Footer below bubble: timestamp left, action buttons right */}
-        {showFooterActions && (
-          <div className="flex items-center justify-between mt-1.5 w-full">
-            {showTimestamp && message.timestamp
-              ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
-              : <span />
-            }
-            <div className={actionBarClass}>
-              {isUser ? renderUserActionButtons() : renderAssistantActionButtons()}
-            </div>
-          </div>
-        )}
-      </div>{/* end message shell */}
-      </div>{/* end message column */}
+          {/* Footer below bubble */}
+          {showFooterActions &&
+            (isUser ? (
+              <div className="mt-1.5 flex w-full items-center justify-end gap-1.5 pr-1 text-[11px] text-zinc-400">
+                {showTimestamp && message.timestamp && (
+                  <span className="select-none">
+                    {formatSmartTime(message.timestamp)}
+                  </span>
+                )}
+                <div
+                  className={`${actionBarClass} opacity-70 transition-opacity group-hover:opacity-100`}
+                >
+                  {renderUserActionButtons()}
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between mt-1.5 w-full">
+                {showTimestamp && message.timestamp ? (
+                  <span className="text-[11px] text-zinc-400 select-none">
+                    {formatSmartTime(message.timestamp)}
+                  </span>
+                ) : (
+                  <span />
+                )}
+                <div className={actionBarClass}>
+                  {renderAssistantActionButtons()}
+                </div>
+              </div>
+            ))}
+        </div>
+        {/* end message shell */}
+      </div>
+      {/* end message column */}
       {previewImage && (
         <ImageLightbox
           src={previewImage.url}
@@ -2410,15 +2970,20 @@ function ChatMessageBubbleInner({
 const TOOL_DISPLAY_MAX_LEN = 120;
 
 /** Shared compact row shell for tool + reasoning blocks inside assistant bubbles. */
-const META_ROW_SHELL = 'rounded-lg border border-zinc-100 bg-zinc-50 overflow-hidden';
+const META_ROW_SHELL =
+  "rounded-lg border border-zinc-100 bg-zinc-50 overflow-hidden";
 const META_ROW_HEADER =
-  'flex items-center gap-2 px-2.5 py-1.5 min-w-0 text-xs w-full text-left select-none';
-const META_ROW_BODY = 'border-t border-zinc-100 px-2.5 py-2 text-[11px] leading-relaxed';
+  "flex items-center gap-2 px-2.5 py-1.5 min-w-0 text-xs w-full text-left select-none";
+const META_ROW_BODY =
+  "border-t border-zinc-100 px-2.5 py-2 text-[11px] leading-relaxed";
 /** Reasoning body/header — smaller than bubble text-sm (14px). */
-const THINKING_TEXT_CLASS = 'text-[13px] leading-relaxed';
+const THINKING_TEXT_CLASS = "text-[13px] leading-relaxed";
 
 /** Truncate long tool titles / param summaries shown in the card header. */
-export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
+export function truncateToolDisplayText(
+  text: string,
+  maxLen = TOOL_DISPLAY_MAX_LEN,
+): string {
   if (text.length <= maxLen) return text;
   return `${text.slice(0, maxLen)}…`;
 }
@@ -2426,7 +2991,7 @@ export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_
 function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
     .map(([k, v]) => `${k}=${String(v)}`)
-    .join(', ');
+    .join(", ");
 }
 
 export interface ChatToolPartProps {
@@ -2436,9 +3001,14 @@ export interface ChatToolPartProps {
   onReject?: () => Promise<void>;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: ChatToolPartProps) {
-  const { t } = useTranslation('session');
-  const toolName = part.tool || 'unknown';
+export function ChatToolPart({
+  part,
+  pendingQuestion,
+  onAnswer,
+  onReject,
+}: ChatToolPartProps) {
+  const { t } = useTranslation("session");
+  const toolName = part.tool || "unknown";
 
   // Keep the delegate fallback narrow: many MCP tools also carry a generic
   // `category` field (for example wecom_mcp category="doc").
@@ -2447,50 +3017,54 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   }
 
   const state: Partial<ToolState> = part.state || {};
-  const status = state.status || 'pending';
+  const status = state.status || "pending";
 
   // Some tools block on an internal `question` call (for example safety
   // confirmation inside `ssh_host_cmd`), so render the question UI whenever
   // this running tool part has a pending question attached to it.
-  const isWaitingForAnswer = status === 'running' && !!pendingQuestion;
+  const isWaitingForAnswer = status === "running" && !!pendingQuestion;
 
   type StatusCfg = {
     icon: React.ReactNode;
     iconColor: string;
-    pill: string;      // 状态 pill 样式
+    pill: string; // 状态 pill 样式
     label: string;
   };
   const statusConfig: Record<string, StatusCfg> = {
-    pending:   {
+    pending: {
       icon: <Clock className="w-3.5 h-3.5 flex-shrink-0" />,
-      iconColor: 'text-zinc-400',
-      pill: 'bg-zinc-100 text-zinc-500',
-      label: t('chat.tool.pending'),
+      iconColor: "text-zinc-400",
+      pill: "bg-zinc-100 text-zinc-500",
+      label: t("chat.tool.pending"),
     },
-    running:   {
+    running: {
       icon: <Loader2 className="w-3.5 h-3.5 flex-shrink-0 animate-spin" />,
-      iconColor: 'text-sky-500',
-      pill: 'bg-sky-50 text-sky-600',
-      label: t('chat.tool.running'),
+      iconColor: "text-sky-500",
+      pill: "bg-sky-50 text-sky-600",
+      label: t("chat.tool.running"),
     },
     completed: {
       icon: <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0" />,
-      iconColor: 'text-green-500',
-      pill: 'bg-green-50 text-green-600',
-      label: t('chat.tool.completed'),
+      iconColor: "text-green-500",
+      pill: "bg-green-50 text-green-600",
+      label: t("chat.tool.completed"),
     },
-    error:     {
+    error: {
       icon: <XCircle className="w-3.5 h-3.5 flex-shrink-0" />,
-      iconColor: 'text-red-400',
-      pill: 'bg-red-50 text-red-500',
-      label: t('chat.tool.error'),
+      iconColor: "text-red-400",
+      pill: "bg-red-50 text-red-500",
+      label: t("chat.tool.error"),
     },
   };
   const config = statusConfig[status] ?? statusConfig.pending;
 
   const formatOutput = (output: unknown): string => {
-    if (typeof output === 'string') {
-      try { return JSON.stringify(JSON.parse(output), null, 2); } catch { return output; }
+    if (typeof output === "string") {
+      try {
+        return JSON.stringify(JSON.parse(output), null, 2);
+      } catch {
+        return output;
+      }
     }
     return JSON.stringify(output, null, 2);
   };
@@ -2499,8 +3073,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
     ? truncateToolDisplayText(buildToolInputSummary(state.input))
-    : '';
-  const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
+    : "";
+  const displayTitle = state.title ? truncateToolDisplayText(state.title) : "";
 
   if (isWaitingForAnswer) {
     // Outer spacing is owned by the part wrapper in SessionChat's parts map.
@@ -2522,20 +3096,24 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
     <details className={`group/tool ${META_ROW_SHELL}`}>
       <summary className={`${META_ROW_HEADER} cursor-pointer list-none`}>
-        <span className={`${config.iconColor} flex-shrink-0`}>{config.icon}</span>
-        <span className="font-medium text-zinc-700 whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
+        <span className={`${config.iconColor} flex-shrink-0`}>
+          {config.icon}
+        </span>
+        <span className="font-medium text-zinc-700 whitespace-nowrap flex-shrink-0">
+          {toolName.replace(/_/g, " ")}
+        </span>
         {inputSummary && (
           <span className="text-zinc-400 font-mono truncate min-w-0">
             {inputSummary}
           </span>
         )}
         {displayTitle && !inputSummary && (
-          <span className="text-zinc-400 truncate min-w-0">
-            {displayTitle}
-          </span>
+          <span className="text-zinc-400 truncate min-w-0">{displayTitle}</span>
         )}
         <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
-          <span className={`font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}>
+          <span
+            className={`font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}
+          >
             {config.label}
           </span>
           <ChevronDown className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
@@ -2546,7 +3124,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         {state.input && (
           <details>
             <summary className="cursor-pointer text-zinc-500 font-medium mb-1 list-none [&::-webkit-details-marker]:hidden">
-              {t('chat.tool.inputParams')}
+              {t("chat.tool.inputParams")}
             </summary>
             <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md overflow-x-auto font-mono">
               {JSON.stringify(state.input, null, 2)}
@@ -2554,10 +3132,10 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </details>
         )}
 
-        {status === 'completed' && state.output !== undefined && (
+        {status === "completed" && state.output !== undefined && (
           <details open>
             <summary className="cursor-pointer text-zinc-500 font-medium mb-1 list-none [&::-webkit-details-marker]:hidden">
-              {t('chat.tool.outputResult')}
+              {t("chat.tool.outputResult")}
             </summary>
             <pre className="p-2 bg-zinc-950 text-green-400 rounded-md overflow-x-auto max-h-48 overflow-y-auto font-mono">
               {formatOutput(state.output)}
@@ -2565,7 +3143,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </details>
         )}
 
-        {status === 'error' && state.error && (
+        {status === "error" && state.error && (
           <div className="px-2.5 py-1.5 bg-red-50 border border-red-100 rounded-md text-[11px] text-red-600">
             {state.error}
           </div>
