@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -1518,15 +1518,20 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3 scrollbar-hide'
-    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 scrollbar-hide';
+    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3'
+    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
 
   const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
       {/* Messages area */}
-      <div ref={scrollContainerRef} className={msgAreaClass} onScroll={handleScroll}>
+      <div
+        ref={scrollContainerRef}
+        className={msgAreaClass}
+        onScroll={handleScroll}
+        style={{ scrollbarGutter: 'stable' }}
+      >
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
             <LoadingSpinner />
@@ -2206,16 +2211,12 @@ function ChatMessageBubbleInner({
                           }`}>
                             {isThinking ? (
                               <>
-                                <span className="flex gap-0.5 flex-shrink-0">
-                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                                </span>
-                                <span className="text-sky-600">{t('chat.thinking')}</span>
+                                <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
+                                <span className="text-violet-600">{t('chat.thinking')}</span>
                               </>
                             ) : (
                               <>
-                                <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+                                <Brain className="w-3.5 h-3.5 flex-shrink-0 text-violet-500" />
                                 <span className="text-zinc-500 truncate min-w-0">
                                   {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
                                 </span>
@@ -2518,9 +2519,6 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         {inputSummary && (
           <span
             className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-            // Show the un-truncated input on hover so dense tool calls
-            // (e.g. multi-argument MCP invocations) remain inspectable.
-            title={state.input ? buildToolInputSummary(state.input) : undefined}
           >
             {inputSummary}
           </span>
@@ -2528,7 +2526,6 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         {displayTitle && !inputSummary && (
           <span
             className="text-[11px] text-zinc-400 truncate min-w-0"
-            title={state.title}
           >
             {displayTitle}
           </span>
