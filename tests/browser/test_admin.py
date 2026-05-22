@@ -36,9 +36,9 @@ def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp_url(mon
     assert not admin._is_local_chrome_mode()
 
 
-def test_handshake_timeout_needs_chrome_remote_debugging_prompt() -> None:
+def test_handshake_timeout_does_not_open_chrome_inspect() -> None:
     msg = "CDP WS handshake failed: timed out during opening handshake"
-    assert admin._needs_chrome_remote_debugging_prompt(msg)
+    assert not admin._needs_chrome_remote_debugging_prompt(msg)
 
 
 def test_handshake_403_needs_chrome_remote_debugging_prompt() -> None:
@@ -232,7 +232,8 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     monkeypatch.setattr(admin, "daemon_alive", lambda: False)
     monkeypatch.setattr(admin, "_chrome_running", lambda: True)
     monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
-    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: None)
+    open_calls = []
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True))
 
     calls = {"count": 0}
 
@@ -252,6 +253,25 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     assert "browser remote debugging is not enabled on the current profile." in out
     assert "opening your browser's inspect page" in out
     assert "if the browser shows the profile picker" in out
+    assert open_calls == [True]
+
+
+def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "_daemon_has_current_protocol", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    restarted = []
+    ensure_calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "browser connection is stale; restarting" in out
+    assert "daemon is up." in out
+    assert restarted == [None]
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
 
 
 def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
@@ -266,7 +286,7 @@ def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch,
     out = capsys.readouterr().out
     assert "attaching via BU_CDP_WS" in out
     assert "daemon is up." in out
-    assert ensure_calls == [{"wait": 20.0}]
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
 
 
 def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
@@ -285,7 +305,7 @@ def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch,
     assert "restarting to attach via BU_CDP_URL" in out
     assert "daemon is up." in out
     assert restarted == [None]
-    assert ensure_calls == [{"wait": 20.0}]
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
 
 
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:

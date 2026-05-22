@@ -710,6 +710,7 @@ def test_start_all_stops_services_before_starting(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
     monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: call_order.append("stop_browser") or [])
     monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
     service_manager.start_all(service_manager.ServiceConfig(), console=None)
@@ -719,6 +720,7 @@ def test_start_all_stops_services_before_starting(monkeypatch) -> None:
         "service_lock",
         "stop_one:5173",
         "stop_one:8000",
+        "stop_browser",
         "_start_all_without_stop",
     ]
 
@@ -738,6 +740,7 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
     monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: call_order.append("stop_browser") or [])
     monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
     service_manager.restart_all(service_manager.ServiceConfig(), console=None)
@@ -747,6 +750,7 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
         "service_lock",
         "stop_one:5173",
         "stop_one:8000",
+        "stop_browser",
         "_start_all_without_stop",
     ]
 

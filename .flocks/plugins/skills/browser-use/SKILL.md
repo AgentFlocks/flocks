@@ -72,12 +72,16 @@ flocks browser --doctor
 browser: not connected — 请确保 Chrome / Chromium / Edge 已打开，然后访问对应浏览器的 inspect 页面（例如 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging）并勾选 Allow remote debugging
 ```
 
-然后等待用户进一步指示。如果用户确认已开启后，不要立刻重跑 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 attach，再运行 `flocks browser --doctor` 做只读确认。
+然后等待用户进一步指示，不要直接操作。
+
+当用户确认已开启remote-debugging后:
+1. 执行 `flocks browser --setup` 触发交互式 attach，不要用短超时包装该命令
+2. 再运行 `flocks browser --doctor` 做只读确认。
+3. 如果还失败，先执行 `flocks browser --reload` 清理旧 daemon，再重新执行 `flocks browser --setup`，避免因为残留 daemon 造成干扰。
 
 如果用户在 `Windows PowerShell` 中执行 `flocks browser -c`，优先使用单行代码并用分号分隔；多行单引号字符串容易因为换行/转义处理差异而触发假失败。
 
-- 如果 `--setup` / `-c` 成功，或随后 `--doctor` 通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
-- 如果仍未通过：继续提示用户检查 remote debugging，或提示切到 `agent-browser`
+- 如果 `--setup` 成功，随后 `--doctor` 通过：立即使用 `CDP 直连`，并立刻阅读 `references/cdp-direct.md`
 
 #### 结果 C：`flocks browser --doctor` 失败，或当前机器没有可用 Chrome/Chromium/Edge
 

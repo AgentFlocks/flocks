@@ -46,10 +46,7 @@ def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
         or "remote-debugging page" in lower
         or "inspect/#remote-debugging" in lower
         or "not live yet" in lower
-        or (
-            "ws handshake failed" in lower
-            and ("403" in lower or "opening handshake" in lower or "timed out" in lower or "timeout" in lower)
-        )
+        or ("ws handshake failed" in lower and "403" in lower)
     )
 
 
@@ -221,14 +218,15 @@ def ensure_daemon(
             time.sleep(0.2)
         msg = _log_tail(name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
-            if _open_inspect:
-                _open_browser_inspect()
+            restart_daemon(name)
+            if not _open_inspect:
+                raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
+            _open_browser_inspect()
             print(
                 f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
                 "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
                 file=sys.stderr,
             )
-            restart_daemon(name)
             continue
         raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
 
@@ -413,13 +411,16 @@ def run_setup() -> int:
             print(f"daemon already running; restarting to attach via {endpoint_name}.")
             restart_daemon()
         else:
-            print("daemon already running; nothing to do.")
-            return 0
+            if _daemon_has_current_protocol():
+                print("daemon already running and attached; nothing to do.")
+                return 0
+            print("daemon already running but browser connection is stale; restarting.")
+            restart_daemon()
     if not endpoint_name and not _chrome_running():
         print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1
     try:
-        ensure_daemon(wait=20.0)
+        ensure_daemon(wait=20.0, _open_inspect=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
