@@ -30,7 +30,6 @@ from flocks.session.core.defaults import (
     DEFAULT_MAX_TOOL_STEPS,
     DOOM_LOOP_THRESHOLD,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
-    SAME_TOOL_STREAK_HALT_THRESHOLD,
 )
 from flocks.session.lifecycle.retry import SessionRetry
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
@@ -266,9 +265,7 @@ class SessionRunner:
         state = {
             "last_user_id": last_user_id or "",
             "last_signature": "",
-            "last_tool_name": "",
             "exact_count": 0,
-            "same_tool_count": 0,
         }
         self._static_cache["tool_loop_guard"] = state
         return state
@@ -287,28 +284,18 @@ class SessionRunner:
 
     def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
         state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
-        return (
-            int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
-            or int(state.get("same_tool_count", 0)) >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
-        )
+        return int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
 
     def _build_tool_loop_halt_message(
         self,
         *,
         tool_name: str,
-        reason: str,
         count: int,
     ) -> str:
-        if reason == "repeated_exact_tool_call":
-            return (
-                f"Stopped the loop because `{tool_name}` was called {count} times in a row "
-                "with the same arguments and kept producing a tool-only turn. Change strategy, "
-                "summarize the blocker, or answer directly instead of repeating the exact same call."
-            )
         return (
-            f"Stopped the loop because `{tool_name}` was the only tool used for {count} consecutive "
-            "tool-only turns. Change strategy, summarize the blocker, or answer directly instead of "
-            "continuing the same tool pattern."
+            f"Stopped the loop because `{tool_name}` was called {count} times in a row "
+            "with the same arguments and kept producing a tool-only turn. Change strategy, "
+            "summarize the blocker, or answer directly instead of repeating the exact same call."
         )
 
     def _update_tool_loop_guard(
@@ -330,16 +317,10 @@ class SessionRunner:
         if state.get("last_signature") == signature:
             exact_count = int(state.get("exact_count", 0)) + 1
 
-        same_tool_count = 1
-        if state.get("last_tool_name") == tool_call.name:
-            same_tool_count = int(state.get("same_tool_count", 0)) + 1
-
         state.update({
             "last_user_id": last_user_id,
             "last_signature": signature,
-            "last_tool_name": tool_call.name,
             "exact_count": exact_count,
-            "same_tool_count": same_tool_count,
         })
 
         if exact_count >= REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD:
@@ -349,22 +330,11 @@ class SessionRunner:
                 "tool_name": tool_call.name,
                 "count": exact_count,
             }
-        if same_tool_count >= SAME_TOOL_STREAK_HALT_THRESHOLD:
-            return {
-                "action": "halt",
-                "reason": "same_tool_streak",
-                "tool_name": tool_call.name,
-                "count": same_tool_count,
-            }
-        if (
-            exact_count >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
-            or same_tool_count >= max(4, SAME_TOOL_STREAK_HALT_THRESHOLD // 2)
-        ):
+        if exact_count >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1):
             return {
                 "action": "warn",
                 "tool_name": tool_call.name,
                 "exact_count": exact_count,
-                "same_tool_count": same_tool_count,
             }
         return {"action": "allow"}
 
@@ -1098,9 +1068,8 @@ class SessionRunner:
             if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
                 state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
                 log.warn("runner.repeated_tool_calls_detected", {
-                    "tool_name": state.get("last_tool_name"),
+                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
                     "exact_count": state.get("exact_count", 0),
-                    "same_tool_count": state.get("same_tool_count", 0),
                     "step": self._step,
                 })
                 from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
@@ -1373,7 +1342,6 @@ class SessionRunner:
                 if tool_loop_guard.get("action") == "halt":
                     halt_message = self._build_tool_loop_halt_message(
                         tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
-                        reason=str(tool_loop_guard.get("reason") or "same_tool_streak"),
                         count=int(tool_loop_guard.get("count", 0) or 0),
                     )
                     log.warn("runner.tool_loop_guard_halt", {
