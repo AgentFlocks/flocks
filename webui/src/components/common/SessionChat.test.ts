@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import React from 'react';
+import { render, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
+  default as SessionChat,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
@@ -11,6 +14,92 @@ import {
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+
+const clientGetMock = vi.fn();
+const clientPostMock = vi.fn();
+const useSessionMessagesMock = vi.fn();
+const tMock = (key: string) => ({
+  'chat.placeholder': '请输入消息',
+  'chat.emptyText': '暂无消息',
+  'chat.sending': '发送中...',
+  'chat.thinking': '思考中...',
+  'chat.streaming': '继续输出中...',
+  'chat.compacting': '压缩中...',
+}[key] ?? key);
+const pendingQuestionsHookMock = {
+  pendingQuestions: {},
+  handleQuestionAsked: vi.fn(),
+  submitAnswer: vi.fn(),
+  submitReject: vi.fn(),
+  removeByRequestId: vi.fn(),
+  fetchPendingQuestions: vi.fn().mockResolvedValue(undefined),
+  clearAll: vi.fn(),
+};
+const toastMock = {
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+};
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: tMock,
+  }),
+}));
+
+vi.mock('@/hooks/useSessions', () => ({
+  useSessionMessages: (...args: unknown[]) => useSessionMessagesMock(...args),
+}));
+
+vi.mock('@/hooks/useSSE', () => ({
+  useSSE: () => ({ status: 'connected' }),
+}));
+
+vi.mock('@/hooks/useReasoningToggle', () => ({
+  useReasoningToggle: () => ({
+    getPartExpanded: () => false,
+    togglePart: vi.fn(),
+    isReasoningDone: true,
+  }),
+}));
+
+vi.mock('@/hooks/usePendingQuestions', () => ({
+  usePendingQuestions: () => pendingQuestionsHookMock,
+}));
+
+vi.mock('./Toast', () => ({
+  useToast: () => toastMock,
+}));
+
+vi.mock('@/api/client', () => ({
+  __esModule: true,
+  default: {
+    get: (...args: unknown[]) => clientGetMock(...args),
+    post: (...args: unknown[]) => clientPostMock(...args),
+  },
+  getApiBase: () => '',
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  clientGetMock.mockResolvedValue({ data: {} });
+  clientPostMock.mockResolvedValue({ data: {} });
+  pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  useSessionMessagesMock.mockReturnValue({
+    messages: [],
+    loading: false,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+});
 
 function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   return {
@@ -118,6 +207,44 @@ describe('getStandaloneThinkingBubbleClassName', () => {
     expect(getStandaloneThinkingBubbleClassName(true)).toBe(
       getMessageBubbleClassName({ compact: true, isUser: false, isEditing: false }),
     );
+  });
+});
+
+describe('SessionChat standalone thinking indicator', () => {
+  it('keeps only the bouncing dots during the initial assistant loading state', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-1-part', type: 'text', text: 'hello' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'hello',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+      expect(container.textContent).not.toContain('思考中...');
+    });
   });
 });
 

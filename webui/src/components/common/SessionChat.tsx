@@ -554,6 +554,7 @@ export default function SessionChat({
     updateMessage,
     updateMessagePart,
     replaceMessageText,
+    markMessageStopped,
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
@@ -576,7 +577,15 @@ export default function SessionChat({
 
       if (!properties || !sessionId) return;
 
-      if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
+      if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
+        setIsStreaming(false);
+        const lastAsstMsg = [...messagesRef.current].reverse().find(
+          (message) => message.role === 'assistant' && !message.finish,
+        );
+        if (lastAsstMsg?.parts?.length) {
+          markMessageStopped(lastAsstMsg.id);
+        }
+      } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
         if (properties.info.finish || properties.info.time?.completed) {
           const shouldRefetch = shouldRefetchFinishedMessage({
@@ -665,6 +674,7 @@ export default function SessionChat({
       sessionId,
       updateMessage,
       updateMessagePart,
+      markMessageStopped,
       refetch,
       handleQuestionAsked,
       removeByRequestId,
@@ -1302,6 +1312,9 @@ export default function SessionChat({
       abortedMessageIdRef.current = lastAsstMsg?.id || null;
       abortingRef.current = true;
       await client.post(`/api/session/${sessionId}/abort`);
+      if (lastAsstMsg?.id) {
+        markMessageStopped(lastAsstMsg.id);
+      }
       setIsStreaming(false);
       setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
@@ -1309,7 +1322,7 @@ export default function SessionChat({
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
     }
-  }, [sessionId]);
+  }, [markMessageStopped, sessionId]);
 
   // Fire onStreamingDone when isStreaming transitions true → false
   useEffect(() => {
@@ -1654,7 +1667,6 @@ export default function SessionChat({
                             <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
                             <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                           </div>
-                          <span>{t('chat.thinking')}</span>
                         </div>
                       </div>
                     </div>

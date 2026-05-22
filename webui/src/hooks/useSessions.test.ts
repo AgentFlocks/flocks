@@ -285,4 +285,79 @@ describe('updateMessagePart scheduling', () => {
 
     expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-1']);
   });
+
+  it('markMessageStopped keeps partial text and freezes running tools', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-stop',
+        role: 'assistant',
+        parts: [
+          { id: 'reason-1', type: 'reasoning', text: '分析中' } as any,
+          {
+            id: 'tool-1',
+            type: 'tool',
+            state: {
+              status: 'running',
+              title: 'Read file',
+              time: { start: 100 },
+            },
+          } as any,
+          { id: 'text-1', type: 'text', text: '已经输出一半' } as any,
+        ],
+      }));
+    });
+
+    await act(async () => {
+      result.current.markMessageStopped('msg-stop');
+    });
+
+    const msg = result.current.messages.find((item) => item.id === 'msg-stop');
+    expect(msg?.finish).toBe('stop');
+    expect((msg?.parts as any[])[2].text).toBe('已经输出一半');
+    expect((msg?.parts as any[])[1].state.status).toBe('error');
+    expect((msg?.parts as any[])[1].state.error).toBe('Tool execution was interrupted');
+    expect((msg?.parts as any[])[1].state.time.end).toBeDefined();
+  });
+
+  it('refetch preserves locally stopped assistant content when backend snapshot is weaker', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-stop',
+        role: 'assistant',
+        parts: [
+          { id: 'tool-1', type: 'tool', state: { status: 'completed', output: 'ok' } } as any,
+          { id: 'text-1', type: 'text', text: '保留这段已输出文本' } as any,
+        ],
+      }));
+      result.current.markMessageStopped('msg-stop');
+    });
+
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: [{
+        info: {
+          id: 'msg-stop',
+          sessionID: 'sess-1',
+          role: 'assistant',
+          time: { created: 123 },
+        },
+        parts: [],
+      }],
+    } as any);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    const msg = result.current.messages.find((item) => item.id === 'msg-stop');
+    expect(msg?.finish).toBe('stop');
+    expect(msg?.parts).toHaveLength(2);
+    expect((msg?.parts as any[])[1].text).toBe('保留这段已输出文本');
+    expect((msg?.parts as any[])[0].state.status).toBe('completed');
+  });
 });
