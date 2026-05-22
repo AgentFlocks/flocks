@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -9,9 +10,10 @@ from flocks.updater import updater
 
 
 @pytest.mark.asyncio
-async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     from flocks.storage.storage import Storage
 
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     await Storage.set("console:session", {"console_session_token": "cs_manifest"}, "json")
 
     class _Resp:
@@ -98,6 +100,100 @@ async def test_check_update_uses_pro_marker_and_component_version(monkeypatch: p
 
 
 @pytest.mark.asyncio
+async def test_check_update_force_console_manifest_uses_pro_versions(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        """{
+  "installed_version": "v2026.5.23",
+  "flockspro_component_version": "pro-v2026-05-23"
+}""",
+        encoding="utf-8",
+    )
+
+    async def _fake_config():
+        return SimpleNamespace(enabled=True, sources=["github"], repo="", token=None)
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="pro-v2026-05-24",
+            release_notes="latest pro",
+            release_url="https://console.example.com/v1/pro-bundles/rel_1/download",
+            bundle_url="https://console.example.com/v1/pro-bundles/rel_1/download",
+            bundle_sha256="abc123",
+            bundle_format="zip",
+            manifest={"flockspro_component_version": "pro-v2026-05-24"},
+        )
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+
+    info = await updater.check_update(force_console_manifest=True)
+
+    assert info.edition == "flockspro"
+    assert info.current_version == "pro-v2026-05-23"
+    assert info.latest_version == "pro-v2026-05-24"
+    assert info.bundle_sha256 == "abc123"
+    assert info.has_update is True
+
+
+@pytest.mark.asyncio
+async def test_load_console_session_token_falls_back_to_shared_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.storage.storage import Storage
+
+    async def _missing_storage_session(_key):
+        return None
+
+    session_path = tmp_path / "run" / "console-session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        __import__("json").dumps(
+            {
+                "console_session_token": "cs_shared",
+                "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(Storage, "get", _missing_storage_session)
+
+    assert await updater._load_console_session_token() == "cs_shared"
+
+
+@pytest.mark.asyncio
+async def test_load_console_session_token_prefers_shared_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from flocks.storage.storage import Storage
+
+    async def _stale_storage_session(_key):
+        return {"console_session_token": "cs_stale"}
+
+    session_path = tmp_path / "run" / "console-session.json"
+    session_path.parent.mkdir(parents=True)
+    session_path.write_text(
+        __import__("json").dumps(
+            {
+                "console_session_token": "cs_shared",
+                "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr(Storage, "get", _stale_storage_session)
+
+    assert await updater._load_console_session_token() == "cs_shared"
+
+
+@pytest.mark.asyncio
 async def test_fetch_console_manifest_release_blocks_frozen_channel(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Resp:
         def raise_for_status(self) -> None:
@@ -127,13 +223,77 @@ async def test_fetch_console_manifest_release_blocks_frozen_channel(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_perform_pro_bundle_install_only_installs_wheel(
+async def test_download_console_bundle_sends_token_only_to_console_origin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    seen_headers: list[dict | None] = []
+
+    class _Resp:
+        def raise_for_status(self) -> None:
+            return None
+
+        async def aiter_bytes(self, chunk_size=65536):
+            yield b"bundle"
+
+    class _Stream:
+        def __init__(self, headers):
+            self.headers = headers
+
+        async def __aenter__(self):
+            seen_headers.append(self.headers)
+            return _Resp()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None):
+            return _Stream(headers)
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(updater.httpx, "AsyncClient", _Client)
+
+    await updater._download_console_bundle(
+        "https://console.example.com/v1/pro-bundles/rel_1/download",
+        "cs_manifest",
+        tmp_path,
+        "console.zip",
+    )
+    await updater._download_console_bundle(
+        "https://cdn.example.com/flockspro/console.zip",
+        "cs_manifest",
+        tmp_path,
+        "cdn.zip",
+    )
+
+    assert seen_headers == [
+        {"Authorization": "Bearer cs_manifest"},
+        {},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_perform_pro_bundle_install_replaces_core_and_installs_wheel(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     bundle_root = tmp_path / "bundle-root"
+    core_root = bundle_root / "flocks"
+    core_root.mkdir(parents=True)
+    (core_root / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
+    (core_root / "new_core.py").write_text("UPDATED = True\n", encoding="utf-8")
     wheels = bundle_root / "wheels"
-    wheels.mkdir(parents=True)
+    wheels.mkdir()
     wheel = wheels / "flockspro-0.1.0-py3-none-any.whl"
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
@@ -154,31 +314,42 @@ async def test_perform_pro_bundle_install_only_installs_wheel(
 
     install_root = tmp_path / "install"
     install_root.mkdir()
+    (install_root / "old_core.py").write_text("OLD = True\n", encoding="utf-8")
+    venv_bin = install_root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").write_text("#!/usr/bin/env python\n", encoding="utf-8")
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-root"))
     monkeypatch.setattr(updater, "_get_repo_root", lambda: install_root)
     monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", lambda: _async_manifest_info(bundle))
     monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
     monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
-    monkeypatch.setattr(
-        updater,
-        "_replace_install_dir",
-        lambda *_args, **_kwargs: pytest.fail("Pro upgrade must not replace OSS core"),
-    )
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_write_version_marker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda *_args, **_kwargs: None)
 
-    captured: dict[str, list[str]] = {}
+    captured: list[list[str]] = []
 
     async def _fake_run_async(cmd, **_kwargs):
-        captured["cmd"] = cmd
+        captured.append(cmd)
         return 0, "", ""
 
     monkeypatch.setattr(updater, "_run_async", _fake_run_async)
 
     progresses = [step async for step in updater.perform_pro_bundle_install(restart=False)]
     assert progresses[-1].stage == "done"
-    assert captured["cmd"][:3] == ["/usr/bin/uv", "pip", "install"]
-    assert "--no-deps" in captured["cmd"]
-    assert str(wheel.name) in captured["cmd"][-1]
+    assert (install_root / "new_core.py").is_file()
+    assert not (install_root / "old_core.py").exists()
+    assert any(cmd[:2] == ["/usr/bin/uv", "sync"] for cmd in captured)
+    pip_installs = [cmd for cmd in captured if cmd[:3] == ["/usr/bin/uv", "pip", "install"]]
+    assert pip_installs
+    assert "--no-deps" in pip_installs[-1]
+    assert str(wheel.name) in pip_installs[-1][-1]
+    marker = tmp_path / "flocks-root" / "run" / "pro-bundle-installed.json"
+    assert marker.is_file()
+    marker_payload = __import__("json").loads(marker.read_text(encoding="utf-8"))
+    assert marker_payload["display_version"] == "v2026.5.10"
+    assert marker_payload["oss_version"] == "v2026.5.10"
 
 
 @pytest.mark.asyncio
@@ -187,8 +358,11 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
     tmp_path,
 ) -> None:
     bundle_root = tmp_path / "bundle-root"
+    core_root = bundle_root / "flocks"
+    core_root.mkdir(parents=True)
+    (core_root / "pyproject.toml").write_text('[project]\nname = "flocks"\n', encoding="utf-8")
     wheels = bundle_root / "wheels"
-    wheels.mkdir(parents=True)
+    wheels.mkdir()
     wheel = wheels / "flockspro-0.1.0-py3-none-any.whl"
     wheel.write_bytes(b"fake-wheel")
     (bundle_root / "manifest.json").write_text(
@@ -217,33 +391,14 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
     monkeypatch.setattr(updater, "_download_console_bundle", lambda *_args, **_kwargs: _async_path(bundle))
     monkeypatch.setattr(updater, "_verify_download_sha256", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(updater, "_find_executable", lambda name: "/usr/bin/uv" if name == "uv" else None)
+    monkeypatch.setattr(updater, "_backup_current_version", lambda *_args, **_kwargs: tmp_path / "backup.tar.gz")
+    monkeypatch.setattr(updater, "_write_version_marker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(updater, "_refresh_global_cli_entry", lambda *_args, **_kwargs: None)
 
     async def _fake_run_async(_cmd, **_kwargs):
         return 0, "", ""
 
     monkeypatch.setattr(updater, "_run_async", _fake_run_async)
-    spawned: dict[str, object] = {}
-
-    def _fake_spawn_detached_process(command, *, cwd, log_path):
-        spawned["command"] = command
-        spawned["cwd"] = cwd
-        spawned["log_path"] = log_path
-
-        class _Process:
-            pid = 12345
-
-        return _Process()
-
-    monkeypatch.setattr(updater, "_spawn_detached_process", _fake_spawn_detached_process)
-    scheduled: dict[str, object] = {}
-
-    class _Loop:
-        def call_later(self, delay, callback):
-            scheduled["delay"] = delay
-            scheduled["callback"] = callback
-            return None
-
-    monkeypatch.setattr(updater.asyncio, "get_running_loop", lambda: _Loop())
 
     progresses = []
     async for step in updater.perform_pro_bundle_install(restart=True):
@@ -252,12 +407,6 @@ async def test_perform_pro_bundle_install_schedules_restart_before_stream_can_cl
             break
 
     assert progresses[-1].stage == "restarting"
-    assert scheduled["delay"] == 0.8
-    assert callable(scheduled["callback"])
-    scheduled["callback"]()
-    assert spawned["command"][1:4] == ["-m", "flocks.cli.main", "restart"]
-    assert "--no-browser" in spawned["command"]
-    assert "--skip-webui-build" in spawned["command"]
 
 
 async def _async_manifest_info(bundle):

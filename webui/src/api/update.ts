@@ -7,6 +7,7 @@ import client from './client';
 export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'restarting' | 'done' | 'error';
 
 export type DeployMode = 'docker' | 'source';
+export type UpdateEdition = 'flocks' | 'flockspro';
 
 export interface VersionInfo {
   current_version: string;
@@ -32,9 +33,12 @@ export interface UpdateProgress {
 // API
 // ======================================================================
 
-export const checkUpdate = async (locale?: string): Promise<VersionInfo> => {
+export const checkUpdate = async (locale?: string, edition?: UpdateEdition): Promise<VersionInfo> => {
   const response = await client.get<VersionInfo>('/api/update/check', {
-    params: locale ? { locale } : undefined,
+    params: {
+      ...(locale ? { locale } : {}),
+      ...(edition ? { edition } : {}),
+    },
   });
   return response.data;
 };
@@ -52,6 +56,7 @@ export const applyUpdate = (
   targetVersion: string,
   onProgress: (progress: UpdateProgress) => void,
   locale?: string,
+  edition?: UpdateEdition,
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
@@ -59,6 +64,9 @@ export const applyUpdate = (
     });
     if (locale) {
       params.set('locale', locale);
+    }
+    if (edition) {
+      params.set('edition', edition);
     }
     const url = `/api/update/apply?${params.toString()}`;
     fetch(url, { method: 'POST' })

@@ -5,7 +5,7 @@ from flocks.updater.updater import _resolve_sources_for_edition
 
 
 @pytest.mark.asyncio
-async def test_installed_pro_bundle_marker_uses_console_manifest(monkeypatch, tmp_path):
+async def test_installed_pro_bundle_marker_without_active_license_keeps_oss_sources(monkeypatch, tmp_path):
     marker = tmp_path / "run" / "pro-bundle-installed.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(
@@ -18,11 +18,11 @@ async def test_installed_pro_bundle_marker_uses_console_manifest(monkeypatch, tm
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.delenv("FLOCKS_EDITION", raising=False)
     sources = await _resolve_sources_for_edition(["github", "gitee"])
-    assert sources == ["console-manifest"]
+    assert sources == ["github", "gitee"]
 
 
 @pytest.mark.asyncio
-async def test_flockspro_env_with_active_license_keeps_oss_sources_without_marker(monkeypatch, tmp_path):
+async def test_flockspro_env_with_active_license_keeps_oss_sources(monkeypatch, tmp_path):
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
     monkeypatch.setenv("FLOCKS_EDITION", "flockspro")
     monkeypatch.setattr("flocks.updater.updater._is_flockspro_license_active", lambda: True)

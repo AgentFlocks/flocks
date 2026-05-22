@@ -15,7 +15,7 @@ import {
   BellOff,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress } from '@/api/update';
+import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 // ------------------------------------------------------------------ //
@@ -34,11 +34,12 @@ function formatUpdateVersion(version?: string | null): string {
 
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
+  edition?: UpdateEdition;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateModalProps) {
+export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, onDismiss }: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -60,7 +61,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language);
+      const data = await checkUpdate(i18n.language, edition);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -68,7 +69,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     } finally {
       setChecking(false);
     }
-  }, [i18n.language, t]);
+  }, [edition, i18n.language, t]);
 
   useEffect(() => {
     if (!initialInfo) {
@@ -98,7 +99,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
           setRestartingSync(true);
           pollUntilReady();
         }
-      }, i18n.language);
+      }, i18n.language, edition);
     } catch (e: any) {
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
@@ -107,7 +108,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
         setUpgrading(false);
       }
     }
-  }, [i18n.language, info, t]);
+  }, [edition, i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
   const showProgressDialog = upgrading || restarting || steps.length > 0;
@@ -153,6 +154,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     const label = t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
     const isError = step.stage === 'error';
     const isSpinning = step.stage === 'restarting';
+    const detail = step.pro_component_filename || step.bundle_filename || step.message;
     return (
       <div key={index} className="flex items-center gap-2.5 py-1 text-sm">
         {isError
@@ -163,7 +165,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
         }
         <span className={isError ? 'text-red-600' : 'text-gray-700'}>{label}</span>
         {!isError && !isSpinning && (
-          <span className="text-gray-400 text-xs truncate">{step.message}</span>
+          <span className="text-gray-400 text-xs truncate">{detail}</span>
         )}
       </div>
     );

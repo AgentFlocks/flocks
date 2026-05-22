@@ -451,6 +451,7 @@ export default function Layout() {
       {showUpdate && (
         <UpdateModal
           initialInfo={updateInfo}
+          edition={isFlocksproActive ? 'flockspro' : 'flocks'}
           onClose={() => setShowUpdate(false)}
           onDismiss={() => setShowUpdate(false)}
         />

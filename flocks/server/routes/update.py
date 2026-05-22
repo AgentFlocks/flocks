@@ -4,6 +4,7 @@ Update routes — check version and apply self-upgrade via SSE stream
 
 import asyncio
 import json
+from typing import Literal
 
 from fastapi import APIRouter, Query
 from fastapi.responses import StreamingResponse
@@ -26,8 +27,12 @@ async def check_version(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
+    edition: Literal["flocks", "flockspro"] = Query(
+        default="flocks",
+        description="Version channel to check. flockspro checks the Console Pro bundle manifest.",
+    ),
 ) -> VersionInfo:
-    return await check_update(locale=locale)
+    return await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
 
 
 @router.post(
@@ -48,6 +53,10 @@ async def apply_update(
     locale: str | None = Query(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
+    ),
+    edition: Literal["flocks", "flockspro"] = Query(
+        default="flocks",
+        description="Version channel to apply. flockspro applies the Console Pro bundle.",
     ),
 ):
     """
@@ -77,7 +86,7 @@ async def apply_update(
     if target_version:
         version_to_apply = target_version
     else:
-        info = await check_update(locale=locale)
+        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
         if info.error:
             return StreamingResponse(_error(info.error), media_type="text/event-stream")
         if not info.has_update or not info.latest_version:
@@ -100,6 +109,7 @@ async def apply_update(
             bundle_sha256=bundle_sha256,
             bundle_format=bundle_format,
             locale=locale,
+            force_console_manifest=(edition == "flockspro"),
         )
         try:
             async for progress in gen:
