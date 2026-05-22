@@ -131,6 +131,8 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         version_to_apply,
         zipball_url=info.zipball_url,
         tarball_url=info.tarball_url,
+        bundle_sha256=info.bundle_sha256,
+        bundle_format=info.bundle_format,
         restart=False,
         region=region,
     ):

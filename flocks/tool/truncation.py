@@ -45,7 +45,7 @@ _last_cleanup_ts: float = 0.0
 def _ensure_output_dir() -> Path:
     global _OUTPUT_DIR
     if _OUTPUT_DIR is None:
-        base = WorkspaceManager.get_instance().get_workspace_dir() / "tool-output"
+        base = WorkspaceManager.get_instance().get_default_outputs_dir() / "tool-output"
         base.mkdir(parents=True, exist_ok=True)
         _OUTPUT_DIR = base
     return _OUTPUT_DIR
