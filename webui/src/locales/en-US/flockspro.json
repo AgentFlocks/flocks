@@ -34,7 +34,7 @@
   "upgrade": {
     "title": "Upgrade to Flocks Pro",
     "description": "Review the current license information, submit applications, and track approval status.",
-    "installedTitle": "Flocks Pro {{version}}",
+    "installedTitle": "Flocks Pro",
     "installedDescription": "Flocks Pro is installed and the license is activated.",
     "installedVersion": "Flocks Pro Version",
     "licenseStatus": "License Status",

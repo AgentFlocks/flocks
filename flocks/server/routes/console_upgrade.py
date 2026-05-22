@@ -673,6 +673,8 @@ async def get_pro_package_status(request: Request) -> dict[str, Any]:
     installed = _is_pro_component_installed()
     return {
         "installed": installed,
+        "display_version": marker.get("display_version"),
+        "compare_version": marker.get("compare_version"),
         "installed_version": marker.get("installed_version"),
         "flockspro_component_version": marker.get("flockspro_component_version"),
         "build_id": marker.get("build_id"),

@@ -168,6 +168,8 @@ async def test_pro_package_status_reports_installed_marker(
         console_routes,
         "_read_pro_bundle_install_marker",
         lambda: {
+            "display_version": "v2026.5.13.1",
+            "compare_version": "2026.5.13.1",
             "installed_version": "pro-v2026-05-13-3",
             "flockspro_component_version": "1.2.3",
             "build_id": "build_1",
@@ -180,6 +182,8 @@ async def test_pro_package_status_reports_installed_marker(
     assert resp.status_code == status.HTTP_200_OK
     payload = resp.json()
     assert payload["installed"] is True
+    assert payload["display_version"] == "v2026.5.13.1"
+    assert payload["compare_version"] == "2026.5.13.1"
     assert payload["flockspro_component_version"] == "1.2.3"
 
 

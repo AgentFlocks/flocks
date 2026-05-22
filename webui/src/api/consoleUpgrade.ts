@@ -61,6 +61,8 @@ export interface UpgradeRequestStatus {
 
 export interface ProPackageStatus {
   installed: boolean;
+  display_version?: string | null;
+  compare_version?: string | null;
   installed_version?: string | null;
   flockspro_component_version?: string | null;
   build_id?: string | null;
