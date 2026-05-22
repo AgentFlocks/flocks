@@ -8,7 +8,6 @@ AI-Native SecOps Platform
 
 ## 1. Project Overview
 
-
 Flocks is an AI-driven SecOps platform built with Python, featuring multi-agent collaboration, HTTP API server, and modern terminal user interface designed to help you with your SecOps tasks.
 
 ## 2. Features
