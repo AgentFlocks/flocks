@@ -20,3 +20,11 @@ jobs:
           ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/${GITHUB_SHA}.tar.gz"
           mkdir -p dist
           curl -fSL "${ARCHIVE_URL}" -o "dist/flocks-${SHORT_SHA}.tar.gz"
+
+      - name: Upload tar archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: flocks-linux-tar
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 90
