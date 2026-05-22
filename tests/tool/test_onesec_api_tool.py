@@ -18,7 +18,7 @@ def _load_tool(yaml_name: str):
         / ".flocks"
         / "plugins"
         / "tools"
-        / "api"
+        / "device"
         / "onesec_v2_8_2"
         / yaml_name
     )
@@ -121,7 +121,7 @@ async def test_onesec_dns_search_queries_uses_signed_query_params_and_doc_payloa
             pageitemsnum=50,
         )
 
-    assert tool.info.source == "api"
+    assert tool.info.source == "device"
     assert tool.info.provider == "onesec_api_v2_8_2"
     assert result.success is True
     assert result.output["items"] == [{"domain": "example.com"}]

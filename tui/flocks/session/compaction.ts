@@ -41,7 +41,7 @@ export namespace SessionCompaction {
   export const PRUNE_MINIMUM = 20_000
   export const PRUNE_PROTECT = 40_000
 
-  const PRUNE_PROTECTED_TOOLS = ["skill"]
+  const PRUNE_PROTECTED_TOOLS = ["skill_load"]
 
   // goes backwards through parts until there are 40_000 tokens worth of tool
   // calls. then erases output of previous tool calls. idea is to throw away old

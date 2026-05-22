@@ -2142,7 +2142,6 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   if (providerId === 'openai' && ['o1', 'o3', 'gpt-5'].some(tag => lowered.includes(tag))) return true;
   if (providerId === 'google' && lowered.includes('gemini') && (lowered.includes('2.5') || lowered.includes('gemini-3'))) return true;
   if (providerId === 'groq') return true;
-  if (providerId === 'amazon-bedrock' && (lowered.includes('anthropic') || lowered.includes('nova'))) return true;
 
   if (['threatbook-cn-llm', 'threatbook-io-llm', 'alibaba', 'moonshot'].includes(providerId)) {
     if (lowered.includes('qwen3-max') || lowered.includes('qwen3.6-plus')) return true;
@@ -2150,6 +2149,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   }
 
   return false;
+}
+
+function allowsBuiltInVisionToggle(modelId: string): boolean {
+  const lowered = modelId.toLowerCase();
+  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
 }
 
 // ==================== Configure Dialog ====================
@@ -2634,15 +2638,13 @@ function ModelDetailSheet({
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
+  const visionToggleLocked = isPredefined && !allowsBuiltInVisionToggle(model.id);
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
   const [supportsTools, setSupportsTools] = useState(features.includes('tool_call') || !!model.capabilities?.supports_tools);
-  // For predefined models vision is always treated as disabled — only user-added
-  // (customizable) models may have vision enabled so the multimodal upload flow
-  // is only unlocked when the user has explicitly configured a vision model.
   const [supportsVision, setSupportsVision] = useState(
-    isPredefined ? false : (features.includes('vision') || !!model.capabilities?.supports_vision),
+    features.includes('vision') || !!model.capabilities?.supports_vision,
   );
   const [supportsStreaming, setSupportsStreaming] = useState(!!model.capabilities?.supports_streaming);
   const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
@@ -2787,8 +2789,8 @@ function ModelDetailSheet({
                   label={t('form.vision')}
                   checked={supportsVision}
                   onChange={setSupportsVision}
-                  disabled={isPredefined}
-                  disabledHint={t('form.visionPredefinedHint')}
+                  disabled={visionToggleLocked}
+                  disabledHint={visionToggleLocked ? t('form.visionPredefinedHint') : undefined}
                 />
                 <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
                 <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
@@ -2915,7 +2917,7 @@ function SetDefaultModelDialog({
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <h2 className="text-base font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
+          <h2 className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X className="w-5 h-5" />
           </button>

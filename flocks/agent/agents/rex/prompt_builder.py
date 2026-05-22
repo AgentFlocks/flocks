@@ -193,7 +193,7 @@ __ANTI_PATTERNS__
 - Prefer existing libraries over new dependencies.
 - Prefer small, focused changes over large refactors.
 - When uncertain about scope, ask.
-- If a user query matches a skill and the relevant tools, load the skill first and follow its guidance.
+- If a user query matches a skill and the relevant tools, call `skill_load` first and follow its guidance.
 </Constraints>
 
 __COMMAND_GUIDANCE__
@@ -221,7 +221,7 @@ def _build_rex_skills_section(available_skills: List["AvailableSkill"]) -> str:
     lines = [
         "### Available Skills",
         "",
-        "Load a skill when the task clearly matches its domain expertise.",
+        "Call `skill_load` when the task clearly matches a skill's domain expertise.",
         "",
     ]
     for skill in available_skills:

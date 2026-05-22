@@ -7,7 +7,6 @@ temperature, tool_call, limit, etc.
 """
 
 import time
-import json
 import re
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -21,10 +20,55 @@ from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
 from flocks.tool.tool_loader import extract_provider_version
+from flocks.tool.schema import api_service_schema as api_service_schema_helpers
+
+# Schema helpers are re-exported from flocks.tool.schema.api_service_schema (canonical
+# home). Existing callers — tests, onboarding, device migration — keep importing
+# them from this module without churn.
+from flocks.tool.schema.api_service_schema import (
+    APIServiceCredentialField,
+    _build_api_service_credential_schema,
+    _default_api_service_field_label,
+    _extract_secret_id,
+    _get_api_service_default_secret_id,
+    _get_api_service_schema_field,
+    _get_api_service_secret_candidates,
+    _get_api_service_secret_field_names,
+    _get_compound_secret_metadata,
+    _normalize_api_service_credential_field,
+    _should_persist_secondary_secret,
+)
 
 
 router = APIRouter()
 log = Log.create(service="provider-routes")
+
+
+def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper for callers patching provider-route helpers."""
+    return api_service_schema_helpers._load_provider_yaml_metadata(provider_id)
+
+
+def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper preserving the historical patch seam in this module."""
+    merged: Dict[str, Any] = {}
+
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
+    if isinstance(config_data, dict):
+        merged.update(config_data)
+
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if meta_file.is_file():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata_data = api_service_schema_helpers.json.load(f)
+        if isinstance(metadata_data, dict):
+            merged = {**metadata_data, **merged}
+
+    yaml_data = _load_provider_yaml_metadata(provider_id)
+    if isinstance(yaml_data, dict):
+        merged = {**yaml_data, **merged}
+
+    return merged or None
 
 
 _EMAIL_KEY_PAIR_PATTERN = re.compile(
@@ -63,22 +107,6 @@ def _split_compound_service_credentials(raw_value: str) -> Optional[tuple[str, s
     if not email or not api_key:
         return None
     return api_key, email
-
-
-def _get_compound_secret_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(metadata, dict):
-        return {}
-    compound_secret = metadata.get("compound_secret")
-    if isinstance(compound_secret, dict):
-        return compound_secret
-    return {}
-
-
-def _should_persist_secondary_secret(metadata: Optional[Dict[str, Any]]) -> bool:
-    compound_secret = _get_compound_secret_metadata(metadata)
-    if compound_secret.get("persist_secondary_secret") is False:
-        return False
-    return True
 
 
 #: Sentinel value persisted when a user saves an OpenAI-compatible / custom
@@ -882,301 +910,14 @@ class APIServiceSummary(BaseModel):
     description_cn: Optional[str] = None
     builtin: bool = False
     verify_ssl: bool = False
+    integration_type: Optional[str] = None  # e.g. "device" for security device APIs
+    vendor: Optional[str] = None  # Manufacturer key (threatbook, qianxin, sangfor, qingteng, ...)
 
 
 class APIServiceUpdateRequest(BaseModel):
     """API service update request."""
     enabled: bool = Field(..., description="Enable or disable the API service")
     verify_ssl: Optional[bool] = Field(None, description="SSL verification for HTTP requests (default: False)")
-
-
-class APIServiceCredentialField(BaseModel):
-    """Credential field definition exposed to the WebUI."""
-
-    key: str
-    label: str
-    description: Optional[str] = None
-    storage: str = "config"
-    sensitive: bool = False
-    required: bool = False
-    input_type: str = "text"
-    config_key: str
-    secret_id: Optional[str] = None
-    default_value: Optional[str] = None
-
-
-def _default_api_service_field_label(field_key: str) -> str:
-    labels = {
-        "api_key": "API Key",
-        "base_url": "Base URL",
-        "secret": "Secret",
-        "username": "Username",
-        "password": "Password",
-    }
-    return labels.get(field_key, field_key.replace("_", " ").title())
-
-
-def _extract_secret_id(secret_ref: Any) -> Optional[str]:
-    if isinstance(secret_ref, str) and secret_ref.startswith("{secret:") and secret_ref.endswith("}"):
-        return secret_ref[len("{secret:"):-1]
-    return None
-
-
-def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load raw API service metadata from config, metadata JSON, or YAML provider."""
-    merged: Dict[str, Any] = {}
-
-    config_data = ConfigWriter.get_api_service_raw(provider_id)
-    if isinstance(config_data, dict):
-        merged.update(config_data)
-
-    metadata_dirs = [
-        Path(__file__).parent.parent.parent / "tool" / "security" / "metadata",
-    ]
-    for md in metadata_dirs:
-        meta_file = md / f"{provider_id}.json"
-        if meta_file.is_file():
-            with open(meta_file, "r", encoding="utf-8") as f:
-                metadata_data = json.load(f)
-            if isinstance(metadata_data, dict):
-                merged = {**metadata_data, **merged}
-            break
-
-    yaml_data = _load_provider_yaml_metadata(provider_id)
-    if isinstance(yaml_data, dict):
-        merged = {**yaml_data, **merged}
-
-    return merged or None
-
-
-def _normalize_api_service_credential_field(
-    provider_id: str,
-    raw_field: Dict[str, Any],
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[APIServiceCredentialField]:
-    if not isinstance(raw_field, dict):
-        return None
-
-    key = raw_field.get("key")
-    if not isinstance(key, str) or not key.strip():
-        return None
-    key = key.strip()
-
-    storage = raw_field.get("storage")
-    if storage not in {"config", "secret"}:
-        storage = "secret" if key in {"api_key", "secret", "password", "token", "client_secret"} else "config"
-
-    config_key = raw_field.get("config_key")
-    if not isinstance(config_key, str) or not config_key.strip():
-        config_key = "apiKey" if key == "api_key" else key
-
-    label = raw_field.get("label")
-    if not isinstance(label, str) or not label.strip():
-        label = _default_api_service_field_label(key)
-
-    input_type = raw_field.get("input_type")
-    if input_type not in {"text", "password", "url"}:
-        if storage == "secret":
-            input_type = "password"
-        elif key.endswith("url"):
-            input_type = "url"
-        else:
-            input_type = "text"
-
-    sensitive = raw_field.get("sensitive")
-    if sensitive is None:
-        sensitive = storage == "secret"
-    else:
-        sensitive = bool(sensitive)
-
-    secret_id = raw_field.get("secret_id")
-    if storage == "secret":
-        if not isinstance(secret_id, str) or not secret_id.strip():
-            secret_id = _get_api_service_default_secret_id(provider_id, field_name=key)
-        else:
-            secret_id = secret_id.strip()
-    else:
-        secret_id = None
-
-    default_value = raw_field.get("default_value")
-    if default_value is None:
-        default_value = raw_field.get("default")
-    if default_value is None and key == "base_url":
-        defaults = (metadata or {}).get("defaults", {})
-        if isinstance(defaults, dict):
-            default_value = defaults.get("base_url")
-        if default_value is None:
-            default_value = (metadata or {}).get("base_url")
-    if default_value is not None and not isinstance(default_value, str):
-        default_value = str(default_value)
-
-    description = raw_field.get("description")
-    if description is not None and not isinstance(description, str):
-        description = str(description)
-
-    return APIServiceCredentialField(
-        key=key,
-        label=label,
-        description=description,
-        storage=storage,
-        sensitive=sensitive,
-        required=bool(raw_field.get("required", False)),
-        input_type=input_type,
-        config_key=config_key,
-        secret_id=secret_id,
-        default_value=default_value,
-    )
-
-
-def _build_api_service_credential_schema(
-    provider_id: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> List[APIServiceCredentialField]:
-    metadata = metadata or _load_api_service_metadata_data(provider_id) or {}
-    raw_fields = metadata.get("credential_fields")
-    normalized_fields: List[APIServiceCredentialField] = []
-
-    if isinstance(raw_fields, list):
-        for raw_field in raw_fields:
-            field = _normalize_api_service_credential_field(provider_id, raw_field, metadata)
-            if field:
-                normalized_fields.append(field)
-    else:
-        auth = metadata.get("authentication") or metadata.get("auth")
-        if isinstance(auth, dict):
-            api_secret_id = auth.get("secret_key") or auth.get("api_key_secret") or auth.get("secret")
-            if api_secret_id:
-                normalized_fields.append(
-                    APIServiceCredentialField(
-                        key="api_key",
-                        label="API Key",
-                        storage="secret",
-                        sensitive=True,
-                        input_type="password",
-                        config_key="apiKey",
-                        secret_id=str(api_secret_id).strip(),
-                    )
-                )
-            secondary_secret_id = auth.get("secret_secret")
-            if secondary_secret_id and _should_persist_secondary_secret(metadata):
-                normalized_fields.append(
-                    APIServiceCredentialField(
-                        key="secret",
-                        label="Secret",
-                        storage="secret",
-                        sensitive=True,
-                        input_type="password",
-                        config_key="secret",
-                        secret_id=str(secondary_secret_id).strip(),
-                    )
-                )
-
-        defaults = metadata.get("defaults", {})
-        base_url = None
-        if isinstance(defaults, dict):
-            base_url = defaults.get("base_url")
-        if base_url or metadata.get("base_url"):
-            normalized_fields.append(
-                APIServiceCredentialField(
-                    key="base_url",
-                    label="Base URL",
-                    storage="config",
-                    sensitive=False,
-                    input_type="url",
-                    config_key="base_url",
-                    default_value=str(base_url or metadata.get("base_url")),
-                )
-            )
-
-    deduped: List[APIServiceCredentialField] = []
-    seen_keys: set[str] = set()
-    for field in normalized_fields:
-        if field.key in seen_keys:
-            continue
-        deduped.append(field)
-        seen_keys.add(field.key)
-    return deduped
-
-
-def _get_api_service_schema_field(
-    provider_id: str,
-    field_name: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[APIServiceCredentialField]:
-    for field in _build_api_service_credential_schema(provider_id, metadata):
-        if field.key == field_name:
-            return field
-    return None
-
-
-def _get_api_service_secret_field_names(
-    provider_id: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    return [
-        field.key
-        for field in _build_api_service_credential_schema(provider_id, metadata)
-        if field.storage == "secret"
-    ]
-
-
-def _get_api_service_default_secret_id(provider_id: str, field_name: str = "api_key") -> str:
-    """Return the canonical secret id for an API service credential field."""
-    metadata = _load_api_service_metadata_data(provider_id) or {}
-    raw_fields = metadata.get("credential_fields")
-    if isinstance(raw_fields, list):
-        for raw_field in raw_fields:
-            if not isinstance(raw_field, dict):
-                continue
-            if raw_field.get("key") != field_name:
-                continue
-            storage = raw_field.get("storage")
-            if storage == "config":
-                break
-            secret_id = raw_field.get("secret_id")
-            if isinstance(secret_id, str):
-                secret_id = secret_id.strip()
-                if secret_id:
-                    return secret_id
-
-    auth = metadata.get("authentication") or metadata.get("auth")
-    if isinstance(auth, dict):
-        if field_name == "api_key":
-            secret_id = auth.get("secret_key") or auth.get("api_key_secret") or auth.get("secret")
-        else:
-            secret_id = auth.get("secret_secret") or auth.get(f"{field_name}_secret")
-        if isinstance(secret_id, str):
-            secret_id = secret_id.strip()
-            if secret_id:
-                return secret_id
-    if field_name == "api_key":
-        return f"{provider_id}_api_key"
-    return f"{provider_id}_{field_name}"
-
-
-def _get_api_service_secret_candidates(
-    provider_id: str,
-    raw_service: Optional[Dict[str, Any]] = None,
-    field_name: str = "api_key",
-) -> List[str]:
-    """Return candidate secret ids for an API service, ordered by preference."""
-    candidates: List[str] = []
-    if raw_service is None:
-        raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
-
-    ref_key = "apiKey" if field_name == "api_key" else field_name
-    secret_ref = raw_service.get(ref_key, "")
-    if isinstance(secret_ref, str) and secret_ref.startswith("{secret:") and secret_ref.endswith("}"):
-        candidates.append(secret_ref[len("{secret:"):-1])
-
-    candidates.append(_get_api_service_default_secret_id(provider_id, field_name=field_name))
-    candidates.append(f"{provider_id}_{field_name}")
-
-    deduped: List[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
 
 
 def _get_api_service_enabled(provider_id: str) -> bool:
@@ -1194,7 +935,7 @@ def _get_api_service_tool_infos(provider_id: str) -> List[Any]:
     matched_tools: List[Any] = []
     for tool_info in ToolRegistry.list_tools():
         source, source_name = _get_tool_source(tool_info)
-        if source == "api" and source_name == provider_id:
+        if source in ("api", "device") and source_name == provider_id:
             matched_tools.append(tool_info)
     return matched_tools
 
@@ -1319,6 +1060,8 @@ def _build_api_service_summary(
         description_cn=meta.get("description_cn"),
         builtin=_is_api_service_builtin(provider_id, matched_tools),
         verify_ssl=verify_ssl,
+        integration_type=meta.get("integration_type"),
+        vendor=meta.get("vendor"),
     )
 
 
@@ -1462,16 +1205,21 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[str]:
-    """Return the ``installed.json`` plugin id that backs *storage_key*.
+def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[tuple[str, str]]:
+    """Return ``(plugin_type, plugin_id)`` backing *storage_key*, if any.
 
     Walks the discovered ``ApiServiceDescriptor`` set, finds the
     ``_provider.yaml`` matching *storage_key*, and resolves it to the
-    enclosing user-installed plugin directory id. Returns ``None`` if
-    no descriptor matches OR the descriptor lives outside
-    ``~/.flocks/plugins/`` (project-level / built-in installs are kept
-    intact — only user-level installs cascade).
+    enclosing user-installed plugin directory id. ``plugin_type`` is
+    ``"device"`` when the descriptor lives under ``<tools>/device/`` or
+    when ``_provider.yaml`` declares ``integration_type: device`` —
+    otherwise ``"tool"``. Returns ``None`` if no descriptor matches OR
+    the descriptor lives outside ``~/.flocks/plugins/`` (project-level
+    / built-in installs are kept intact — only user-level installs
+    cascade).
     """
+    import yaml
+
     from flocks.config.api_versioning import discover_api_service_descriptors
     from flocks.hub import local as hub_local
 
@@ -1485,13 +1233,34 @@ def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[str]:
         except ValueError:
             return None  # Not under the user-level install root.
         plugin_id = plugin_dir.name
+
+        plugin_type = "tool"
+        if plugin_dir.parent.name == "device":
+            plugin_type = "device"
+        else:
+            try:
+                provider_yaml = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
+                if (
+                    isinstance(provider_yaml, dict)
+                    and str(provider_yaml.get("integration_type") or "").strip().lower() == "device"
+                ):
+                    plugin_type = "device"
+            except Exception:
+                pass
+
         # Confirm the catalog tracks this as an installed plugin so
         # we never try to "uninstall" a stray on-disk dir.
-        record = hub_local.get_record("tool", plugin_id)
+        record = hub_local.get_record(plugin_type, plugin_id)
         if record is not None:
-            return plugin_id
-        if hub_local.infer_local_install("tool", plugin_id) is not None:
-            return plugin_id
+            return (plugin_type, plugin_id)
+        # Fall back to the opposite type when the record was saved
+        # before ``device`` became a first-class Hub type.
+        legacy_type = "tool" if plugin_type == "device" else "device"
+        legacy_record = hub_local.get_record(legacy_type, plugin_id)
+        if legacy_record is not None:
+            return (legacy_type, plugin_id)
+        if hub_local.infer_local_install(plugin_type, plugin_id) is not None:
+            return (plugin_type, plugin_id)
     return None
 
 
@@ -1530,7 +1299,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
         # ``remove_api_service`` runs, ``discover_api_service_descriptors``
         # still works (it scans ``_provider.yaml`` on disk, not config),
         # but doing this first keeps the order easy to reason about.
-        backing_plugin_id = _find_user_installed_tool_plugin_for(provider_id)
+        backing_plugin = _find_user_installed_tool_plugin_for(provider_id)
 
         removed_config = ConfigWriter.remove_api_service(provider_id)
 
@@ -1547,19 +1316,23 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
         matched_count = _set_api_service_tools_enabled(provider_id, False)
 
         uninstalled_plugin = False
-        if backing_plugin_id:
+        if backing_plugin is not None:
+            backing_plugin_type, backing_plugin_id = backing_plugin
             try:
                 # ``uninstall_plugin`` itself calls
                 # ``_cleanup_orphan_api_services`` for the plugin's
                 # storage_keys, but ``provider_id`` is already gone from
                 # config at this point so that pass is a no-op for it.
-                uninstalled_plugin = await uninstall_plugin("tool", backing_plugin_id)
+                uninstalled_plugin = await uninstall_plugin(backing_plugin_type, backing_plugin_id)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("api_service.delete.plugin_uninstall_failed", {
                     "provider_id": provider_id,
+                    "plugin_type": backing_plugin_type,
                     "plugin_id": backing_plugin_id,
                     "error": str(exc),
                 })
+        else:
+            backing_plugin_id = None
 
         if not removed_config and not deleted_secret and not uninstalled_plugin:
             raise HTTPException(status_code=404, detail="API service not found")
@@ -1641,67 +1414,6 @@ async def get_api_service_metadata(provider_id: str):
             name=provider_id,
             description=f"API service: {provider_id}"
         )
-
-
-def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load ``_provider.yaml`` metadata for an API plugin.
-
-    ``provider_id`` may be either the storage_key (the post-versioning
-    canonical id, e.g. ``tdp_api_v3_3_10``) or the bare unversioned
-    ``service_id`` (legacy callers). Discovery is delegated to
-    :func:`discover_api_service_descriptors`, so plugin directories
-    whose name does not match ``provider_id`` (e.g. ``tdp_v3_3_10``
-    for ``service_id`` ``tdp_api``) still resolve correctly.
-    """
-    try:
-        from flocks.config.api_versioning import discover_api_service_descriptors
-        import yaml
-
-        descriptor = next(
-            (d for d in discover_api_service_descriptors()
-             if provider_id in (d.storage_key, d.service_id)),
-            None,
-        )
-        if descriptor is None:
-            return None
-
-        api_dir = descriptor.provider_yaml.parent
-        prov = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
-        if not isinstance(prov, dict):
-            return None
-
-        tool_apis: List[Dict[str, Any]] = []
-        for item in sorted(api_dir.iterdir()):
-            if item.suffix not in (".yaml", ".yml") or item.name.startswith("_"):
-                continue
-            try:
-                tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
-            except Exception as e:
-                log.debug("provider.yaml_metadata.tool_read_failed", {
-                    "provider_id": provider_id, "file": item.name, "error": str(e),
-                })
-                continue
-            if isinstance(tool_data, dict) and tool_data.get("name"):
-                tool_apis.append({
-                    "name": tool_data["name"],
-                    "description": tool_data.get("description", ""),
-                })
-
-        return {
-            "name": prov.get("name", provider_id),
-            "service_id": prov.get("service_id", provider_id),
-            "version": extract_provider_version(prov),
-            "description": prov.get("description"),
-            "description_cn": prov.get("description_cn"),
-            "auth": prov.get("auth"),
-            "credential_fields": prov.get("credential_fields"),
-            "defaults": prov.get("defaults", {}),
-            "apis": tool_apis or None,
-        }
-    except Exception as e:
-        log.debug("provider.yaml_metadata.load_failed", {"provider_id": provider_id, "error": str(e)})
-        return None
-
 
 # =============================================================================
 # Credentials Management (Similar to MCP)
@@ -2466,7 +2178,7 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 if not tool_info.enabled:
                     continue
                 source, source_name = _get_tool_source(tool_info)
-                if source == "api" and source_name == provider_id:
+                if source in ("api", "device") and source_name == provider_id:
                     service_tools.append(tool_info)
             
             log.info("test_credentials.service_tools", {

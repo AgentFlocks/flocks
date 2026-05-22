@@ -46,15 +46,22 @@ def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
         or "remote-debugging page" in lower
         or "inspect/#remote-debugging" in lower
         or "not live yet" in lower
-        or (
-            "ws handshake failed" in lower
-            and ("403" in lower or "opening handshake" in lower or "timed out" in lower or "timeout" in lower)
-        )
+        or ("ws handshake failed" in lower and "403" in lower)
     )
 
 
+def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str | None]:
+    """Return the explicit CDP endpoint env var name and value, if configured."""
+    merged_env = {**os.environ, **(env or {})}
+    if value := merged_env.get("BU_CDP_WS"):
+        return "BU_CDP_WS", value
+    if value := merged_env.get("BU_CDP_URL"):
+        return "BU_CDP_URL", value
+    return None, None
+
+
 def _is_local_chrome_mode(env: dict | None = None) -> bool:
-    return not (env or {}).get("BU_CDP_WS") and not os.environ.get("BU_CDP_WS")
+    return _configured_cdp_endpoint(env)[0] is None
 
 
 def daemon_alive(name: str | None = None) -> bool:
@@ -68,7 +75,7 @@ def daemon_alive(name: str | None = None) -> bool:
 
 def _daemon_endpoint_names() -> list[str]:
     suffix = ".port" if ipc.IS_WINDOWS else ".sock"
-    if ipc.BH_TMP_DIR:
+    if ipc.BU_TMP_DIR:
         return [NAME] if (ipc._TMP / f"bu{suffix}").exists() else []
     names: list[str] = []
     for path in sorted(ipc._TMP.glob(f"bu-*{suffix}")):
@@ -129,6 +136,51 @@ def active_browser_connections() -> int:
     return len(browser_connections())
 
 
+def _daemon_probe(name: str | None, req: dict) -> dict | None:
+    conn = None
+    try:
+        conn = ipc.connect(name or NAME, timeout=3.0)
+        conn.sendall((json.dumps(req) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(1 << 16)
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data)
+    except (
+        FileNotFoundError,
+        ConnectionRefusedError,
+        TimeoutError,
+        socket.timeout,
+        OSError,
+        KeyError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+
+def _daemon_has_current_protocol(name: str | None = None) -> bool:
+    """Return True when the daemon supports the helper IPC protocol in this checkout."""
+    targets = _daemon_probe(name, {"method": "Target.getTargets", "params": {}})
+    if not targets or "result" not in targets:
+        return False
+    managed_tabs = _daemon_probe(name, {"meta": "managed_tabs"})
+    return bool(managed_tabs is not None and "tabs" in managed_tabs)
+
+
+def stop_all_daemons() -> list[str]:
+    """Stop all browser daemons visible from the current environment."""
+    names = _daemon_endpoint_names()
+    for name in names:
+        restart_daemon(name)
+    return names
+
+
 def _doctor_short_text(value, limit: int | None = None) -> str:
     limit = limit or DOCTOR_TEXT_LIMIT
     value = str(value)
@@ -140,19 +192,8 @@ def ensure_daemon(
 ) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
     if daemon_alive(name):
-        try:
-            sock = ipc.connect(name or NAME, timeout=3.0)
-            sock.sendall(b'{"method":"Target.getTargets","params":{}}\n')
-            data = b""
-            while not data.endswith(b"\n"):
-                chunk = sock.recv(1 << 16)
-                if not chunk:
-                    break
-                data += chunk
-            if b'"result"' in data:
-                return
-        except Exception:
-            pass
+        if _daemon_has_current_protocol(name):
+            return
         restart_daemon(name)
 
     import subprocess
@@ -177,14 +218,15 @@ def ensure_daemon(
             time.sleep(0.2)
         msg = _log_tail(name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
-            if _open_inspect:
-                _open_browser_inspect()
+            restart_daemon(name)
+            if not _open_inspect:
+                raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
+            _open_browser_inspect()
             print(
                 f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
                 "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
                 file=sys.stderr,
             )
-            restart_daemon(name)
             continue
         raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
 
@@ -359,15 +401,26 @@ def run_setup() -> int:
     """Interactively attach to the running browser."""
     import sys
 
-    print(f"{BROWSER_LABEL} setup: attaching to your browser...")
+    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
+    if endpoint_name:
+        print(f"{BROWSER_LABEL} setup: attaching via {endpoint_name}...")
+    else:
+        print(f"{BROWSER_LABEL} setup: attaching to your browser...")
     if daemon_alive():
-        print("daemon already running; nothing to do.")
-        return 0
-    if not _chrome_running():
+        if endpoint_name:
+            print(f"daemon already running; restarting to attach via {endpoint_name}.")
+            restart_daemon()
+        else:
+            if _daemon_has_current_protocol():
+                print("daemon already running and attached; nothing to do.")
+                return 0
+            print("daemon already running but browser connection is stale; restarting.")
+            restart_daemon()
+    if not endpoint_name and not _chrome_running():
         print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1
     try:
-        ensure_daemon(wait=20.0)
+        ensure_daemon(wait=20.0, _open_inspect=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
@@ -408,6 +461,7 @@ def run_doctor() -> int:
     current = _version()
     mode = _install_mode()
     browser_running = _chrome_running()
+    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
     daemon = daemon_alive()
     connections = browser_connections()
     latest = _latest_release_tag()
@@ -426,11 +480,14 @@ def run_doctor() -> int:
         print(f"  latest release    {latest}" + (" (update available)" if newer else ""))
     else:
         print("  latest release    (not configured)")
-    row(
-        "browser running",
-        browser_running,
-        "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
-    )
+    if endpoint_name:
+        row("browser target", True, f"configured via {endpoint_name}")
+    else:
+        row(
+            "browser running",
+            browser_running,
+            "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
+        )
     row("daemon alive", daemon, "" if daemon else "run `flocks browser --setup` to attach")
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
@@ -441,4 +498,4 @@ def run_doctor() -> int:
             print(f"        {conn['name']} — active page: {title} — {url}")
         else:
             print(f"        {conn['name']} — active page: (no real page)")
-    return 0 if (browser_running and daemon) else 1
+    return 0 if ((browser_running or endpoint_name) and daemon) else 1

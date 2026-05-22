@@ -58,6 +58,37 @@ def _sample_requests():
     ]
 
 
+def _multi_operation_requests():
+    return [
+        {
+            "type": "Fetch",
+            "method": "POST",
+            "url": "https://example.com/api/alerts/list",
+            "origin": "https://example.com",
+            "pathname": "/api/alerts/list",
+            "status": 200,
+            "captureReason": "nonGet",
+            "apiPurpose": {"name": "alert-list", "desc": "List alerts"},
+            "requestHeaders": {"Content-Type": "application/json", "Cookie": "sid=cookie-123"},
+            "requestBody": '{"page": 1, "size": 20}',
+            "response": '{"data":{"items":[{"id":"a-1","title":"Alert 1"}]}}',
+        },
+        {
+            "type": "Fetch",
+            "method": "GET",
+            "url": "https://example.com/api/alarms/count?page=1",
+            "origin": "https://example.com",
+            "pathname": "/api/alarms/count",
+            "query": {"page": "1"},
+            "status": 200,
+            "captureReason": "includePattern",
+            "apiPurpose": {"name": "alarm-count", "desc": "Count alarms"},
+            "requestHeaders": {"Accept": "application/json", "Cookie": "sid=cookie-123"},
+            "response": '{"count":5}',
+        },
+    ]
+
+
 def test_generate_spec_from_requests_picks_primary_collection_endpoint():
     module = _load_module()
 
@@ -76,6 +107,22 @@ def test_generate_spec_from_requests_picks_primary_collection_endpoint():
     assert spec["columns"][:2] == [
         {"name": "id", "path": "$.id", "relativePath": "id", "sourceField": "id", "type": "string"},
         {"name": "title", "path": "$.title", "relativePath": "title", "sourceField": "title", "type": "string"},
+    ]
+
+
+def test_generate_spec_from_requests_includes_multi_operation_entries():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_multi_operation_requests())
+
+    assert [entry["command"] for entry in spec["operations"]] == ["alert-list", "alarm-count"]
+    assert spec["operations"][0]["operation"]["endpoint"] == "/api/alerts/list"
+    assert spec["operations"][1]["operation"]["endpoint"] == "/api/alarms/count"
+    assert spec["operations"][1]["args"] == [
+        {"name": "page", "type": "int", "default": 1, "help": "Page number"}
+    ]
+    assert spec["operations"][1]["columns"] == [
+        {"name": "count", "path": "$.count", "relativePath": "count", "sourceField": "count", "type": "int"}
     ]
 
 

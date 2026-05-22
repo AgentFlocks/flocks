@@ -230,7 +230,7 @@ class StreamProcessor:
             messageID=self.assistant_message.id,
             text="",
             time=PartTime(start=int(datetime.now().timestamp() * 1000)),
-            metadata=event.metadata or {},
+            metadata=dict(event.metadata) if event.metadata else {},
         )
         self.reasoning_parts[event.id] = part
         self.parts.append(part)
@@ -249,6 +249,38 @@ class StreamProcessor:
             })
         
         log.info("stream.reasoning.start", {"reasoning_id": event.id})
+
+    @staticmethod
+    def _merge_reasoning_metadata(part: ReasoningPart, metadata: Optional[Dict[str, Any]]) -> None:
+        """Merge streamed reasoning metadata without losing accumulated content."""
+        if not metadata:
+            return
+
+        if part.metadata is None:
+            part.metadata = {}
+
+        for key, value in metadata.items():
+            if key != "reasoningContent":
+                part.metadata[key] = value
+                continue
+
+            existing = part.metadata.get(key)
+            if not isinstance(existing, str) or not isinstance(value, str):
+                part.metadata[key] = value
+                continue
+
+            # Synthetic reasoning-start events seed the first chunk metadata, so
+            # the first delta often repeats the same value. Ignore exact
+            # duplicates while still accepting providers that emit cumulative
+            # reasoning_content.
+            if value == existing:
+                continue
+            if existing == part.text and part.text.endswith(value):
+                continue
+            if value.startswith(existing):
+                part.metadata[key] = value
+                continue
+            part.metadata[key] = existing + value
     
     async def _handle_reasoning_delta(self, event: ReasoningDeltaEvent) -> None:
         """Handle reasoning content delta with throttling"""
@@ -262,9 +294,7 @@ class StreamProcessor:
             
             # Update metadata if provided
             if event.metadata:
-                if part.metadata is None:
-                    part.metadata = {}
-                part.metadata.update(event.metadata)
+                self._merge_reasoning_metadata(part, event.metadata)
             
             # Call reasoning delta callback for CLI display
             if self.reasoning_delta_callback and event.text:
@@ -316,9 +346,7 @@ class StreamProcessor:
             part.text = part.text.rstrip()
             
             if event.metadata:
-                if part.metadata is None:
-                    part.metadata = {}
-                part.metadata.update(event.metadata)
+                self._merge_reasoning_metadata(part, event.metadata)
             
             # Update time
             if part.time:
@@ -563,7 +591,7 @@ class StreamProcessor:
             from flocks.hooks.pipeline import HookPipeline
             hook_ctx = await HookPipeline.run_tool_before({
                 "sessionID": self.session_id,
-                "workspace": self.workspace_dir,
+                "workspace": self._workspace_dir,
                 "agent": self.agent.name,
                 "tool": {
                     "name": tool_name,
@@ -720,7 +748,7 @@ class StreamProcessor:
                 from flocks.hooks.pipeline import HookPipeline
                 hook_ctx = await HookPipeline.run_tool_after({
                     "sessionID": self.session_id,
-                    "workspace": self.workspace_dir,
+                    "workspace": self._workspace_dir,
                     "agent": self.agent.name,
                     "tool": {
                         "name": tool_name,

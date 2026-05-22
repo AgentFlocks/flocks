@@ -50,15 +50,20 @@ describe('useDefaultModelVision', () => {
     await waitFor(() => expect(result.current).toBe(false));
   });
 
-  it('returns false for a predefined (built-in) model even when it declares vision support', async () => {
-    // Built-in models must explicitly reject image uploads (not return
-    // null / unknown) so SessionChat shows the "model does not support
-    // images" toast instead of silently letting them through.
-    mockResolved.mockResolvedValue(makeResolvedResp());
+  it('returns false for a predefined model without the built-in allowlist even when it declares vision support', async () => {
+    mockResolved.mockResolvedValue(makeResolvedResp('openai', 'gpt-4o'));
     mockDefinition.mockResolvedValue(makeDefResp({ supports_vision: true }, 'predefined'));
 
     const { result } = renderHook(() => useDefaultModelVision());
     await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  it('returns true for an allowlisted predefined vision model', async () => {
+    mockResolved.mockResolvedValue(makeResolvedResp('threatbook-cn-llm', 'qwen3.6-plus'));
+    mockDefinition.mockResolvedValue(makeDefResp({ supports_vision: true }, 'predefined'));
+
+    const { result } = renderHook(() => useDefaultModelVision());
+    await waitFor(() => expect(result.current).toBe(true));
   });
 
   it('returns null when capabilities are absent', async () => {

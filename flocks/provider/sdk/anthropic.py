@@ -15,6 +15,7 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
+from flocks.provider.sdk.openai_base import build_reasoning_metadata
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.anthropic")
@@ -24,6 +25,9 @@ class AnthropicProvider(BaseProvider):
     """Anthropic (Claude) provider with tool support."""
 
     CATALOG_ID = "anthropic"
+    _INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
+    _FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
+    _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 
     def __init__(self):
         super().__init__(provider_id="anthropic", name="Anthropic")
@@ -88,6 +92,71 @@ class AnthropicProvider(BaseProvider):
                 anthropic_tools.append(anthropic_tool)
         
         return anthropic_tools if anthropic_tools else None
+
+    def _resolved_base_url(self) -> Optional[str]:
+        if self._config and self._config.base_url:
+            return self._config.base_url
+        return "https://api.anthropic.com"
+
+    @staticmethod
+    def _is_native_anthropic_base_url(base_url: Optional[str]) -> bool:
+        if not isinstance(base_url, str) or not base_url.strip():
+            return True
+        return "anthropic.com" in base_url.lower()
+
+    @staticmethod
+    def _preserve_unsigned_thinking(base_url: Optional[str], model_id: Optional[str]) -> bool:
+        target = f"{base_url or ''} {model_id or ''}".lower()
+        return any(token in target for token in ("api.kimi.com", "moonshot", "deepseek"))
+
+    @classmethod
+    def _filter_assistant_thinking_blocks(
+        cls,
+        content_blocks: List[Dict[str, Any]],
+        *,
+        base_url: Optional[str],
+        model_id: Optional[str],
+        is_latest_assistant: bool,
+    ) -> List[Dict[str, Any]]:
+        """Apply Hermes-style thinking replay rules for Anthropic-compatible targets."""
+        if not content_blocks:
+            return content_blocks
+
+        native_anthropic = cls._is_native_anthropic_base_url(base_url)
+        preserve_unsigned = cls._preserve_unsigned_thinking(base_url, model_id)
+        filtered: List[Dict[str, Any]] = []
+
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type not in cls._THINKING_BLOCK_TYPES:
+                filtered.append(block)
+                continue
+
+            if preserve_unsigned:
+                # Kimi / DeepSeek-style Anthropics want unsigned thinking echoed
+                # back, but signed / opaque Anthropic-native payloads cannot be
+                # verified by the third-party endpoint.
+                if block.get("signature") or block.get("data"):
+                    continue
+                filtered.append(block)
+                continue
+
+            if not native_anthropic or not is_latest_assistant:
+                # Third-party targets and older assistant turns should not
+                # receive stale thinking blocks.
+                continue
+
+            if block_type == "redacted_thinking" or block.get("signature"):
+                filtered.append(block)
+                continue
+
+            thinking_text = block.get("thinking")
+            if isinstance(thinking_text, str) and thinking_text:
+                filtered.append({"type": "text", "text": thinking_text})
+
+        return filtered
     
     @staticmethod
     def _format_user_content(content: Any) -> Any:
@@ -112,8 +181,14 @@ class AnthropicProvider(BaseProvider):
                 })
         return blocks
 
-    @staticmethod
-    def _format_messages_anthropic(messages: List[ChatMessage]) -> list:
+    @classmethod
+    def _format_messages_anthropic(
+        cls,
+        messages: List[ChatMessage],
+        *,
+        base_url: Optional[str] = None,
+        model_id: Optional[str] = None,
+    ) -> list:
         """Convert ChatMessage list to Anthropic API format.
 
         Anthropic requires:
@@ -123,12 +198,24 @@ class AnthropicProvider(BaseProvider):
         - Alternating user/assistant turns
         """
         formatted: list = []
-        for msg in messages:
+        assistant_indexes = [
+            index for index, message in enumerate(messages)
+            if message.role == "assistant"
+        ]
+        last_assistant_index = assistant_indexes[-1] if assistant_indexes else -1
+        for index, msg in enumerate(messages):
             if msg.role == "system":
                 continue
 
             if msg.role == "assistant":
                 content_blocks: list = []
+                anthropic_thinking_blocks = None
+                if isinstance(msg.custom_settings, dict):
+                    anthropic_thinking_blocks = msg.custom_settings.get("anthropic_thinking_blocks")
+                if isinstance(anthropic_thinking_blocks, list):
+                    for block in anthropic_thinking_blocks:
+                        if isinstance(block, dict) and block.get("type") in {"thinking", "redacted_thinking"}:
+                            content_blocks.append(block)
                 if msg.content:
                     content_blocks.append({"type": "text", "text": msg.content})
                 if msg.tool_calls:
@@ -145,6 +232,13 @@ class AnthropicProvider(BaseProvider):
                             "name": fn.get("name", ""),
                             "input": input_obj,
                         })
+                content_blocks = cls._filter_assistant_thinking_blocks(
+                    content_blocks,
+                    base_url=base_url,
+                    model_id=model_id,
+                    is_latest_assistant=index == last_assistant_index,
+                )
+
                 formatted.append({
                     "role": "assistant",
                     "content": content_blocks if content_blocks else msg.content,
@@ -170,9 +264,49 @@ class AnthropicProvider(BaseProvider):
                 # user messages
                 formatted.append({
                     "role": msg.role,
-                    "content": AnthropicProvider._format_user_content(msg.content),
+                    "content": cls._format_user_content(msg.content),
                 })
         return formatted
+
+    @classmethod
+    def _beta_flags_for_request(cls, *, thinking_enabled: bool, has_tools: bool) -> Optional[List[str]]:
+        """Return beta feature flags needed for interleaved thinking."""
+        if not thinking_enabled:
+            return None
+        betas = [cls._INTERLEAVED_THINKING_BETA]
+        if has_tools:
+            betas.append(cls._FINE_GRAINED_TOOL_STREAMING_BETA)
+        return betas
+
+    @staticmethod
+    def _reasoning_metadata(
+        *,
+        provider_id: str,
+        model_id: str,
+        reasoning_source: str,
+        reasoning_field: str = "thinking",
+        reasoning_content: Optional[str] = None,
+        thinking_signature: Optional[str] = None,
+        redacted_thinking_data: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build Anthropic reasoning metadata for thinking/redacted blocks."""
+        metadata = build_reasoning_metadata(
+            provider_id=provider_id,
+            model_id=model_id,
+            reasoning_content=reasoning_content,
+            reasoning_source=reasoning_source,
+            reasoning_field=reasoning_field,
+        ) or {
+            "providerID": provider_id,
+            "modelID": model_id,
+            "reasoningField": reasoning_field,
+            "reasoningSource": reasoning_source,
+        }
+        if thinking_signature:
+            metadata["thinkingSignature"] = thinking_signature
+        if redacted_thinking_data:
+            metadata["redactedThinkingData"] = redacted_thinking_data
+        return metadata
 
     async def chat(
         self,
@@ -184,7 +318,11 @@ class AnthropicProvider(BaseProvider):
         client = self._get_client()
         
         # Convert messages to Anthropic format
-        anthropic_messages = self._format_messages_anthropic(messages)
+        anthropic_messages = self._format_messages_anthropic(
+            messages,
+            base_url=self._resolved_base_url(),
+            model_id=model_id,
+        )
         
         # Check if we have any non-system messages
         if not anthropic_messages:
@@ -222,8 +360,15 @@ class AnthropicProvider(BaseProvider):
             request_params["system"] = system_message
         if tools:
             request_params["tools"] = tools
-        
-        response = await client.messages.create(**request_params)
+
+        betas = self._beta_flags_for_request(
+            thinking_enabled=bool(kwargs.get("thinking")),
+            has_tools=bool(tools),
+        )
+        if betas and hasattr(client, "beta") and hasattr(client.beta, "messages"):
+            response = await client.beta.messages.create(**request_params, betas=betas)
+        else:
+            response = await client.messages.create(**request_params)
         
         # Parse response content
         content_parts = []
@@ -270,7 +415,11 @@ class AnthropicProvider(BaseProvider):
         client = self._get_client()
         
         # Convert messages
-        anthropic_messages = self._format_messages_anthropic(messages)
+        anthropic_messages = self._format_messages_anthropic(
+            messages,
+            base_url=self._resolved_base_url(),
+            model_id=model_id,
+        )
         
         # Check if we have any non-system messages
         if not anthropic_messages:
@@ -312,12 +461,19 @@ class AnthropicProvider(BaseProvider):
             request_params["system"] = system_message
         if tools:
             request_params["tools"] = tools
-        
+
+        betas = self._beta_flags_for_request(
+            thinking_enabled=bool(kwargs.get("thinking")),
+            has_tools=bool(tools),
+        )
+
         # Track tool calls during streaming
-        current_tool_calls: List[Dict[str, Any]] = []
         current_tool_id: Optional[str] = None
         current_tool_name: Optional[str] = None
         current_tool_input: str = ""
+        current_reasoning_open = False
+        current_reasoning_signature: Optional[str] = None
+        current_redacted_thinking_data: Optional[str] = None
         # Track token usage from streaming events
         input_tokens: int = 0
         output_tokens: int = 0
@@ -325,7 +481,13 @@ class AnthropicProvider(BaseProvider):
         cache_write_tokens: int = 0
         
         try:
-            async with client.messages.stream(**request_params) as stream:
+            stream_target = client.messages
+            stream_kwargs = dict(request_params)
+            if betas and hasattr(client, "beta") and hasattr(client.beta, "messages"):
+                stream_target = client.beta.messages
+                stream_kwargs["betas"] = betas
+
+            async with stream_target.stream(**stream_kwargs) as stream:
                 async for event in stream:
                     # Handle different event types
                     if event.type == "message_start":
@@ -347,8 +509,30 @@ class AnthropicProvider(BaseProvider):
                                 current_tool_name = block.name
                                 current_tool_input = ""
                             elif block.type == "thinking":
-                                # Start thinking block (reasoning content will stream in deltas)
-                                pass
+                                current_reasoning_open = True
+                                current_reasoning_signature = None
+                                current_redacted_thinking_data = None
+                                yield StreamChunk(
+                                    event_type="reasoning-start",
+                                    metadata=self._reasoning_metadata(
+                                        provider_id=self.id,
+                                        model_id=model_id,
+                                        reasoning_source="anthropic_thinking",
+                                    ),
+                                )
+                            elif block.type == "redacted_thinking":
+                                current_reasoning_open = True
+                                current_reasoning_signature = None
+                                current_redacted_thinking_data = getattr(block, "data", None)
+                                yield StreamChunk(
+                                    event_type="reasoning-start",
+                                    metadata=self._reasoning_metadata(
+                                        provider_id=self.id,
+                                        model_id=model_id,
+                                        reasoning_source="anthropic_redacted_thinking",
+                                        redacted_thinking_data=current_redacted_thinking_data,
+                                    ),
+                                )
                     
                     elif event.type == "content_block_delta":
                         delta = event.delta
@@ -361,24 +545,54 @@ class AnthropicProvider(BaseProvider):
                                     event_type="reasoning",
                                     reasoning=delta.thinking,
                                     finish_reason=None,
+                                    metadata=self._reasoning_metadata(
+                                        provider_id=self.id,
+                                        model_id=model_id,
+                                        reasoning_content=delta.thinking,
+                                        reasoning_source="anthropic_thinking",
+                                    ),
                                 )
+                            elif delta.type == "signature_delta":
+                                current_reasoning_signature = getattr(delta, "signature", None)
                             elif delta.type == "input_json_delta":
                                 current_tool_input += delta.partial_json
                     
                     elif event.type == "content_block_stop":
                         # Finalize tool call if we were building one
                         if current_tool_id and current_tool_name:
-                            current_tool_calls.append({
-                                "id": current_tool_id,
-                                "type": "function",
-                                "function": {
-                                    "name": current_tool_name,
-                                    "arguments": current_tool_input or "{}",
-                                },
-                            })
+                            yield StreamChunk(
+                                delta="",
+                                finish_reason=None,
+                                tool_calls=[{
+                                    "id": current_tool_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": current_tool_name,
+                                        "arguments": current_tool_input or "{}",
+                                    },
+                                }],
+                            )
                             current_tool_id = None
                             current_tool_name = None
                             current_tool_input = ""
+                        elif current_reasoning_open:
+                            yield StreamChunk(
+                                event_type="reasoning-end",
+                                metadata=self._reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_source=(
+                                        "anthropic_redacted_thinking"
+                                        if current_redacted_thinking_data
+                                        else "anthropic_thinking"
+                                    ),
+                                    thinking_signature=current_reasoning_signature,
+                                    redacted_thinking_data=current_redacted_thinking_data,
+                                ),
+                            )
+                            current_reasoning_open = False
+                            current_reasoning_signature = None
+                            current_redacted_thinking_data = None
 
                     elif event.type == "message_delta":
                         # Capture output token count (accumulates during streaming)
@@ -406,22 +620,11 @@ class AnthropicProvider(BaseProvider):
                                 "cache_read": cache_read_tokens,
                                 "cache_write": cache_write_tokens,
                             })
-                        # Yield final chunk with tool calls if any
-                        if current_tool_calls:
-                            yield StreamChunk(
-                                delta="",
-                                finish_reason="tool_calls",
-                                tool_calls=current_tool_calls,
-                                usage=usage_meta if usage_meta else None,
-                            )
-                            # Clear tool calls after yielding to prevent duplicate sends
-                            current_tool_calls = []
-                        else:
-                            yield StreamChunk(
-                                delta="",
-                                finish_reason="stop",
-                                usage=usage_meta if usage_meta else None,
-                            )
+                        yield StreamChunk(
+                            delta="",
+                            finish_reason="stop",
+                            usage=usage_meta if usage_meta else None,
+                        )
         
         except Exception as e:
             # Catch and log stream errors, but don't propagate harmless connection close errors
@@ -430,14 +633,6 @@ class AnthropicProvider(BaseProvider):
                 # This is a known Anthropic SDK issue when stream ends after tool calls
                 # The stream has actually completed successfully, so we can safely ignore this
                 log.debug("anthropic.stream.harmless_close", {"error": str(e)})
-                # Make sure we yielded a final chunk (only if not already sent)
-                if current_tool_calls:
-                    log.debug("anthropic.stream.yielding_tools_after_error", {"count": len(current_tool_calls)})
-                    yield StreamChunk(
-                        delta="",
-                        finish_reason="tool_calls",
-                        tool_calls=current_tool_calls,
-                    )
             elif "list index out of range" in error_msg:
                 # Fallback to non-streaming request if streaming fails unexpectedly
                 log.warn("anthropic.stream.fallback_to_chat", {"error": str(e)})
@@ -449,6 +644,56 @@ class AnthropicProvider(BaseProvider):
                     for block in response.content:
                         if block.type == "text":
                             content_parts.append(block.text)
+                        elif block.type == "thinking":
+                            thinking_text = getattr(block, "thinking", None) or ""
+                            yield StreamChunk(
+                                event_type="reasoning-start",
+                                metadata=self._reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_source="anthropic_thinking",
+                                ),
+                            )
+                            if thinking_text:
+                                yield StreamChunk(
+                                    event_type="reasoning",
+                                    reasoning=thinking_text,
+                                    metadata=self._reasoning_metadata(
+                                        provider_id=self.id,
+                                        model_id=model_id,
+                                        reasoning_content=thinking_text,
+                                        reasoning_source="anthropic_thinking",
+                                    ),
+                                )
+                            yield StreamChunk(
+                                event_type="reasoning-end",
+                                metadata=self._reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_source="anthropic_thinking",
+                                    thinking_signature=getattr(block, "signature", None),
+                                ),
+                            )
+                        elif block.type == "redacted_thinking":
+                            redacted_data = getattr(block, "data", None)
+                            yield StreamChunk(
+                                event_type="reasoning-start",
+                                metadata=self._reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_source="anthropic_redacted_thinking",
+                                    redacted_thinking_data=redacted_data,
+                                ),
+                            )
+                            yield StreamChunk(
+                                event_type="reasoning-end",
+                                metadata=self._reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_source="anthropic_redacted_thinking",
+                                    redacted_thinking_data=redacted_data,
+                                ),
+                            )
                         elif block.type == "tool_use":
                             tool_calls.append({
                                 "id": block.id,

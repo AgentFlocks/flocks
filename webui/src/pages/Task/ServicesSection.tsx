@@ -10,11 +10,15 @@ import i18n from '@/i18n';
 
 function ServiceCard({
   service,
+  onRestart,
   onStop,
+  restarting,
   stopping,
 }: {
   service: WorkflowService;
+  onRestart: () => void;
   onStop: () => void;
+  restarting: boolean;
   stopping: boolean;
 }) {
   const { t } = useTranslation('task');
@@ -30,6 +34,11 @@ function ServiceCard({
     hour: '2-digit',
     minute: '2-digit',
   });
+  const isRunning = service.status === 'running';
+  const canRestart = service.status !== 'publishing';
+  const driverLabel = service.driver === 'docker'
+    ? t('services.driverDocker')
+    : t('services.driverLocal');
 
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4 shadow-sm">
@@ -44,6 +53,11 @@ function ServiceCard({
           </div>
         </div>
         <WorkflowStatusBadge status={service.status} variant="pill" />
+      </div>
+
+      <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2">
+        <span className="text-xs text-gray-500">{t('services.serviceDriver')}</span>
+        <span className="text-xs font-medium text-gray-700">{driverLabel}</span>
       </div>
 
       {/* Invoke URL */}
@@ -93,15 +107,27 @@ function ServiceCard({
         </div>
       </div>
 
-      {service.status === 'running' && (
-        <button
-          onClick={onStop}
-          disabled={stopping}
-          className="w-full flex items-center justify-center gap-2 py-2 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
-        >
-          {stopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
-          {stopping ? t('services.stopping') : t('services.stopService')}
-        </button>
+      {canRestart && (
+        <div className={`grid gap-2 ${isRunning ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          <button
+            onClick={onRestart}
+            disabled={restarting || stopping}
+            className="flex items-center justify-center gap-2 py-2 border border-blue-200 text-blue-600 text-xs font-medium rounded-lg hover:bg-blue-50 disabled:opacity-60 transition-colors"
+          >
+            {restarting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            {restarting ? t('services.restarting') : t('services.restartService')}
+          </button>
+          {isRunning && (
+            <button
+              onClick={onStop}
+              disabled={stopping || restarting}
+              className="flex items-center justify-center gap-2 py-2 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
+            >
+              {stopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
+              {stopping ? t('services.stopping') : t('services.stopService')}
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -111,6 +137,7 @@ export default function ServicesSection() {
   const { t } = useTranslation('task');
   const [services, setServices] = useState<WorkflowService[]>([]);
   const [loading, setLoading] = useState(true);
+  const [restartingIds, setRestartingIds] = useState<Set<string>>(new Set());
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const toast = useToast();
@@ -132,6 +159,27 @@ export default function ServicesSection() {
     const timer = setInterval(fetchServices, 10000);
     return () => clearInterval(timer);
   }, [fetchServices]);
+
+  const handleRestart = async (service: WorkflowService) => {
+    setRestartingIds(prev => new Set(prev).add(service.workflowId));
+    try {
+      const publishRequest = service.driver === 'local' || service.driver === 'docker'
+        ? { driver: service.driver }
+        : undefined;
+      await workflowAPI.publish(service.workflowId, publishRequest);
+      await fetchServices();
+      toast.success(t('services.serviceRestarted'));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(t('services.restartFailed'), msg);
+    } finally {
+      setRestartingIds(prev => {
+        const s = new Set(prev);
+        s.delete(service.workflowId);
+        return s;
+      });
+    }
+  };
 
   const handleStop = async (workflowId: string) => {
     setStoppingIds(prev => new Set(prev).add(workflowId));
@@ -203,7 +251,9 @@ export default function ServicesSection() {
             <ServiceCard
               key={service.workflowId}
               service={service}
+              onRestart={() => handleRestart(service)}
               onStop={() => handleStop(service.workflowId)}
+              restarting={restartingIds.has(service.workflowId)}
               stopping={stoppingIds.has(service.workflowId)}
             />
           ))}

@@ -22,6 +22,17 @@
     "nodes": "Nodes"
   },
   "noDescription": "No description",
+  "totalCount": "{{total}} workflows",
+  "filter": {
+    "all": "All",
+    "builtin": "Built-in",
+    "custom": "Custom",
+    "aria": "Filter by source"
+  },
+  "badge": {
+    "builtin": "Built-in",
+    "custom": "Custom"
+  },
   "detail": {
     "loadFailed": "Failed to load workflow",
     "notFound": "Workflow not found",
@@ -193,10 +204,17 @@
       "curlExample": "Call Example (curl)",
       "stopping": "Stopping...",
       "stopService": "Stop Service",
-      "publishDesc": "Publish the workflow as a standalone API service (Docker container), generating a unique invoke URL and API Key.",
+      "publishDesc": "Publish the workflow as a standalone API service with a dedicated invoke URL and API Key.",
       "publishing": "Publishing, please wait...",
       "publishAsApi": "Publish as API Service",
       "dockerStarting": "Starting Docker container, may take 1-2 minutes...",
+      "localStarting": "Starting local API service...",
+      "serviceDriver": "Runtime",
+      "driverLocal": "Local process",
+      "driverDocker": "Docker container",
+      "recommended": "Recommended",
+      "driverLocalDesc": "Recommended first; starts faster for local development and debugging",
+      "driverDockerDesc": "Runs isolated, best for validating container deployment",
       "kafkaSection": "Kafka Configuration",
       "kafkaExperimental": "(Experimental)",
       "inputConfig": "Input Configuration",

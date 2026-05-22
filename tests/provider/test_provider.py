@@ -3,12 +3,20 @@ Tests for provider module
 """
 
 import pytest
+from types import SimpleNamespace
+from flocks.provider.interleaved import (
+    REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+    REASONING_TRANSPORT_GENERIC_CHAT,
+    resolve_interleaved_capability,
+    resolve_reasoning_transport,
+)
 from flocks.provider.provider import (
     Provider,
     ChatMessage,
     ModelInfo,
     ProviderType,
 )
+from flocks.provider.model_catalog import get_provider_model_definitions
 
 
 @pytest.mark.asyncio
@@ -43,12 +51,12 @@ async def test_list_models():
 async def test_list_models_by_provider():
     """Test listing models for specific provider"""
     await Provider.init()
-    
-    anthropic_models = Provider.list_models(provider_id="anthropic")
+
+    anthropic_models = get_provider_model_definitions("anthropic")
     assert len(anthropic_models) > 0
     assert all(m.provider_id == "anthropic" for m in anthropic_models)
-    
-    openai_models = Provider.list_models(provider_id="openai")
+
+    openai_models = get_provider_model_definitions("openai")
     assert len(openai_models) > 0
     assert all(m.provider_id == "openai" for m in openai_models)
 
@@ -71,23 +79,177 @@ async def test_get_provider():
 async def test_get_model():
     """Test getting a model by ID"""
     await Provider.init()
-    
+
     # Test Anthropic model
-    claude = Provider.get_model("claude-3-5-sonnet-20241022")
+    claude = next(
+        (m for m in get_provider_model_definitions("anthropic") if m.id == "claude-sonnet-4-6"),
+        None,
+    )
     assert claude is not None
-    assert claude.id == "claude-3-5-sonnet-20241022"
+    assert claude.id == "claude-sonnet-4-6"
     assert claude.provider_id == "anthropic"
     assert claude.capabilities.supports_streaming
     assert claude.capabilities.supports_tools
-    
+
     # Test OpenAI model
-    gpt4 = Provider.get_model("gpt-4-turbo-preview")
-    assert gpt4 is not None
-    assert gpt4.provider_id == "openai"
-    
+    gpt5 = next(
+        (m for m in get_provider_model_definitions("openai") if m.id == "gpt-5.4"),
+        None,
+    )
+    assert gpt5 is not None
+    assert gpt5.provider_id == "openai"
+
     # Test unknown model
-    unknown = Provider.get_model("unknown-model")
+    unknown = next(
+        (m for m in get_provider_model_definitions("openai") if m.id == "unknown-model"),
+        None,
+    )
     assert unknown is None
+
+
+def test_resolve_model_prefers_provider_specific_runtime_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="shared-model",
+        capabilities=SimpleNamespace(interleaved={"field": "reasoning_content"}),
+    )
+    wrong_global_model = SimpleNamespace(
+        id="shared-model",
+        capabilities=SimpleNamespace(interleaved={"field": "reasoning_details"}),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"deepseek": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {"shared-model": wrong_global_model})
+
+    resolved = Provider.resolve_model("deepseek", "shared-model")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved["field"] == "reasoning_content"
+
+
+def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="qwen3-max",
+        capabilities=SimpleNamespace(interleaved=None),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+        _config=SimpleNamespace(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"openai-compatible": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("openai-compatible", "qwen3-max")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved == {
+        "field": "reasoning_content",
+        "echo": "tool_calls",
+        "cross_provider_policy": "promote",
+    }
+
+
+def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkeypatch):
+    provider_model = SimpleNamespace(
+        id="deepseek-chat",
+        capabilities=SimpleNamespace(interleaved=None),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+        _config=SimpleNamespace(base_url="https://api.deepseek.com/v1"),
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"custom-demo": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("custom-demo", "deepseek-chat")
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved is None
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "model_id", "base_url", "field"),
+    [
+        ("openai-compatible", "qwen3-235b-a22b-thinking", "https://api.example.com/v1", "reasoning_content"),
+        ("openai-compatible", "kimi-k2-thinking-turbo", "https://api.example.com/v1", "reasoning_content"),
+        ("openai-compatible", "deepseek-v4-pro", "https://api.deepseek.com/v1", "reasoning_content"),
+        ("openai-compatible", "glm-4.7", "https://api.example.com/v1", "reasoning_content"),
+        ("openai-compatible", "minimax-m2.1", "https://api.example.com/v1", "reasoning_details"),
+        ("openai-compatible", "gemini-3.1-pro-preview", "https://api.example.com/v1", "reasoning_details"),
+        ("openai-compatible", "step-3.5-flash", "https://api.example.com/v1", "reasoning_content"),
+        ("google-vertex-anthropic", "claude-sonnet-4-6", "https://example.com", "thinking"),
+    ],
+)
+def test_resolve_model_infers_all_hermes_interleaved_families(
+    monkeypatch,
+    provider_id,
+    model_id,
+    base_url,
+    field,
+):
+    provider_model = SimpleNamespace(
+        id=model_id,
+        capabilities=SimpleNamespace(interleaved=None),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [provider_model],
+        get_models=lambda: [],
+        _config_models=[],
+        _config=SimpleNamespace(base_url=base_url),
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {provider_id: fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model(provider_id, model_id)
+
+    assert resolved is provider_model
+    assert resolved.capabilities.interleaved["field"] == field
+
+
+def test_resolve_interleaved_capability_prefers_explicit_metadata():
+    resolved = resolve_interleaved_capability(
+        provider_id="openai-compatible",
+        model_id="claude-sonnet-4-6",
+        explicit_capability={
+            "field": "reasoning_details",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote",
+        },
+        base_url="https://api.example.com/v1",
+    )
+
+    assert resolved == {
+        "field": "reasoning_details",
+        "echo": "tool_calls",
+        "cross_provider_policy": "promote",
+    }
+
+
+def test_resolve_reasoning_transport_is_independent_from_interleaved_field():
+    assert resolve_reasoning_transport(
+        provider_id="anthropic",
+        model_id="claude-sonnet-4-6",
+    ) == REASONING_TRANSPORT_ANTHROPIC_MESSAGES
+    assert resolve_reasoning_transport(
+        provider_id="openai-compatible",
+        model_id="claude-sonnet-4-6",
+        base_url="https://api.example.com/v1",
+    ) == REASONING_TRANSPORT_GENERIC_CHAT
 
 
 @pytest.mark.asyncio
@@ -96,17 +258,15 @@ async def test_provider_models():
     
     await Provider.init()
     
-    anthropic = Provider.get("anthropic")
-    models = anthropic.get_models()
+    models = get_provider_model_definitions("anthropic")
     
     assert len(models) > 0
-    assert all(isinstance(m, ModelInfo) for m in models)
     assert all(m.provider_id == "anthropic" for m in models)
     
     # Check that Claude models are present
     model_ids = [m.id for m in models]
-    assert "claude-3-5-sonnet-20241022" in model_ids
-    assert "claude-3-opus-20240229" in model_ids
+    assert "claude-sonnet-4-6" in model_ids
+    assert "claude-opus-4-6" in model_ids
 
 
 @pytest.mark.asyncio
@@ -126,19 +286,24 @@ async def test_model_capabilities():
     await Provider.init()
     
     # Test Claude 3.5 Sonnet capabilities
-    claude = Provider.get_model("claude-3-5-sonnet-20241022")
+    claude = next(
+        (m for m in get_provider_model_definitions("anthropic") if m.id == "claude-sonnet-4-6"),
+        None,
+    )
     assert claude.capabilities.supports_streaming
     assert claude.capabilities.supports_tools
     assert claude.capabilities.supports_vision
-    assert claude.capabilities.max_tokens == 8192
-    assert claude.capabilities.context_window == 200000
+    assert claude.limits.max_output_tokens == 1000000
+    assert claude.limits.context_window == 1000000
     
-    # Test GPT-4 capabilities (may come from OpenAI or Gateway provider)
-    gpt4 = Provider.get_model("gpt-4")
-    assert gpt4.capabilities.supports_streaming
-    assert gpt4.capabilities.supports_tools
-    # max_tokens varies by provider (8192 for OpenAI, 4096 for Gateway)
-    assert gpt4.capabilities.max_tokens in [4096, 8192]
+    # Test GPT-5 capabilities
+    gpt5 = next(
+        (m for m in get_provider_model_definitions("openai") if m.id == "gpt-5.4"),
+        None,
+    )
+    assert gpt5.capabilities.supports_streaming
+    assert gpt5.capabilities.supports_tools
+    assert gpt5.limits.max_output_tokens == 1050000
 
 
 # Note: Actual API call tests require API keys and should be run separately

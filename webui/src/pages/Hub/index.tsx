@@ -57,8 +57,24 @@ const TYPE_LABEL: Record<HubPluginType, string> = {
   skill: 'Skill',
   agent: 'Agent',
   tool: 'Tool',
+  device: 'Device',
   workflow: 'Workflow',
 };
+
+const TYPE_LABEL_CN: Record<HubPluginType, string> = {
+  skill: 'Skill',
+  agent: 'Agent',
+  tool: 'Tool',
+  device: '设备',
+  workflow: 'Workflow',
+};
+
+function formatPluginTypeLabel(type: HubPluginType, language: string): string {
+  if (language.toLowerCase().startsWith('zh')) {
+    return TYPE_LABEL_CN[type] ?? TYPE_LABEL[type];
+  }
+  return TYPE_LABEL[type];
+}
 
 const HUB_TEXT = {
   zh: {
@@ -389,9 +405,9 @@ export default function HubPage() {
               onChange={value => setTypeFilter(value as HubPluginType | '')}
               options={[
                 { value: '', label: text.all },
-                ...(['skill', 'agent', 'tool', 'workflow'] as HubPluginType[]).map(type => ({
+                ...(['skill', 'agent', 'tool', 'device', 'workflow'] as HubPluginType[]).map(type => ({
                   value: type,
-                  label: TYPE_LABEL[type],
+                  label: formatPluginTypeLabel(type, i18n.language),
                   count: facetCounts.type[type] ?? 0,
                 })),
               ]}
@@ -628,7 +644,7 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
         <tbody className="divide-y divide-gray-100">
           {items.map(item => (
             <tr key={`${item.type}:${item.id}`} className="hover:bg-gray-50">
-              <td className="px-3 py-2 text-gray-500">{TYPE_LABEL[item.type]}</td>
+              <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
                 <button onClick={() => onSelect(item)} className="w-full text-left">
                   <div className="truncate font-medium text-gray-900 hover:text-slate-700">{item.name}</div>
@@ -863,7 +879,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
         {activeTab === 'overview' && (
           <div className="p-5 space-y-4 overflow-auto h-full text-sm">
             <InfoBlock label="ID" value={entry.id} />
-            <InfoBlock label={text.type} value={TYPE_LABEL[entry.type]} />
+            <InfoBlock label={text.type} value={formatPluginTypeLabel(entry.type, language)} />
             <InfoBlock label="Tag" value={entry.tags.join(', ') || '-'} />
             <InfoBlock label={text.useCase} value={entry.useCases.join(', ') || '-'} />
             <InfoBlock label={text.trust} value={entry.trust} />

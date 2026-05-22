@@ -1,12 +1,105 @@
-import { describe, expect, it } from 'vitest';
+import React from 'react';
+import { render, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
+  default as SessionChat,
+  getEditingActionBarClassName,
   getMessageBubbleClassName,
+  getMessageGroupClassName,
   getRegenerateTruncateTarget,
+  getStandaloneThinkingBubbleClassName,
+  shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+
+const clientGetMock = vi.fn();
+const clientPostMock = vi.fn();
+const useSessionMessagesMock = vi.fn();
+const tMock = (key: string) => ({
+  'chat.placeholder': '请输入消息',
+  'chat.emptyText': '暂无消息',
+  'chat.sending': '发送中...',
+  'chat.thinking': '思考中...',
+  'chat.streaming': '继续输出中...',
+  'chat.compacting': '压缩中...',
+}[key] ?? key);
+const pendingQuestionsHookMock = {
+  pendingQuestions: {},
+  handleQuestionAsked: vi.fn(),
+  submitAnswer: vi.fn(),
+  submitReject: vi.fn(),
+  removeByRequestId: vi.fn(),
+  fetchPendingQuestions: vi.fn().mockResolvedValue(undefined),
+  clearAll: vi.fn(),
+};
+const toastMock = {
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+};
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: tMock,
+  }),
+}));
+
+vi.mock('@/hooks/useSessions', () => ({
+  useSessionMessages: (...args: unknown[]) => useSessionMessagesMock(...args),
+}));
+
+vi.mock('@/hooks/useSSE', () => ({
+  useSSE: () => ({ status: 'connected' }),
+}));
+
+vi.mock('@/hooks/useReasoningToggle', () => ({
+  useReasoningToggle: () => ({
+    getPartExpanded: () => false,
+    togglePart: vi.fn(),
+    isReasoningDone: true,
+  }),
+}));
+
+vi.mock('@/hooks/usePendingQuestions', () => ({
+  usePendingQuestions: () => pendingQuestionsHookMock,
+}));
+
+vi.mock('./Toast', () => ({
+  useToast: () => toastMock,
+}));
+
+vi.mock('@/api/client', () => ({
+  __esModule: true,
+  default: {
+    get: (...args: unknown[]) => clientGetMock(...args),
+    post: (...args: unknown[]) => clientPostMock(...args),
+  },
+  getApiBase: () => '',
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  clientGetMock.mockResolvedValue({ data: {} });
+  clientPostMock.mockResolvedValue({ data: {} });
+  pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  useSessionMessagesMock.mockReturnValue({
+    messages: [],
+    loading: false,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+});
 
 function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   return {
@@ -20,6 +113,12 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
 }
 
 describe('getMessageBubbleClassName', () => {
+  // The bubble's max width is owned by its outer container (`max-w-[80%]` for
+  // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
+  // only controls its own intrinsic sizing (`w-auto` vs `w-full`).  Previously
+  // the inner bubble also pinned `max-w-2xl`, but the unified chat redesign
+  // moved that responsibility outward.  Tests here therefore assert width
+  // semantics, not the legacy `max-w-2xl` literal.
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -27,7 +126,8 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('max-w-2xl w-auto');
+    expect(className).toContain('w-auto');
+    expect(className).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -37,7 +137,7 @@ describe('getMessageBubbleClassName', () => {
       isEditing: true,
     });
 
-    expect(className).toContain('max-w-2xl w-full');
+    expect(className).toContain('w-full');
     expect(className).not.toContain('w-auto');
   });
 
@@ -48,7 +148,103 @@ describe('getMessageBubbleClassName', () => {
       isEditing: true,
     });
 
-    expect(className).toContain('max-w-2xl w-full');
+    expect(className).toContain('w-full');
+  });
+});
+
+describe('getMessageGroupClassName', () => {
+  it('caps full-layout user messages at 80% width', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('max-w-[80%]');
+    expect(className).toContain('w-fit');
+  });
+
+  it('expands editing user messages to the 80% container width', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: true,
+      isEditing: true,
+    });
+
+    expect(className).toContain('w-[80%]');
+    expect(className).toContain('max-w-[80%]');
+  });
+
+  it('keeps assistant messages full width in full layout', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toBe('w-full');
+  });
+});
+
+describe('getEditingActionBarClassName', () => {
+  it('keeps editing actions right-aligned inside the bubble', () => {
+    const className = getEditingActionBarClassName();
+
+    expect(className).toContain('justify-end');
+    expect(className).toContain('w-full');
+    expect(className).toContain('mt-3');
+  });
+});
+
+describe('getStandaloneThinkingBubbleClassName', () => {
+  it('matches the standard assistant bubble sizing in full layout', () => {
+    expect(getStandaloneThinkingBubbleClassName(false)).toBe(
+      getMessageBubbleClassName({ compact: false, isUser: false, isEditing: false }),
+    );
+  });
+
+  it('matches the standard assistant bubble sizing in compact layout', () => {
+    expect(getStandaloneThinkingBubbleClassName(true)).toBe(
+      getMessageBubbleClassName({ compact: true, isUser: false, isEditing: false }),
+    );
+  });
+});
+
+describe('SessionChat standalone thinking indicator', () => {
+  it('keeps only the bouncing dots during the initial assistant loading state', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-1-part', type: 'text', text: 'hello' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'hello',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+      expect(container.textContent).not.toContain('思考中...');
+    });
   });
 });
 
@@ -83,5 +279,21 @@ describe('getRegenerateTruncateTarget', () => {
     ], 'assistant-1');
 
     expect(target).toEqual({ messageId: 'assistant-1', includeTarget: true });
+  });
+});
+
+describe('shouldRefetchFinishedMessage', () => {
+  it('skips refetch for the assistant message the user just aborted', () => {
+    expect(shouldRefetchFinishedMessage({
+      finishedMessageId: 'assistant-1',
+      abortedMessageId: 'assistant-1',
+    })).toBe(false);
+  });
+
+  it('still refetches for unrelated finished messages', () => {
+    expect(shouldRefetchFinishedMessage({
+      finishedMessageId: 'assistant-2',
+      abortedMessageId: 'assistant-1',
+    })).toBe(true);
   });
 });

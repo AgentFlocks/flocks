@@ -443,13 +443,14 @@ def run_workflow(
     _on_step_start = None
     _on_step_end = None
     if on_step_start is not None:
-        _on_step_start = lambda _rid, _step, _node, _inp: on_step_start(
-            _rid, _step, _node, _inp
-        )
+        def _on_step_start(_rid, _step, _node, _inp):
+            return on_step_start(_rid, _step, _node, _inp)
     elif on_step_complete is not None:
-        _on_step_start = lambda _rid, _step, _node, _inp: True
+        def _on_step_start(_rid, _step, _node, _inp):
+            return True
     if on_step_complete is not None:
-        _on_step_end = lambda _token, step_result: on_step_complete(step_result)
+        def _on_step_end(_token, step_result):
+            return on_step_complete(step_result)
 
     try:
         result = engine.run(
@@ -488,6 +489,17 @@ def run_workflow(
 
     history = [s.model_dump(mode="json") for s in result.history]
     last_outputs = result.history[-1].outputs if result.history else {}
+
+    if cancel is not None and cancel():
+        return RunWorkflowResult(
+            status="CANCELLED",
+            run_id=result.run_id,
+            steps=result.steps,
+            last_node_id=result.last_node_id,
+            outputs=last_outputs,
+            history=history,
+            error=f"RunCancelledError: Run cancelled: run_id={result.run_id}",
+        )
     
     _logger.info(f"=== workflow 执行成功 === run_id={result.run_id}, steps={result.steps}, last_node={result.last_node_id}")
     

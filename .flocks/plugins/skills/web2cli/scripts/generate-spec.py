@@ -107,6 +107,9 @@ def score_request(request: dict[str, Any], index: int) -> tuple[int, int]:
         score += 15
     if action:
         score += 12
+    purpose = request.get("apiPurpose", {}) if isinstance(request.get("apiPurpose"), dict) else {}
+    if purpose.get("name") or purpose.get("desc"):
+        score += 15
     if isinstance(response, dict) and "raw" not in response:
         score += 20
 
@@ -321,15 +324,47 @@ def command_name_from_path(pathname: str) -> str:
     return sanitize_name(parts[-1] if parts else "command")
 
 
-def generate_spec_from_requests(requests: list[dict[str, Any]], *, base_url: str | None = None) -> dict[str, Any]:
-    """Build a web2cli spec object from captured request data."""
-    request = choose_primary_request(requests)
+def cli_command_name(name: str) -> str:
+    """Return a CLI subcommand name from captured metadata."""
+    return sanitize_name(name).replace("_", "-") or "command"
+
+
+def select_operation_requests(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one representative request per method/path pair in capture order."""
+    selected: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for index, request in enumerate(requests):
+        url_info = normalize_url_info(request)
+        pathname = url_info["pathname"] or "/"
+        method = str(request.get("method", "GET")).upper()
+        key = (method, pathname)
+        score, _ = score_request(request, index)
+        current = selected.get(key)
+        if current is None or score > current["score"]:
+            selected[key] = {"index": index, "score": score, "request": request}
+
+    candidates = sorted(selected.values(), key=lambda item: item["index"])
+    filtered = [item for item in candidates if item["score"] >= 60]
+    return [item["request"] for item in (filtered or candidates[:1])]
+
+
+def make_unique_commands(entries: list[dict[str, Any]]) -> None:
+    """Mutate operation entries so every command is unique."""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        command = entry["command"]
+        counts[command] = counts.get(command, 0) + 1
+        if counts[command] > 1:
+            entry["command"] = f"{command}-{counts[command]}"
+
+
+def build_operation_entry(request: dict[str, Any]) -> dict[str, Any]:
+    """Build one multi-operation spec entry from a captured request."""
     url_info = normalize_url_info(request)
     response = parse_json_text(str(request.get("response", "")))
     collection = find_best_collection(response)
     row_item = collection["item"] if collection is not None else response
     query_template, body_template, args = build_templates(request, url_info)
-    strategy, auth = build_strategy(request)
     columns = collect_columns(row_item)
 
     defaults = {item["name"]: item["default"] for item in args}
@@ -340,19 +375,12 @@ def generate_spec_from_requests(requests: list[dict[str, Any]], *, base_url: str
         row_count["max"] = collection["length"]
 
     purpose = request.get("apiPurpose", {}) if isinstance(request.get("apiPurpose"), dict) else {}
-    host_origin = base_url or url_info["origin"] or "https://example.com"
     pathname = url_info["pathname"] or "/"
-    site = site_name_from_host(urlparse(host_origin).netloc or url_info["host"])
     command = purpose.get("name") or command_name_from_path(pathname)
 
     return {
-        "schemaVersion": "1.0",
-        "site": site,
-        "command": sanitize_name(command),
+        "command": cli_command_name(command),
         "description": purpose.get("desc") or f"Generated from {request.get('method', 'GET')} {pathname}",
-        "baseUrl": host_origin,
-        "strategy": strategy,
-        "auth": auth,
         "operation": {
             "method": request.get("method", "GET"),
             "endpoint": pathname,
@@ -378,6 +406,37 @@ def generate_spec_from_requests(requests: list[dict[str, Any]], *, base_url: str
             "patterns": {},
         },
     }
+
+
+def generate_spec_from_requests(requests: list[dict[str, Any]], *, base_url: str | None = None) -> dict[str, Any]:
+    """Build a web2cli spec object from captured request data."""
+    request = choose_primary_request(requests)
+    url_info = normalize_url_info(request)
+    strategy, auth = build_strategy(request)
+    primary_entry = build_operation_entry(request)
+    host_origin = base_url or url_info["origin"] or "https://example.com"
+    site = site_name_from_host(urlparse(host_origin).netloc or url_info["host"])
+
+    operation_entries = [build_operation_entry(item) for item in select_operation_requests(requests)]
+    make_unique_commands(operation_entries)
+
+    spec = {
+        "schemaVersion": "1.0",
+        "site": site,
+        "command": sanitize_name(primary_entry["command"].replace("-", "_")),
+        "description": primary_entry["description"],
+        "baseUrl": host_origin,
+        "strategy": strategy,
+        "auth": auth,
+        "operation": primary_entry["operation"],
+        "rowSource": primary_entry["rowSource"],
+        "args": primary_entry["args"],
+        "columns": primary_entry["columns"],
+        "verify": primary_entry["verify"],
+    }
+    if len(operation_entries) > 1:
+        spec["operations"] = operation_entries
+    return spec
 
 
 def main() -> None:

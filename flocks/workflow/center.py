@@ -42,6 +42,8 @@ _DEFAULT_IMAGE = "python:3.12-slim"
 _DEFAULT_HEALTH_RETRIES = 20
 _DEFAULT_HEALTH_INTERVAL_S = 2.0
 _DEFAULT_RUNTIME_INSTALL_HEALTH_RETRIES = 450  # 450 × 2s = 15 minutes
+_DEFAULT_STOP_TIMEOUT_S = 15.0
+_DEFAULT_LOCAL_STOP_GRACE_S = 5.0
 
 # Service driver: "local" runs as a subprocess; "docker" runs in a container.
 _DEFAULT_SERVICE_DRIVER = "local"
@@ -372,8 +374,16 @@ async def _wait_service_healthy(service_url: str, retries: int = 20, interval_s:
     return False
 
 
-async def _stop_and_remove_container(container_name: str) -> None:
-    await exec_docker(["rm", "-f", container_name], allow_failure=True)
+async def _stop_and_remove_container(container_name: str) -> bool:
+    _, stderr, code = await exec_docker(
+        ["rm", "-f", container_name],
+        allow_failure=True,
+        timeout_s=float(os.getenv("FLOCKS_WORKFLOW_SERVICE_STOP_TIMEOUT_S", str(_DEFAULT_STOP_TIMEOUT_S))),
+    )
+    if code != 0:
+        log.warning("workflow.container.stop_failed", {"container": container_name, "error": stderr})
+        return False
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -387,6 +397,44 @@ def _local_pid_key(workflow_id: str) -> str:
     return f"{_LOCAL_PID_PREFIX}{workflow_id}"
 
 
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+async def _wait_for_pid_exit(pid: int, timeout_s: float) -> bool:
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    while time.monotonic() < deadline:
+        try:
+            waited, _ = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                return True
+        except ChildProcessError:
+            pass
+        if not _pid_is_running(pid):
+            return True
+        await asyncio.sleep(0.1)
+    return not _pid_is_running(pid)
+
+
+def _signal_local_process(pid: int, sig: signal.Signals, process_group_id: Optional[int] = None) -> None:
+    if process_group_id:
+        try:
+            os.killpg(int(process_group_id), sig)
+            return
+        except (ProcessLookupError, OSError):
+            pass
+    try:
+        os.kill(int(pid), sig)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 async def _stop_local_service(workflow_id: str) -> None:
     """Kill a previously started local workflow service process."""
     pid_record = await Storage.read(_local_pid_key(workflow_id))
@@ -394,12 +442,115 @@ async def _stop_local_service(workflow_id: str) -> None:
         return
     pid = pid_record.get("pid")
     if not pid:
+        await Storage.remove(_local_pid_key(workflow_id))
         return
+    pid_int = int(pid)
+    process_group_id = pid_record.get("processGroupId")
     try:
-        os.kill(int(pid), signal.SIGTERM)
-    except (ProcessLookupError, OSError):
-        pass
+        _signal_local_process(pid_int, signal.SIGTERM, process_group_id)
+        grace_s = float(os.getenv("FLOCKS_WORKFLOW_LOCAL_STOP_GRACE_S", str(_DEFAULT_LOCAL_STOP_GRACE_S)))
+        exited = await _wait_for_pid_exit(pid_int, grace_s)
+        if not exited:
+            log.warning("workflow.local.force_kill", {"workflow_id": workflow_id, "pid": pid_int})
+            _signal_local_process(pid_int, signal.SIGKILL, process_group_id)
+            await _wait_for_pid_exit(pid_int, 1.0)
+    finally:
+        await Storage.remove(_local_pid_key(workflow_id))
+
+
+async def _stop_local_runtime(workflow_id: str, runtime: Dict[str, Any]) -> bool:
+    """Stop a local workflow service using the persisted runtime record."""
+    pid_raw = runtime.get("containerId") or runtime.get("pid")
+    try:
+        pid = int(pid_raw)
+    except (TypeError, ValueError):
+        await _stop_local_service(workflow_id)
+        return False
+
+    process_group_id = runtime.get("processGroupId") or pid
+    _signal_local_process(pid, signal.SIGTERM, process_group_id)
+    grace_s = float(os.getenv("FLOCKS_WORKFLOW_LOCAL_STOP_GRACE_S", str(_DEFAULT_LOCAL_STOP_GRACE_S)))
+    exited = await _wait_for_pid_exit(pid, grace_s)
+    if not exited:
+        log.warning("workflow.local.force_kill", {"workflow_id": workflow_id, "pid": pid})
+        _signal_local_process(pid, signal.SIGKILL, process_group_id)
+        exited = await _wait_for_pid_exit(pid, 1.0)
     await Storage.remove(_local_pid_key(workflow_id))
+    return exited
+
+
+def _runtime_driver(runtime: Optional[Dict[str, Any]]) -> str:
+    """Resolve the driver for an already-published runtime record."""
+    if not runtime:
+        return _service_driver()
+    driver = str(runtime.get("driver") or "").strip().lower()
+    if driver in {"local", "docker"}:
+        return driver
+    image = str(runtime.get("image") or "").strip().lower()
+    container_name = str(runtime.get("containerName") or "").strip().lower()
+    if image == "local" or container_name.startswith("local-"):
+        return "local"
+    return "docker"
+
+
+async def _mark_release_inactive(workflow_id: str, release_id: Optional[Any]) -> None:
+    if not release_id:
+        return
+    release_record = await Storage.read(_release_key(workflow_id, str(release_id))) or {}
+    if release_record:
+        release_record["status"] = "inactive"
+        release_record["deactivatedAt"] = _now_ms()
+        await Storage.write(_release_key(workflow_id, str(release_id)), release_record)
+
+
+async def _stop_runtime_record(
+    workflow_id: str,
+    runtime: Dict[str, Any],
+    *,
+    update_registry: bool,
+    clear_runtime_keys: bool = True,
+) -> Dict[str, Any]:
+    """Stop the concrete runtime instance recorded in storage."""
+    registry = await _read_registry(workflow_id)
+    driver = _runtime_driver(runtime)
+    stopped = False
+    if driver == "local":
+        stopped = await _stop_local_runtime(workflow_id, runtime)
+    else:
+        container_name = runtime.get("containerName")
+        if container_name:
+            stopped = await _stop_and_remove_container(str(container_name))
+            if not stopped:
+                raise WorkflowCenterError(f"Failed to stop Docker container: {container_name}")
+
+    active = (await Storage.read(_active_release_key(workflow_id)) or {}) if clear_runtime_keys else {}
+    release_id = runtime.get("releaseId") or active.get("releaseId")
+    await _mark_release_inactive(workflow_id, release_id)
+    if clear_runtime_keys:
+        await Storage.remove(_runtime_key(workflow_id))
+        await Storage.remove(_active_release_key(workflow_id))
+
+    if update_registry:
+        registry["publishStatus"] = "stopped"
+        registry["updatedAt"] = _now_ms()
+        registry["serviceUrl"] = None
+        await Storage.write(_registry_key(workflow_id), registry)
+
+    return {
+        "workflowId": workflow_id,
+        "status": "stopped",
+        "stopped": stopped,
+        "driver": driver,
+    }
+
+
+async def _stop_existing_runtime_for_publish(workflow_id: str) -> None:
+    """Best-effort cleanup before starting a replacement service."""
+    runtime = await Storage.read(_runtime_key(workflow_id))
+    if isinstance(runtime, dict) and runtime:
+        await _stop_runtime_record(workflow_id, runtime, update_registry=False)
+    else:
+        await _stop_local_service(workflow_id)
 
 
 async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
@@ -424,8 +575,7 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
 
     release_snapshot_file = await _write_release_snapshot(workflow_id, release_id, workflow_json)
 
-    # Stop any previously running local service for this workflow
-    await _stop_local_service(workflow_id)
+    await _stop_existing_runtime_for_publish(workflow_id)
 
     host_port = await _allocate_port()
     service_url = _host_service_url(host_port)
@@ -443,9 +593,14 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
         env=env,
+        start_new_session=True,
     )
 
-    await Storage.write(_local_pid_key(workflow_id), {"pid": proc.pid, "port": host_port})
+    await Storage.write(_local_pid_key(workflow_id), {
+        "pid": proc.pid,
+        "processGroupId": proc.pid,
+        "port": host_port,
+    })
 
     health_retries = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_RETRIES", str(_DEFAULT_HEALTH_RETRIES)))
     health_interval_s = float(os.getenv("FLOCKS_WORKFLOW_SERVICE_HEALTH_INTERVAL_S", str(_DEFAULT_HEALTH_INTERVAL_S)))
@@ -453,7 +608,7 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
     healthy = await _wait_service_healthy(service_url, retries=health_retries, interval_s=health_interval_s)
     if not healthy:
         try:
-            proc.terminate()
+            await _stop_local_service(workflow_id)
         except Exception:
             pass
         registry["publishStatus"] = "failed"
@@ -467,6 +622,7 @@ async def publish_workflow_local(workflow_id: str) -> Dict[str, Any]:
         "serviceKey": service_key,
         "containerName": f"local-{workflow_id[:8]}-{release_id[:8]}",
         "containerId": str(proc.pid),
+        "processGroupId": proc.pid,
         "image": "local",
         "hostPort": host_port,
         "serviceUrl": service_url,
@@ -509,19 +665,30 @@ def _service_driver() -> str:
     return os.getenv("FLOCKS_WORKFLOW_SERVICE_DRIVER", _DEFAULT_SERVICE_DRIVER).lower()
 
 
-async def publish_workflow(workflow_id: str, image: Optional[str] = None) -> Dict[str, Any]:
+async def publish_workflow(
+    workflow_id: str,
+    image: Optional[str] = None,
+    driver: Optional[str] = None,
+) -> Dict[str, Any]:
     """Publish a workflow using the configured service driver (local or docker)."""
-    driver = _service_driver()
-    if driver == "docker":
+    resolved_driver = (driver or _service_driver()).strip().lower()
+    if resolved_driver == "docker":
         return await _publish_workflow_docker(workflow_id, image=image)
+    if resolved_driver != "local":
+        raise WorkflowCenterError(f"Unsupported workflow service driver: {resolved_driver}")
     return await publish_workflow_local(workflow_id)
 
 
 async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
     """Stop a published workflow service (driver-aware)."""
-    driver = _service_driver()
-    if driver == "docker":
-        return await _stop_workflow_service_docker(workflow_id)
+    runtime = await Storage.read(_runtime_key(workflow_id))
+    if isinstance(runtime, dict) and runtime:
+        return await _stop_runtime_record(workflow_id, runtime, update_registry=True)
+    active = await Storage.read(_active_release_key(workflow_id))
+    if isinstance(active, dict) and active:
+        return await _stop_runtime_record(workflow_id, active, update_registry=True)
+
+    # Fallback for legacy local records that predate workflow_runtime/.
     return await stop_local_service(workflow_id)
 
 
@@ -557,6 +724,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
     }
     await Storage.write(_release_key(workflow_id, release_id), release_record)
 
+    previous_runtime = await Storage.read(_runtime_key(workflow_id)) or {}
     previous_active = await Storage.read(_active_release_key(workflow_id)) or {}
     previous_container_name = previous_active.get("containerName")
     previous_release_id = previous_active.get("releaseId")
@@ -692,6 +860,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
             "serviceUrl": service_url,
             "status": "active",
             "updatedAt": _now_ms(),
+            "driver": "docker",
         }
         await Storage.write(_active_release_key(workflow_id), active_record)
         await Storage.write(_runtime_key(workflow_id), active_record)
@@ -703,14 +872,17 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
         registry["updatedAt"] = _now_ms()
         await Storage.write(_registry_key(workflow_id), registry)
 
-        if previous_container_name and previous_container_name != container_name:
+        if isinstance(previous_runtime, dict) and previous_runtime:
+            await _stop_runtime_record(
+                workflow_id,
+                previous_runtime,
+                update_registry=False,
+                clear_runtime_keys=False,
+            )
+        elif previous_container_name and previous_container_name != container_name:
             await _stop_and_remove_container(previous_container_name)
             if previous_release_id:
-                old_release = await Storage.read(_release_key(workflow_id, previous_release_id)) or {}
-                if old_release:
-                    old_release["status"] = "inactive"
-                    old_release["deactivatedAt"] = _now_ms()
-                    await Storage.write(_release_key(workflow_id, previous_release_id), old_release)
+                await _mark_release_inactive(workflow_id, previous_release_id)
 
         return active_record
     except Exception as exc:
@@ -728,7 +900,7 @@ async def _publish_workflow_docker(workflow_id: str, image: Optional[str] = None
 async def _stop_workflow_service_docker(workflow_id: str) -> Dict[str, Any]:
     """Stop a published workflow Docker service container."""
     registry = await _read_registry(workflow_id)
-    runtime = await Storage.read(_runtime_key(workflow_id))
+    runtime = await Storage.read(_runtime_key(workflow_id)) or await Storage.read(_active_release_key(workflow_id))
     if not runtime:
         registry["publishStatus"] = "stopped"
         registry["updatedAt"] = _now_ms()
@@ -737,7 +909,9 @@ async def _stop_workflow_service_docker(workflow_id: str) -> Dict[str, Any]:
 
     container_name = runtime.get("containerName")
     if container_name:
-        await _stop_and_remove_container(str(container_name))
+        stopped = await _stop_and_remove_container(str(container_name))
+        if not stopped:
+            raise WorkflowCenterError(f"Failed to stop Docker container: {container_name}")
 
     active = await Storage.read(_active_release_key(workflow_id)) or {}
     release_id = active.get("releaseId")
@@ -766,6 +940,34 @@ async def get_workflow_health(workflow_id: str) -> Dict[str, Any]:
 
     container_name = str(runtime.get("containerName", ""))
     service_url = str(runtime.get("serviceUrl", ""))
+    if runtime.get("driver") == "local":
+        pid_raw = runtime.get("containerId")
+        try:
+            pid = int(pid_raw)
+        except (TypeError, ValueError):
+            pid = 0
+        process_running = bool(pid and _pid_is_running(pid))
+        endpoint_ok = False
+        endpoint_payload: Dict[str, Any] = {}
+        if process_running and service_url:
+            try:
+                endpoint_payload = await asyncio.to_thread(_json_get, f"{service_url}/health", 2.0)
+                endpoint_ok = bool(endpoint_payload.get("ok"))
+            except Exception:
+                endpoint_ok = False
+        return {
+            "workflowId": workflow_id,
+            "published": True,
+            "containerName": container_name,
+            "serviceUrl": service_url,
+            "containerExists": process_running,
+            "containerRunning": process_running,
+            "endpointOk": endpoint_ok,
+            "endpoint": endpoint_payload,
+            "ok": bool(process_running and endpoint_ok),
+            "driver": "local",
+        }
+
     docker_state = await docker_container_state(container_name) if container_name else {"exists": False, "running": False}
 
     endpoint_ok = False
@@ -787,6 +989,7 @@ async def get_workflow_health(workflow_id: str) -> Dict[str, Any]:
         "endpointOk": endpoint_ok,
         "endpoint": endpoint_payload,
         "ok": bool(docker_state.get("running") and endpoint_ok),
+        "driver": "docker",
     }
 
 

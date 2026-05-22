@@ -9,7 +9,7 @@ from flocks.tool.tool_loader import yaml_to_tool
 
 
 def _load_tool(yaml_name: str):
-    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "skyeye_v4_0_14_0_SP2" / yaml_name
+    yaml_path = Path.cwd() / ".flocks" / "plugins" / "tools" / "device" / "skyeye_v4_0_14_0_SP2" / yaml_name
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     return yaml_to_tool(raw, yaml_path)
 
@@ -90,7 +90,7 @@ async def test_skyeye_dashboard_view_tool_uses_custom_login_flow():
     ):
         result = await tool.handler(ToolContext(session_id="test", message_id="test"))
 
-    assert tool.info.source == "api"
+    assert tool.info.source == "device"
     assert tool.info.provider == "skyeye_api_v4_0_14_0_SP2"
     assert result.success is True
     assert result.output["data"]["items"] == {"value": 42}
@@ -166,6 +166,59 @@ async def test_skyeye_alarm_list_returns_clear_error_when_not_configured():
 
     assert result.success is False
     assert "base URL" in result.error
+
+
+@pytest.mark.asyncio
+async def test_skyeye_alarm_list_accepts_legacy_threat_level_alias():
+    tool = _load_tool("skyeye_alarm_list.yaml")
+    mock_secret_manager = MagicMock()
+    mock_secret_manager.get.side_effect = lambda key: {
+        "skyeye_api_key": "login-key-123",
+    }.get(key)
+    fake_session = _FakeSession([
+        _FakeResponse(json_payload={"access_token": "token-123", "status": 200}),
+        _FakeResponse(text_payload='<html><meta name="csrf-token" content="abcdef1234567890"></html>'),
+        _FakeResponse(json_payload={"data": {"items": [], "total": 0}, "status": 1000, "message": "ok"}),
+    ])
+
+    with (
+        patch("flocks.security.get_secret_manager", return_value=mock_secret_manager),
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:skyeye_api_key}",
+                "base_url": "https://skyeye.local",
+                "custom_settings": {
+                    "api_prefix": "api",
+                    "api_version": "v1",
+                    "username": "tapadmin",
+                },
+            },
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.execute(ToolContext(session_id="test", message_id="test"), threat_level="3")
+
+    assert result.success is True
+    method, request_url, request_kwargs = fake_session.calls[2]
+    assert method == "GET"
+    assert request_url == "https://skyeye.local/api/v1/alarm/alarm/list"
+    assert request_kwargs["params"]["hazard_level"] == "3"
+    assert "threat_level" not in request_kwargs["params"]
+
+
+@pytest.mark.asyncio
+async def test_skyeye_alarm_list_still_rejects_unknown_level_fields():
+    tool = _load_tool("skyeye_alarm_list.yaml")
+
+    result = await tool.execute(
+        ToolContext(session_id="test", message_id="test"),
+        hazard_rating="critical",
+    )
+
+    assert result.success is False
+    assert "unknown parameters" in (result.error or "").lower()
+    assert "hazard_rating" in (result.error or "")
 
 
 @pytest.mark.asyncio

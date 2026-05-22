@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock
 from fastapi.testclient import TestClient
 
 import flocks.workflow.service_runtime as service_runtime
+from flocks.tool import ToolContext
 
 
 def test_service_runtime_lifespan_initializes_and_shuts_down_mcp(
@@ -81,3 +82,44 @@ def test_service_runtime_lifespan_reports_mcp_init_failure(
     init_mock.assert_awaited_once()
     shutdown_mock.assert_awaited_once()
     run_workflow_mock.assert_not_called()
+
+
+def test_service_runtime_invoke_builds_real_tool_context(
+    monkeypatch,
+) -> None:
+    init_mock = AsyncMock()
+    shutdown_mock = AsyncMock()
+    manager = SimpleNamespace(shutdown=shutdown_mock)
+    tool_context = ToolContext(session_id="session-1", message_id="message-1", agent="rex")
+    build_context_mock = AsyncMock(return_value=tool_context)
+    run_workflow_mock = Mock(
+        return_value=SimpleNamespace(
+            status="SUCCEEDED",
+            run_id="run-1",
+            outputs={"ok": True},
+            error=None,
+        )
+    )
+
+    monkeypatch.setattr(service_runtime.MCP, "init", init_mock)
+    monkeypatch.setattr(service_runtime, "get_manager", lambda: manager)
+    monkeypatch.setattr(service_runtime, "build_workflow_tool_context", build_context_mock)
+    monkeypatch.setattr(service_runtime, "run_workflow", run_workflow_mock)
+
+    app = service_runtime.create_service_app(
+        workflow_json={"id": "wf-1", "start": "node-1", "nodes": [], "edges": []},
+        workflow_id="wf-1",
+        release_id="rel-1",
+    )
+
+    with TestClient(app, raise_server_exceptions=True) as client:
+        response = client.post("/invoke", json={"inputs": {"ip": "8.8.8.8"}})
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "SUCCEEDED"
+    build_context_mock.assert_awaited_once_with(
+        workflow_id="wf-1",
+        action_name="invoke",
+    )
+    run_workflow_mock.assert_called_once()
+    assert run_workflow_mock.call_args.kwargs["tool_context"] is tool_context

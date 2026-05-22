@@ -28,6 +28,11 @@ def install_root(plugin_type: PluginType, scope: str = "global") -> Path:
         return root / "agents"
     if plugin_type == "workflow":
         return root / "workflows"
+    if plugin_type == "device":
+        # Device plugins live as a subdirectory of tools/ so the runtime
+        # tool loader (which expects ``<plugins>/tools/<group>/<id>/``)
+        # picks them up alongside api/ and python/ groups.
+        return root / "tools" / "device"
     return root / "tools"
 
 
@@ -94,7 +99,7 @@ def has_install_payload(plugin_type: PluginType, path: Path) -> bool:
         return (path / "agent.yaml").is_file()
     if plugin_type == "workflow":
         return (path / "workflow.json").is_file() or (path / "workflow.md").is_file()
-    if plugin_type == "tool":
+    if plugin_type in {"tool", "device"}:
         if path.is_file():
             return path.suffix in {".yaml", ".yml", ".py"}
         return any(candidate.is_file() for candidate in path.rglob("*.yaml")) or any(
@@ -139,12 +144,27 @@ def infer_local_install(plugin_type: PluginType, plugin_id: str) -> Optional[Pat
         for base in (install_root("tool", "global"), install_root("tool", "project")):
             if not base.is_dir():
                 continue
-            for nested in (base / "api" / plugin_id, base / "mcp" / plugin_id, base / "generated" / plugin_id):
+            for nested in (
+                base / "api" / plugin_id,
+                base / "device" / plugin_id,
+                base / "mcp" / plugin_id,
+                base / "generated" / plugin_id,
+            ):
                 if has_install_payload(plugin_type, nested):
                     return nested
             for candidate in base.rglob(f"{plugin_id}.yaml"):
                 if has_install_payload(plugin_type, candidate.parent):
                     return candidate.parent
+    if plugin_type == "device":
+        # Device installs live under ``<tools>/device/<id>/``. We already
+        # checked the canonical path above via ``install_dir``; the loop
+        # here catches legacy installs that may have been written into
+        # the bare ``<tools>/<id>/`` location before ``device`` became
+        # a first-class plugin type.
+        for base in (install_root("tool", "global"), install_root("tool", "project")):
+            legacy = base / plugin_id
+            if has_install_payload("tool", legacy):
+                return legacy
     return None
 
 
@@ -168,19 +188,33 @@ def infer_local_installs() -> dict[tuple[PluginType, str], Path]:
         for child in base.iterdir():
             if child.is_dir() and has_install_payload("tool", child):
                 result.setdefault(("tool", child.name), child)
-        for group in ("api", "mcp", "generated"):
+        # Tools live under ``<tools>/<group>/<id>/`` where ``group`` is
+        # one of api/device/mcp/generated. ``device`` is a first-class
+        # plugin type on the Hub layer (driven by ``integration_type:
+        # device`` in ``_provider.yaml``), so we surface those entries
+        # keyed as ``("device", id)`` instead of ``("tool", id)`` to keep
+        # the catalog state in sync with the runtime install path.
+        for group in ("api", "device", "mcp", "generated"):
             group_dir = base / group
             if not group_dir.is_dir():
                 continue
+            entry_type: PluginType = "device" if group == "device" else "tool"
             for child in group_dir.iterdir():
                 if child.is_dir() and has_install_payload("tool", child):
-                    result.setdefault(("tool", child.name), child)
+                    result.setdefault((entry_type, child.name), child)
         for candidate in base.rglob("*"):
             if not candidate.is_file() or candidate.name == "__init__.py":
                 continue
             if candidate.suffix not in {".yaml", ".yml", ".py"}:
                 continue
             if has_install_payload("tool", candidate.parent):
-                result.setdefault(("tool", candidate.stem), candidate.parent)
+                # Preserve the directory-derived classification populated
+                # above; never downgrade a previously-classified device
+                # entry back to tool just because we found another yaml
+                # in the same package.
+                stem_key = candidate.stem
+                if (("device", stem_key) in result) or (("tool", stem_key) in result):
+                    continue
+                result.setdefault(("tool", stem_key), candidate.parent)
 
     return result

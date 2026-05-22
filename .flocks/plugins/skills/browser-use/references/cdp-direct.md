@@ -2,26 +2,20 @@
 
 本文件是 `browser-use` 的 CDP 模式参考文档。只有当 `browser-use/SKILL.md` 判定应使用 `CDP 直连` 时，才读取并遵循本文件；不要和 `references/agent-browser.md` 同时加载。
 
-## 使用入口
+## CDP 无头模式入口
 
-`flocks browser` 是 Flocks 内置的薄 CDP harness：agent 直接控制真实浏览器，helpers 预加载，daemon 自动启动。通过 `flocks browser ...` 调用。
+如果当前任务需要 headless，即任务本身是后台任务/定时任务，或系统不支持可视化，先读取：
 
-## 适用范围
+- `references/cdp-headless.md`
 
-使用 CDP 直连处理这些任务：
-
-- 打开网页、点击、填写表单、上传文件、打印/下载、抓取动态页面内容。
-- 需要复用用户当前浏览器登录态、访问内网页面、登录后页面或复杂 SPA。
-- 需要比普通浏览器自动化更底层的 CDP 能力，例如 raw CDP、iframe/shadow DOM/cross-origin 点击、网络状态判断。
-
-如果任务涉及账号、资金、生产环境配置、删除/发布/提交等高风险动作，先向用户确认再执行。遇到登录页、验证码、TOTP、授权弹窗或需要输入密码时，可以停下来提示用户操作。
+先按该文档完成专用 headless 浏览器启动、`BU_CDP_URL` / `BU_CDP_WS` 设置，以及 `flocks browser --setup` 连通；连通成功后，再回到本文件，后续 tab、页面、CDP helper、提取与排障流程都按本文件执行。
 
 ## 操作原则
 
-- 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，在其中完成任务。每个任务或者每个站点的操作创建一个 tab 就可以，不要对同一个站点或任务多次创建 tab。
+- 默认不要直接操作用户已有 tab。优先 `new_tab(url, activate=True)` 创建自己的 tab，或者用 `open_or_attach_tab(url, activate=True)` 复用当前任务自己已经创建的 tab。
 - 后续命令恢复同一个 tab 时，优先 `attach_tab(target_id)`，不要反复 `switch_tab(target_id)` 抢用户当前浏览器焦点。只有需要让用户看到页面、登录、授权或手动操作时才使用 `switch_tab(target_id)`。
-- 只关闭自己创建的 tab，不关闭用户原有 tab。
-- 不要主动停止或重启浏览器。daemon stale 时可以 `restart_daemon()` 一次；杀浏览器只能作为最后排障手段并先说明影响。
+- 只关闭自己创建的 tab，不关闭用户原有 tab。`close_tab()` 默认会拒绝关闭未托管 tab。
+- 不要主动停止或重启浏览器。唯一例外是 `cdp-headless` 场景下由当前任务临时启动的专用实例，这种实例可以在任务完全结束后按 `references/cdp-headless.md` 的生命周期约定关闭；daemon stale 时可以 `restart_daemon()` 一次；
 - 不建议主动停止 proxy 或远程调试连接；重启后可能需要用户重新授权浏览器调试连接。
 - 每个可见动作后立即用 `page_info()` 或 `js(...)` 重新观察并验证，不要凭假设继续。
 - 优先读取 DOM、文本、可交互元素、URL、网络状态等结构化信息。
@@ -36,7 +30,48 @@
 flocks browser --doctor
 ```
 
-基本用法：
+通过`flocks browser -c '...'` 操作浏览器
+
+## 语法说明
+
+- `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
+- 多行代码请直接写成真正的多行 shell 字符串或 heredoc；不要把 `\n` 当字面量塞进单引号参数里。
+- 在 `Windows PowerShell` 中，默认写法是：把整段 Python 代码放进一对外层双引号里，并尽量压成单行，用分号分隔语句。
+- 在 `Windows PowerShell` 中，内层字符串尽量统一改用单引号，例如 `js('document.body.innerText.slice(0, 5000)')`；这样可以减少外层双引号、内层双引号互相打架导致的截断或变形。
+- 如果代码里本身包含很多引号、反引号、`$`，或者已经长到不适合单行，先写到临时 `.py` 文件，再用 `Get-Content -Raw` 读出后传给 `-c`；不要硬拼多行单引号字符串。
+
+Windows PowerShell 推荐示例：
+
+```powershell
+flocks browser -c "r = js('document.body.innerText.slice(0, 5000)'); print(r)"
+```
+
+Windows PowerShell 多行代码推荐写法：
+
+```powershell
+@'
+tid = new_tab("https://example.com", activate=True)
+wait_for_load()
+print(page_info())
+'@ | Set-Content "$env:TEMP\flocks-browser-cmd.py"
+
+flocks browser -c (Get-Content -Raw "$env:TEMP\flocks-browser-cmd.py")
+```
+
+## 核心操作循环
+> 打开页面 -> 观察当前状态 -> 执行动作 -> 再观察验证
+
+1. 新建或打开已打开 tab
+2. 用 `page_info()` / `js(...)` 观察当前页面、URL、文本、结构和阻塞状态
+3. 选择当前最稳妥的动作方式
+4. 动作后重新观察，确认页面是否真的变化
+5. 如果未达成目标，先解释当前卡点，再换一种方式继续
+
+
+## 标准工作流
+
+1. 如果是具体网站/产品任务，先搜索已存在的skill，看 `<产品>-use` skill 下是否存在浏览器相关操作；如果没有，再自己探索。
+2. 创建自己的 tab，保存 `targetId`，等待加载，并先读取页面基础状态：
 
 ```bash
 flocks browser -c '
@@ -46,52 +81,14 @@ print(page_info())
 '
 ```
 
-`flocks browser -c` 内部可直接使用预加载 helpers；daemon 会自动启动并连接已运行的 Chromium 系浏览器。
+如需进一步观察页面结构、文本或候选交互元素，再按当前站点实际情况用 `js(...)` 做针对性提取；
 
-注意：
-
-- `flocks browser -c '...'` 执行的是一段 Python 代码，不是交互式 REPL；如果希望看到结果，必须显式 `print(...)`。
-- 多行代码请直接写成真正的多行 shell 字符串或 heredoc；不要把 `\n` 当字面量塞进单引号参数里。
-- 在 `Windows PowerShell` 中，优先把 `flocks browser -c` 写成单行并用分号分隔；多行单引号字符串的换行/转义处理不稳定，容易让代码没有完整传给 Python。
-
-常用 helpers：
-
-- `new_tab(url, activate=True)`, `goto_url(url)`, `wait_for_load(timeout=15)`, `page_info()`
-- `click_at_xy(x, y)`, `type_text(text)`, `press_key(key)`, `scroll(x, y, dy=-300)`
-- `js(expression)`, `cdp("Domain.method", **params)`, `drain_events()`
-- `list_tabs(include_chrome=False)`, `current_tab()`, `attach_tab(target_id)`, `switch_tab(target_id)`, `close_tab()`, `ensure_real_tab()`
-- `upload_file(selector, path)`, `http_get(url, headers=None)`
-- `capture_screenshot(path="/tmp/shot.png", full=False, max_dim=1800)` 仅用于可查看图片文件的调试或交付场景
-
-## 标准工作流
-
-`flocks browser` 的基础循环是：打开页面 -> 读取结构化状态 -> 执行动作 -> 重新读取状态验证。
-
-1. 如果是具体网站任务，先搜索已存在的站点经验。优先看 `~/.flocks/workspace/domain-skills/`；如果没有，再自己探索。
-2. 创建自己的 tab，等待加载，并读取页面基础状态与候选交互元素：
+后续步骤继续使用同一个 tab 时，先恢复它：
 
 ```bash
 flocks browser -c '
-tid = new_tab("https://example.com", activate=True)
-wait_for_load()
+attach_tab("<TARGET_ID>")
 print(page_info())
-
-state = js("""
-(() => ({
-  title: document.title,
-  url: location.href,
-  text: document.body.innerText.slice(0, 2000),
-  controls: Array.from(document.querySelectorAll("a,button,input,textarea,select"))
-    .slice(0, 40)
-    .map((el, index) => ({
-      index,
-      tag: el.tagName,
-      text: (el.innerText || el.value || el.placeholder || el.ariaLabel || el.href || "").trim(),
-      disabled: el.disabled || el.getAttribute("aria-disabled") === "true"
-    }))
-}))()
-""")
-print(state)
 '
 ```
 
@@ -106,7 +103,7 @@ print(page_info())
 ```
 
 4. 需要提取数据时用 `js(...)` 或 `http_get(...)`。静态页面/接口批量抓取优先 `http_get`，不要浪费浏览器。
-5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明。
+5. 结束时只关闭自己创建的 tab。若不确定 tab 是否属于自己，保留它并说明；如果当前任务还临时拉起了专用 headless 浏览器实例，tab 清理完后再按 `references/cdp-headless.md` 的约定决定是否关闭整个浏览器进程。
 
 注意：
 
@@ -115,18 +112,23 @@ print(page_info())
 - 提取大量结构化数据时，优先在页面内用 `js(...)` 组装 JSON 后返回。
 - 判断内容是否已在 DOM 中，不要只依赖当前可见区域；懒加载或虚拟列表再配合 `scroll(...)` 分段读取。
 
+
 ## Tab 与可见性
 
 - `new_tab(url, activate=True)` 会创建并 attach 到新 tab，默认同时让 tab 在浏览器中可见；这是需要用户登录或观察页面时的默认入口。
+- `open_or_attach_tab(url, activate=True)` 只会复用当前任务自己创建过的同 URL tab；不会按 URL 复用用户已有 tab。
 - `new_tab(url, activate=False)` 会创建后台 tab 并 attach，不主动抢当前可见 tab。
 - `attach_tab(target_id)` 只 attach 到目标 tab，不激活浏览器 UI；后续读取页面状态、导出数据、保存认证状态等命令优先使用它。
 - `switch_tab(target_id)` 会 attach 到目标 tab 并执行 `Target.activateTarget`，让目标 tab 在浏览器中可见；只在需要用户看到或手动操作时使用。
-- `close_tab(target_id, activate_next=False)` 可关闭自己创建的 tab 且不自动切到其他已打开 tab。
+- `managed_tabs()` 只列出当前任务创建并仍然存在的 tab，可用于调试和确认复用目标。
+- `close_tab(target_id, activate_next=False)` 默认只允许关闭自己创建的 tab，且不自动切到其他已打开 tab；确实需要关闭用户 tab 时必须显式传 `allow_unmanaged=True`。
 - `list_tabs()` 默认会包含 `chrome://`、`about:` 等内部页面；要面向用户页面时用 `list_tabs(include_chrome=False)`。
 - 忽略 `chrome://omnibox-popup.top-chrome/` 这类假 page target。页面 `w=0 h=0` 时通常是 attach 到了错误 target。
-- 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户可见页面时，先 `ensure_real_tab()`。
+- 当当前 session stale、内部页或不可见，并且确实要恢复到某个用户页面时，先 `ensure_real_tab()`；它会先 attach 到非内部页而不是主动激活浏览器 UI。
 
-## 结构化观察与点击
+## 读取、定位与执行
+
+本节的核心不是罗列所有操作方式，而是确定优先级：先读清楚，再选最稳的执行方式。
 
 默认先用 `page_info()` 与 `js(...)` 观察页面，不依赖截图：
 
@@ -134,6 +136,14 @@ print(page_info())
 print(page_info())
 print(js("document.body.innerText.slice(0, 2000)"))
 ```
+
+推荐顺序：
+
+1. 先用 `page_info()` 看 URL、标题、滚动位置、页面尺寸，以及是否被原生对话框阻塞
+2. 再用 `js(...)` 读取文本、DOM 结构、元素状态、业务字段
+3. 能稳定定位 DOM 时，优先直接在页面内执行 JS 或 raw CDP
+4. 只有 DOM 难以稳定定位，或需要操作 compositor 级控件时，才退到坐标点击
+5. iframe / 特殊 target 场景，再考虑 `iframe_target(...)` 配合 `js(..., target_id=...)`
 
 能稳定定位 DOM 时，优先通过页面内 JS 或 selector 相关能力操作；需要穿过 iframe、shadow DOM、cross-origin 或自定义控件时，再使用 compositor 级坐标点击：
 
@@ -176,7 +186,30 @@ for event in drain_events():
 
 不要在未确认语义时自动接受会导致提交、删除、支付或离开未保存页面的弹窗。
 
+## 页面操作排障
+
+如果页面操作没有达到预期，优先按“先确认现状，再换方法”的顺序排障。
+
+推荐排障顺序：
+
+1. 先确认当前控制的是不是对的 tab：看 `current_tab()`，必要时看 `list_tabs()` / `managed_tabs()`
+2. 再确认页面有没有真的变化：重新跑 `page_info()`、`js(...)`，不要复用旧判断
+3. 如果动作无效，先检查是否有对话框、遮罩、iframe、局部刷新或 target 切换
+4. 如果当前动作方式不稳定，就降级或升级方式，而不是重复同一动作
+
+常见情况：
+
+- 点击无效：先确认元素是否真的可交互、是否被遮罩覆盖、是否点在错误 tab；DOM 可定位时优先改用 `js(...)`
+- 输入无效：先确认焦点和元素类型；必要时改用页面内 JS 赋值，或 `type_text(...)` 配合 `press_key(...)`
+- 页面内容没变：先确认是否只是局部刷新、异步加载或滚动区变化，再决定是否继续等待
+- attach 到错误上下文：检查 `current_tab()`、`list_tabs(include_chrome=False)`，必要时重新 `attach_tab(...)`
+- iframe 场景异常：先确认是否确实进入了 iframe；需要时用 `iframe_target(...)` 缩小目标范围
+
+原则上，不要连续重复同一个失败动作两次以上；第二次失败后就应回到观察阶段。
+
 ## 文件上传与下载
+
+本节主要使用：`upload_file(...)`、`http_get(...)`、必要时配合 `js(...)`。
 
 上传优先使用真实 file input：
 
@@ -223,19 +256,47 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 flocks browser -c 'restart_daemon()'
 ```
 
-## 沉淀可复用经验
-
-针对特定网站的多次操作，如果有可复用信息，优先沉淀到 `~/.flocks/workspace/domain-skills/<site>/`：
-
-- URL 模式、必要 query 参数、能跳过 loader 的直接路由。
-- 私有 API、请求方法、payload 结构、认证依赖。
-- 稳定 selector、语义结构、滚动容器、虚拟列表规则。
-- 框架交互怪癖、必须等待的状态、容易踩坑的弹窗或 beforeunload。
-
-不要写入 secrets、cookies、token、用户个人数据、原始像素坐标或本次任务流水账。
+8. 页面操作异常但连接本身正常时，优先回到上面的“页面操作排障”，不要把所有问题都归因为浏览器没连上。
 
 ## The self-heal loop 自修复/扩展 循环
-> 终极模式（非必要不进入）
-`flocks/browser/` 是当前 CDP 直连模式使用的内核实现：
-- `helpers.py`：该文件是浏览器操作的行为实现，支持增减、修改函数实现自定义功能，具备生长能力
-- 其他源码文件是支撑`helpers.py`运行的设施，不支持修改
+
+`flocks/browser/helpers.py`：该文件是浏览器操作的通用行为实现，具备生长能力
+
+如果现有 helper 无法稳定实现目标，不要立刻放弃当前流程。`flocks browser -c '...'` 可以直接实现任意自定义逻辑。
+
+推荐顺序是：
+1. 先尝试内置 helper
+2. 如果不够，就直接在 `flocks browser -c '...'` 中补当前任务所需的自定义代码
+3. 如果这段逻辑会被重复使用，或已经证明值得沉淀时，可以沉淀操作函数到对应产品 skill
+
+典型流程如下：
+
+```text
+打开页面 -> 观察 -> 尝试现有 helper -> 发现缺口
+                                |
+                                v
+        直接在 flocks browser -c 中补一段自定义逻辑
+                                |
+                    +-----------+-----------+
+                    |                       |
+                    v                       v
+         当前任务一次性使用            沉淀到 skill 复用
+                    |                       |
+                    +-----------+-----------+
+                                |
+                                v
+                    重新执行当前观察-执行-验证循环
+```
+
+## 沉淀可复用经验
+把特定产品页/网站的浏览器操作经验，沉淀到对应产品 skill，实现可复用。
+
+适合沉淀的经验包括：
+
+- 已确认某产品的稳定登录的方法
+- 更稳定的页面进入方式，例如“优先直接拼 URL，不走菜单”
+- 表格、筛选器、分页、弹窗、下载、详情展开等可靠操作路径
+- 某站点特有的等待条件、重渲染特征、虚拟列表/SPA 交互怪癖
+- 特定操作的成功经验，失败案例（特定操作失败 2 次以上，最终成功的经验）
+
+具体怎么沉淀到 产品skill，请阅读 `references/browser-experience-in-skill.md`。

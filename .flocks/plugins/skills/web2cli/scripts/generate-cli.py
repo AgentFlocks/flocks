@@ -338,7 +338,7 @@ def generate_markdown_docs(requests: List[Dict], title: str = "API Documentation
 from generated_client import APIClient
 
 client = APIClient(
-    base_url="https://your-instance.threatbook.net",
+    base_url="https://api.example.com",
     cookie_file="auth-state.json"
 )
 
@@ -351,7 +351,7 @@ print(result)
 
 ```bash
 # 示例
-curl -X POST "https://your-instance.threatbook.net/api/web/tag/list" \
+curl -X POST "https://api.example.com/api/web/tag/list" \
   -H "Content-Type: application/json" \
   -d '{"type":"asset"}' \
   -b "COOKIE_STRING"
@@ -422,6 +422,50 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
 
 def generate_verify_materials_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Generate verify metadata from a web2cli spec."""
+    def build_verify(command: str, args: Dict[str, Any], columns: List[Dict[str, Any]], verify: Dict[str, Any]) -> Dict[str, Any]:
+        column_names = [column.get("name") for column in columns if isinstance(column, dict) and column.get("name")]
+        return {
+            "command": command,
+            "args": args,
+            "expect": {
+                "rowCount": verify.get("rowCount", {"min": 1}),
+                "columns": verify.get("columns", column_names),
+                "types": verify.get(
+                    "types",
+                    {
+                        column.get("name"): column.get("type", "string")
+                        for column in columns
+                        if isinstance(column, dict) and column.get("name")
+                    },
+                ),
+                "notEmpty": verify.get("notEmpty", column_names[: min(3, len(column_names))]),
+                "patterns": verify.get("patterns", {}),
+            },
+        }
+
+    entries = spec_operation_entries(spec)
+    if len(entries) > 1:
+        return {
+            "site": spec.get("site", ""),
+            "command": spec.get("command", ""),
+            "operations": [
+                build_verify(
+                    entry["command"],
+                    entry.get("verify", {}).get(
+                        "args",
+                        {
+                            arg.get("name"): arg.get("default")
+                            for arg in entry.get("args", [])
+                            if isinstance(arg, dict) and arg.get("name")
+                        },
+                    ),
+                    entry.get("columns", []),
+                    entry.get("verify", {}) if isinstance(entry.get("verify"), dict) else {},
+                )
+                for entry in entries
+            ],
+        }
+
     verify = spec.get("verify", {}) if isinstance(spec.get("verify"), dict) else {}
     columns = spec.get("columns", [])
     column_names = [column.get("name") for column in columns if isinstance(column, dict) and column.get("name")]
@@ -447,12 +491,73 @@ def generate_verify_materials_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def cli_command_name(value: Any, fallback: str = "command") -> str:
+    """Return an argparse-friendly subcommand name."""
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or fallback))
+    name = re.sub(r"[-_]+", "-", name).strip("-").lower()
+    return name or fallback
+
+
+def spec_operation_entries(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return normalized operation entries from either old or multi-operation specs."""
+    raw_operations = spec.get("operations")
+    entries: List[Dict[str, Any]] = []
+
+    if isinstance(raw_operations, list):
+        for index, item in enumerate(raw_operations, start=1):
+            if not isinstance(item, dict):
+                continue
+            operation = item.get("operation") if isinstance(item.get("operation"), dict) else item
+            fallback = f"{spec.get('command', 'command')}-{index}"
+            command = cli_command_name(
+                item.get("command") or item.get("name") or operation.get("command") or operation.get("name"),
+                fallback,
+            )
+            entries.append(
+                {
+                    "command": command,
+                    "description": item.get("description") or operation.get("description") or spec.get("description", ""),
+                    "operation": operation,
+                    "rowSource": item.get("rowSource", spec.get("rowSource", {})),
+                    "args": item.get("args", spec.get("args", [])),
+                    "columns": item.get("columns", spec.get("columns", [])),
+                    "verify": item.get("verify", spec.get("verify", {})),
+                }
+            )
+
+    if entries:
+        return entries
+
+    operation = spec.get("operation", {}) if isinstance(spec.get("operation"), dict) else {}
+    return [
+        {
+            "command": cli_command_name(spec.get("command", "command")),
+            "description": spec.get("description", ""),
+            "operation": operation,
+            "rowSource": spec.get("rowSource", {}),
+            "args": spec.get("args", []),
+            "columns": spec.get("columns", []),
+            "verify": spec.get("verify", {}),
+        }
+    ]
+
+
 def generate_markdown_docs_from_spec(spec: Dict[str, Any], title: str = "API Documentation") -> str:
     """Generate Markdown documentation from a web2cli spec."""
-    operation = spec.get("operation", {})
-    args = spec.get("args", [])
-    columns = spec.get("columns", [])
-    verify = generate_verify_materials_from_spec(spec)
+    entries = spec_operation_entries(spec)
+    primary = entries[0]
+    operation = primary["operation"]
+    args = primary["args"]
+    columns = primary["columns"]
+    verify = primary.get("verify", {}) if isinstance(primary.get("verify"), dict) else {}
+    verify_args = verify.get(
+        "args",
+        {arg.get("name"): arg.get("default") for arg in args if isinstance(arg, dict) and arg.get("name")},
+    )
+    verify_not_empty = verify.get(
+        "notEmpty",
+        [column.get("name") for column in columns[: min(3, len(columns))] if isinstance(column, dict)],
+    )
 
     md = f"""# {title}
 
@@ -468,6 +573,21 @@ def generate_markdown_docs_from_spec(spec: Dict[str, Any], title: str = "API Doc
 - **Method**: `{operation.get("method", "GET")}`
 - **Endpoint**: `{operation.get("endpoint", "/")}`
 
+"""
+
+    if len(entries) > 1:
+        md += "## 子命令\n\n"
+        md += "| 子命令 | Method | Endpoint | 说明 |\n"
+        md += "|--------|--------|----------|------|\n"
+        for entry in entries:
+            op = entry["operation"]
+            md += (
+                f"| `{entry['command']}` | `{op.get('method', 'GET')}` | "
+                f"`{op.get('endpoint', '/')}` | {entry.get('description', '')} |\n"
+            )
+        md += "\n"
+
+    md += """
 ## 参数
 
 """
@@ -488,48 +608,51 @@ def generate_markdown_docs_from_spec(spec: Dict[str, Any], title: str = "API Doc
         md += f"| `{column.get('name', '')}` | `{column.get('type', 'string')}` | `{column.get('path', '')}` |\n"
 
     md += "\n## 验证建议\n\n"
-    md += f"- 默认参数: `{json.dumps(verify['args'], ensure_ascii=False)}`\n"
-    md += f"- 最少行数: `{verify['expect']['rowCount'].get('min', 0)}`\n"
-    md += f"- 必填列: `{', '.join(verify['expect']['notEmpty'])}`\n"
+    md += f"- 默认参数: `{json.dumps(verify_args, ensure_ascii=False)}`\n"
+    md += f"- 最少行数: `{verify.get('rowCount', {}).get('min', 0)}`\n"
+    md += f"- 必填列: `{', '.join(verify_not_empty)}`\n"
 
     return md
 
 
 def generate_postman_collection_from_spec(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Generate a minimal Postman collection from a web2cli spec."""
-    operation = spec.get("operation", {})
-    headers = operation.get("headers", {}) if isinstance(operation.get("headers"), dict) else {}
-    body_template = operation.get("bodyTemplate", {}) if isinstance(operation.get("bodyTemplate"), dict) else {}
-    endpoint = operation.get("endpoint", "/")
-    path_parts = endpoint.lstrip("/").split("/") if endpoint.lstrip("/") else []
+    items = []
+    for entry in spec_operation_entries(spec):
+        operation = entry["operation"]
+        headers = operation.get("headers", {}) if isinstance(operation.get("headers"), dict) else {}
+        body_template = operation.get("bodyTemplate", {}) if isinstance(operation.get("bodyTemplate"), dict) else {}
+        endpoint = operation.get("endpoint", "/")
+        path_parts = endpoint.lstrip("/").split("/") if endpoint.lstrip("/") else []
 
-    request = {
-        "method": operation.get("method", "GET"),
-        "url": {
-            "raw": f"{{{{base_url}}}}{endpoint}",
-            "host": ["{{base_url}}"],
-            "path": path_parts,
-        },
-        "header": [{"key": key, "value": value} for key, value in headers.items()],
-    }
-    if body_template:
-        request["body"] = {
-            "mode": "raw",
-            "raw": json.dumps(body_template, ensure_ascii=False),
-            "options": {"raw": {"language": "json"}},
+        request = {
+            "method": operation.get("method", "GET"),
+            "url": {
+                "raw": f"{{{{base_url}}}}{endpoint}",
+                "host": ["{{base_url}}"],
+                "path": path_parts,
+            },
+            "header": [{"key": key, "value": value} for key, value in headers.items()],
         }
+        if body_template:
+            request["body"] = {
+                "mode": "raw",
+                "raw": json.dumps(body_template, ensure_ascii=False),
+                "options": {"raw": {"language": "json"}},
+            }
+        items.append(
+            {
+                "name": entry["command"],
+                "request": request,
+            }
+        )
 
     return {
         "info": {
             "name": f"{spec.get('site', 'captured')} {spec.get('command', 'command')}",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
         },
-        "item": [
-            {
-                "name": spec.get("command", endpoint),
-                "request": request,
-            }
-        ],
+        "item": items,
         "variable": [{"key": "base_url", "value": spec.get("baseUrl", "")}],
     }
 
@@ -546,6 +669,7 @@ Generated from web2cli-spec.json
 import argparse
 import csv
 import json
+import re
 import sys
 from typing import Any, Dict, List
 
@@ -591,6 +715,66 @@ def _type_name(value: Any) -> str:
     if isinstance(value, dict):
         return "object"
     return "string"
+
+
+def _cli_command_name(value: Any, fallback: str = "command") -> str:
+    name = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(value or fallback))
+    name = re.sub(r"[-_]+", "-", name).strip("-").lower()
+    return name or fallback
+
+
+def _operation_entries() -> List[Dict[str, Any]]:
+    raw_operations = SPEC.get("operations")
+    entries: List[Dict[str, Any]] = []
+    if isinstance(raw_operations, list):
+        for index, item in enumerate(raw_operations, start=1):
+            if not isinstance(item, dict):
+                continue
+            operation = item.get("operation") if isinstance(item.get("operation"), dict) else item
+            fallback = f"{SPEC.get('command', 'command')}-{index}"
+            command = _cli_command_name(
+                item.get("command") or item.get("name") or operation.get("command") or operation.get("name"),
+                fallback,
+            )
+            entries.append(
+                {
+                    "command": command,
+                    "description": item.get("description") or operation.get("description") or SPEC.get("description", ""),
+                    "operation": operation,
+                    "rowSource": item.get("rowSource", SPEC.get("rowSource", {})),
+                    "args": item.get("args", SPEC.get("args", [])),
+                    "columns": item.get("columns", SPEC.get("columns", [])),
+                    "verify": item.get("verify", SPEC.get("verify", {})),
+                }
+            )
+    if entries:
+        return entries
+    operation = SPEC.get("operation", {}) if isinstance(SPEC.get("operation"), dict) else {}
+    return [
+        {
+            "command": _cli_command_name(SPEC.get("command", "command")),
+            "description": SPEC.get("description", ""),
+            "operation": operation,
+            "rowSource": SPEC.get("rowSource", {}),
+            "args": SPEC.get("args", []),
+            "columns": SPEC.get("columns", []),
+            "verify": SPEC.get("verify", {}),
+        }
+    ]
+
+
+def _uses_subcommands() -> bool:
+    return isinstance(SPEC.get("operations"), list) and bool(SPEC.get("operations"))
+
+
+def _operation_by_command(command: str | None) -> Dict[str, Any]:
+    entries = _operation_entries()
+    if command is None:
+        return entries[0]
+    for entry in entries:
+        if entry["command"] == command:
+            return entry
+    raise SystemExit(f"unknown command: {command}")
 
 
 class APIClient:
@@ -685,7 +869,7 @@ class APIClient:
     def _apply_auth_state(self) -> None:
         strategy = SPEC.get("strategy", "PUBLIC")
         auth = SPEC.get("auth", {})
-        headers = SPEC.get("operation", {}).get("headers", {})
+        headers = SPEC.get("headers", {})
         if isinstance(headers, dict) and headers:
             self.session.headers.update(headers)
 
@@ -709,27 +893,29 @@ class APIClient:
                 if value:
                     self.session.headers[str(rule["name"])] = value
 
-    def build_request(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        operation = SPEC.get("operation", {})
+    def build_request(self, args: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:
+        operation = entry.get("operation", {})
         endpoint = operation.get("endpoint", "/")
         query = self._resolve_template(operation.get("queryTemplate", {}), args)
         body = self._resolve_template(operation.get("bodyTemplate", {}), args)
+        headers = operation.get("headers", {})
         return {
             "method": operation.get("method", "GET"),
             "url": f"{self.base_url}{endpoint}",
             "params": query or None,
             "json": body or None,
+            "headers": headers or None,
         }
 
-    def _project_rows(self, payload: Any) -> List[Dict[str, Any]]:
-        row_source = SPEC.get("rowSource", {})
+    def _project_rows(self, payload: Any, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
+        row_source = entry.get("rowSource", {})
         collection_path = row_source.get("collectionPath") or row_source.get("path") or "$"
         collection = self._extract_many(payload, collection_path) if collection_path != "$" else [payload]
         if not collection:
             return []
 
         rows = []
-        columns = SPEC.get("columns", [])
+        columns = entry.get("columns", [])
         for index, row in enumerate(collection, start=1):
             projected = {}
             for column in columns:
@@ -746,16 +932,18 @@ class APIClient:
             rows.append(projected)
         return rows
 
-    def run(self, args: Dict[str, Any]) -> List[Dict[str, Any]]:
-        request_options = self.build_request(args)
+    def run(self, args: Dict[str, Any], entry: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+        operation_entry = entry or _operation_entries()[0]
+        request_options = self.build_request(args, operation_entry)
         response = self.session.request(
             request_options["method"],
             request_options["url"],
             params=request_options["params"],
             json=request_options["json"],
+            headers=request_options["headers"],
         )
         response.raise_for_status()
-        return self._project_rows(response.json())
+        return self._project_rows(response.json(), operation_entry)
 
 
 def verify_rows(rows: List[Dict[str, Any]], verify_spec: Dict[str, Any]) -> List[str]:
@@ -813,18 +1001,14 @@ def _print_rows(rows: List[Dict[str, Any]], output_format: str) -> None:
         print("\\t".join("" if row.get(column) is None else str(row.get(column)) for column in columns))
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=SPEC.get("description", "Generated Web2CLI command"))
-    parser.add_argument("--base-url", default=SPEC.get("baseUrl", ""), help="Override base URL")
-    parser.add_argument(
-        "--auth-state",
-        default=(SPEC.get("auth", {}) or {}).get("stateFile", "auth-state.json"),
-        help="Path to auth state JSON",
-    )
+def _add_output_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--format", choices=["json", "csv", "table"], default="json", help="Output format")
     parser.add_argument("--verify", action="store_true", help="Validate rows against embedded or external verify spec")
     parser.add_argument("--verify-spec", help="Optional verify JSON path")
-    for arg in SPEC.get("args", []):
+
+
+def _add_operation_arguments(parser: argparse.ArgumentParser, entry: Dict[str, Any]) -> None:
+    for arg in entry.get("args", []):
         if not isinstance(arg, dict) or not arg.get("name"):
             continue
         option = "--" + str(arg["name"]).replace("_", "-")
@@ -843,22 +1027,47 @@ def build_parser() -> argparse.ArgumentParser:
         else:
             kwargs["type"] = str
         parser.add_argument(option, **kwargs)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=SPEC.get("description", "Generated Web2CLI command"))
+    parser.add_argument("--base-url", default=SPEC.get("baseUrl", ""), help="Override base URL")
+    parser.add_argument(
+        "--auth-state",
+        default=(SPEC.get("auth", {}) or {}).get("stateFile", "auth-state.json"),
+        help="Path to auth state JSON",
+    )
+    entries = _operation_entries()
+    if _uses_subcommands():
+        subparsers = parser.add_subparsers(dest="command", required=True)
+        for entry in entries:
+            subparser = subparsers.add_parser(
+                entry["command"],
+                description=entry.get("description") or entry["command"],
+                help=entry.get("description") or entry["command"],
+            )
+            _add_output_arguments(subparser)
+            _add_operation_arguments(subparser, entry)
+    else:
+        _add_output_arguments(parser)
+        _add_operation_arguments(parser, entries[0])
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     parsed = parser.parse_args()
+    entry = _operation_by_command(getattr(parsed, "command", None) if _uses_subcommands() else None)
     runtime_args = {
         item["name"]: getattr(parsed, item["name"])
-        for item in SPEC.get("args", [])
+        for item in entry.get("args", [])
         if isinstance(item, dict) and item.get("name")
     }
     client = APIClient(base_url=parsed.base_url, auth_state=parsed.auth_state)
-    rows = client.run(runtime_args)
+    rows = client.run(runtime_args, entry)
 
     if parsed.verify:
-        verify_spec = _load_json(parsed.verify_spec) if parsed.verify_spec else SPEC.get("verify", {})
+        verify_spec = _load_json(parsed.verify_spec) if parsed.verify_spec else entry.get("verify", {})
         errors = verify_rows(rows, verify_spec)
         if errors:
             raise SystemExit("\\n".join(errors))

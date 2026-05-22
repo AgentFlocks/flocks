@@ -428,8 +428,8 @@ Run the bundled validator before anything else. It is self-contained
 `_provider.yaml` and any script handler:
 
 ```bash
-SKILL_DIR="$(realpath ~/.flocks/plugins/skills/tool-builder)"
-uv run python "$SKILL_DIR/validator.py" "$TOOL_PATH"
+SKILL_DIR="$(git rev-parse --show-toplevel)/.flocks/plugins/skills/tool-builder"
+uv run python "$SKILL_DIR/scripts/validator.py" "$TOOL_PATH"
 ```
 
 The validator checks (this list is enforced, not aspirational):
@@ -487,7 +487,7 @@ them — note the reason when reporting back.
 For a CI-style check that fails on warnings too:
 
 ```bash
-uv run python "$SKILL_DIR/validator.py" --strict "$TOOL_PATH"
+uv run python "$SKILL_DIR/scripts/validator.py" --strict "$TOOL_PATH"
 ```
 
 ### Step 1: Load Test
@@ -546,69 +546,29 @@ If load fails: **read the error, fix the root cause**, and re-run.
 
 ### Step 2: Smoke Test
 
-Execute the tool with **safe, minimal test parameters** to confirm end-to-end functionality:
+Confirm the tool works in the real agent flow with **safe, minimal test parameters**:
 
-**YAML-HTTP tools (Mode A):**
-```bash
-uv run python -c "
-import asyncio
-from pathlib import Path
-from flocks.tool.tool_loader import yaml_to_tool, _read_yaml_raw
-from flocks.tool.registry import ToolContext
+1. Use `tool_search` to load the tool into the current callable set.
+2. Then call the tool directly with the prepared smoke-test parameters.
 
-yaml_path = Path('$TOOL_PATH').expanduser()
-raw = _read_yaml_raw(yaml_path)
-tool = yaml_to_tool(raw, yaml_path)
-ctx = ToolContext(session_id='test', message_id='test')
+Use exact-select form so the session loads the intended tool rather than a fuzzy match:
 
-# Replace with actual safe test parameters
-test_params = {$TEST_PARAMS}
-
-async def run():
-    result = await tool.execute(ctx, **test_params)
-    print(f'Success: {result.success}')
-    if result.error:
-        print(f'Error: {result.error}')
-    if result.output:
-        output_str = str(result.output)
-        print(f'Output: {output_str[:500]}')
-    return result.success
-
-ok = asyncio.run(run())
-if not ok:
-    print('WARN: Smoke test returned success=False (may be expected for auth errors with unconfigured API keys)')
-"
+```text
+tool_search(query="select:$TOOL_NAME")
 ```
 
-**Python tools (Mode B):**
-```bash
-uv run python -c "
-import asyncio
-from flocks.tool.registry import ToolRegistry, ToolContext
-import importlib.util
-from pathlib import Path
+Then invoke the tool itself:
 
-path = Path('$TOOL_PATH').expanduser()
-spec = importlib.util.spec_from_file_location(f'_test_{path.stem}', str(path))
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-ctx = ToolContext(session_id='test', message_id='test')
-test_params = {$TEST_PARAMS}
-
-async def run():
-    result = await ToolRegistry.execute('$TOOL_NAME', ctx, **test_params)
-    print(f'Success: {result.success}')
-    if result.error:
-        print(f'Error: {result.error}')
-    if result.output:
-        output_str = str(result.output)
-        print(f'Output: {output_str[:500]}')
-    return result.success
-
-asyncio.run(run())
-"
+```text
+$TOOL_NAME(...)
 ```
+
+Smoke-test rules:
+
+- Do not stop at static validation or registry import success; the tool must be callable through the normal tool interface.
+- Prefer the smallest harmless happy-path input that still exercises the real handler.
+- If `tool_search` does not return the new tool, treat that as a failure in discovery/loading and fix it before proceeding.
+- If the tool call returns an auth error because the API key is not configured yet, that is an acceptable `WARN` for API tools. Record it explicitly.
 
 ### Choosing test parameters
 

@@ -27,7 +27,7 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
     return (
       <button
         onClick={toggleLanguage}
-        className="flex items-center justify-center w-8 h-8 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+        className="flex items-center justify-center w-8 h-8 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-white/60 transition-colors"
         title={t('switchLanguage')}
       >
         <Globe className="w-4 h-4" />
@@ -43,8 +43,8 @@ export default function LanguageSwitcher({ collapsed = false }: LanguageSwitcher
           onClick={() => handleChange(code)}
           className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
             currentLang === code
-              ? 'bg-red-600 text-white'
-              : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
+              ? 'bg-white text-zinc-900 shadow-sm'
+              : 'text-zinc-500 hover:bg-white/60 hover:text-zinc-800'
           }`}
         >
           {label}

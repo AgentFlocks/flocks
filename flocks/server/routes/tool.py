@@ -35,8 +35,9 @@ class ToolInfoResponse(BaseModel):
     description: str = Field(..., description="Tool description")
     description_cn: Optional[str] = Field(None, description="Chinese UI description")
     category: str = Field(..., description="Tool category")
-    source: str = Field("builtin", description="Tool source: builtin, mcp, api, custom")
+    source: str = Field("builtin", description="Tool source: builtin, mcp, api, device, custom")
     source_name: Optional[str] = Field(None, description="Source detail, e.g. MCP server name or API module name")
+    vendor: Optional[str] = Field(None, description="Manufacturer key for device tools (e.g. threatbook, qianxin, sangfor, qingteng)")
     parameters: List[Dict[str, Any]] = Field(default_factory=list, description="Tool parameters")
     enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
     enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
@@ -138,11 +139,13 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
     
     Returns:
         (source, source_name) tuple where source is one of:
-        'builtin', 'mcp', 'api', 'plugin_yaml', 'plugin_py', 'custom'
+        'builtin', 'mcp', 'api', 'device', 'plugin_yaml', 'plugin_py', 'custom'
     """
     # Use ToolInfo.source field if explicitly set
     if tool_info.source == "api":
         return "api", tool_info.provider
+    if tool_info.source == "device":
+        return "device", tool_info.provider
     if tool_info.source == "plugin_yaml":
         return "plugin_yaml", tool_info.provider
     if tool_info.source == "plugin_py":
@@ -185,6 +188,7 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         category=t.category.value,
         source=source,
         source_name=source_name,
+        vendor=t.vendor,
         parameters=[p.model_dump() for p in t.parameters],
         enabled=_get_effective_tool_enabled(t),
         enabled_default=enabled_default,
@@ -412,7 +416,7 @@ def _service_allows_enable(t: ToolInfo) -> bool:
 def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
     """Compute tool enabled state without mutating the registry object."""
     source, source_name = _get_tool_source(tool_info)
-    if source != "api" or not source_name:
+    if source not in ("api", "device") or not source_name:
         return tool_info.enabled
     from flocks.server.routes.provider import _get_api_service_enabled
 

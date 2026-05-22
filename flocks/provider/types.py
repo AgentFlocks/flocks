@@ -245,6 +245,7 @@ class ModelCapabilitiesV2(BaseModel):
     supports_tools: bool = True
     supports_vision: bool = False
     supports_reasoning: bool = False
+    interleaved: Optional[Dict[str, Any]] = None
     supports_temperature: bool = True
     supports_json_mode: bool = False
     supports_structured_output: bool = False

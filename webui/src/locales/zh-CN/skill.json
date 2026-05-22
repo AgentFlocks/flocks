@@ -16,19 +16,51 @@
     "noSkills": "暂无技能",
     "noResults": "未找到技能",
     "createFirst": "创建您的第一个技能",
-    "tryOtherKeywords": "试试其他搜索关键词"
+    "tryOtherKeywords": "试试其他搜索关键词",
+    "tryOtherFilters": "当前筛选条件下暂无技能，请调整筛选或清除过滤"
   },
   "section": {
     "custom": "自定义技能",
     "builtin": "内置技能"
   },
+  "table": {
+    "type": "类型",
+    "name": "名称",
+    "source": "来源",
+    "status": "状态",
+    "enabled": "启用",
+    "actions": "操作",
+    "edit": "编辑",
+    "builtin": "内置",
+    "custom": "自定义",
+    "totalCount_other": "共 {{count}} 个技能"
+  },
+  "pagination": {
+    "info": "显示 {{start}}–{{end}} / 共 {{total}} 个"
+  },
+  "toggle": {
+    "enabledTip": "已启用，点击后将从 Agent System Prompt 中移除",
+    "disabledTip": "已禁用，点击后将加入 Agent System Prompt",
+    "failed": "切换失败"
+  },
   "eligibility": {
     "ready": "就绪",
     "missingDeps": "缺少依赖",
+    "missingDepsInline": "缺少依赖：{{list}}",
     "installDeps": "安装依赖",
     "installing": "安装中...",
     "installSuccess": "依赖安装成功",
     "installFailed": "依赖安装失败"
+  },
+  "filter": {
+    "aria": "技能来源过滤",
+    "all": "全部",
+    "builtin": "内置",
+    "custom": "自定义",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "showAll": "查看全部",
+    "clear": "清除筛选"
   },
   "installDialog": {
     "title": "安装技能",

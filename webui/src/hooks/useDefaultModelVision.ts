@@ -35,6 +35,11 @@ type VisionState = boolean | null;
 let cachedPromise: Promise<VisionState> | null = null;
 const subscribers = new Set<(state: VisionState) => void>();
 
+function allowsBuiltInVision(modelId: string): boolean {
+  const lowered = modelId.toLowerCase();
+  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+}
+
 async function resolveVisionSupport(): Promise<VisionState> {
   try {
     const resolvedResp = await defaultModelAPI.getResolved();
@@ -43,24 +48,23 @@ async function resolveVisionSupport(): Promise<VisionState> {
     const defResp = await modelV2API.getDefinition(provider_id, model_id);
     const def: any = defResp.data;
     if (!def) return null;
-    // Predefined (catalog/SDK) models are treated as **explicitly non-vision**
-    // (return false, not null) so the chat composer actively *rejects* image
-    // uploads with the "model does not support images" hint. Returning null
-    // would fall through to the best-effort "allow upload" branch in
-    // SessionChat (`supportsVision === false` is the rejection trigger), which
-    // is exactly the bug we're avoiding here. Vision is only unlocked by
-    // user-added (customizable) models that have explicitly enabled it.
-    if (def.fetch_from !== 'customizable') return false;
     const caps = def.capabilities;
     if (!caps) return null;
+    const builtInVisionAllowed = allowsBuiltInVision(model_id);
     if (
       caps.supports_vision === true ||
       caps.modalities?.input?.includes('image') ||
       (caps.features ?? []).includes('vision')
     ) {
+      if (def.fetch_from !== 'customizable' && !builtInVisionAllowed) {
+        return false;
+      }
       return true;
     }
     if (caps.supports_vision === false) {
+      return false;
+    }
+    if (def.fetch_from !== 'customizable') {
       return false;
     }
     return null;

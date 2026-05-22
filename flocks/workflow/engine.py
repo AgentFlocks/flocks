@@ -36,6 +36,7 @@ class _ExecOutcome(NamedTuple):
     traceback: Optional[str]
     duration_ms: float
     is_timeout: bool = False
+    is_cancelled: bool = False
 
 
 def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
@@ -142,6 +143,7 @@ class WorkflowEngine:
             return PythonExecRuntime(
                 globals=dict(self.runtime.globals),
                 tool_registry=self.runtime.tool_registry,
+                cancel_checker=self.runtime.cancel_checker,
             )
         return self.runtime
 
@@ -179,6 +181,10 @@ class WorkflowEngine:
         timeout_executor: Optional[ThreadPoolExecutor] = None
         if step_timeout_s is not None:
             timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
+        previous_cancel_checker = None
+        if isinstance(self.runtime, PythonExecRuntime):
+            previous_cancel_checker = self.runtime.cancel_checker
+            self.runtime.cancel_checker = cancel
         try:
             def _build_execution_context() -> Dict[str, Any]:
                 return {
@@ -188,11 +194,14 @@ class WorkflowEngine:
                     "history": history,
                 }
 
+            def _raise_cancelled() -> None:
+                err = RunCancelledError(rid)
+                err.execution_context = _build_execution_context()
+                raise err
+
             while q:
                 if cancel is not None and cancel():
-                    err = RunCancelledError(rid)
-                    err.execution_context = _build_execution_context()
-                    raise err
+                    _raise_cancelled()
                 if timeout_s is not None and timeout_s > 0:
                     if (time.perf_counter() - run_t0) > float(timeout_s):
                         err = RunTimeoutError(rid, float(timeout_s))
@@ -321,6 +330,12 @@ class WorkflowEngine:
                             _prt = self._get_isolated_runtime()
                             _pouts, _pso = self._execute_node(_pnd, _pinp, _runtime=_prt)
                             return _ExecOutcome(_pi, _pouts, _pso, None, None, (time.perf_counter() - _t0) * 1000.0)
+                        except RunCancelledError as _ce:
+                            return _ExecOutcome(
+                                _pi, {}, "", str(_ce), None,
+                                (time.perf_counter() - _t0) * 1000.0,
+                                False, True,
+                            )
                         except Exception as _pe:
                             _perr = str(_pe)
                             _ptb: Optional[str] = traceback.format_exc()
@@ -379,6 +394,9 @@ class WorkflowEngine:
                                 except TypeError:
                                     timeout_executor.shutdown(wait=False)
                                 timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
+                        except RunCancelledError as _ce:
+                            _ce.execution_context = _build_execution_context()
+                            raise
                         except Exception as _e:
                             _err = str(_e)
                             _tb: Optional[str] = traceback.format_exc()
@@ -395,6 +413,23 @@ class WorkflowEngine:
                     _nid, _nd, _inp, _src = ready[_eo.idx]
                     _sn = step_count + _eo.idx + 1
                     last_node_id = _nid
+
+                    if _eo.is_cancelled:
+                        step_res = StepResult(
+                            node_id=_nid, inputs=_inp, outputs={},
+                            stdout=_eo.stdout, error=_eo.error or "Run cancelled",
+                            traceback=_eo.traceback, duration_ms=_eo.duration_ms,
+                        )
+                        history.append(step_res)
+                        if on_step_end is not None and _eo.idx in step_tokens:
+                            try:
+                                on_step_end(step_tokens[_eo.idx], step_res)
+                            except Exception:
+                                _logger.exception(
+                                    "wf.step_end.hook_error",
+                                    extra={"run_id": rid, "step": _sn, "node_id": _nid},
+                                )
+                        _raise_cancelled()
 
                     if _eo.error is not None:
                         # ── error / timeout result ────────────────────────
@@ -495,6 +530,8 @@ class WorkflowEngine:
                 step_count += len(exec_results)
                 if _stop_exc is not None:
                     raise _stop_exc
+                if cancel is not None and cancel():
+                    _raise_cancelled()
 
             pending_joins = []
             for nid, buf in join_inputs.items():
@@ -510,6 +547,8 @@ class WorkflowEngine:
                 raise NodeExecutionError(node_id=pending_joins[0][0], message=msg)
             return ExecutionResult(steps=step_count, history=history, last_node_id=last_node_id, run_id=rid)
         finally:
+            if isinstance(self.runtime, PythonExecRuntime):
+                self.runtime.cancel_checker = previous_cancel_checker
             if timeout_executor is not None:
                 try:
                     timeout_executor.shutdown(wait=False, cancel_futures=True)
@@ -585,7 +624,7 @@ class WorkflowEngine:
         if node.type in {"branch", "loop"}:
             return {}, ""
         if node.type == "tool":
-            return self._execute_tool_node(node, inputs)
+            return self._execute_tool_node(node, inputs, _runtime=_runtime)
         if node.type == "llm":
             return self._execute_llm_node(node, inputs)
         if node.type == "http_request":
@@ -596,15 +635,35 @@ class WorkflowEngine:
             node_id=node_id, message=f"Unsupported node.type={node.type!r}"
         )
 
-    def _execute_tool_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def _execute_tool_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
         """Execute a tool node by calling the named tool from the tool registry."""
         assert node.tool_name, "tool node requires tool_name"
         from .tools import ToolFacade, get_tool_registry
-        reg = get_tool_registry()
+
+        _rt = _runtime or self.runtime
+        cancel_checker = None
+        if isinstance(_rt, PythonExecRuntime):
+            reg = _rt.tool_registry or get_tool_registry()
+            cancel_checker = _rt.cancel_checker
+        else:
+            reg = get_tool_registry()
+        if hasattr(reg, "cancel_checker"):
+            try:
+                reg.cancel_checker = cancel_checker
+            except Exception:
+                pass
         facade = ToolFacade(reg)
         merged_args = {**(node.tool_args or {}), **inputs}
         try:
             result = facade.run(node.tool_name, **merged_args)
+        except RunCancelledError:
+            raise
         except Exception as e:
             raise NodeExecutionError(
                 node_id=node.id,

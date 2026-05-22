@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from flocks.tool import ToolContext, ToolRegistry, ToolResult
-from flocks.workflow.errors import NodeExecutionError
-from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+from flocks.workflow.errors import NodeExecutionError, RunCancelledError
+from flocks.workflow._async_runtime import (
+    run_sync as _run_sync_on_shared_loop,
+    run_sync_cancellable as _run_sync_cancellable_on_shared_loop,
+)
 from flocks.workflow.tools_spec import ToolSpec
 
 # Tools that must not be exposed inside workflow (avoid circular invocation).
@@ -28,6 +32,7 @@ class FlocksToolAdapter:
     def __init__(self, tool_context: Optional[ToolContext] = None):
         ToolRegistry.init()
         self._ctx = tool_context
+        self.cancel_checker: Optional[Callable[[], bool]] = None
 
     def _blocked(self, name: str) -> bool:
         return (name or "").strip() in WORKFLOW_TOOL_BLOCKLIST
@@ -42,10 +47,15 @@ class FlocksToolAdapter:
         attached to a stable loop and avoids cross-loop Future errors under
         sibling-node concurrency.
         """
-        return _run_sync_on_shared_loop(ToolRegistry.execute(name, ctx=ctx, **kwargs))
+        coro = ToolRegistry.execute(name, ctx=ctx, **kwargs)
+        if self.cancel_checker is not None:
+            return _run_sync_cancellable_on_shared_loop(coro, self.cancel_checker)
+        return _run_sync_on_shared_loop(coro)
 
     def run(self, name: str, /, **kwargs: Any) -> Any:
         name = (name or "").strip()
+        if self.cancel_checker is not None and self.cancel_checker():
+            raise RunCancelledError("<tool>")
         if self._blocked(name):
             raise NodeExecutionError(
                 node_id="<tool>",
@@ -57,9 +67,17 @@ class FlocksToolAdapter:
 
         ctx = self._ctx or ToolContext(session_id="workflow", message_id="workflow")
         try:
+            if self.cancel_checker is not None and self.cancel_checker():
+                raise RunCancelledError("<tool>")
             result: ToolResult = self._execute_tool_async(name, ctx, dict(kwargs))
+            if self.cancel_checker is not None and self.cancel_checker():
+                raise RunCancelledError("<tool>")
         except _FuturesTimeoutError:
             raise
+        except RunCancelledError:
+            raise
+        except asyncio.CancelledError as e:
+            raise RunCancelledError("<tool>") from e
         except Exception as e:
             raise NodeExecutionError(
                 node_id="<tool>", message=f"Tool {name!r} failed: {e}"

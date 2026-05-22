@@ -27,9 +27,18 @@ def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp(monkeyp
     assert not admin._is_local_chrome_mode()
 
 
-def test_handshake_timeout_needs_chrome_remote_debugging_prompt() -> None:
+def test_local_chrome_mode_is_false_when_env_provides_remote_cdp_url() -> None:
+    assert not admin._is_local_chrome_mode({"BU_CDP_URL": "http://127.0.0.1:9222"})
+
+
+def test_local_chrome_mode_is_false_when_process_env_provides_remote_cdp_url(monkeypatch) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    assert not admin._is_local_chrome_mode()
+
+
+def test_handshake_timeout_does_not_open_chrome_inspect() -> None:
     msg = "CDP WS handshake failed: timed out during opening handshake"
-    assert admin._needs_chrome_remote_debugging_prompt(msg)
+    assert not admin._needs_chrome_remote_debugging_prompt(msg)
 
 
 def test_handshake_403_needs_chrome_remote_debugging_prompt() -> None:
@@ -65,21 +74,9 @@ def test_generic_remote_debugging_message_triggers_prompt() -> None:
     assert admin._needs_chrome_remote_debugging_prompt(msg)
 
 
-def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", None)
-    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
-    (tmp_path / "bu-default.sock").touch()
-    (tmp_path / "bu-remote_1.sock").touch()
-    (tmp_path / "bu-invalid.name.sock").touch()
-    (tmp_path / "not-bu-default.sock").touch()
-
-    assert admin._daemon_endpoint_names() == ["default", "remote_1"]
-
-
-def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
     monkeypatch.setattr(admin, "NAME", "session-xyz")
     (tmp_path / "bu.sock").touch()
@@ -87,9 +84,9 @@ def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exis
     assert admin._daemon_endpoint_names() == ["session-xyz"]
 
 
-def test_daemon_endpoint_names_with_bh_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
     monkeypatch.setattr(admin, "NAME", "session-xyz")
 
@@ -136,6 +133,37 @@ def test_browser_connections_returns_attached_page(monkeypatch) -> None:
             "page": {"title": "Cat - Wikipedia", "url": "https://en.wikipedia.org/wiki/Cat"},
         }
     ]
+
+
+def test_stop_all_daemons_restarts_every_visible_endpoint(monkeypatch) -> None:
+    monkeypatch.setattr(admin, "_daemon_endpoint_names", lambda: ["default", "remote_1"])
+    restarted = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+
+    assert admin.stop_all_daemons() == ["default", "remote_1"]
+    assert restarted == ["default", "remote_1"]
+
+
+def test_daemon_protocol_probe_accepts_current_daemon(monkeypatch) -> None:
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"tabs":[]}\n']
+
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+
+    assert admin._daemon_has_current_protocol()
+
+
+def test_daemon_protocol_probe_rejects_old_managed_tab_protocol(monkeypatch) -> None:
+    responses = [b'{"result":{"targetInfos":[]}}\n', b'{"error":"\'method\'"}\n']
+
+    def fake_connect(name, timeout=3.0):
+        return FakeSocket(responses.pop(0))
+
+    monkeypatch.setattr(admin.ipc, "connect", fake_connect)
+
+    assert not admin._daemon_has_current_protocol()
 
 
 def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
@@ -204,7 +232,8 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     monkeypatch.setattr(admin, "daemon_alive", lambda: False)
     monkeypatch.setattr(admin, "_chrome_running", lambda: True)
     monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
-    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: None)
+    open_calls = []
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True))
 
     calls = {"count": 0}
 
@@ -224,6 +253,59 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     assert "browser remote debugging is not enabled on the current profile." in out
     assert "opening your browser's inspect page" in out
     assert "if the browser shows the profile picker" in out
+    assert open_calls == [True]
+
+
+def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "_daemon_has_current_protocol", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    restarted = []
+    ensure_calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "browser connection is stale; restarting" in out
+    assert "daemon is up." in out
+    assert restarted == [None]
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
+
+
+def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_WS", "ws://example.test/devtools/browser/1")
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    ensure_calls = []
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "attaching via BU_CDP_WS" in out
+    assert "daemon is up." in out
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
+
+
+def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:19222")
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: (_ for _ in ()).throw(AssertionError("should not probe browser")))
+    restarted = []
+    ensure_calls = []
+    monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
+    monkeypatch.setattr(admin, "ensure_daemon", lambda **kwargs: ensure_calls.append(kwargs))
+
+    assert admin.run_setup() == 0
+
+    out = capsys.readouterr().out
+    assert "attaching via BU_CDP_URL" in out
+    assert "restarting to attach via BU_CDP_URL" in out
+    assert "daemon is up." in out
+    assert restarted == [None]
+    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
 
 
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
@@ -239,6 +321,22 @@ def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsy
     out = capsys.readouterr().out
     assert "[FAIL] browser running" in out
     assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
+
+
+def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: False)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: True)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 0
+
+    out = capsys.readouterr().out
+    assert "[ok  ] browser target — configured via BU_CDP_URL" in out
+    assert "[ok  ] daemon alive" in out
 
 
 def test_chrome_running_on_windows_handles_non_utf8_tasklist_output(monkeypatch) -> None:

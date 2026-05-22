@@ -710,6 +710,7 @@ def test_start_all_stops_services_before_starting(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
     monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: call_order.append("stop_browser") or [])
     monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
     service_manager.start_all(service_manager.ServiceConfig(), console=None)
@@ -719,6 +720,7 @@ def test_start_all_stops_services_before_starting(monkeypatch) -> None:
         "service_lock",
         "stop_one:5173",
         "stop_one:8000",
+        "stop_browser",
         "_start_all_without_stop",
     ]
 
@@ -738,6 +740,7 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call(call_order, "service_lock"))
     monkeypatch.setattr(service_manager, "stop_one", lambda port, _pid_file, _name, _console: call_order.append(f"stop_one:{port}"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: call_order.append("stop_browser") or [])
     monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
 
     service_manager.restart_all(service_manager.ServiceConfig(), console=None)
@@ -747,6 +750,7 @@ def test_restart_all_stops_then_starts_under_lock(monkeypatch) -> None:
         "service_lock",
         "stop_one:5173",
         "stop_one:8000",
+        "stop_browser",
         "_start_all_without_stop",
     ]
 
@@ -1511,6 +1515,7 @@ def test_stop_all_reads_port_from_runtime_record(monkeypatch, tmp_path: Path) ->
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: [])
     monkeypatch.setattr(
         service_manager,
         "stop_one",
@@ -1540,6 +1545,7 @@ def test_stop_all_falls_back_to_default_port_when_record_missing(monkeypatch, tm
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: [])
     monkeypatch.setattr(service_manager, "stop_one", lambda port, *_args: calls.append(port))
 
     service_manager.stop_all(console=None)
@@ -1564,11 +1570,52 @@ def test_stop_all_falls_back_to_default_port_when_record_has_no_port(monkeypatch
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: [])
     monkeypatch.setattr(service_manager, "stop_one", lambda port, *_args: calls.append(port))
 
     service_manager.stop_all(console=None)
 
     assert calls == [5173, 8000]
+
+
+def test_stop_all_also_cleans_browser_daemons(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    calls: list[str] = []
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "service_lock", lambda _paths: _record_call([], "service_lock"))
+    monkeypatch.setattr(
+        service_manager,
+        "stop_one",
+        lambda _port, _pid_file, name, _console: calls.append(name),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "stop_all_browser_daemons",
+        lambda: calls.append("browser") or ["default", "remote"],
+    )
+
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def print(self, message) -> None:
+            self.messages.append(message)
+
+    console = FakeConsole()
+    service_manager.stop_all(console=console)
+
+    assert calls == ["WebUI", "后端", "browser"]
+    assert console.messages == []
 
 
 def test_build_status_lines_reads_port_from_runtime_record(monkeypatch, tmp_path: Path) -> None:

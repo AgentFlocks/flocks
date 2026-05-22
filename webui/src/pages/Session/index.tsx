@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  MessageSquare, Plus, Trash2, Wifi, WifiOff,
+  MessageSquare, Plus, Trash2,
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
@@ -66,11 +66,13 @@ export default function SessionPage() {
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
+  const [searchQuery, setSearchQuery] = useState('');
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
@@ -82,6 +84,56 @@ export default function SessionPage() {
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
   );
+
+  // 今天/昨天不限制；本周/上周/更早默认只显示 5 条
+  const GROUP_DEFAULT_LIMIT: Record<string, number> = {
+    today: Infinity,
+    yesterday: Infinity,
+    thisWeek: 5,
+    lastWeek: 5,
+    earlier: 5,
+  };
+
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+  const toggleGroupExpand = useCallback((key: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  const groupedSessions = useMemo(() => {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yesterdayStart = todayStart - 86400000;
+    // Week starts on Monday
+    const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
+    const thisWeekStart = todayStart - (dayOfWeek - 1) * 86400000;
+    const lastWeekStart = thisWeekStart - 7 * 86400000;
+
+    const q = searchQuery.toLowerCase().trim();
+    const filtered = q ? sessions.filter(s => s.title.toLowerCase().includes(q)) : sessions;
+
+    const buckets: { key: string; labelKey: string; items: typeof sessions }[] = [
+      { key: 'today', labelKey: 'groupToday', items: [] },
+      { key: 'yesterday', labelKey: 'groupYesterday', items: [] },
+      { key: 'thisWeek', labelKey: 'groupThisWeek', items: [] },
+      { key: 'lastWeek', labelKey: 'groupLastWeek', items: [] },
+      { key: 'earlier', labelKey: 'groupEarlier', items: [] },
+    ];
+
+    for (const s of filtered) {
+      const ts = s.time?.updated ?? 0;
+      if (ts >= todayStart) buckets[0].items.push(s);
+      else if (ts >= yesterdayStart) buckets[1].items.push(s);
+      else if (ts >= thisWeekStart) buckets[2].items.push(s);
+      else if (ts >= lastWeekStart) buckets[3].items.push(s);
+      else buckets[4].items.push(s);
+    }
+
+    return buckets.filter(b => b.items.length > 0);
+  }, [sessions, searchQuery]);
 
   // Handle SSE events for session-level updates (title changes, etc.)
   const handleChatError = useCallback((msg: string) => {
@@ -141,8 +193,9 @@ export default function SessionPage() {
     if (!openMenuSessionId) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest('[data-session-actions]')) {
+      if (!target.closest('[data-session-actions]') && !target.closest('[data-session-menu-portal]')) {
         setOpenMenuSessionId(null);
+        setMenuAnchor(null);
       }
     };
     document.addEventListener('mousedown', handle);
@@ -383,92 +436,84 @@ export default function SessionPage() {
     <div className="h-full w-full flex overflow-hidden">
       {/* ── Sidebar ── */}
       <div
-        className={`bg-white border-r border-gray-200 flex flex-col transition-all duration-300 flex-shrink-0 h-full overflow-hidden ${
-          sidebarCollapsed ? 'w-0' : 'w-80'
+        className={`bg-white border-r border-gray-100 flex flex-col transition-all duration-300 flex-shrink-0 h-full overflow-hidden ${
+          sidebarCollapsed ? 'w-0' : 'w-64'
         }`}
       >
-        <div className="px-4 h-16 border-b border-gray-200 flex-shrink-0 flex items-center gap-2">
-          {selectMode ? (
-            <>
-              <button
-                onClick={handleExitSelectMode}
-                className="px-3 py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                {t('cancelSelect')}
-              </button>
-              <button
-                onClick={handleSelectAll}
-                className="flex-1 text-sm text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg py-2 transition-colors"
-              >
-                {checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
-              </button>
-              <button
-                onClick={handleBatchDelete}
-                disabled={checkedIds.size === 0 || batchDeleting}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {batchDeleting
-                  ? <Loader2 className="w-4 h-4 animate-spin" />
-                  : <Trash2 className="w-4 h-4" />}
-                <span>{t('deleteSelected', { count: checkedIds.size })}</span>
-              </button>
-            </>
-          ) : (
-            <>
-              <button
-                onClick={handleCreateSession}
-                disabled={creating}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-xl hover:bg-gray-50 hover:border-gray-300 transition-colors disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
-              >
-                {creating
-                  ? <Loader2 className="w-5 h-5 animate-spin" />
-                  : <Plus className="w-5 h-5" />}
-                <span className="font-medium">{t('newSession')}</span>
-              </button>
-              <button
-                onClick={handleEnterSelectMode}
-                title={t('selectMode')}
-                className="p-2.5 bg-white border border-gray-200 text-gray-500 rounded-xl hover:bg-gray-50 hover:border-gray-300 hover:text-gray-700 transition-colors shadow-sm"
-              >
-                <CheckSquare className="w-5 h-5" />
-              </button>
-            </>
-          )}
+        {/* Header：始终显示新建 + 搜索 */}
+        <div className="px-3 pt-3 pb-2 flex-shrink-0 space-y-2">
+          <div className="relative">
+            {creating
+              ? <Loader2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-gray-400 pointer-events-none" />
+              : <Plus className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />}
+            <button
+              onClick={handleCreateSession}
+              disabled={creating}
+              className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium"
+            >
+              {t('newSession')}
+            </button>
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder={t('filterConversations', 'Filter conversations...')}
+              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-100 rounded-lg border-0 outline-none focus:bg-gray-200 transition-colors placeholder:text-gray-400 text-gray-700"
+            />
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-2">
+        {/* Session list */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
           {sessions.length === 0 ? (
-            <div className="text-center py-8 text-gray-400">
-              <MessageSquare className="w-12 h-12 mx-auto mb-2 opacity-50" />
+            <div className="text-center py-10 px-4 text-gray-400">
+              <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-40" />
               <p className="text-sm">{t('noSessions')}</p>
             </div>
+          ) : groupedSessions.length === 0 ? (
+            <div className="text-center py-8 px-4 text-gray-400">
+              <p className="text-sm">{t('noResults', 'No conversations found')}</p>
+            </div>
           ) : (
-            sessions.map((session) => (
-              <div
-                key={session.id}
-                onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
-                className={`group p-3 rounded-xl cursor-pointer transition-all duration-200 ${
-                  !selectMode && selectedSessionId === session.id
-                    ? 'bg-gray-100 border-2 border-gray-300 shadow-sm'
-                    : selectMode && checkedIds.has(session.id)
-                    ? 'bg-blue-50 border-2 border-blue-300 shadow-sm'
-                    : 'border-2 border-transparent hover:bg-gray-50 hover:shadow-sm'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  {selectMode && (
-                    <div className="flex-shrink-0 mt-0.5 pt-0.5">
-                      <input
-                        type="checkbox"
-                        checked={checkedIds.has(session.id)}
-                        onChange={() => handleToggleCheck(session.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="w-4 h-4 accent-blue-500 cursor-pointer rounded"
-                      />
-                    </div>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5 min-w-0">
+            groupedSessions.map(({ key, labelKey, items }) => {
+              const isSearching = searchQuery.trim().length > 0;
+              const limit = isSearching ? Infinity : (GROUP_DEFAULT_LIMIT[key] ?? 5);
+              const isExpanded = expandedGroups.has(key);
+              const visibleItems = (isSearching || isExpanded || items.length <= limit)
+                ? items
+                : items.slice(0, limit);
+              const hiddenCount = items.length - visibleItems.length;
+
+              return (
+              <div key={key}>
+                <div className="px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none">
+                  {t(labelKey, labelKey)}
+                </div>
+                {visibleItems.map((session) => (
+                  <div
+                    key={session.id}
+                    onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
+                    className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+                      !selectMode && selectedSessionId === session.id
+                        ? 'bg-gray-100 border-gray-300 shadow-sm'
+                        : selectMode && checkedIds.has(session.id)
+                        ? 'bg-blue-50 border-blue-200'
+                        : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm'
+                    }`}
+                  >
+                    {/* Title row */}
+                    <div className="flex items-center gap-1.5 min-w-0 pr-7">
+                      {selectMode && (
+                        <input
+                          type="checkbox"
+                          checked={checkedIds.has(session.id)}
+                          onChange={() => handleToggleCheck(session.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
+                        />
+                      )}
                       {session.category === 'workflow' && (
                         <span title={t('workflowSession')} className="flex-shrink-0">
                           <WorkflowIcon className="w-3 h-3 text-orange-400" />
@@ -487,100 +532,122 @@ export default function SessionPage() {
                           onClick={(e) => e.stopPropagation()}
                           onBlur={() => void handleSubmitRename(session.id)}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              void handleSubmitRename(session.id);
-                            }
-                            if (e.key === 'Escape') {
-                              e.preventDefault();
-                              handleCancelRename();
-                            }
+                            if (e.key === 'Enter') { e.preventDefault(); void handleSubmitRename(session.id); }
+                            if (e.key === 'Escape') { e.preventDefault(); handleCancelRename(); }
                           }}
                           placeholder={t('renamePlaceholder')}
                           disabled={renameSubmitting}
-                          className="w-full min-w-0 rounded-md border border-blue-300 bg-white px-2 py-1 text-sm font-semibold text-gray-900 outline-none ring-0 focus:border-blue-400"
+                          className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400"
                           aria-label={t('rename')}
                           data-session-rename-input
                         />
                       ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
-                          <span className="truncate">{session.title}</span>
-                        </h3>
+                        <span className="truncate text-sm font-medium text-gray-800">{session.title}</span>
                       )}
                     </div>
-                    {session.time?.updated && (
-                      <p className="text-xs text-gray-400 mt-1 truncate">
+                    {/* Timestamp row */}
+                    {session.time?.updated && renamingSessionId !== session.id && (
+                      <p className="mt-1 text-xs text-gray-400 truncate pl-0.5">
                         {formatSessionDate(session.time.updated)}
                       </p>
                     )}
-                  </div>
-                  {!selectMode && (
-                    <div className="relative flex-shrink-0" data-session-actions>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setOpenMenuSessionId(prev => prev === session.id ? null : session.id);
-                        }}
-                        title={t('moreActions')}
-                        className={`p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-all ${
-                          openMenuSessionId === session.id ? 'opacity-100 bg-slate-100 text-slate-700' : 'opacity-0 group-hover:opacity-100'
-                        }`}
-                        aria-label={t('moreActions')}
-                        aria-expanded={openMenuSessionId === session.id}
-                      >
-                        <MoreHorizontal className="w-4 h-4" />
-                      </button>
-                      {openMenuSessionId === session.id && (
-                        <div className="absolute right-0 top-full z-20 mt-1.5 w-32 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-md">
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleStartRename(session.id, session.title);
-                            }}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50"
-                          >
-                            <PencilLine className="w-3.5 h-3.5" />
-                            <span>{t('rename')}</span>
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              void handleDownloadSession(session.id, session.title);
-                            }}
-                            disabled={downloadingSessionId === session.id}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                            <span>{t('downloadJson')}</span>
-                          </button>
-                          <div className="mx-2.5 my-1 border-t border-gray-100" />
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
+
+                    {/* Three-dot menu trigger */}
+                    {!selectMode && (
+                      <div className="absolute right-1.5 top-2" data-session-actions>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (openMenuSessionId === session.id) {
                               setOpenMenuSessionId(null);
-                              void handleDeleteSession(session.id);
-                            }}
-                            disabled={session.canDelete === false}
-                            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[13px] text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                            <span>{t('deleteAction')}</span>
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                              setMenuAnchor(null);
+                            } else {
+                              const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                              setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                              setOpenMenuSessionId(session.id);
+                            }
+                          }}
+                          title={t('moreActions')}
+                          aria-label={t('moreActions')}
+                          aria-expanded={openMenuSessionId === session.id}
+                          className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all ${
+                            openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200' : 'opacity-0 group-hover:opacity-100'
+                          }`}
+                        >
+                          <MoreHorizontal className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {/* 展开/收起按钮 */}
+                {!isSearching && hiddenCount > 0 && (
+                  <button
+                    onClick={() => toggleGroupExpand(key)}
+                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
+                  >
+                    <ChevronDown className="w-3 h-3" />
+                    <span>{t('showMore', { count: hiddenCount })}</span>
+                  </button>
+                )}
+                {!isSearching && isExpanded && items.length > (GROUP_DEFAULT_LIMIT[key] ?? 5) && (
+                  <button
+                    onClick={() => toggleGroupExpand(key)}
+                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
+                  >
+                    <ChevronDown className="w-3 h-3 rotate-180" />
+                    <span>{t('showLess', 'Show less')}</span>
+                  </button>
+                )}
               </div>
-            ))
+              );
+            })
           )}
         </div>
+
+        {/* Bottom：批量操作栏 / 批量选择入口 */}
+        {sessions.length > 0 && (
+          <div className="border-t border-gray-100 px-3 pt-3 pb-4 flex-shrink-0">
+            {selectMode ? (
+              <div className="grid grid-cols-3 gap-1.5">
+                <button
+                  onClick={handleSelectAll}
+                  className="flex items-center justify-center py-2 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                >
+                  {checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
+                </button>
+                <button
+                  onClick={handleExitSelectMode}
+                  className="flex items-center justify-center py-2 text-sm text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                >
+                  {t('cancelSelect')}
+                </button>
+                <button
+                  onClick={handleBatchDelete}
+                  disabled={checkedIds.size === 0 || batchDeleting}
+                  className="flex items-center justify-center py-2 text-sm text-red-600 bg-red-50 hover:bg-red-100 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  title={t('deleteSelected', { count: checkedIds.size })}
+                >
+                  {batchDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleEnterSelectMode}
+                className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span>{t('selectMode')}</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* ── Main area ── */}
       <div className="flex-1 flex flex-col overflow-hidden h-full min-w-0">
         {/* Header */}
-        <div className="px-6 h-16 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative">
+        <div className="px-6 h-12 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative">
           <div className="absolute left-4 top-1/2 -translate-y-1/2">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -592,73 +659,11 @@ export default function SessionPage() {
           </div>
 
           <div className="flex items-center gap-3 ml-14">
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-base font-semibold text-gray-900">
               {selectedSession?.title || t('newSession')}
             </h2>
-            {selectedSessionId && (
-              <span className="inline-flex items-center">
-                {sseStatus === 'connected' ? (
-                  <span title={t('realTimeOk')}><Wifi className="w-4 h-4 text-green-500" /></span>
-                ) : sseStatus === 'reconnecting' ? (
-                  <span title={t('reconnecting')}><WifiOff className="w-4 h-4 text-yellow-500 animate-pulse" /></span>
-                ) : sseStatus === 'failed' ? (
-                  <span title={t('connectionFailed')}><WifiOff className="w-4 h-4 text-red-500" /></span>
-                ) : (
-                  <span title={t('notConnected')}><WifiOff className="w-4 h-4 text-gray-400" /></span>
-                )}
-              </span>
-            )}
           </div>
 
-          {/* Agent Selector */}
-          <div className="relative" data-agent-selector>
-            <button
-              onClick={() => setShowAgentOptions(!showAgentOptions)}
-              className="flex items-center gap-2 text-sm text-gray-600 hover:text-gray-900 transition-colors"
-            >
-              <Bot className="w-4 h-4 text-purple-600" />
-              <span className="font-medium text-purple-600">
-                {selectedAgent.charAt(0).toUpperCase() + selectedAgent.slice(1)}
-              </span>
-              <ChevronDown className={`w-4 h-4 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
-            </button>
-
-            {showAgentOptions && (
-              <div className="absolute right-0 top-full mt-2 w-80 bg-white border border-gray-200 rounded-xl shadow-lg z-50 overflow-hidden">
-                <div className="p-2 space-y-1 max-h-80 overflow-y-auto">
-                  {loadingAgents ? (
-                    <div className="p-4 text-center text-sm text-gray-500">{t('loading')}</div>
-                  ) : rexAgents.length > 0 ? (
-                    rexAgents.map((agent) => (
-                      <button
-                        key={agent.name}
-                        onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                        className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
-                          selectedAgent === agent.name
-                            ? 'bg-purple-50 text-purple-900 border border-purple-200'
-                            : 'hover:bg-gray-50'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <Bot className="w-4 h-4 text-purple-600" />
-                          <div className="flex-1">
-                            <div className="font-medium text-sm">
-                              {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
-                            </div>
-                            <div className="text-xs text-gray-500 mt-0.5">
-                              {getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant')}
-                            </div>
-                          </div>
-                        </div>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="p-4 text-center text-sm text-gray-500">{t('noAgents')}</div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
         </div>
 
         {/* Chat — powered by unified SessionChat */}
@@ -666,7 +671,7 @@ export default function SessionPage() {
           key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
           live={Boolean(selectedSessionId)}
-          display={{ compact: false, showActions: true, showTimestamp: false }}
+          display={{ compact: false, showActions: true, showTimestamp: true }}
           agentName={selectedAgent}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
@@ -675,13 +680,103 @@ export default function SessionPage() {
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
+          onCreateNewSession={handleCreateSession}
           onStreamingDone={() => setPendingInitialMessage(null)}
           supportsVision={supportsVision}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}
+          toolbarSlot={
+            <div className="relative" data-agent-selector>
+              <button
+                onClick={() => setShowAgentOptions(!showAgentOptions)}
+                className="flex items-center gap-1.5 h-8 px-2 rounded-lg text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 transition-colors text-sm"
+              >
+                <Bot className="w-4 h-4 flex-shrink-0" />
+                <span className="font-medium">
+                  {selectedAgent.charAt(0).toUpperCase() + selectedAgent.slice(1)}
+                </span>
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
+              </button>
+              {showAgentOptions && (
+                <div className="absolute left-0 bottom-full mb-2 w-72 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                  <div className="p-1.5 space-y-0.5 max-h-72 overflow-y-auto">
+                    {loadingAgents ? (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('loading')}</div>
+                    ) : rexAgents.length > 0 ? (
+                      rexAgents.map((agent) => (
+                        <button
+                          key={agent.name}
+                          onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
+                          className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
+                            selectedAgent === agent.name
+                              ? 'bg-zinc-100 text-zinc-900'
+                              : 'hover:bg-zinc-50 text-zinc-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <Bot className="w-4 h-4 text-zinc-500 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium text-sm">
+                                {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
+                              </div>
+                              <div className="text-xs text-zinc-400 mt-0.5 leading-snug whitespace-normal break-words">
+                                {getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant')}
+                              </div>
+                            </div>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('noAgents')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          }
         />
       </div>
+
+      {/* Three-dot dropdown — rendered outside sidebar to avoid overflow:hidden clipping */}
+      {openMenuSessionId && menuAnchor && (() => {
+        const sid = openMenuSessionId;
+        const session = sessions.find(s => s.id === sid);
+        if (!session) return null;
+        return (
+          <div
+            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg"
+            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            data-session-menu-portal
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors"
+            >
+              <PencilLine className="w-3.5 h-3.5" />
+              <span>{t('rename')}</span>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
+              disabled={downloadingSessionId === session.id}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>{t('downloadJson')}</span>
+            </button>
+            <div className="mx-2.5 my-1 border-t border-gray-100" />
+            <button
+              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
+              disabled={session.canDelete === false}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>{t('deleteAction')}</span>
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -695,8 +790,8 @@ function WelcomeScreen({ onSuggestion }: { onSuggestion: (text: string) => void 
       <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center shadow-lg">
         <Sparkles className="w-10 h-10 text-white" />
       </div>
-      <h3 className="text-3xl font-bold text-gray-900 mb-3">{t('welcome.title')}</h3>
-      <p className="text-gray-600 mb-8 text-lg">{t('welcome.description')}</p>
+      <h3 className="text-xl font-bold text-gray-900 mb-3">{t('welcome.title')}</h3>
+      <p className="text-sm text-gray-600 mb-8">{t('welcome.description')}</p>
 
       <div className="flex flex-wrap gap-3 justify-center">
         <button

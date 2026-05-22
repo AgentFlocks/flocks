@@ -5,12 +5,16 @@ Discovers SKILL.md files from Flocks-compatible locations and provides
 access to skill information. Mirrors original Flocks Skill namespace.
 """
 
+import json
 import os
 import glob
 import re
 import shutil
+import sys
+import tempfile
 import threading
-from typing import Any, Dict, List, Literal, Optional, Set
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Literal, Optional, Set
 from pathlib import Path
 from pydantic import BaseModel, Field
 
@@ -19,6 +23,101 @@ from flocks.project.instance import Instance
 
 
 log = Log.create(service="skill")
+
+# Process-wide reentrant lock guarding ~/.flocks/config/skill_settings.json.
+# FastAPI runs request handlers on a thread pool, so concurrent toggle calls
+# can race on the JSON file.  We use an RLock so high-level read-modify-write
+# helpers (toggle_disabled, set_disabled, etc.) can hold the lock across the
+# entire load → mutate → save sequence while still calling the lower-level
+# load_disabled / save_disabled primitives, which also acquire it.
+_SETTINGS_LOCK = threading.RLock()
+
+# Sidecar path used purely as a target for OS file-locking primitives.  We
+# don't lock the JSON itself because (a) ``os.replace`` would atomically
+# swap the inode out from under any open handle, and (b) on Windows the
+# real file is briefly absent during ``tempfile.mkstemp + replace``.  A
+# dedicated zero-byte ``.lock`` file gives every process a stable fd to
+# coordinate on.
+_LOCK_FILENAME = "skill_settings.json.lock"
+
+
+def _platform_file_lock(fd: int) -> None:
+    """Acquire an exclusive OS-level lock on ``fd`` (blocking).
+
+    Linux / macOS: ``fcntl.flock`` with ``LOCK_EX``.
+    Windows:       ``msvcrt.locking`` with ``LK_LOCK``.
+
+    Both are advisory and *cross-process*, which is exactly what we need
+    when uvicorn runs with ``--workers N`` and several worker processes
+    might call :meth:`Skill.toggle_disabled` concurrently.
+    """
+    if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+        import msvcrt
+
+        # ``locking`` requires a non-zero length to lock.  One byte is
+        # enough for an advisory range lock on the sentinel file.
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _platform_file_unlock(fd: int) -> None:
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _settings_cross_process_lock(directory: Path) -> Iterator[None]:
+    """Acquire a cross-process advisory lock on a sentinel file.
+
+    The lock file is created lazily inside ``~/.flocks/config/`` and is
+    *never* removed — keeping the inode stable across runs is what makes
+    the lock meaningful.  An empty file is fine; the lock is on the fd,
+    not the contents.
+
+    Best-effort: if the platform refuses to grant a lock (read-only FS,
+    NFS without lockd, sandboxing, …) we log and continue, falling back
+    to the in-process ``_SETTINGS_LOCK`` only.  Better to over-write than
+    to wedge the user's UI on file-lock failure.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / _LOCK_FILENAME
+    fd: Optional[int] = None
+    locked = False
+    try:
+        # ``O_CREAT`` so the very first caller bootstraps the file.
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            _platform_file_lock(fd)
+            locked = True
+        except OSError as exc:
+            log.warn(
+                "skill.disabled.flock_failed",
+                {"path": str(lock_path), "error": str(exc)},
+            )
+        yield
+    finally:
+        if fd is not None:
+            if locked:
+                _platform_file_unlock(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -336,9 +435,14 @@ class Skill:
     @classmethod
     async def all(cls) -> List[SkillInfo]:
         """
-        Get all available skills
+        Get all available skills (including disabled ones).
 
-        Matches TypeScript Skill.all()
+        Use this for management UIs that need to display the full inventory
+        and reflect each skill's disabled state.  For agent runtime use
+        :meth:`list_enabled` so disabled skills are excluded from the system
+        prompt and the ``skill`` tool's description.
+
+        Matches TypeScript Skill.all().
 
         Returns:
             List of all discovered skills
@@ -347,6 +451,23 @@ class Skill:
             cls._cache = cls._discover()
 
         return list(cls._cache.values())
+
+    @classmethod
+    async def list_enabled(cls) -> List[SkillInfo]:
+        """
+        Get skills that are enabled (i.e. visible to the agent).
+
+        Disabled skills — those whose names appear in
+        ``~/.flocks/config/skill_settings.json`` under ``disabled`` — are
+        filtered out.  Agent loaders and the ``skill`` tool's description
+        builder must use this method so that toggling a skill off in the
+        Skill UI actually removes it from the LLM's system prompt.
+        """
+        skills = await cls.all()
+        disabled = cls.load_disabled()
+        if not disabled:
+            return skills
+        return [s for s in skills if s.name not in disabled]
 
     @classmethod
     async def get(cls, name: str) -> Optional[SkillInfo]:
@@ -385,6 +506,146 @@ class Skill:
         """
         cls.clear_cache()
         return await cls.all()
+
+    # ----- Disabled state (user preferences) -----
+
+    @staticmethod
+    def settings_path() -> Path:
+        """Path to the user-level skill settings file."""
+        return Path.home() / ".flocks" / "config" / "skill_settings.json"
+
+    @classmethod
+    @contextmanager
+    def _locked_rmw(cls) -> Iterator[None]:
+        """Hold both the in-process RLock and the cross-process file lock.
+
+        Use this around every read-modify-write of the disabled-skills
+        file so multiple worker processes (uvicorn ``--workers N``) cannot
+        interleave their loads / saves and lose each other's updates.
+        Single-shot reads (:meth:`load_disabled`) don't need this — the
+        on-disk file is always a valid JSON snapshot because
+        :meth:`save_disabled` publishes via ``os.replace``.
+        """
+        with _SETTINGS_LOCK:
+            with _settings_cross_process_lock(cls.settings_path().parent):
+                yield
+
+    @classmethod
+    def load_disabled(cls) -> Set[str]:
+        """Return the set of skill names the user has marked as disabled.
+
+        Disabled skills are still discoverable (so the management UI can
+        list them) but are excluded from :meth:`list_enabled`, which is what
+        the agent uses.  Missing or malformed files yield an empty set.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            try:
+                if not path.exists():
+                    return set()
+                data = json.loads(path.read_text(encoding="utf-8"))
+                disabled = data.get("disabled", [])
+                if isinstance(disabled, list):
+                    return {str(n) for n in disabled if isinstance(n, str)}
+            except Exception as exc:
+                log.warn("skill.disabled.load_failed", {"error": str(exc)})
+        return set()
+
+    @classmethod
+    def save_disabled(cls, disabled: Set[str]) -> None:
+        """Persist the disabled-skill set, creating parent dirs as needed.
+
+        Write atomically via ``tempfile`` + :func:`os.replace`.  A plain
+        ``write_text`` opens the file in truncate mode, so a crash, SIGKILL,
+        or full disk midway through the write can leave a half-written /
+        empty JSON behind.  On the next ``load_disabled`` call the parser
+        would throw and we would silently fall back to an empty set —
+        wiping every disabled preference the user had configured.  The
+        ``tmp + rename`` dance keeps the on-disk file pointing at a fully
+        written payload until the very last instant.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"disabled": sorted(disabled)}
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent),
+                prefix=".skill_settings_",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                os.replace(tmp_path, str(path))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+    @classmethod
+    def is_disabled(cls, name: str) -> bool:
+        return name in cls.load_disabled()
+
+    @classmethod
+    def set_disabled(cls, name: str, disabled: bool) -> bool:
+        """Set whether the given skill is disabled.
+
+        The whole read-modify-write runs under :meth:`_locked_rmw` so two
+        concurrent callers — including separate uvicorn workers — cannot
+        lose each other's updates.
+
+        Returns the new disabled state (mirrors the input ``disabled``).
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if disabled:
+                current.add(name)
+            else:
+                current.discard(name)
+            cls.save_disabled(current)
+        return disabled
+
+    @classmethod
+    def toggle_disabled(cls, name: str) -> bool:
+        """Flip the disabled state of a skill and return the new value."""
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                new_value = False
+            else:
+                current.add(name)
+                new_value = True
+            cls.save_disabled(current)
+        return new_value
+
+    @classmethod
+    def forget_disabled(cls, name: str) -> None:
+        """Remove a name from the disabled list (no-op if not present).
+
+        Call this after deleting a skill so its preference does not linger
+        as a ghost record in the settings file.
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                cls.save_disabled(current)
+
+    @classmethod
+    def rename_disabled(cls, old_name: str, new_name: str) -> None:
+        """Migrate a disabled flag from ``old_name`` to ``new_name``."""
+        if old_name == new_name:
+            return
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if old_name in current:
+                current.discard(old_name)
+                current.add(new_name)
+                cls.save_disabled(current)
 
     # ----- Eligibility -----
 

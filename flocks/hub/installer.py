@@ -13,7 +13,7 @@ from flocks.hub.models import InstalledPluginRecord, PluginType
 from flocks.hub.security import SKIP_NAMES, validate_package
 
 
-_TOOL_TYPE_DIRS = {"api", "python", "mcp", "generated"}
+_TOOL_TYPE_DIRS = {"api", "device", "python", "mcp", "generated"}
 
 
 def _copytree_skip_caches(src: Path, dst: Path) -> None:
@@ -52,10 +52,21 @@ def _resolve_install_destination(
     (``api/``, ``python/``, ``mcp/``, ``generated/``) we install to
     ``<base>/<group>/<plugin_id>/`` — regardless of whether the source
     is the bundled flockshub copy or an existing project-level install
-    being re-installed at user scope. All other plugin types and
-    sources without a recognised group prefix fall back to the
-    standard ``<base>/<plugin_id>/`` layout.
+    being re-installed at user scope.
+
+    For ``plugin_type == "device"`` we always install to
+    ``<user_plugins>/tools/device/<plugin_id>/`` (resolved through
+    :func:`local.install_dir`). That keeps every device plugin in a
+    canonical location regardless of how the source was laid out, and
+    matches the search root used by
+    :func:`flocks.config.api_versioning._api_plugin_roots`.
+
+    All other plugin types and sources without a recognised group
+    prefix fall back to the standard ``<base>/<plugin_id>/`` layout.
     """
+    if plugin_type == "device":
+        return local.install_dir(plugin_type, plugin_id, scope)
+
     if plugin_type != "tool":
         return local.install_dir(plugin_type, plugin_id, scope)
 
@@ -112,7 +123,13 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         from flocks.agent.registry import Agent
 
         Agent.invalidate_cache()
-    elif plugin_type == "tool":
+    elif plugin_type in {"tool", "device"}:
+        # ``device`` plugins live under ``<plugins>/tools/device/<id>/``
+        # and are loaded by the same ``ToolRegistry`` machinery as ``tool``
+        # plugins — refreshing one means refreshing both, so a freshly
+        # installed device is picked up by both the Tool API summary and
+        # the Device Access wizard (the latter consumes
+        # ``api_services[storage_key]`` shaped by ``discover_api_service_descriptors``).
         from flocks.config.api_versioning import discover_api_service_descriptors
         from flocks.tool.registry import ToolRegistry
 
@@ -220,8 +237,14 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
         raise ValueError("Only user-managed Hub plugin installs can be removed")
     # Capture provider metadata BEFORE rmtree — once the dir is gone we
     # can't read its ``_provider.yaml`` to know which api_services keys
-    # were derived from it.
-    orphan_keys = _collect_storage_keys(install_path) if plugin_type == "tool" else []
+    # were derived from it. ``device`` plugins reuse the same provider
+    # yaml machinery as ``tool``/``api`` plugins, so we collect orphan
+    # storage keys for both types.
+    orphan_keys = (
+        _collect_storage_keys(install_path)
+        if plugin_type in {"tool", "device"}
+        else []
+    )
     shutil.rmtree(install_path)
     local.remove_installed_record(plugin_type, plugin_id)
     _cleanup_orphan_api_services(orphan_keys)

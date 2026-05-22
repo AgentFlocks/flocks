@@ -64,6 +64,8 @@ mkdir -p "$CAPTURE_ROOT/captures"
 
 ## 标准流程
 
+> 按照以下 1-12 的操作流程完成任务
+
 ### 1. 打开浏览器或创建 Tab
 
 `agent-browser` 模式：
@@ -413,7 +415,7 @@ else:
 
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
 
-### 11. 迭代与 skill 沉淀
+### 11.  skill 集成
 
 将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
 
