@@ -13,6 +13,7 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
+from flocks.provider.sdk.openai_base import format_openai_messages
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.azure")
@@ -118,11 +119,7 @@ class AzureProvider(BaseProvider):
         """Send chat completion request to Azure OpenAI"""
         client = self._get_client()
         
-        # Convert messages to OpenAI format
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
+        formatted_messages = format_openai_messages(messages)
         
         # Extract parameters
         temperature = kwargs.get("temperature", 0.7)
@@ -176,11 +173,7 @@ class AzureProvider(BaseProvider):
         """Send streaming chat completion request to Azure OpenAI"""
         client = self._get_client()
         
-        # Convert messages to OpenAI format
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
+        formatted_messages = format_openai_messages(messages)
         
         # Extract parameters
         temperature = kwargs.get("temperature", 0.7)

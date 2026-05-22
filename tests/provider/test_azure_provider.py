@@ -180,3 +180,53 @@ async def test_azure_chat_stream_still_emits_text_chunks():
 
     assert [chunk.delta for chunk in emitted] == ["hello", ""]
     assert emitted[-1].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_azure_chat_stream_preserves_tool_call_history():
+    client = _FakeAzureClient([
+        _chunk(
+            delta=SimpleNamespace(content=None, tool_calls=None),
+            finish_reason="stop",
+        ),
+    ])
+    provider = AzureProvider()
+    provider._get_client = lambda: client
+
+    messages = [
+        ChatMessage(role="user", content="call a sub agent"),
+        ChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "delegate_task",
+                        "arguments": '{"prompt":"say ok"}',
+                    },
+                }
+            ],
+        ),
+        ChatMessage(
+            role="tool",
+            content="sub agent result",
+            tool_call_id="call_1",
+            name="delegate_task",
+        ),
+    ]
+
+    emitted = [
+        chunk
+        async for chunk in provider.chat_stream(
+            model_id="gpt-5.4-mini",
+            messages=messages,
+        )
+    ]
+
+    request_messages = client.completions.last_request["messages"]
+    assert request_messages[1]["tool_calls"][0]["id"] == "call_1"
+    assert request_messages[2]["tool_call_id"] == "call_1"
+    assert request_messages[2]["name"] == "delegate_task"
+    assert emitted[-1].finish_reason == "stop"
