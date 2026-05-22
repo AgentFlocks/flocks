@@ -175,6 +175,7 @@ class TestCuratedCatalogModels:
         }
 
         k26 = next(m for m in models if m.id == "kimi-k2.6")
+        assert k26.capabilities.supports_vision is True
         assert k26.capabilities.supports_reasoning is True
         assert k26.capabilities.interleaved["field"] == "reasoning_content"
         assert k26.capabilities.interleaved["placeholder"] == " "
@@ -239,7 +240,11 @@ class TestCuratedCatalogModels:
             "kimi-k2.6",
         }
 
+        qwen = next(m for m in models if m.id == "qwen3.6-plus")
+        assert qwen.capabilities.supports_vision is True
+
         kimi = next(m for m in models if m.id == "kimi-k2.6")
+        assert kimi.capabilities.supports_vision is True
         assert kimi.capabilities.supports_reasoning is True
         assert kimi.capabilities.interleaved["field"] == "reasoning_content"
         assert kimi.pricing.currency == "CNY"
@@ -263,6 +268,9 @@ class TestCuratedCatalogModels:
             "qwen3.6-plus",
             "qwen3-max",
         }
+
+        qwen = next(m for m in models if m.id == "qwen3.6-plus")
+        assert qwen.capabilities.supports_vision is True
 
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.interleaved["field"] == "reasoning_details"

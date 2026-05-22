@@ -126,6 +126,7 @@
         "family": "qwen",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",
@@ -172,6 +173,7 @@
         "family": "kimi-k2.6",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",
@@ -292,6 +294,7 @@
         "family": "qwen",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",
@@ -1111,6 +1114,7 @@
         "family": "kimi-k2.6",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",

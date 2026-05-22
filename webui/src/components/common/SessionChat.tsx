@@ -288,10 +288,10 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (compact) {
-    return `max-w-[90%] px-4 py-3 rounded-xl text-sm break-words ${
+    return `max-w-[90%] px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
-        ? 'bg-blue-50 border border-blue-100 text-gray-900'
-        : 'bg-white border border-zinc-200'
+        ? 'bg-sky-50 border border-sky-100 text-zinc-900'
+        : 'bg-white border border-zinc-200/90'
     }`;
   }
 
@@ -299,11 +299,31 @@ export function getMessageBubbleClassName({
     ? (isEditing ? 'w-full' : 'w-auto')
     : 'w-full';
 
-  return `${widthClass} px-6 py-4 rounded-2xl text-sm break-words ${
+  return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
     isUser
-      ? 'bg-blue-50 border border-blue-100 text-gray-900'
-      : 'bg-white border border-zinc-200'
+      ? 'bg-sky-50 border border-sky-100 text-zinc-900'
+      : 'bg-white border border-zinc-200/90'
   }`;
+}
+
+export function getMessageGroupClassName({
+  compact,
+  isUser,
+  isEditing,
+}: {
+  compact: boolean;
+  isUser: boolean;
+  isEditing: boolean;
+}): string {
+  if (!isUser) {
+    return compact ? 'max-w-[90%]' : 'w-full';
+  }
+
+  if (compact) {
+    return isEditing ? 'w-full max-w-[90%]' : 'w-fit max-w-[90%]';
+  }
+
+  return isEditing ? 'w-[80%] max-w-[80%]' : 'w-fit max-w-[80%]';
 }
 
 export function getRegenerateTruncateTarget(
@@ -315,6 +335,24 @@ export function getRegenerateTruncateTarget(
     return { messageId: targetMessage.parentID };
   }
   return { messageId, includeTarget: true };
+}
+
+export function shouldRefetchFinishedMessage({
+  finishedMessageId,
+  abortedMessageId,
+}: {
+  finishedMessageId?: string | null;
+  abortedMessageId?: string | null;
+}): boolean {
+  return !finishedMessageId || !abortedMessageId || finishedMessageId !== abortedMessageId;
+}
+
+export function getEditingActionBarClassName(): string {
+  return 'mt-3 flex w-full items-center justify-end gap-1.5';
+}
+
+export function getStandaloneThinkingBubbleClassName(compact: boolean): string {
+  return getMessageBubbleClassName({ compact, isUser: false, isEditing: false });
 }
 
 
@@ -541,17 +579,19 @@ export default function SessionChat({
       if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
         if (properties.info.finish || properties.info.time?.completed) {
-          refetch();
-          // If this is the message we aborted, don't stop streaming — the user may have
-          // already sent a new message whose response is now arriving.
-          if (abortedMessageIdRef.current && abortedMessageIdRef.current === properties.info.id) {
-            abortedMessageIdRef.current = null;
-            abortingRef.current = false;
-          } else {
+          const shouldRefetch = shouldRefetchFinishedMessage({
+            finishedMessageId: properties.info.id,
+            abortedMessageId: abortedMessageIdRef.current,
+          });
+          // Preserve locally streamed partial text when the user aborts. The
+          // backend never persists in-flight text chunks, so refetching here
+          // would replace the visible partial response with an empty message.
+          if (shouldRefetch) {
+            refetch();
             setIsStreaming(false);
-            abortingRef.current = false;
-            abortedMessageIdRef.current = null;
           }
+          abortingRef.current = false;
+          abortedMessageIdRef.current = null;
         } else if (
           properties.info.role === 'assistant' &&
           !properties.info.finish &&
@@ -1588,19 +1628,31 @@ export default function SessionChat({
 
             {/* Standalone thinking indicator when no incomplete message exists */}
             {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
-              <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-white border border-gray-200 text-sm`}>
-                  <div className="text-xs font-medium mb-1.5 opacity-70 flex items-center gap-1.5">
-                    <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-600 text-white text-[9px] font-bold">R</span>
-                    Rex
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-gray-500">
-                    <div className="flex gap-0.5">
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+                <div className={`flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}`}>
+                  <span
+                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${
+                      compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
+                    }`}
+                  >
+                    R
+                  </span>
+                  <div className="flex flex-col items-start flex-1 min-w-0">
+                    <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
+                      <span className="text-xs font-semibold text-zinc-700">Rex</span>
                     </div>
-                    <span>{t('chat.thinking')}</span>
+                    <div className="flex flex-col min-w-0 w-full">
+                      <div className={getStandaloneThinkingBubbleClassName(compact)}>
+                        <div className="flex items-center gap-2 text-sm text-gray-500">
+                          <div className="flex gap-0.5">
+                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </div>
+                          <span>{t('chat.thinking')}</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -2001,345 +2053,344 @@ function ChatMessageBubbleInner({
   const isActionPending = actionMessageId === targetMessageId;
 
   const bubbleClass = getMessageBubbleClassName({ compact, isUser, isEditing });
+  const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
+  const editingActionBarClass = getEditingActionBarClassName();
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
 
   const avatar = isUser ? (
-    <span className={`inline-flex items-center justify-center rounded-full bg-blue-500 text-white flex-shrink-0 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full bg-gradient-to-b from-sky-400 to-blue-500 text-white shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}>
       <User className={compact ? 'w-3 h-3' : 'w-3.5 h-3.5'} />
     </span>
   ) : (
-    <span className={`inline-flex items-center justify-center rounded-full bg-red-600 text-white font-bold flex-shrink-0 ${avatarSize}`}>
+    <span className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${avatarSize}`}>
       {agentName.charAt(0).toUpperCase()}
     </span>
   );
 
-  // 头像高度（不含 compact）= 32px，对应 h-8。让 header 行也 h-8 并且 items-center，
-  // 这样头像中心和名字/时间中心严格对齐
   const headerHeight = compact ? 'h-7' : 'h-8';
+  const bubble = (
+    <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
 
-  return (
-    <div className={`group relative ${!compact ? 'w-full' : ''} flex ${isUser ? 'justify-end' : ''}`}>
-      {/* The whole "avatar + content column" group; for user it floats right */}
-      <div className={`flex gap-2.5 ${isUser ? 'max-w-[50%]' : 'w-full'}`}>
-        {avatar}
-
-        <div className="flex flex-col items-start flex-1 min-w-0">
-          {/* Name header */}
-          <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700">
-              {isUser ? t('chat.you') : agentName}
-            </span>
-          </div>
-
-      {/* Bubble + footer wrapper.
-          ``flex flex-col`` defaults to ``align-items: stretch``, so the
-          footer underneath is automatically pulled to the bubble's intrinsic
-          width.  This is what makes the user-side timestamp sit flush with
-          the bubble's left edge and the action buttons flush with its right
-          edge — without the wrapper, a user bubble (``w-auto``) and a
-          ``w-full`` footer would not share the same width and
-          ``justify-between`` would either look stuck-together (short text)
-          or balloon past the bubble (the actions would drift further right
-          than the bubble's right edge). */}
-      <div className={`flex flex-col min-w-0 ${isUser ? 'max-w-full' : 'w-full'}`}>
-      <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
-
-        {/* Empty / loading state */}
-        {parts.length === 0 && (
-          isUser ? (
-            <div className="flex items-center gap-2 opacity-60">
-              <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
-              {t('chat.sending')}
-            </div>
-          ) : (
-            <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
-              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
-            </div>
-          )
-        )}
-
-        {/* Parts */}
-        {isEditing ? (
-          <div className="space-y-3">
-            <textarea
-              value={editingText}
-              onChange={(event) => onEditChange?.(event.target.value)}
-              rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
-              className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
-            />
+      {/* Empty / loading state */}
+      {parts.length === 0 && (
+        isUser ? (
+          <div className="flex items-center gap-2 opacity-60">
+            <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+            {t('chat.sending')}
           </div>
         ) : (
-          (() => {
-            // Render attachments (file/image parts) first so the bubble shows
-            // image previews above the textual prompt — matches typical chat
-            // UX for "look at this image and …" style messages.
-            const fileParts = parts.filter((p) => p.type === 'file' && p.url);
-            const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
-            return (
-              <>
-                {fileParts.length > 0 && (
-                  <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
-                    {fileParts.map((part, i) => {
-                      const isImage = (part.mime || '').startsWith('image/');
-                      if (isImage && part.url) {
-                        return (
-                          <img
-                            key={part.id || `file-${i}`}
-                            src={part.url}
-                            alt={part.filename || ''}
-                            className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                            onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
-                          />
-                        );
-                      }
+          <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
+            <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
+          </div>
+        )
+      )}
+
+      {/* Parts */}
+      {isEditing ? (
+        <div className="space-y-3">
+          <textarea
+            value={editingText}
+            onChange={(event) => onEditChange?.(event.target.value)}
+            rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
+            className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
+      ) : (
+        (() => {
+          // Render attachments (file/image parts) first so the bubble shows
+          // image previews above the textual prompt — matches typical chat
+          // UX for "look at this image and …" style messages.
+          const fileParts = parts.filter((p) => p.type === 'file' && p.url);
+          const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
+          return (
+            <>
+              {fileParts.length > 0 && (
+                <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
+                  {fileParts.map((part, i) => {
+                    const isImage = (part.mime || '').startsWith('image/');
+                    if (isImage && part.url) {
                       return (
-                        <div
+                        <img
                           key={part.id || `file-${i}`}
-                          className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
-                        >
-                          <FileText className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
-                        </div>
+                          src={part.url}
+                          alt={part.filename || ''}
+                          className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
+                          onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
+                        />
                       );
-                    })}
-                  </div>
-                )}
-                {otherParts.map((part: MessagePart, i: number) => (
-                  // Spacing between consecutive parts is owned by this wrapper,
-                  // not by individual part components. Each part used to set its
-                  // own `mt-2 first:mt-0`, but since every part lives in its own
-                  // wrapper div, `first:` always matched and the gap collapsed
-                  // to zero between, e.g., a tool card and the next thinking
-                  // block, making them look glued together.
-                  <div key={part.id || i} className="mt-2 first:mt-0">
-                    {/* Text */}
-                    {part.type === 'text' && part.text && (() => {
-                      const nodeRefMatch = isUser
-                        ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
-                        : null;
-                      const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
-                      return (
-                        <>
-                          {nodeRefMatch && (
-                            <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
-                              <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
-                              <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
-                              <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
-                            </div>
-                          )}
-                          <StreamingMarkdown
-                            content={displayText}
-                            isStreaming={isActive && !isUser}
-                          />
-                        </>
-                      );
-                    })()}
-
-                    {/* Tool call */}
-              {part.type === 'tool' && (
-                <ChatToolPart
-                  part={part}
-                  pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
-                  onAnswer={onQuestionAnswer && part.callID
-                    ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
-                    : undefined}
-                  onReject={onQuestionReject && part.callID
-                    ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
-                    : undefined}
-                />
+                    }
+                    return (
+                      <div
+                        key={part.id || `file-${i}`}
+                        className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700"
+                      >
+                        <FileText className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
+              {otherParts.map((part: MessagePart, i: number) => (
+                // Spacing between consecutive parts is owned by this wrapper,
+                // not by individual part components. Each part used to set its
+                // own `mt-2 first:mt-0`, but since every part lives in its own
+                // wrapper div, `first:` always matched and the gap collapsed
+                // to zero between, e.g., a tool card and the next thinking
+                // block, making them look glued together.
+                <div key={part.id || i} className="mt-2 first:mt-0">
+                  {/* Text */}
+                  {part.type === 'text' && part.text && (() => {
+                    const nodeRefMatch = isUser
+                      ? part.text.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
+                      : null;
+                    const displayText = nodeRefMatch ? nodeRefMatch[3] : part.text;
+                    return (
+                      <>
+                        {nodeRefMatch && (
+                          <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                            <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                            <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                            <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
+                          </div>
+                        )}
+                        <StreamingMarkdown
+                          content={displayText}
+                          isStreaming={isActive && !isUser}
+                        />
+                      </>
+                    );
+                  })()}
 
-              {/* Reasoning / thinking */}
-              {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
-                const thinkingText = part.text || part.thinking || '';
-                const partKey = part.id || `reasoning-${i}`;
-                const isExpanded = getPartExpanded(partKey);
-                const isThinking = !isReasoningDone;
-                return (
-                  // Vertical spacing is provided by the parent part wrapper
-                  // (see `otherParts.map` above); keep this container neutral
-                  // so wrapper-level `mt-2 first:mt-0` is the single source of
-                  // truth for inter-part gaps.
-                  <div>
-                    <button
-                      onClick={() => togglePart(partKey)}
-                      disabled={isThinking}
-                      className="group/think w-full text-left"
-                    >
-                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
-                        isThinking
-                          ? 'bg-sky-50 border-sky-100'
-                          : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
-                      }`}>
-                        {isThinking ? (
-                          <>
-                            <span className="flex gap-0.5 flex-shrink-0">
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                              <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                            </span>
-                            <span className="text-sky-600">{t('chat.thinking')}</span>
-                          </>
-                        ) : (
-                          <>
-                            <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
-                            <span className="text-zinc-500 truncate min-w-0">
-                              {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
-                            </span>
-                            <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
-                          </>
+                  {/* Tool call */}
+                  {part.type === 'tool' && (
+                    <ChatToolPart
+                      part={part}
+                      pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
+                      onAnswer={onQuestionAnswer && part.callID
+                        ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
+                        : undefined}
+                      onReject={onQuestionReject && part.callID
+                        ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
+                        : undefined}
+                    />
+                  )}
+
+                  {/* Reasoning / thinking */}
+                  {(part.type === 'reasoning' || part.type === 'thinking') && (part.text || part.thinking) && (() => {
+                    const thinkingText = part.text || part.thinking || '';
+                    const partKey = part.id || `reasoning-${i}`;
+                    const isExpanded = getPartExpanded(partKey);
+                    const isThinking = !isReasoningDone;
+                    return (
+                      // Vertical spacing is provided by the parent part wrapper
+                      // (see `otherParts.map` above); keep this container neutral
+                      // so wrapper-level `mt-2 first:mt-0` is the single source of
+                      // truth for inter-part gaps.
+                      <div>
+                        <button
+                          onClick={() => togglePart(partKey)}
+                          disabled={isThinking}
+                          className="group/think w-full text-left"
+                        >
+                          <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
+                            isThinking
+                              ? 'bg-sky-50 border-sky-100'
+                              : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
+                          }`}>
+                            {isThinking ? (
+                              <>
+                                <span className="flex gap-0.5 flex-shrink-0">
+                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                                  <span className="w-1.5 h-1.5 bg-sky-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                                </span>
+                                <span className="text-sky-600">{t('chat.thinking')}</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5 flex-shrink-0 text-zinc-400" />
+                                <span className="text-zinc-500 truncate min-w-0">
+                                  {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
+                                </span>
+                                <ChevronDown className={`w-3 h-3 ml-auto text-zinc-400 flex-shrink-0 transition-transform ${isExpanded ? '' : '-rotate-90'}`} />
+                              </>
+                            )}
+                          </div>
+                        </button>
+                        {isExpanded && (
+                          <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
+                            {thinkingText}
+                          </div>
                         )}
                       </div>
-                    </button>
-                    {isExpanded && (
-                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
-                        {thinkingText}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-                  </div>
-                ))}
-              </>
-            );
-          })()
-        )}
-
-        {/* Streaming indicator */}
-        {isActive && !isUser && parts.length > 0 && (() => {
-          const lastPart = parts[parts.length - 1];
-          const isDelegating = lastPart?.type === 'tool'
-            && isDelegateTool(lastPart.tool || '')
-            && lastPart.state?.status === 'running';
-          if (isDelegating) return null;
-          return (
-            <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
-              <div className="flex gap-0.5">
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-              </div>
-              <span>{t('chat.streaming')}</span>
-            </div>
+                    );
+                  })()}
+                </div>
+              ))}
+            </>
           );
-        })()}
+        })()
+      )}
 
-
-        {/* Actions — rendered inside bubble only while editing */}
-        {showActions && parts.length > 0 && isEditing && (
-          <div className={actionBarClass}>
-            {isEditing ? (
-              <>
-                <button
-                  onClick={() => void onEditSave?.()}
-                  disabled={actionsDisabled || isActionPending || !editingText.trim()}
-                  className={iconButtonClass}
-                  aria-label={t('chat.save')}
-                >
-                  <Save className="w-3 h-3" />
-                  <span className={tooltipClass}>{t('chat.save')}</span>
-                </button>
-                {isUser && (
-                  <button
-                    onClick={() => void onEditSend?.()}
-                    disabled={actionsDisabled || isActionPending || !editingText.trim()}
-                    className={iconButtonClass}
-                    aria-label={t('chat.sendEdited')}
-                  >
-                    <Send className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.sendEdited')}</span>
-                  </button>
-                )}
-                <button
-                  onClick={onEditCancel}
-                  disabled={isActionPending}
-                  className={iconButtonClass}
-                  aria-label={t('chat.cancel')}
-                >
-                  <X className="w-3 h-3" />
-                  <span className={tooltipClass}>{t('chat.cancel')}</span>
-                </button>
-              </>
-            ) : (
-              // Non-editing branch: placeholder — never rendered because we
-              // guard `isEditing` above.  Keeps the ternary shape intact.
-              <></>
-            )}
-          </div>
-        )}
-      </div>{/* end bubble */}
-
-        {/* Footer below bubble.  Stretched to the bubble's width by the
-            wrapper's default ``align-items: stretch`` (see comment on the
-            wrapper above), so ``justify-between`` pins the timestamp to the
-            bubble's left edge and the action buttons to its right edge for
-            both user and assistant messages — even for very short user
-            inputs where the bubble itself is narrow. */}
-        {!compact && showActions && parts.length > 0 && !isEditing && (
-          <div className="flex items-center justify-between mt-1.5">
-            {showTimestamp && message.timestamp
-              ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
-              : <span />
-            }
-            <div className={actionBarClass}>
-              {isUser ? (
-                <>
-                  {targetPartId && editableRawText && (
-                    <button
-                      onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
-                      disabled={actionsDisabled || isActionPending}
-                      className={iconButtonClass}
-                      aria-label={t('chat.edit')}
-                    >
-                      <Pencil className="w-3 h-3" />
-                      <span className={tooltipClass}>{t('chat.edit')}</span>
-                    </button>
-                  )}
-                  <button
-                    onClick={() => onCopy?.(getTextContent())}
-                    disabled={isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.copy')}
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.copy')}</span>
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => void onRegenerate?.(targetMessageId)}
-                    disabled={actionsDisabled || isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.regenerate')}
-                  >
-                    <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
-                    <span className={tooltipClass}>{t('chat.regenerate')}</span>
-                  </button>
-                  <button
-                    onClick={() => onCopy?.(getTextContent())}
-                    disabled={isActionPending}
-                    className={iconButtonClass}
-                    aria-label={t('chat.copy')}
-                  >
-                    <Copy className="w-3 h-3" />
-                    <span className={tooltipClass}>{t('chat.copy')}</span>
-                  </button>
-                </>
-              )}
+      {/* Streaming indicator */}
+      {isActive && !isUser && parts.length > 0 && (() => {
+        const lastPart = parts[parts.length - 1];
+        const isDelegating = lastPart?.type === 'tool'
+          && isDelegateTool(lastPart.tool || '')
+          && lastPart.state?.status === 'running';
+        if (isDelegating) return null;
+        return (
+          <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
+            <div className="flex gap-0.5">
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
             </div>
+            <span>{t('chat.streaming')}</span>
           </div>
+        );
+      })()}
+
+
+      {/* Actions — rendered inside bubble only while editing */}
+      {showActions && parts.length > 0 && isEditing && (
+        <div className={editingActionBarClass}>
+          <>
+            <button
+              onClick={() => void onEditSave?.()}
+              disabled={actionsDisabled || isActionPending || !editingText.trim()}
+              className={iconButtonClass}
+              aria-label={t('chat.save')}
+            >
+              <Save className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.save')}</span>
+            </button>
+            {isUser && (
+              <button
+                onClick={() => void onEditSend?.()}
+                disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                className={iconButtonClass}
+                aria-label={t('chat.sendEdited')}
+              >
+                <Send className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.sendEdited')}</span>
+              </button>
+            )}
+            <button
+              onClick={onEditCancel}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.cancel')}
+            >
+              <X className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.cancel')}</span>
+            </button>
+          </>
+        </div>
+      )}
+    </div>
+  );
+  const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
+    <div className="flex items-center justify-between mt-1.5">
+      {showTimestamp && message.timestamp
+        ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
+        : <span />}
+      <div className={actionBarClass}>
+        {isUser ? (
+          <>
+            {targetPartId && editableRawText && (
+              <button
+                onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+                disabled={actionsDisabled || isActionPending}
+                className={iconButtonClass}
+                aria-label={t('chat.edit')}
+              >
+                <Pencil className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.edit')}</span>
+              </button>
+            )}
+            <button
+              onClick={() => onCopy?.(getTextContent())}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.copy')}
+            >
+              <Copy className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.copy')}</span>
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onClick={() => void onRegenerate?.(targetMessageId)}
+              disabled={actionsDisabled || isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.regenerate')}
+            >
+              <RefreshCw className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+              <span className={tooltipClass}>{t('chat.regenerate')}</span>
+            </button>
+            <button
+              onClick={() => onCopy?.(getTextContent())}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.copy')}
+            >
+              <Copy className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.copy')}</span>
+            </button>
+          </>
         )}
-      </div>{/* end bubble+footer wrapper */}
-        </div>{/* end name+bubble col */}
-      </div>{/* end avatar+content group */}
+      </div>
+    </div>
+  ) : null;
+
+  if (isUser) {
+    return (
+      <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end`}>
+        <div className={`flex flex-col items-end gap-2 ${messageGroupClass}`}>
+          <div className={`flex items-center justify-end ${headerHeight}`}>
+            {avatar}
+          </div>
+          <div className={`flex flex-col min-w-0 ${isEditing ? 'w-full' : 'w-fit max-w-full'}`}>
+            {bubble}
+            {footer}
+          </div>
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+      <div className={`flex gap-2.5 ${messageGroupClass}`}>
+        {avatar}
+        <div className="flex flex-col items-start flex-1 min-w-0">
+          <div className={`flex items-center gap-2 ${headerHeight}`}>
+            <span className="text-xs font-semibold text-zinc-700">
+              {agentName}
+            </span>
+          </div>
+          <div className="flex flex-col min-w-0 w-full">
+            {bubble}
+            {footer}
+          </div>
+        </div>
+      </div>
       {previewImage && (
         <ImageLightbox
           src={previewImage.url}

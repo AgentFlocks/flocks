@@ -2151,6 +2151,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
   return false;
 }
 
+function allowsBuiltInVisionToggle(modelId: string): boolean {
+  const lowered = modelId.toLowerCase();
+  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+}
+
 // ==================== Configure Dialog ====================
 
 function ConfigureProviderDialog({ provider, existingCredentials, models, onClose, onConfigured, onTestResult, onDelete }: {
@@ -2633,15 +2638,13 @@ function ModelDetailSheet({
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
+  const visionToggleLocked = isPredefined && !allowsBuiltInVisionToggle(model.id);
   const [name, setName] = useState(model.name);
   const [contextWindow, setContextWindow] = useState(model.limits?.context_window != null ? String(model.limits.context_window) : '128000');
   const [maxOutput, setMaxOutput] = useState(model.limits?.max_output_tokens != null ? String(model.limits.max_output_tokens) : '4096');
   const [supportsTools, setSupportsTools] = useState(features.includes('tool_call') || !!model.capabilities?.supports_tools);
-  // For predefined models vision is always treated as disabled — only user-added
-  // (customizable) models may have vision enabled so the multimodal upload flow
-  // is only unlocked when the user has explicitly configured a vision model.
   const [supportsVision, setSupportsVision] = useState(
-    isPredefined ? false : (features.includes('vision') || !!model.capabilities?.supports_vision),
+    features.includes('vision') || !!model.capabilities?.supports_vision,
   );
   const [supportsStreaming, setSupportsStreaming] = useState(!!model.capabilities?.supports_streaming);
   const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
@@ -2786,8 +2789,8 @@ function ModelDetailSheet({
                   label={t('form.vision')}
                   checked={supportsVision}
                   onChange={setSupportsVision}
-                  disabled={isPredefined}
-                  disabledHint={t('form.visionPredefinedHint')}
+                  disabled={visionToggleLocked}
+                  disabledHint={visionToggleLocked ? t('form.visionPredefinedHint') : undefined}
                 />
                 <ToggleField label={t('form.streaming')} checked={supportsStreaming} onChange={setSupportsStreaming} />
                 <ToggleField label={t('form.reasoning')} checked={supportsReasoning} onChange={setSupportsReasoning} />
