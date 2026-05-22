@@ -164,7 +164,7 @@ macOS / Linux：
 
 ```bash
 export BU_CDP_URL="http://127.0.0.1:$BU_HEADLESS_PORT"
-rm -f /tmp/bu-default.sock
+rm -f "$HOME/.flocks/browser/bu.sock"
 flocks browser --setup
 flocks browser -c 'print(page_info())'
 ```
@@ -227,5 +227,6 @@ fi
 - 这种场景必须显式设置 `BU_CDP_WS` 或 `BU_CDP_URL`，让 `flocks browser` 直连你启动的 headless 实例
 - 如果 `9222` 已被其他浏览器实例占用，不要复用它；改用新的专用端口，并同步更新浏览器启动参数与 `BU_CDP_URL` / `BU_CDP_WS`
 - 如果显式切换到了新的 `BU_CDP_URL` / `BU_CDP_WS`，但当前 `BU_NAME` 下还有旧 daemon，优先让 `flocks browser --setup` 重新建连；若仍异常，再执行 `flocks browser -c 'restart_daemon()'`
-- 当 daemon 已经死掉但 POSIX socket 文件还留在 `/tmp/` 时，再手动删除 `/tmp/bu-default.sock`；Windows 不需要这一步
+- `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`，例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`
+- 当 daemon 已经死掉但 POSIX socket 文件还留在 `~/.flocks/browser/` 时，再手动删除 `~/.flocks/browser/bu.sock`；Windows 不需要这一步
 - 如果失败并出现 `HTTP 403`，优先回头检查 headless Chrome 是否带了 `--remote-allow-origins=*`

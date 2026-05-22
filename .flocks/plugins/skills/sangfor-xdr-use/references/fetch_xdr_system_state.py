@@ -2,9 +2,12 @@ import argparse
 import json
 import re
 import socket
-import tempfile
 import time
 from pathlib import Path
+
+
+BROWSER_DAEMON_PORT_FILE = Path.home() / ".flocks" / "browser" / "bu.port"
+
 
 def send_cmd(sock, cmd):
     sock.sendall((json.dumps(cmd) + "\n").encode())
@@ -153,9 +156,9 @@ def main():
     parser.add_argument("--raw", action="store_true", help="Print raw page text")
     args = parser.parse_args()
 
-    port_file = Path(tempfile.gettempdir()) / "bu-default.port"
+    port_file = BROWSER_DAEMON_PORT_FILE
     if not port_file.exists():
-        print("ERROR: Browser daemon port file not found")
+        print(f"ERROR: Browser daemon port file not found: {port_file}")
         print("Please run: flocks browser --setup")
         exit(1)
 
