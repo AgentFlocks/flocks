@@ -767,6 +767,105 @@ async def test_start_approved_request_streams_upgrade_and_marks_activated(
     assert reported == [("success", None)]
 
 
+async def test_start_activated_request_reinstalls_when_pro_package_missing(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+    from flocks.updater.models import UpdateProgress
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    request_id = "req_start_activated_missing_pro"
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "activated",
+            "previous_request_id": None,
+            "reason": None,
+            "suggestion": None,
+            "activate_key": "key_start",
+            "license_id": "lic_start",
+            "manifest_url": "https://manifest.example.com/v1/manifest/latest",
+            "details": {"company": "acme", "license_id": "lic_start"},
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    installed = False
+
+    async def _fake_perform_pro_bundle_install(*args, **kwargs):
+        nonlocal installed
+        assert args == ()
+        assert kwargs["restart"] is True
+        yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...", success=None)
+        installed = True
+        yield UpdateProgress(stage="done", message="Flocks Pro component installed.", success=True)
+
+    async def _noop(_record: dict):
+        return None
+
+    async def _fake_report(record: dict, *, install_result: str, error_message: str | None = None):
+        return None
+
+    monkeypatch.setattr(console_routes, "perform_pro_bundle_install", _fake_perform_pro_bundle_install)
+    monkeypatch.setattr(console_routes, "_maybe_activate_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_maybe_refresh_pro_license", _noop)
+    monkeypatch.setattr(console_routes, "_report_pro_bundle_installation", _fake_report)
+    monkeypatch.setattr(console_routes, "_mark_console_upgrade_activated", _noop)
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: installed)
+    monkeypatch.setattr(console_routes, "_get_pro_capability_status", lambda: {"pro_enabled": True, "active": True})
+    monkeypatch.setattr(
+        console_routes,
+        "_read_pro_bundle_install_marker",
+        lambda: {"installed_version": "v2026.5.9"} if installed else {},
+    )
+
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/start")
+
+    assert resp.status_code == status.HTTP_200_OK
+    assert "Downloading Flocks Pro bundle" in resp.text
+    stored = await Storage.get(f"console:upgrade_request:{request_id}")
+    assert stored["status"] == "activated"
+    assert stored["details"]["auto_install_result"] == "done"
+    assert stored["details"]["auto_install_version"] == "v2026.5.9"
+
+
+async def test_start_revoked_request_does_not_reinstall(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import console_upgrade as console_routes
+    from flocks.storage.storage import Storage
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    monkeypatch.setattr(console_routes, "_is_pro_component_installed", lambda: False)
+    request_id = "req_start_revoked"
+    await Storage.set(
+        f"console:upgrade_request:{request_id}",
+        {
+            "request_id": request_id,
+            "status": "activated",
+            "license_id": "lic_revoked",
+            "license_status": "revoked",
+            "activate_key": "key_revoked",
+            "details": {"license_id": "lic_revoked", "license_status": "revoked"},
+            "created_at": "2026-05-08T08:00:00+00:00",
+            "updated_at": "2026-05-08T08:00:00+00:00",
+        },
+        "json",
+    )
+
+    resp = await client.post(f"/api/console/upgrade-requests/{request_id}/start")
+
+    assert resp.status_code == status.HTTP_400_BAD_REQUEST
+
+
 async def test_auto_activate_reports_already_latest_install(
     monkeypatch: pytest.MonkeyPatch,
 ):

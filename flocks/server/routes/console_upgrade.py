@@ -91,6 +91,16 @@ def _is_approved(record: dict[str, Any]) -> bool:
     return str(record.get("status", "")).strip().lower() == "approved"
 
 
+def _can_install_from_request(record: dict[str, Any]) -> bool:
+    record_status = str(record.get("status", "")).strip().lower()
+    license_status = _record_license_status(record)
+    if license_status in _INACTIVE_LICENSE_STATUSES:
+        return False
+    if record_status == "approved":
+        return True
+    return record_status == "activated" and bool(_record_license_id(record)) and not _is_pro_component_installed()
+
+
 def _record_license_id(record: dict[str, Any]) -> str:
     details = record.get("details") if isinstance(record.get("details"), dict) else {}
     return str(record.get("license_id") or details.get("license_id") or "").strip()
@@ -835,8 +845,8 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
     raw = await Storage.get(_request_key(request_id))
     if not raw:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="升级申请不存在")
-    if not _is_approved(raw):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅已审批通过的申请可以开始升级")
+    if not _can_install_from_request(raw):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="仅已审批通过或已激活但本地缺少 Pro 组件的申请可以开始升级")
 
     async def _stream():
         details = raw.setdefault("details", {})

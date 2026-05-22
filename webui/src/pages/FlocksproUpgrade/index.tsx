@@ -92,6 +92,16 @@ async function refreshFlocksproLicenseStatus(): Promise<FlocksproLicenseStatus> 
   return getFlocksproLicenseStatus();
 }
 
+function proPackageStatusToLicenseStatus(status: ProPackageStatus): FlocksproLicenseStatus {
+  return {
+    activated: false,
+    active: false,
+    license_status: status.license_status || 'uninstalled',
+    inactive_reason: status.inactive_reason || 'flockspro_not_installed',
+    pro_enabled: status.pro_enabled ?? false,
+  };
+}
+
 function formatProVersion(version?: string | null): string {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
   return normalized ? `pro-v${normalized}` : 'pro-v...';
@@ -183,6 +193,11 @@ function requestHasIssuedLicense(item: UpgradeRequestStatus): boolean {
   return Boolean(item.license_id || item.details?.license_id || item.activate_key);
 }
 
+function requestCanInstallProPackage(item: UpgradeRequestStatus): boolean {
+  const status = (item.status || '').toLowerCase();
+  return ['approved', 'activated'].includes(status) && requestHasIssuedLicense(item) && !requestLicenseInactive(item);
+}
+
 function requestExpiresAt(item: UpgradeRequestStatus): string | number | null | undefined {
   return item.expires_at || item.details?.license_effective_expires_at || item.details?.expires_at;
 }
@@ -199,6 +214,10 @@ function requestLicenseStatus(item: UpgradeRequestStatus): string {
 
 function isInactiveLicenseStatus(value?: string | null): boolean {
   return ['revoked', 'expired', 'superseded'].includes(String(value || '').trim().toLowerCase());
+}
+
+function requestLicenseInactive(item: UpgradeRequestStatus): boolean {
+  return isInactiveLicenseStatus(item.license_status) || isInactiveLicenseStatus(item.details?.license_status);
 }
 
 function requestMaxAdmins(item: UpgradeRequestStatus): number | null | undefined {
@@ -267,32 +286,10 @@ export default function FlocksproUpgradePage() {
     isInactiveLicenseStatus(licenseStatus?.license_status);
   const invalidRuntimeLicenseId =
     runtimeLicenseInvalid && licenseStatus?.license_id ? String(licenseStatus.license_id) : '';
+  const runtimeLicenseId = licenseStatus?.license_id ? String(licenseStatus.license_id) : '';
   const accountScopedRequests = useMemo(
     () => requests.filter((item) => isRequestForCurrentAccount(item, currentConsoleAccountKey)),
     [currentConsoleAccountKey, requests],
-  );
-
-  const visibleRequests = useMemo(
-    () => {
-      const currentStatuses = ['pending', 'reviewing', 'approved'];
-      return accountScopedRequests.filter((item) => {
-        const status = (item.status || '').toLowerCase();
-        if (status === 'rejected') {
-          return !dismissedRejectedRequestIds.has(item.request_id);
-        }
-        if (status === 'approved') {
-          return !requestHasIssuedLicense(item) || !isProPackageInstalled;
-        }
-        return currentStatuses.includes(status);
-      });
-    },
-    [accountScopedRequests, dismissedRejectedRequestIds, isProPackageInstalled],
-  );
-
-  const activeRequest = useMemo(
-    () =>
-      visibleRequests.find((item) => item.request_id === activeRequestId) ?? visibleRequests[0] ?? null,
-    [activeRequestId, visibleRequests],
   );
 
   const currentIssuedRequest = useMemo(
@@ -305,6 +302,52 @@ export default function FlocksproUpgradePage() {
       return issued[0] ?? null;
     },
     [accountScopedRequests],
+  );
+
+  const currentIssuedRequestLicenseId = currentIssuedRequest ? requestLicenseId(currentIssuedRequest) : '';
+  const canInstallProPackageFromRequest = useCallback(
+    (item: UpgradeRequestStatus) => {
+      if (!isProPackageInstalled && requestCanInstallProPackage(item) && item.request_id === currentIssuedRequest?.request_id) {
+        if (!runtimeLicenseId) {
+          return true;
+        }
+        return currentIssuedRequestLicenseId === runtimeLicenseId && !runtimeLicenseInvalid;
+      }
+      return false;
+    },
+    [
+      currentIssuedRequest?.request_id,
+      currentIssuedRequestLicenseId,
+      isProPackageInstalled,
+      runtimeLicenseId,
+      runtimeLicenseInvalid,
+    ],
+  );
+
+  const visibleRequests = useMemo(
+    () => {
+      const currentStatuses = ['pending', 'reviewing', 'approved'];
+      return accountScopedRequests.filter((item) => {
+        const status = (item.status || '').toLowerCase();
+        if (status === 'rejected') {
+          return !dismissedRejectedRequestIds.has(item.request_id);
+        }
+        if (status === 'approved') {
+          return !requestHasIssuedLicense(item) || canInstallProPackageFromRequest(item);
+        }
+        if (status === 'activated') {
+          return canInstallProPackageFromRequest(item);
+        }
+        return currentStatuses.includes(status);
+      });
+    },
+    [accountScopedRequests, canInstallProPackageFromRequest, dismissedRejectedRequestIds],
+  );
+
+  const activeRequest = useMemo(
+    () =>
+      visibleRequests.find((item) => item.request_id === activeRequestId) ?? visibleRequests[0] ?? null,
+    [activeRequestId, visibleRequests],
   );
 
   const latestActivatedRequest = useMemo(
@@ -334,13 +377,12 @@ export default function FlocksproUpgradePage() {
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
   const preferRequestLicense =
     Boolean(currentIssuedRequest) &&
-    (!runtimeLicenseUsable ||
-      requestLicenseId(currentIssuedRequest as UpgradeRequestStatus) !== licenseStatus?.license_id);
+    (!runtimeLicenseId || currentIssuedRequestLicenseId !== runtimeLicenseId);
   const currentDisplayLicenseId = preferRequestLicense
-    ? requestLicenseId(currentIssuedRequest as UpgradeRequestStatus)
+    ? currentIssuedRequestLicenseId
     : runtimeLicenseUsable
     ? licenseStatus?.license_id
-    : undefined;
+    : runtimeLicenseId || undefined;
   const showCurrentLicenseCard = Boolean(currentDisplayLicenseId);
   const displayedLicenseStatus = (preferRequestLicense
     ? requestLicenseStatus(currentIssuedRequest as UpgradeRequestStatus)
@@ -416,6 +458,12 @@ export default function FlocksproUpgradePage() {
         if (status === 'rejected') {
           return !dismissedRejectedRequestIds.has(item.request_id);
         }
+        if (status === 'activated') {
+          return canInstallProPackageFromRequest(item);
+        }
+        if (status === 'approved') {
+          return !requestHasIssuedLicense(item) || canInstallProPackageFromRequest(item);
+        }
         return currentStatuses.includes(status);
       });
       setActiveRequestId((prev) => {
@@ -427,7 +475,7 @@ export default function FlocksproUpgradePage() {
     } catch (err) {
       setRequestError(extractErrorMessage(err, t('errors.fetchRequests')));
     }
-  }, [currentConsoleAccountKey, dismissedRejectedRequestIds, t]);
+  }, [canInstallProPackageFromRequest, currentConsoleAccountKey, dismissedRejectedRequestIds, t]);
 
   useEffect(() => {
     if (!activeRequestId) {
@@ -600,6 +648,11 @@ export default function FlocksproUpgradePage() {
       await refreshRequests();
       const packageStatus = await consoleUpgradeApi.getProPackageStatus();
       setProPackageStatus(packageStatus);
+      if (!packageStatus.installed) {
+        setLicenseStatus(proPackageStatusToLicenseStatus(packageStatus));
+        window.dispatchEvent(new Event('flockspro-license-status-changed'));
+        return;
+      }
       const status = await refreshFlocksproLicenseStatus();
       setLicenseStatus(status);
       window.dispatchEvent(new Event('flockspro-license-status-changed'));
@@ -728,10 +781,13 @@ export default function FlocksproUpgradePage() {
     if (['pending', 'reviewing'].includes(status)) {
       return true;
     }
-    return status === 'approved' && (!requestHasIssuedLicense(item) || !isProPackageInstalled);
+    return (
+      (status === 'approved' && !requestHasIssuedLicense(item)) ||
+      canInstallProPackageFromRequest(item)
+    );
   });
   const canOpenApplyDialog = canApplyUpgrade && !hasOpenRequest;
-  const showApprovedActions = activeRequest?.status === 'approved' && !isProPackageInstalled;
+  const showApprovedActions = Boolean(activeRequest && canInstallProPackageFromRequest(activeRequest));
   const showRejectedFeedback = activeRequest?.status === 'rejected';
   const canCancel =
     activeRequest?.status === 'pending' ||
