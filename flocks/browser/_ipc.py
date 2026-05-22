@@ -6,13 +6,12 @@ import re
 import socket
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
 IS_WINDOWS = sys.platform == "win32"
-BH_TMP_DIR = os.environ.get("BH_TMP_DIR")
-_TMP = Path(BH_TMP_DIR or (tempfile.gettempdir() if IS_WINDOWS else "/tmp"))
+BU_TMP_DIR = str(Path.home() / ".flocks" / "browser")
+_TMP = Path(BU_TMP_DIR).expanduser()
 _TMP.mkdir(parents=True, exist_ok=True)
 _NAME_RE = re.compile(r"\A[A-Za-z0-9_-]{1,64}\Z")
 
@@ -27,7 +26,7 @@ def _check(name: str) -> str:
 def _stem(name: str) -> str:
     """Return the daemon file stem for the given browser session name."""
     _check(name)
-    return "bu" if BH_TMP_DIR else f"bu-{name}"
+    return "bu" if BU_TMP_DIR else f"bu-{name}"
 
 
 def log_path(name: str) -> Path:

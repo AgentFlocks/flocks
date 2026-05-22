@@ -4,7 +4,7 @@
 
 | 项目 | 值 |
 |------|-----|
-| **Browser daemon port 文件** | `{tempfile.gettempdir()}/bu-default.port`（由 Python `tempfile.gettempdir()` 解析，跨平台） |
+| **Browser daemon port 文件** | `~/.flocks/browser/bu.port`（固定路径，跨平台） |
 | **EDR 地址** | **需用户提供**（无默认值） |
 | **目标页面 URL** | `{EDR_URL}/ui/#/index`（首页仪表盘） |
 
@@ -107,11 +107,10 @@ powershell -Command "& '<FLOCKS_VENV>\Scripts\python.exe' '<FLOCKS_PLUGINS>\skil
 ```python
 import json
 import socket
-import tempfile
 import time
 from pathlib import Path
 
-port_file = Path(tempfile.gettempdir()) / "bu-default.port"
+port_file = Path.home() / ".flocks" / "browser" / "bu.port"
 port = int(port_file.read_text().strip())
 
 def send_cmd(sock, cmd):

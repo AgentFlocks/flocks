@@ -78,7 +78,7 @@ def daemon_alive(name: str | None = None) -> bool:
 
 def _daemon_endpoint_names() -> list[str]:
     suffix = ".port" if ipc.IS_WINDOWS else ".sock"
-    if ipc.BH_TMP_DIR:
+    if ipc.BU_TMP_DIR:
         return [NAME] if (ipc._TMP / f"bu{suffix}").exists() else []
     names: list[str] = []
     for path in sorted(ipc._TMP.glob(f"bu-*{suffix}")):

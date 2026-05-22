@@ -74,21 +74,9 @@ def test_generic_remote_debugging_message_triggers_prompt() -> None:
     assert admin._needs_chrome_remote_debugging_prompt(msg)
 
 
-def test_daemon_endpoint_names_discovers_valid_socket_names(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", None)
-    monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
-    (tmp_path / "bu-default.sock").touch()
-    (tmp_path / "bu-remote_1.sock").touch()
-    (tmp_path / "bu-invalid.name.sock").touch()
-    (tmp_path / "not-bu-default.sock").touch()
-
-    assert admin._daemon_endpoint_names() == ["default", "remote_1"]
-
-
-def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exists(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
     monkeypatch.setattr(admin, "NAME", "session-xyz")
     (tmp_path / "bu.sock").touch()
@@ -96,9 +84,9 @@ def test_daemon_endpoint_names_with_bh_tmp_dir_returns_local_name_when_sock_exis
     assert admin._daemon_endpoint_names() == ["session-xyz"]
 
 
-def test_daemon_endpoint_names_with_bh_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
+def test_daemon_endpoint_names_with_bu_tmp_dir_returns_empty_when_sock_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
-    monkeypatch.setattr(admin.ipc, "BH_TMP_DIR", str(tmp_path))
+    monkeypatch.setattr(admin.ipc, "BU_TMP_DIR", str(tmp_path))
     monkeypatch.setattr(admin.ipc, "_TMP", tmp_path)
     monkeypatch.setattr(admin, "NAME", "session-xyz")
 

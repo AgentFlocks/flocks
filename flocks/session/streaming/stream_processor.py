@@ -591,7 +591,7 @@ class StreamProcessor:
             from flocks.hooks.pipeline import HookPipeline
             hook_ctx = await HookPipeline.run_tool_before({
                 "sessionID": self.session_id,
-                "workspace": self.workspace_dir,
+                "workspace": self._workspace_dir,
                 "agent": self.agent.name,
                 "tool": {
                     "name": tool_name,
@@ -748,7 +748,7 @@ class StreamProcessor:
                 from flocks.hooks.pipeline import HookPipeline
                 hook_ctx = await HookPipeline.run_tool_after({
                     "sessionID": self.session_id,
-                    "workspace": self.workspace_dir,
+                    "workspace": self._workspace_dir,
                     "agent": self.agent.name,
                     "tool": {
                         "name": tool_name,

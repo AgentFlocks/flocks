@@ -415,7 +415,7 @@ else:
 
 `cdp-direct` 必须保留用户原有的 tab 不受影响。
 
-### 11. 迭代与 skill 沉淀
+### 11.  skill 集成
 
 将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
 
