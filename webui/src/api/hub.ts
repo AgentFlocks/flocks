@@ -1,6 +1,6 @@
 import client from './client';
 
-export type HubPluginType = 'skill' | 'agent' | 'tool' | 'workflow';
+export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow';
 export type HubPluginState =
   | 'available'
   | 'installed'

@@ -193,7 +193,14 @@ async def route_update_device(device_id: str, body: DeviceIntegrationUpdate):
         verify_ssl=new_ssl,
         db_fields=new_fields,
     )
-    await sync_service_tool_state(row["service_id"])
+    # Recompute ``service_id`` from the row's ``storage_key`` instead of
+    # trusting the stored column. Rows created before the descriptor-
+    # aware ``storage_key_to_service_id`` fix may carry a too-greedy
+    # value (e.g. ``onesig`` instead of ``onesig_v2_5_3_D20250710_api``);
+    # using the column directly would route this sync to the wrong key
+    # bucket and leave ``api_services[storage_key].enabled`` stale,
+    # which in turn keeps tools wrongly exposed to the LLM.
+    await sync_service_tool_state(storage_key_to_service_id(row["storage_key"]))
     return await route_get_device(device_id)
 
 
@@ -202,11 +209,13 @@ async def route_delete_device(device_id: str):
     row = await fetch_device(device_id)
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
-    service_id: str = row["service_id"]
     # Capture storage_key BEFORE deletion: once the row is gone the DB query
     # inside sync_service_tool_state can no longer see it, so if this was the
     # last instance for that storage_key the tool would never get disabled.
     storage_key: str = row["storage_key"]
+    # Always derive service_id from the live storage_key — see comment in
+    # ``route_update_device`` for why we don't trust the stored column.
+    service_id: str = storage_key_to_service_id(storage_key)
     db_fields: dict = json.loads(row["fields"] or "{}")
 
     delete_secrets(device_id, db_fields)

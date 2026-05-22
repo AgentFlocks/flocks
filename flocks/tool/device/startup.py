@@ -20,7 +20,43 @@ log = Log.create(service="tool.device.startup")
 async def device_startup() -> None:
     await ensure_default_group()
     await migrate_from_config()
+    await _heal_stale_service_ids()
     await _sync_all()
+
+
+async def _heal_stale_service_ids() -> None:
+    """Rewrite ``device_integrations.service_id`` rows that disagree with
+    the descriptor-aware ``storage_key_to_service_id``.
+
+    Rows written by older builds (or before the plugin's
+    ``_provider.yaml`` was installed) may carry an over-stripped value —
+    e.g. ``onesig`` instead of ``onesig_v2_5_3_D20250710_api`` for plugins
+    whose ``service_id`` already contains its own ``_v…`` token.
+
+    Self-healing once at startup keeps the live route handlers and the
+    sync loop honest without forcing the user to re-create each device.
+    """
+    try:
+        from flocks.tool.device.store import storage_key_to_service_id
+
+        async with Storage.connect(Storage.get_db_path()) as db:
+            cur = await db.execute("SELECT id, storage_key, service_id FROM device_integrations")
+            rows = await cur.fetchall()
+            updates: list[tuple[str, str]] = []
+            for row in rows:
+                derived = storage_key_to_service_id(row["storage_key"] or "")
+                if derived and derived != (row["service_id"] or ""):
+                    updates.append((derived, row["id"]))
+            for new_sid, dev_id in updates:
+                await db.execute(
+                    "UPDATE device_integrations SET service_id = ? WHERE id = ?",
+                    (new_sid, dev_id),
+                )
+            if updates:
+                await db.commit()
+                log.info("tool.device.startup.service_id_healed", {"count": len(updates)})
+    except Exception as exc:
+        log.warn("tool.device.startup.heal_failed", {"error": str(exc)})
 
 
 async def _sync_all() -> None:

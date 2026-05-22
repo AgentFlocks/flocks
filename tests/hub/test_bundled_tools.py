@@ -455,12 +455,50 @@ class TestDeleteApiServiceCascade:
         )
         await install_plugin("tool", "onesig_v2_5_3_D20250710")
 
-        plugin_id = _find_user_installed_tool_plugin_for("onesig_api_v2_5_3_D20250710")
-        assert plugin_id == "onesig_v2_5_3_D20250710"
+        result = _find_user_installed_tool_plugin_for("onesig_api_v2_5_3_D20250710")
+        # ``_find_user_installed_tool_plugin_for`` now returns
+        # ``(plugin_type, plugin_id)`` so the delete cascade can route
+        # uninstall to the right type (``tool`` or ``device``).
+        assert result == ("tool", "onesig_v2_5_3_D20250710")
 
     async def test_returns_none_when_storage_key_unknown(self, isolated_hub):
         from flocks.server.routes.provider import _find_user_installed_tool_plugin_for
         assert _find_user_installed_tool_plugin_for("nonexistent_v9_9_9") is None
+
+    async def test_finds_user_installed_device_plugin(self, isolated_hub):
+        """Devices (``integration_type: device``) should resolve back as
+        ``("device", id)`` so the api-service delete cascade uninstalls
+        them through the device-typed Hub flow.
+        """
+        from flocks.server.routes.provider import _find_user_installed_tool_plugin_for
+
+        bundled_plugin = _write_bundled_tool(
+            isolated_hub["bundled"],
+            plugin_id="dev_under_device",
+            service_id="device_under_test_api",
+            version="1.0.0",
+            group="device",
+        )
+        # Mark it as a device plugin via the provider metadata.
+        provider_yaml = bundled_plugin / "_provider.yaml"
+        provider_yaml.write_text(
+            yaml.safe_dump(
+                {
+                    "name": "dev_under_device",
+                    "service_id": "device_under_test_api",
+                    "version": "1.0.0",
+                    "integration_type": "device",
+                    "description": "device fixture",
+                },
+                allow_unicode=True,
+            ),
+            encoding="utf-8",
+        )
+
+        await install_plugin("device", "dev_under_device")
+
+        result = _find_user_installed_tool_plugin_for("device_under_test_api_v1_0_0")
+        assert result == ("device", "dev_under_device")
 
     async def test_returns_none_for_project_level_plugin(self, isolated_hub, monkeypatch):
         """Project-level plugins (under ``<cwd>/.flocks/plugins/``) are

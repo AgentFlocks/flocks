@@ -1205,16 +1205,21 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[str]:
-    """Return the ``installed.json`` plugin id that backs *storage_key*.
+def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[tuple[str, str]]:
+    """Return ``(plugin_type, plugin_id)`` backing *storage_key*, if any.
 
     Walks the discovered ``ApiServiceDescriptor`` set, finds the
     ``_provider.yaml`` matching *storage_key*, and resolves it to the
-    enclosing user-installed plugin directory id. Returns ``None`` if
-    no descriptor matches OR the descriptor lives outside
-    ``~/.flocks/plugins/`` (project-level / built-in installs are kept
-    intact — only user-level installs cascade).
+    enclosing user-installed plugin directory id. ``plugin_type`` is
+    ``"device"`` when the descriptor lives under ``<tools>/device/`` or
+    when ``_provider.yaml`` declares ``integration_type: device`` —
+    otherwise ``"tool"``. Returns ``None`` if no descriptor matches OR
+    the descriptor lives outside ``~/.flocks/plugins/`` (project-level
+    / built-in installs are kept intact — only user-level installs
+    cascade).
     """
+    import yaml
+
     from flocks.config.api_versioning import discover_api_service_descriptors
     from flocks.hub import local as hub_local
 
@@ -1228,13 +1233,34 @@ def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[str]:
         except ValueError:
             return None  # Not under the user-level install root.
         plugin_id = plugin_dir.name
+
+        plugin_type = "tool"
+        if plugin_dir.parent.name == "device":
+            plugin_type = "device"
+        else:
+            try:
+                provider_yaml = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
+                if (
+                    isinstance(provider_yaml, dict)
+                    and str(provider_yaml.get("integration_type") or "").strip().lower() == "device"
+                ):
+                    plugin_type = "device"
+            except Exception:
+                pass
+
         # Confirm the catalog tracks this as an installed plugin so
         # we never try to "uninstall" a stray on-disk dir.
-        record = hub_local.get_record("tool", plugin_id)
+        record = hub_local.get_record(plugin_type, plugin_id)
         if record is not None:
-            return plugin_id
-        if hub_local.infer_local_install("tool", plugin_id) is not None:
-            return plugin_id
+            return (plugin_type, plugin_id)
+        # Fall back to the opposite type when the record was saved
+        # before ``device`` became a first-class Hub type.
+        legacy_type = "tool" if plugin_type == "device" else "device"
+        legacy_record = hub_local.get_record(legacy_type, plugin_id)
+        if legacy_record is not None:
+            return (legacy_type, plugin_id)
+        if hub_local.infer_local_install(plugin_type, plugin_id) is not None:
+            return (plugin_type, plugin_id)
     return None
 
 
@@ -1273,7 +1299,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
         # ``remove_api_service`` runs, ``discover_api_service_descriptors``
         # still works (it scans ``_provider.yaml`` on disk, not config),
         # but doing this first keeps the order easy to reason about.
-        backing_plugin_id = _find_user_installed_tool_plugin_for(provider_id)
+        backing_plugin = _find_user_installed_tool_plugin_for(provider_id)
 
         removed_config = ConfigWriter.remove_api_service(provider_id)
 
@@ -1290,19 +1316,23 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
         matched_count = _set_api_service_tools_enabled(provider_id, False)
 
         uninstalled_plugin = False
-        if backing_plugin_id:
+        if backing_plugin is not None:
+            backing_plugin_type, backing_plugin_id = backing_plugin
             try:
                 # ``uninstall_plugin`` itself calls
                 # ``_cleanup_orphan_api_services`` for the plugin's
                 # storage_keys, but ``provider_id`` is already gone from
                 # config at this point so that pass is a no-op for it.
-                uninstalled_plugin = await uninstall_plugin("tool", backing_plugin_id)
+                uninstalled_plugin = await uninstall_plugin(backing_plugin_type, backing_plugin_id)
             except Exception as exc:  # pragma: no cover - defensive
                 log.warning("api_service.delete.plugin_uninstall_failed", {
                     "provider_id": provider_id,
+                    "plugin_type": backing_plugin_type,
                     "plugin_id": backing_plugin_id,
                     "error": str(exc),
                 })
+        else:
+            backing_plugin_id = None
 
         if not removed_config and not deleted_secret and not uninstalled_plugin:
             raise HTTPException(status_code=404, detail="API service not found")

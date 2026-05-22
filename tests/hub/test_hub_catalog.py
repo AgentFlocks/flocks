@@ -40,7 +40,10 @@ def isolated_hub_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_bundled_hub_catalog_loads():
     entries = list_catalog()
     assert entries
-    assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "workflow"}
+    # ``device`` is a first-class Hub type alongside skill/agent/tool/workflow:
+    # entries with ``integration_type: device`` in ``_provider.yaml`` surface
+    # under ``type=device`` instead of ``type=tool``.
+    assert {entry.type for entry in entries} >= {"skill", "agent", "tool", "device", "workflow"}
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -67,7 +70,10 @@ def test_project_builtin_plugins_are_listed_as_installed():
     assert by_key[("skill", "tdp-use")].native is True
     assert by_key[("agent", "ndr-analyst")].state == "installed"
     assert by_key[("workflow", "tdp_alert_triage")].state == "installed"
-    assert by_key[("tool", "tdp_v3_3_10")].state == "installed"
+    # ``tdp_v3_3_10`` declares ``integration_type: device`` in
+    # ``_provider.yaml``, so it surfaces as a ``device`` plugin (not
+    # ``tool``) in the Hub catalog.
+    assert by_key[("device", "tdp_v3_3_10")].state == "installed"
 
     manifest = load_manifest("skill", "tdp-use")
     assert manifest.id == "tdp-use"

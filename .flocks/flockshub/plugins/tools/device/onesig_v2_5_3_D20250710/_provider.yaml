@@ -2,6 +2,7 @@ name: onesig_v2_5_3_D20250710
 vendor: threatbook
 service_id: onesig_v2_5_3_D20250710_api
 version: "2.5.3 D20250710"
+integration_type: device
 description: >
   OneSIG (Secure Internet Gateway) Web API service — *older v2.5 firmware*
   variant. Authentication still uses cookie session, but the login endpoint

@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-PluginType = Literal["skill", "agent", "tool", "workflow"]
+PluginType = Literal["skill", "agent", "tool", "device", "workflow"]
 PluginState = Literal[
     "available",
     "installed",

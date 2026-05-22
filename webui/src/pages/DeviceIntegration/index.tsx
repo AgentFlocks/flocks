@@ -362,6 +362,16 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
   const originalMasked = useRef<Record<string, string>>({});
 
   const serviceId = device?.service_id ?? template?.id ?? '';
+  // ``storage_key`` is the versioned, unambiguous identifier
+  // (e.g. ``onesig_api_v2_5_3_D20260321``) that tool registrations
+  // surface as ``ToolInfoResponse.source_name``. Use it directly for
+  // tool filtering so two devices that happen to share a service_id
+  // prefix (``onesig`` vs ``onesig_pro``) — or a plugin whose
+  // ``service_id`` already contains a ``_v…`` token — never bleed each
+  // other's tools into the device-edit panel. ``template?.id`` is also
+  // the storage_key (set by the wizard), so the create-mode form
+  // resolves to the right key too.
+  const storageKey = device?.storage_key ?? template?.id ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
 
   useEffect(() => {
@@ -391,12 +401,13 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
 
     toolAPI.list()
       .then((res) => {
+        // Match against the device's storage_key exactly. The tool
+        // listing endpoint sets ``source_name = tool.provider``, which
+        // in turn equals the plugin's storage_key (see
+        // ``flocks/tool/tool_loader.py``). An exact comparison keeps
+        // multi-version installs of the same product cleanly isolated.
         const matched = (res.data || []).filter(
-          (t) => t.source_name && (
-            t.source_name === serviceId ||
-            t.source_name.startsWith(serviceId + '_') ||
-            serviceId.startsWith(t.source_name)
-          )
+          (t) => !!storageKey && t.source_name === storageKey,
         );
         setServiceTools(matched);
         const initEnabled: Record<string, boolean> = {};
@@ -404,7 +415,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
         setToolEnabled(initEnabled);
       })
       .catch(() => {});
-  }, [device, serviceId]);
+  }, [device, serviceId, storageKey]);
 
   const handleSave = async () => {
     if (!name.trim()) { toast.error('请填写设备名称'); return; }

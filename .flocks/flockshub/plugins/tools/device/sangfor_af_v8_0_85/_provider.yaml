@@ -2,6 +2,7 @@ name: sangfor_af
 vendor: sangfor
 service_id: sangfor_af
 version: "8.0.85"
+integration_type: device
 description: >
   Sangfor AF (Application Firewall) v8.0.85 REST API service.
   Uses session-based cookie authentication: call login to obtain

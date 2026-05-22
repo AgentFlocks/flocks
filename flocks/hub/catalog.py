@@ -105,6 +105,14 @@ def manifest_path(plugin_type: PluginType, plugin_id: str) -> Path:
     direct = root / "plugins" / f"{plugin_type}s" / plugin_id / "manifest.json"
     if direct.is_file():
         return direct
+    # Device plugins ship inside ``plugins/tools/device/<id>/`` — there
+    # is no ``plugins/devices/`` directory. Try the canonical tool path
+    # before falling back to the index lookup so on-disk manifest files
+    # (when present) are still picked up.
+    if plugin_type == "device":
+        tool_direct = root / "plugins" / "tools" / "device" / plugin_id / "manifest.json"
+        if tool_direct.is_file():
+            return tool_direct
     manifest_rel = _manifest_path_lookup().get((plugin_type, plugin_id))
     if manifest_rel:
         path = (root / manifest_rel).resolve()
@@ -331,6 +339,14 @@ def _tool_tags(plugin_id: str, description: str) -> list[str]:
     return _safe_tags(inferred)
 
 
+def _provider_integration_type(provider: dict[str, Any]) -> Optional[str]:
+    value = provider.get("integration_type")
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().lower()
+    return cleaned or None
+
+
 def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
     if not _has_direct_tool_payload(root):
         return None
@@ -350,8 +366,18 @@ def _tool_manifest(plugin_id: str, root: Path) -> Optional[HubPluginManifest]:
         for path in sorted(root.iterdir(), key=lambda item: item.name)
         if path.is_file() and path.suffix in {".yaml", ".yml", ".py"}
     ]
+    # ``integration_type: device`` in ``_provider.yaml`` upgrades the
+    # plugin to the first-class ``device`` Hub type. This drives:
+    #   * the marketplace "Device" tab (filterable as ``type=device``),
+    #   * the standard install path ``<plugins>/tools/device/<id>/``
+    #     (resolved by ``hub.local.install_root("device", ...)``),
+    #   * the device-access wizard, which still consumes
+    #     ``api_services[storage_key]`` and filters by ``integration_type``
+    #     so devices keep showing up there too.
+    integration_type = _provider_integration_type(provider)
+    plugin_type: PluginType = "device" if integration_type == "device" else "tool"
     return _base_manifest(
-        plugin_type="tool",
+        plugin_type=plugin_type,
         plugin_id=plugin_id,
         name=str(provider.get("name") or first_tool.get("name") or plugin_id),
         description=description,
@@ -386,8 +412,12 @@ def _system_plugin_roots() -> dict[tuple[PluginType, str], Path]:
     tools_root = local.install_root("tool", "project")
     if tools_root.is_dir():
         for directory in sorted((path for path in tools_root.rglob("*") if path.is_dir()), key=lambda item: item.as_posix()):
-            if _tool_manifest(directory.name, directory):
-                roots[("tool", directory.name)] = directory
+            manifest = _tool_manifest(directory.name, directory)
+            if manifest:
+                # The manifest type already reflects ``integration_type:
+                # device`` (see :func:`_tool_manifest`), so we just defer
+                # to it instead of hardcoding ``"tool"``.
+                roots[(manifest.type, directory.name)] = directory
 
     return roots
 
@@ -426,12 +456,15 @@ def _bundled_tool_roots() -> dict[tuple[PluginType, str], Path]:
                 continue
             if directory.parent == tools_root and name in {"api", "device", "python", "mcp", "generated"}:
                 continue
-            if not _tool_manifest(name, directory):
+            manifest = _tool_manifest(name, directory)
+            if not manifest:
                 continue
             # First-wins: keep the highest-priority bundled root entry
             # and let later collisions fall through silently — same
-            # contract as ``_system_plugin_roots``.
-            roots.setdefault(("tool", name), directory)
+            # contract as ``_system_plugin_roots``. ``manifest.type``
+            # honours ``integration_type: device`` so device plugins
+            # surface with ``("device", id)`` keys.
+            roots.setdefault((manifest.type, name), directory)
     return roots
 
 
@@ -449,7 +482,10 @@ def system_plugin_root(plugin_type: PluginType, plugin_id: str) -> Optional[Path
     installed = _system_plugin_roots().get((plugin_type, plugin_id))
     if installed is not None:
         return installed
-    if plugin_type == "tool":
+    # ``tool`` and ``device`` plugins are both materialised as bundled
+    # flockshub directories under ``plugins/tools/`` — the device variant
+    # just sets ``integration_type: device`` in ``_provider.yaml``.
+    if plugin_type in {"tool", "device"}:
         return _bundled_tool_roots().get((plugin_type, plugin_id))
     return None
 
@@ -468,8 +504,16 @@ def _manifest_for_system_root(plugin_type: PluginType, plugin_id: str, root: Pat
         return _agent_manifest(plugin_id, root)
     if plugin_type == "workflow":
         return _workflow_manifest(plugin_id, root)
-    if plugin_type == "tool":
-        return _tool_manifest(plugin_id, root)
+    if plugin_type in {"tool", "device"}:
+        # ``_tool_manifest`` infers the final ``device`` vs ``tool``
+        # split from ``_provider.yaml``'s ``integration_type``. Callers
+        # that already know the expected type still pass through here
+        # so we can confirm the inferred type matches the requested one
+        # (e.g. avoid returning a device manifest for a tool query).
+        manifest = _tool_manifest(plugin_id, root)
+        if manifest and manifest.type != plugin_type:
+            return None
+        return manifest
     return None
 
 

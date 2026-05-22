@@ -51,9 +51,58 @@ def _bump_revision() -> None:
 # Key derivation
 # ---------------------------------------------------------------------------
 
+# Matches the trailing ``_v<token>`` segment added by
+# :func:`flocks.config.api_versioning.derive_storage_key`. Kept anchored to the
+# end of the string so we only strip the *last* version suffix when falling
+# back without descriptor data.
+_TRAILING_VERSION_SUFFIX = re.compile(r"_v[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$")
+
+
 def storage_key_to_service_id(storage_key: str) -> str:
-    """Strip the version suffix: ``sangfor_af_v8_0_106`` → ``sangfor_af``."""
-    return re.sub(r"_v[\w.]+$", "", storage_key, flags=re.IGNORECASE)
+    """Recover the bare ``service_id`` from a ``derive_storage_key`` result.
+
+    Examples::
+
+        sangfor_af_v8_0_106                          → sangfor_af
+        onesig_api_v2_5_3_D20260321                  → onesig_api
+        onesig_v2_5_3_D20250710_api_v2_5_3_D20250710 → onesig_v2_5_3_D20250710_api
+
+    The last example is the tricky one: when the plugin author has baked
+    a version into ``service_id`` itself (so the ``_provider.yaml``
+    declares ``service_id: onesig_v2_5_3_D20250710_api``), the resulting
+    storage_key contains *two* ``_v…`` segments. A naive
+    ``re.sub(r"_v[\\w.]+$", "")`` is greedy from the leftmost ``_v`` and
+    would strip both segments back to ``onesig``, which then fails to
+    resolve in :func:`api_service_schema._load_provider_yaml_metadata`
+    (no descriptor has that bare service_id) — leaving the device-add
+    form blank.
+
+    To stay correct in that case we consult the descriptor registry
+    first (an exact ``storage_key → service_id`` mapping, populated by
+    ``discover_api_service_descriptors``), and only fall back to the
+    regex heuristic when no descriptor matches *and* the input still
+    carries a single trailing ``_v…`` suffix.
+    """
+    if not storage_key:
+        return storage_key
+    # Prefer the descriptor-driven mapping so we honour whatever
+    # ``service_id`` the plugin's ``_provider.yaml`` declared. This also
+    # handles the corner case where the plugin's ``service_id`` already
+    # contains its own ``_v…`` token and the naive regex would
+    # over-strip back to a prefix that nothing maps to.
+    try:
+        from flocks.config.api_versioning import discover_api_service_descriptors
+
+        for descriptor in discover_api_service_descriptors():
+            if descriptor.storage_key == storage_key:
+                return descriptor.service_id
+    except Exception:  # pragma: no cover - defensive (e.g. test isolation)
+        pass
+
+    # Fallback: anchored, non-greedy match against the trailing ``_v…``
+    # segment. Keeps backward compat for storage keys whose plugin is
+    # missing from the descriptor cache (e.g. dangling config rows).
+    return _TRAILING_VERSION_SUFFIX.sub("", storage_key)
 
 
 def _now_ms() -> int:
@@ -67,12 +116,19 @@ def _now_ms() -> int:
 def row_to_device(row: aiosqlite.Row) -> DeviceIntegration:
     raw_fields: Dict[str, str] = json.loads(row["fields"] or "{}")
     display, has_value = mask_for_display(raw_fields)
+    # Recompute service_id from storage_key so historically-wrong rows
+    # (created before ``storage_key_to_service_id`` learned to consult
+    # the descriptor cache) self-heal on read. The DB column stays as a
+    # write-side hint; the canonical mapping is always the descriptor's
+    # ``service_id`` for the row's ``storage_key``.
+    storage_key = row["storage_key"]
+    derived_service_id = storage_key_to_service_id(storage_key) if storage_key else row["service_id"]
     return DeviceIntegration(
         id=row["id"],
         group_id=row["group_id"] or DEFAULT_GROUP_ID,
         name=row["name"],
-        storage_key=row["storage_key"],
-        service_id=row["service_id"],
+        storage_key=storage_key,
+        service_id=derived_service_id or row["service_id"],
         enabled=bool(row["enabled"]),
         verify_ssl=bool(row["verify_ssl"]),
         fields=display,
