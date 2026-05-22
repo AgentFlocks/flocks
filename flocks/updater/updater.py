@@ -1015,6 +1015,17 @@ def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str
     return "tar.gz"
 
 
+def _console_manifest_display_version(data: dict[str, Any]) -> str:
+    component_version = str(data.get("flockspro_component_version") or "").strip()
+    if component_version:
+        return component_version
+    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
+    if display_version:
+        return display_version
+    compare_version = str(data.get("compare_version") or "").strip()
+    return f"pro-v{compare_version}" if compare_version else ""
+
+
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
     return f"flocks-{latest_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
 
@@ -1137,7 +1148,7 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
         if datetime.now(timezone.utc) < frozen_until:
             raise ValueError("console manifest channel frozen_until not reached")
 
-    latest = str(data.get("compare_version") or data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
+    latest = _console_manifest_display_version(data)
     if not latest:
         raise ValueError("manifest 响应缺少 compare_version/display_version")
     bundle_url = str(
@@ -1151,7 +1162,7 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
         raise ValueError("manifest 响应缺少 bundle_url")
     bundle_format = _archive_format_for_url(bundle_url, str(data.get("bundle_format") or data.get("archive_format") or ""))
     return ConsoleManifestRelease(
-        version=latest.lstrip("v"),
+        version=latest,
         release_notes=data.get("release_notes") or data.get("notes"),
         release_url=data.get("release_url") or bundle_url,
         bundle_url=bundle_url,
@@ -1235,7 +1246,9 @@ def _token_for_source(source: str, token: str | None, gitee_token: str | None) -
 
 def _parse_version(v: str) -> tuple[int, ...]:
     parts: list[int] = []
-    for seg in v.lstrip("v").split("."):
+    normalized = v.strip().lower().removeprefix("refs/tags/").removeprefix("pro-").removeprefix("v")
+    normalized = normalized.replace("-", ".").replace("_", ".")
+    for seg in normalized.split("."):
         m = re.match(r"(\d+)", seg)
         if not m:
             m = re.search(r"(\d+)", seg)
@@ -1253,7 +1266,7 @@ def _pick_best_tag(names: list[str]) -> str:
     if not candidates:
         return ""
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1].lstrip("v")
+    return candidates[0][1].removeprefix("v")
 
 
 async def _latest_tag_from_git_remote_async(
@@ -2180,6 +2193,25 @@ def _read_pyproject_version() -> str:
     return ""
 
 
+def _read_pro_bundle_installed_version() -> str:
+    marker = _flocks_root() / "run" / "pro-bundle-installed.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    component_version = str(payload.get("flockspro_component_version") or "").strip()
+    if component_version:
+        return component_version
+    installed_version = str(payload.get("installed_version") or "").strip()
+    if installed_version.startswith(("pro-v", "pro-V")):
+        return installed_version
+    if installed_version:
+        return f"pro-{installed_version}" if installed_version.startswith(("v", "V")) else f"pro-v{installed_version}"
+    return ""
+
+
 def get_current_version() -> str:
     """
     Return the running version.
@@ -2255,7 +2287,6 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
     """Return version comparison info without performing any upgrade."""
     from flocks.updater.deploy import detect_deploy_mode
 
-    current = get_current_version()
     mode = detect_deploy_mode()
     ucfg = await _get_updater_config()
     effective_sources = await _resolve_sources_for_edition(ucfg.sources)
@@ -2264,6 +2295,9 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
         region=region,
         locale=locale,
     )
+    current = _read_pro_bundle_installed_version() if profile.sources == ["console-manifest"] else get_current_version()
+    if not current:
+        current = get_current_version()
 
     if not ucfg.enabled:
         return VersionInfo(
@@ -2341,6 +2375,21 @@ def _absolute_console_url(url: str) -> str:
     return f"{manifest_base}/{url}"
 
 
+def _ensure_pro_heartbeat_env_default() -> None:
+    """Default Pro heartbeat endpoint to console when env is unset."""
+    existing = os.getenv("FLOCKSPRO_HEARTBEAT_URL", "").strip()
+    if existing:
+        return
+    console_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").strip().rstrip("/")
+    if not console_base:
+        return
+    if not console_base.startswith(("http://", "https://")):
+        console_base = f"https://{console_base}"
+    heartbeat_url = f"{console_base}/v1/heartbeats"
+    os.environ["FLOCKSPRO_HEARTBEAT_URL"] = heartbeat_url
+    log.info("updater.pro_bundle.heartbeat_url.defaulted", {"heartbeat_url": heartbeat_url})
+
+
 async def perform_pro_bundle_install(
     *,
     restart: bool = True,
@@ -2367,13 +2416,22 @@ async def perform_pro_bundle_install(
             yield UpdateProgress(stage="error", message="Flocks Pro bundle must be a zip archive.", success=False)
             return
 
-        yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...")
+        bundle_url = _absolute_console_url(manifest_info.bundle_url)
+        bundle_filename = _download_filename_for_url(
+            bundle_url,
+            f"flockspro-bundle-{Path(manifest_info.version).name}.zip",
+        )
+        yield UpdateProgress(
+            stage="fetching",
+            message="Downloading Flocks Pro bundle...",
+            bundle_filename=bundle_filename,
+        )
         token = await _load_console_session_token()
         archive_path = await _download_console_bundle(
-            _absolute_console_url(manifest_info.bundle_url),
+            bundle_url,
             token,
             tmp_dir,
-            _archive_filename_for_format(manifest_info.version, "zip"),
+            bundle_filename,
         )
         await asyncio.to_thread(_verify_download_sha256, archive_path, manifest_info.bundle_sha256)
 
@@ -2395,7 +2453,11 @@ async def perform_pro_bundle_install(
             )
             return
 
-        yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...")
+        yield UpdateProgress(
+            stage="syncing",
+            message="Installing Flocks Pro component...",
+            pro_component_filename=pro_wheel_path.name,
+        )
         python_path = _venv_python_path(install_root)
         install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
         code, _, err = await _run_async(
@@ -2435,6 +2497,7 @@ async def perform_pro_bundle_install(
             return
 
         def _restart_process() -> None:
+            _ensure_pro_heartbeat_env_default()
             log.info("updater.pro_bundle.restart.spawn", {"argv": restart_argv})
             try:
                 _spawn_detached_process(

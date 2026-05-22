@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, X, XCircle } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -254,6 +254,7 @@ export default function FlocksproUpgradePage() {
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
     loadDismissedRejectedRequestIds,
   );
+  const autoSyncTriggeredRef = useRef(false);
   const consoleAccountName = consoleLoginStatus?.account_name?.trim() ?? '';
   const currentConsoleAccountKey = consoleLoginStatus?.logged_in ? consoleAccountName.toLowerCase() : '';
   const isProPackageInstalled = proPackageStatus?.installed === true;
@@ -591,7 +592,7 @@ export default function FlocksproUpgradePage() {
     }
   };
 
-  const refreshInstalledStatus = async () => {
+  const refreshInstalledStatus = useCallback(async () => {
     setRefreshingInstalled(true);
     setRequestError(null);
     try {
@@ -607,7 +608,24 @@ export default function FlocksproUpgradePage() {
     } finally {
       setRefreshingInstalled(false);
     }
-  };
+  }, [refreshRequests, t]);
+
+  useEffect(() => {
+    if (autoSyncTriggeredRef.current) {
+      return;
+    }
+    if (!isProPackageInstalled || isProRuntimeActive || !currentIssuedRequest || refreshingInstalled) {
+      return;
+    }
+    autoSyncTriggeredRef.current = true;
+    void refreshInstalledStatus();
+  }, [
+    currentIssuedRequest,
+    isProPackageInstalled,
+    isProRuntimeActive,
+    refreshInstalledStatus,
+    refreshingInstalled,
+  ]);
 
   const cancelActiveRequest = async () => {
     if (!activeRequest) {
@@ -1262,6 +1280,14 @@ export default function FlocksproUpgradePage() {
                         <div className={isError ? 'text-xs text-red-600' : 'text-xs text-gray-500'}>
                           {step.message}
                         </div>
+                        {step.bundle_filename && (
+                          <div className="mt-1 space-y-0.5 text-xs text-slate-500">
+                            <div className="break-all">
+                              <span className="font-medium text-slate-600">{t('upgrade.bundleFilename')}:</span>{' '}
+                              {step.bundle_filename}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

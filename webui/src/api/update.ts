@@ -11,6 +11,7 @@ export type DeployMode = 'docker' | 'source';
 export interface VersionInfo {
   current_version: string;
   latest_version: string | null;
+  edition?: 'flocks' | 'flockspro';
   has_update: boolean;
   release_notes: string | null;
   release_url: string | null;
@@ -23,6 +24,8 @@ export interface UpdateProgress {
   stage: UpdateStage;
   message: string;
   success: boolean | null;
+  bundle_filename?: string | null;
+  pro_component_filename?: string | null;
 }
 
 // ======================================================================

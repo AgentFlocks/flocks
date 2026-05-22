@@ -21,6 +21,7 @@ UpdateStage = Literal[
 class VersionInfo(BaseModel):
     current_version: str
     latest_version: str | None = None
+    edition: Literal["flocks", "flockspro"] = "flocks"
     has_update: bool = False
     release_notes: str | None = None
     release_url: str | None = None
@@ -37,3 +38,5 @@ class UpdateProgress(BaseModel):
     stage: UpdateStage
     message: str
     success: bool | None = None
+    bundle_filename: str | None = None
+    pro_component_filename: str | None = None

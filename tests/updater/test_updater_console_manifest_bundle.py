@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,7 +45,7 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
     monkeypatch.setattr(updater.httpx, "AsyncClient", lambda timeout=15: _Client())
     result = await updater._fetch_console_manifest_release()
     assert result == (
-        "2026.5.10",
+        "pro-v2026-5-10",
         "bundle release",
         "https://cdn.example.com/flockspro-bundle-v2026.5.10.tar.gz",
         None,
@@ -53,6 +54,47 @@ async def test_fetch_console_manifest_release_uses_bundle_url(monkeypatch: pytes
     info = await updater._fetch_console_manifest_release_info()
     assert info.bundle_sha256 == "abc123"
     assert info.bundle_format == "tar.gz"
+
+
+@pytest.mark.asyncio
+async def test_check_update_uses_pro_marker_and_component_version(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    marker = tmp_path / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(
+        """{
+  "installed_version": "v2026.5.23",
+  "flockspro_component_version": "pro-v2026-05-23"
+}""",
+        encoding="utf-8",
+    )
+
+    async def _fake_sources(_sources):
+        return ["console-manifest"]
+
+    async def _fake_manifest_info():
+        return updater.ConsoleManifestRelease(
+            version="pro-v2026-05-23",
+            release_notes="latest pro",
+            release_url="https://cdn.example.com/flockspro-bundle-pro-v2026-05-23.zip",
+            bundle_url="https://cdn.example.com/flockspro-bundle-pro-v2026-05-23.zip",
+            bundle_sha256=None,
+            bundle_format="zip",
+            manifest={"flockspro_component_version": "pro-v2026-05-23"},
+        )
+
+    async def _fake_config():
+        return SimpleNamespace(enabled=True, sources=["github"], repo="", token=None)
+
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+    monkeypatch.setattr("flocks.updater.deploy.detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(updater, "_get_updater_config", _fake_config)
+    monkeypatch.setattr(updater, "_resolve_sources_for_edition", _fake_sources)
+    monkeypatch.setattr(updater, "_fetch_console_manifest_release_info", _fake_manifest_info)
+
+    info = await updater.check_update()
+    assert info.current_version == "pro-v2026-05-23"
+    assert info.latest_version == "pro-v2026-05-23"
+    assert info.has_update is False
 
 
 @pytest.mark.asyncio

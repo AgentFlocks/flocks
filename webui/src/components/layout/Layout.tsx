@@ -46,6 +46,12 @@ function formatProVersion(version?: string | null): string | null {
   return normalized ? `pro-v${normalized}` : null;
 }
 
+function formatUpdateVersion(version?: string | null): string | null {
+  const raw = (version || '').trim();
+  if (!raw) return null;
+  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+}
+
 function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
   if (!info || info.error || !releaseNotes) return null;
@@ -57,7 +63,7 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
   return {
     id: `whats-new-${version}`,
     kind: 'whats_new',
-    title: isZh ? `Flocks v${version} 更新内容` : `What's new in Flocks v${version}`,
+    title: isZh ? `Flocks ${formatUpdateVersion(version)} 更新内容` : `What's new in Flocks ${formatUpdateVersion(version)}`,
     summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
     body: releaseNotes,
     highlights: [],
@@ -555,7 +561,7 @@ export default function Layout() {
                   >
                     <div className="flex items-center gap-2 text-sm">
                       <span className="min-w-0 flex-1 truncate font-semibold text-amber-900">
-                        {t('newVersion')} {latestVersion ? `v${latestVersion}` : ''}
+                        {t('newVersion')} {formatUpdateVersion(latestVersion) || ''}
                       </span>
                       <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm">
                         {t('updateNow')}
@@ -586,7 +592,7 @@ export default function Layout() {
             {collapsed && (
               <button
                 onClick={() => setShowUpdate(true)}
-                title={hasUpdate ? t('hasNewVersion', { version: latestVersion ? `v${latestVersion}` : '' }) : t('versionInfo')}
+                title={hasUpdate ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
                 className={`relative rounded-xl p-2 transition-colors ${
                   hasUpdate
                     ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'

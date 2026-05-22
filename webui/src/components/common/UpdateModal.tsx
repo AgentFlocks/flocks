@@ -26,6 +26,12 @@ const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
+function formatUpdateVersion(version?: string | null): string {
+  const raw = (version || '').trim();
+  if (!raw) return '—';
+  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+}
+
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
   onClose: () => void;
@@ -202,7 +208,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
                     </div>
                     {info?.latest_version && (
                       <div className="mt-1 text-2xl font-bold text-amber-900">
-                        v{info.latest_version}
+                        {formatUpdateVersion(info.latest_version)}
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
@@ -276,7 +282,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
                   {info?.has_update ? t('newVersionTitle') : t('title')}
                 </div>
                 {info?.latest_version && (
-                  <div className="text-xs text-amber-700">v{info.latest_version}</div>
+                  <div className="text-xs text-amber-700">{formatUpdateVersion(info.latest_version)}</div>
                 )}
               </div>
             </div>
@@ -292,7 +298,9 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
             {info?.has_update ? (
               <>
                 <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
-                  <div className="font-medium">{t('confirmUpgrade', { version: info.latest_version })}</div>
+                  <div className="font-medium">
+                    {t('confirmUpgrade', { version: formatUpdateVersion(info.latest_version) })}
+                  </div>
                   <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
                 </div>
                 {info.update_allowed === false && (
@@ -318,7 +326,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('currentVersion')}</span>
-              <span className="font-medium text-gray-700">{info ? `v${info.current_version}` : '—'}</span>
+              <span className="font-medium text-gray-700">{formatUpdateVersion(info?.current_version)}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('latestVersion')}</span>
@@ -327,7 +335,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
                   <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
                 ) : info?.latest_version ? (
                   <>
-                    <span className="font-medium text-gray-700">v{info.latest_version}</span>
+                    <span className="font-medium text-gray-700">{formatUpdateVersion(info.latest_version)}</span>
                     {info.has_update ? (
                       <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">{t('hasUpdate')}</span>
                     ) : (
