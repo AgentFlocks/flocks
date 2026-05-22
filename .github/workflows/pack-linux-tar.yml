@@ -1,0 +1,22 @@
+name: Pack Linux tar
+
+on:
+  push:
+    branches:
+      - feat/auth_hook2
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create tar archive
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/${GITHUB_SHA}.tar.gz"
+          mkdir -p dist
+          curl -fSL "${ARCHIVE_URL}" -o "dist/flocks-${SHORT_SHA}.tar.gz"
