@@ -16,10 +16,16 @@ jobs:
 
       - name: Create tar archive
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
+          OSS_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          ARCHIVE_NAME="flocks-${OSS_VERSION#v}"
           ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/${GITHUB_SHA}.tar.gz"
           mkdir -p dist
-          curl -fSL "${ARCHIVE_URL}" -o "dist/flocks-${SHORT_SHA}.tar.gz"
+          curl -fSL "${ARCHIVE_URL}" -o "dist/source.tar.gz"
+          mkdir -p dist/source
+          tar -xzf "dist/source.tar.gz" -C "dist/source"
+          SOURCE_ROOT="$(find dist/source -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+          mv "${SOURCE_ROOT}" "dist/${ARCHIVE_NAME}"
+          tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist "${ARCHIVE_NAME}"
 
       - name: Upload tar archive
         uses: actions/upload-artifact@v7
