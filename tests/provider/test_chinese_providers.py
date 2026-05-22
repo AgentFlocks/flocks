@@ -238,10 +238,18 @@ class TestCuratedCatalogModels:
             "qwen3.6-plus",
             "qwen3-max",
             "kimi-k2.6",
+            "deepseek-v4-flash",
         }
 
         qwen = next(m for m in models if m.id == "qwen3.6-plus")
         assert qwen.capabilities.supports_vision is True
+
+        flash_cn = next(m for m in models if m.id == "deepseek-v4-flash")
+        assert flash_cn.pricing.input == 1.0
+        assert flash_cn.pricing.output == 2.0
+        assert flash_cn.pricing.currency == "CNY"
+        assert flash_cn.limits.context_window == 200000
+        assert flash_cn.limits.max_output_tokens == 128000
 
         kimi = next(m for m in models if m.id == "kimi-k2.6")
         assert kimi.capabilities.supports_vision is True
@@ -267,10 +275,18 @@ class TestCuratedCatalogModels:
             "GLM-5",
             "qwen3.6-plus",
             "qwen3-max",
+            "deepseek-v4-flash",
         }
 
         qwen = next(m for m in models if m.id == "qwen3.6-plus")
         assert qwen.capabilities.supports_vision is True
+
+        flash_io = next(m for m in models if m.id == "deepseek-v4-flash")
+        assert flash_io.pricing.input == 1.0
+        assert flash_io.pricing.output == 2.0
+        assert flash_io.pricing.currency == "CNY"
+        assert flash_io.limits.context_window == 200000
+        assert flash_io.limits.max_output_tokens == 128000
 
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.interleaved["field"] == "reasoning_details"
