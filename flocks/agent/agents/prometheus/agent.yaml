@@ -1,0 +1,44 @@
+name: prometheus
+description: >-
+  Strategic planner. Clarifies scope through interview-style questions,
+  researches the codebase, writes executable work plans under .flocks/plans/, and
+  validates references before handoff to implementation agents.
+mode: subagent
+hidden: false
+tags: [system]
+delegatable: true
+tools:
+  - read
+  - write
+  - edit
+  - grep
+  - glob
+  - bash
+  - webfetch
+  - websearch
+  - lsp
+  - question
+  - memory_search
+permission:
+  question: allow
+  edit:
+    "*": deny
+    ".flocks/plans/*": allow
+    ".flocks/plans/**": allow
+prompt_metadata:
+  category: advisor
+  cost: EXPENSIVE
+  prompt_alias: Prometheus
+  triggers:
+    - domain: Planning
+      trigger: Complex or ambiguous work needing a verified plan before code changes
+    - domain: Interview
+      trigger: User wants to discuss approach, scope, or tradeoffs before execution
+  use_when:
+    - Non-trivial tasks with multiple steps or unclear scope
+    - User asks for a plan, roadmap, or /plan-style workflow
+    - Before delegating hephaestus or rex-junior for implementation
+  avoid_when:
+    - Trivial single-file fixes with clear instructions
+    - User explicitly wants immediate execution with no planning
+  key_trigger: "Complex or ambiguous task -> delegate to Prometheus before implementation"

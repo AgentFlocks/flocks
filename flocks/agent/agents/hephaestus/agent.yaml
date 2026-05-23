@@ -6,7 +6,7 @@ mode: subagent
 hidden: false
 tags: [system]
 color: "#FF4500"
-delegatable: true
+delegatable: false
 tools:
   - read
   - glob

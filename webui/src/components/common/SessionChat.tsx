@@ -2460,7 +2460,6 @@ function ChatMessageBubbleInner({
 // ============================================================================
 
 const TOOL_DISPLAY_MAX_LEN = 120;
-
 /** Truncate long tool titles / param summaries shown in the card header. */
 export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
   if (text.length <= maxLen) return text;
@@ -2471,6 +2470,65 @@ function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
     .map(([k, v]) => `${k}=${String(v)}`)
     .join(', ');
+}
+
+type TodoSummaryEntry = {
+  id?: string;
+  content: string;
+  status?: string;
+  activeForm?: string;
+};
+
+function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.content === 'string';
+}
+
+function readTodoEntries(value: unknown): TodoSummaryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isTodoSummaryEntry)
+    .map((todo) => ({
+      id: typeof todo.id === 'string' ? todo.id : undefined,
+      content: todo.content.trim(),
+      status: typeof todo.status === 'string' ? todo.status : undefined,
+      activeForm: typeof todo.activeForm === 'string' ? todo.activeForm : undefined,
+    }))
+    .filter((todo) => todo.content.length > 0);
+}
+
+function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
+  for (const candidate of candidates) {
+    const todos = readTodoEntries(candidate);
+    if (todos.length > 0) return todos;
+  }
+  return [];
+}
+
+export function buildTodoWriteSummary(state: Partial<ToolState>): string {
+  const metadata = state.metadata ?? {};
+  const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
+  if (currentTodos.length === 0) return '';
+  const totalCount = currentTodos.length;
+  const terminalCount = currentTodos.filter(
+    (todo) => todo.status === 'completed' || todo.status === 'cancelled',
+  ).length;
+  const inProgressCount = currentTodos.filter((todo) => todo.status === 'in_progress').length;
+  const hasCancelled = currentTodos.some((todo) => todo.status === 'cancelled');
+
+  let summary =
+    terminalCount === totalCount
+      ? hasCancelled
+        ? `Done ${terminalCount}/${totalCount}`
+        : `Completed ${terminalCount}/${totalCount}`
+      : `Progress ${terminalCount}/${totalCount}`;
+
+  if (inProgressCount > 0 && terminalCount < totalCount) {
+    summary += ` · In progress ${inProgressCount}`;
+  }
+
+  return summary;
 }
 
 export interface ChatToolPartProps {
@@ -2542,7 +2600,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
-    ? truncateToolDisplayText(buildToolInputSummary(state.input))
+    ? truncateToolDisplayText(
+        toolName === 'todowrite'
+          ? (buildTodoWriteSummary(state) || buildToolInputSummary(state.input))
+          : buildToolInputSummary(state.input),
+      )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
 

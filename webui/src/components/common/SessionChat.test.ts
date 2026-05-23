@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/types';
 
 import {
+  buildTodoWriteSummary,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getEditingActionBarClassName,
@@ -314,6 +315,35 @@ describe('truncateToolDisplayText', () => {
     expect(result.length).toBe(121);
     expect(result.endsWith('…')).toBe(true);
     expect(result.startsWith('python3 -c "')).toBe(true);
+  });
+});
+
+describe('buildTodoWriteSummary', () => {
+  it('renders progress from structured todowrite input', () => {
+    expect(buildTodoWriteSummary({
+      input: {
+        todos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'in_progress' },
+          { id: '2', content: '补充回归测试', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+        ],
+      },
+    })).toBe('Progress 1/3 · In progress 1');
+  });
+
+  it('prefers current metadata todos when available', () => {
+    expect(buildTodoWriteSummary({
+      metadata: {
+        oldTodos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'pending' },
+          { id: '2', content: '补充回归测试', status: 'pending' },
+        ],
+        newTodos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'completed' },
+        ],
+      },
+    })).toBe('Completed 2/2');
   });
 });
 
