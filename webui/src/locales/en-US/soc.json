@@ -1,0 +1,9 @@
+{
+  "overview": "SOC Overview",
+  "alerts": "Alert Ops",
+  "assets": "Security Devices",
+  "vulnerabilities": "Vulnerability Triage",
+  "drills": "Phishing Drills",
+  "operationMode": "Operations Demo",
+  "configureMode": "Configuration Workshop"
+}

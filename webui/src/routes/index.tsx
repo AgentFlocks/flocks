@@ -29,6 +29,13 @@ const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
+const SocOverviewPage = lazy(() => import('@/pages/Soc'));
+const SocAlertsPage = lazy(() => import('@/pages/Soc/Alerts'));
+const SocAssetsPage = lazy(() => import('@/pages/Soc/Assets'));
+const SocIntelPage = lazy(() => import('@/pages/Soc/Intel'));
+const SocVulnerabilitiesPage = lazy(() => import('@/pages/Soc/Vulnerabilities'));
+const SocDrillsPage = lazy(() => import('@/pages/Soc/Drills'));
+const SocAttackSurfacePage = lazy(() => import('@/pages/Soc/AttackSurface'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -112,6 +119,16 @@ export function Routes() {
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
         <Route path="tasks" element={<LazyRoute><TaskPage /></LazyRoute>} />
         <Route path="workspace" element={<LazyRoute><WorkspacePage /></LazyRoute>} />
+
+        {/* SOC 场景实验室 */}
+        <Route path="soc" element={<LazyRoute><SocOverviewPage /></LazyRoute>} />
+        <Route path="soc/alerts" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/alerts/:incidentId" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/assets" element={<LazyRoute><SocAssetsPage /></LazyRoute>} />
+        <Route path="soc/intel" element={<LazyRoute><SocIntelPage /></LazyRoute>} />
+        <Route path="soc/vulnerabilities" element={<LazyRoute><SocVulnerabilitiesPage /></LazyRoute>} />
+        <Route path="soc/drills" element={<LazyRoute><SocDrillsPage /></LazyRoute>} />
+        <Route path="soc/attack-surface" element={<LazyRoute><SocAttackSurfacePage /></LazyRoute>} />
         
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />

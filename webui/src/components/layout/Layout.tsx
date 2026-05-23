@@ -11,6 +11,7 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   Menu,
   Radio,
   FolderOpen,
@@ -19,6 +20,13 @@ import {
   UserCog,
   Archive,
   ShieldCheck,
+  Shield,
+  AlertTriangle,
+  Network,
+  Bug,
+  MailWarning,
+  Radar,
+  Globe2,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -40,6 +48,8 @@ import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+const NAV_SECTION_COLLAPSE_KEY = 'flocks-nav-section-collapsed';
+const DEFAULT_COLLAPSED_NAV_SECTIONS = new Set(['agentHub', 'management']);
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
@@ -77,6 +87,14 @@ export default function Layout() {
   const { user } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(NAV_SECTION_COLLAPSE_KEY);
+      return saved ? JSON.parse(saved) as Record<string, boolean> : {};
+    } catch {
+      return {};
+    }
+  });
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showUpdate, setShowUpdate] = useState(false);
@@ -389,15 +407,32 @@ export default function Layout() {
     }
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
+  const toggleNavigationSection = useCallback((sectionId: string) => {
+    setCollapsedSections((prev) => {
+      const current = prev[sectionId] ?? DEFAULT_COLLAPSED_NAV_SECTIONS.has(sectionId);
+      const next = { ...prev, [sectionId]: !current };
+      localStorage.setItem(NAV_SECTION_COLLAPSE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const isNavigationItemActive = useCallback((href: string) => {
+    if (location.pathname === href) return true;
+    if (href === '/' || href === '/soc') return false;
+    return location.pathname.startsWith(`${href}/`);
+  }, [location.pathname]);
+
 
   const navigation = [
     {
+      id: 'home',
       name: t('home'),
       items: [
         { name: t('flocksHome'), href: '/', icon: Home },
       ],
     },
     {
+      id: 'aiWorkbench',
       name: t('aiWorkbench'),
       items: [
         { name: t('sessions'), href: '/sessions', icon: MessageSquare },
@@ -406,6 +441,20 @@ export default function Layout() {
       ],
     },
     {
+      id: 'socLab',
+      name: t('socLab'),
+      items: [
+        { name: t('socOverview'), href: '/soc', icon: Shield },
+        { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
+        { name: t('socAssets'), href: '/soc/assets', icon: Network },
+        { name: t('socIntel'), href: '/soc/intel', icon: Radar },
+        { name: t('socVulnerabilities'), href: '/soc/vulnerabilities', icon: Bug },
+        { name: t('socDrills'), href: '/soc/drills', icon: MailWarning },
+        { name: t('socAttackSurface'), href: '/soc/attack-surface', icon: Globe2 },
+      ],
+    },
+    {
+      id: 'agentHub',
       name: t('agentHub'),
       items: [
         { name: t('agents'), href: '/agents', icon: Bot },
@@ -418,6 +467,7 @@ export default function Layout() {
       ],
     },
     {
+      id: 'management',
       name: t('management'),
       items: [
         { name: t('accountManagement'), href: '/config', icon: UserCog },
@@ -514,45 +564,63 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section) => (
-              <div key={section.name} className="mb-6">
-                {!collapsed && (
-                  <h3 className="px-3 mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider whitespace-nowrap">
-                    {section.name}
-                  </h3>
-                )}
-                {collapsed && <div className="mb-1 border-t border-gray-100 first:border-none" />}
-                <div className="space-y-0.5">
-                  {section.items.map((item) => {
-                    const isActive = location.pathname === item.href
-                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
-                    return (
-                      <Link
-                        key={item.href}
-                        to={item.href}
-                        onClick={() => setSidebarOpen(false)}
-                        title={collapsed ? item.name : undefined}
-                        className={`
-                          flex items-center rounded-lg transition-colors duration-150
-                          ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
-                          ${isActive
-                            ? 'bg-slate-100 text-slate-800'
-                            : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-                          }
-                        `}
-                      >
-                        <item.icon
-                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-slate-700' : 'text-gray-400'}`}
-                        />
-                        {!collapsed && (
-                          <span className="truncate">{item.name}</span>
-                        )}
-                      </Link>
-                    );
-                  })}
+            {navigation.map((section) => {
+              const sectionActive = section.items.some((item) => isNavigationItemActive(item.href))
+                || (section.id === 'socLab' && location.pathname.startsWith('/soc/'));
+              const sectionCollapsed = !collapsed
+                && !sectionActive
+                && (collapsedSections[section.id] ?? DEFAULT_COLLAPSED_NAV_SECTIONS.has(section.id));
+
+              return (
+                <div key={section.id} className="mb-3">
+                  {!collapsed && (
+                    <button
+                      type="button"
+                      onClick={() => toggleNavigationSection(section.id)}
+                      className="mb-1 flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:bg-gray-50 hover:text-gray-600"
+                    >
+                      <span className="truncate">{section.name}</span>
+                      <ChevronDown
+                        className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${
+                          sectionCollapsed ? '-rotate-90' : 'rotate-0'
+                        }`}
+                      />
+                    </button>
+                  )}
+                  {collapsed && <div className="mb-1 border-t border-gray-100 first:border-none" />}
+                  {!sectionCollapsed && (
+                    <div className="space-y-0.5">
+                      {section.items.map((item) => {
+                        const isActive = isNavigationItemActive(item.href);
+                        return (
+                          <Link
+                            key={item.href}
+                            to={item.href}
+                            onClick={() => setSidebarOpen(false)}
+                            title={collapsed ? item.name : undefined}
+                            className={`
+                              flex items-center rounded-lg transition-colors duration-150
+                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                              ${isActive
+                                ? 'bg-slate-100 text-slate-800'
+                                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                              }
+                            `}
+                          >
+                            <item.icon
+                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-slate-700' : 'text-gray-400'}`}
+                            />
+                            {!collapsed && (
+                              <span className="truncate">{item.name}</span>
+                            )}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </nav>
 
           {/* Bottom: Language switcher + version */}

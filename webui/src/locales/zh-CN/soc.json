@@ -1,0 +1,9 @@
+{
+  "overview": "SOC 总览",
+  "alerts": "告警运营",
+  "assets": "安全设备",
+  "vulnerabilities": "漏洞排查",
+  "drills": "钓鱼演练",
+  "operationMode": "运营演示",
+  "configureMode": "配置车间"
+}
