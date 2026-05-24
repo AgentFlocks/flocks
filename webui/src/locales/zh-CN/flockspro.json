@@ -75,8 +75,7 @@
       "expired_unactivated": "已超时"
     },
     "licenseStatusLabels": {
-      "trial": "试用",
-      "test": "测试授权",
+      "poc": "POC授权",
       "commercial": "商业授权",
       "revoked": "已吊销",
       "expired": "已到期",
@@ -84,8 +83,7 @@
       "active": "有效"
     },
     "licenseTypeLabels": {
-      "trial": "试用",
-      "test": "测试授权",
+      "poc": "POC授权",
       "commercial": "商业授权"
     },
     "updatedAt": "审批状态更新时间",
@@ -126,7 +124,6 @@
     "applyDialogTitle": "Flocks Pro 升级申请",
     "productLabel": "申请的版本",
     "licenseTypeLabel": "申请的授权类型",
-    "licenseTypeTrial": "30天使用",
     "licenseTypePoc": "POC授权",
     "licenseTypeCommercial": "正式授权",
     "companyPlaceholderRequired": "公司（必填）",

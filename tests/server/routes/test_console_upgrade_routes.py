@@ -53,7 +53,7 @@ async def test_upgrade_request_lifecycle_local_storage(client: AsyncClient, monk
         "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
-            "license_type": "trial_30d",
+            "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
             "applicant_email": "alice@example.com",
@@ -119,7 +119,7 @@ async def test_create_upgrade_request_requires_console_login(
         "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
-            "license_type": "trial_30d",
+            "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
         },
@@ -127,6 +127,20 @@ async def test_create_upgrade_request_requires_console_login(
 
     assert resp.status_code == status.HTTP_400_BAD_REQUEST
     assert "云账号未登录" in resp.text
+
+
+async def test_create_upgrade_request_rejects_unsupported_license_type(client: AsyncClient):
+    resp = await client.post(
+        "/api/console/upgrade-requests",
+        json={
+            "product": "Flocks Pro",
+            "license_type": "unsupported",
+            "company": "acme",
+            "applicant_name": "alice",
+        },
+    )
+
+    assert resp.status_code == 422
 
 
 async def test_fallback_license_state_does_not_mark_license_activated(
@@ -202,7 +216,7 @@ async def test_sync_console_license_revocations_without_pro_package_only_syncs_c
             "status": "approved",
             "activate_key": "install_token",
             "license_id": "lic_install",
-            "license_status": "trial",
+            "license_status": "poc",
             "details": {"console_account_name": "alice", "license_id": "lic_install"},
             "created_at": "2026-05-15T10:00:00+00:00",
             "updated_at": "2026-05-15T10:00:00+00:00",
@@ -236,8 +250,8 @@ async def test_sync_console_license_revocations_without_pro_package_only_syncs_c
                 return _FakeResponse(
                     {
                         "license_id": "lic_install",
-                        "license_status": "trial",
-                        "effective_status": "trial",
+                        "license_status": "poc",
+                        "effective_status": "poc",
                         "effective_expires_at": 1781417933,
                         "effective_max_admins": 3,
                         "effective_max_members": 9,
@@ -330,7 +344,7 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
             "status": "activated",
             "activate_key": "old_token",
             "license_id": "lic_old",
-            "license_status": "trial",
+            "license_status": "poc",
             "details": {"license_id": "lic_old"},
             "created_at": "2026-05-15T10:00:00+00:00",
             "updated_at": "2026-05-15T10:00:00+00:00",
@@ -344,7 +358,7 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
             "status": "approved",
             "activate_key": "new_token",
             "license_id": "lic_new",
-            "license_status": "trial",
+            "license_status": "poc",
             "details": {"license_id": "lic_new"},
             "created_at": "2026-05-15T11:00:00+00:00",
             "updated_at": "2026-05-15T11:00:00+00:00",
@@ -401,8 +415,8 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
                 return _FakeResponse(
                     {
                         "license_id": "lic_new",
-                        "license_status": "trial",
-                        "effective_status": "trial",
+                        "license_status": "poc",
+                        "effective_status": "poc",
                         "effective_expires_at": 1781417933,
                         "effective_max_admins": 2,
                         "effective_max_members": 6,
@@ -433,7 +447,7 @@ async def test_sync_console_license_revocations_switches_from_revoked_runtime_li
         def status(self):
             return {
                 "license_id": self.license_id,
-                "license_status": "revoked" if not self.active else "trial",
+                "license_status": "revoked" if not self.active else "poc",
                 "active": self.active,
             }
 
@@ -495,7 +509,7 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
                 "manifest_url": None,
                 "form_data": {
                     "product": "Flocks Pro",
-                    "license_type": "trial_30d",
+                    "license_type": "poc",
                     "company": "acme",
                     "applicant_name": "alice",
                 },
@@ -518,7 +532,7 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
             assert json["fingerprint"] == "fp_1"
             assert json["install_id"] == "inst_1"
             assert json["passport_uid"] == "pass_1"
-            assert json["form_data"]["request_kind"] == "trial_extension"
+            assert json["form_data"]["request_kind"] == "license_change"
             assert json["form_data"]["console_account_name"] == "alice"
             assert headers == {"Authorization": "Bearer token_abc"}
             return _FakeResponse()
@@ -529,8 +543,8 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
         "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
-            "license_type": "trial_30d",
-            "request_kind": "trial_extension",
+            "license_type": "poc",
+            "request_kind": "license_change",
             "company": "acme",
             "applicant_name": "alice",
         },
@@ -581,7 +595,7 @@ async def test_create_upgrade_request_maps_console_failure_to_502(
         "/api/console/upgrade-requests",
         json={
             "product": "Flocks Pro",
-            "license_type": "trial_30d",
+            "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
         },

@@ -16,7 +16,7 @@ import { extractErrorMessage } from '@/utils/error';
 
 interface UpgradeApplyFormState {
   product: string;
-  licenseType: 'trial_30d' | 'poc' | 'commercial';
+  licenseType: 'poc' | 'commercial';
   company: string;
   applicantName: string;
   applicantEmail: string;
@@ -42,7 +42,7 @@ interface FlocksproLicenseStatus {
 
 const DEFAULT_FORM: UpgradeApplyFormState = {
   product: 'Flocks Pro',
-  licenseType: 'trial_30d',
+  licenseType: 'poc',
   company: '',
   applicantName: '',
   applicantEmail: '',
@@ -153,13 +153,10 @@ function compactIdentifier(value?: string | null, head = 10, tail = 8): string {
   return `${value.slice(0, head)}...${value.slice(-tail)}`;
 }
 
-function normalizeLicenseType(value?: string | null): 'trial' | 'test' | 'commercial' | null {
+function normalizeLicenseType(value?: string | null): 'poc' | 'commercial' | null {
   const normalized = String(value || '').trim().toLowerCase();
-  if (['trial', 'trial_30d'].includes(normalized)) {
-    return 'trial';
-  }
-  if (['test', 'poc'].includes(normalized)) {
-    return 'test';
+  if (normalized === 'poc') {
+    return 'poc';
   }
   if (normalized === 'commercial') {
     return 'commercial';
@@ -1231,7 +1228,6 @@ export default function FlocksproUpgradePage() {
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
                 aria-label={t('upgrade.licenseTypeLabel')}
               >
-                <option value="trial_30d">{t('upgrade.licenseTypeTrial')}</option>
                 <option value="poc">{t('upgrade.licenseTypePoc')}</option>
                 <option value="commercial">{t('upgrade.licenseTypeCommercial')}</option>
               </select>

@@ -75,8 +75,7 @@
       "expired_unactivated": "Activation Expired"
     },
     "licenseStatusLabels": {
-      "trial": "Trial",
-      "test": "Test",
+      "poc": "POC License",
       "commercial": "Commercial",
       "revoked": "Revoked",
       "expired": "Expired",
@@ -84,8 +83,7 @@
       "active": "Active"
     },
     "licenseTypeLabels": {
-      "trial": "Trial",
-      "test": "Test",
+      "poc": "POC License",
       "commercial": "Commercial"
     },
     "updatedAt": "Approval Status Updated At",
@@ -126,7 +124,6 @@
     "applyDialogTitle": "Flocks Pro Upgrade Application",
     "productLabel": "Requested Version",
     "licenseTypeLabel": "Requested License Type",
-    "licenseTypeTrial": "30-day Usage",
     "licenseTypePoc": "POC License",
     "licenseTypeCommercial": "Formal License",
     "companyPlaceholderRequired": "Company (required)",

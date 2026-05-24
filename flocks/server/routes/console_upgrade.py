@@ -39,8 +39,8 @@ def _console_base_url() -> str:
 
 class UpgradeRequestCreate(BaseModel):
     product: str = Field(default="Flocks Pro", pattern="^Flocks Pro$")
-    license_type: Literal["trial_30d", "poc", "commercial"]
-    request_kind: Literal["new", "trial_extension", "license_change"] = "new"
+    license_type: Literal["poc", "commercial"]
+    request_kind: Literal["new", "license_change"] = "new"
     company: str = Field(min_length=1)
     applicant_name: str = Field(min_length=1)
     applicant_email: Optional[str] = None

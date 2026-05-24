@@ -3,8 +3,8 @@ import type { UpdateProgress } from './update';
 
 export interface UpgradeRequestCreatePayload {
   product: string;
-  license_type: 'trial_30d' | 'poc' | 'commercial';
-  request_kind?: 'new' | 'trial_extension' | 'license_change';
+  license_type: 'poc' | 'commercial';
+  request_kind?: 'new' | 'license_change';
   company: string;
   applicant_name: string;
   applicant_email?: string;
@@ -14,7 +14,7 @@ export interface UpgradeRequestCreatePayload {
 
 export interface UpgradeRequestDetails {
   product?: string;
-  license_type?: 'trial_30d' | 'poc' | 'commercial' | string;
+  license_type?: 'poc' | 'commercial' | string;
   license_status?: string | null;
   expires_at?: number | string | null;
   license_effective_expires_at?: number | string | null;
@@ -22,7 +22,7 @@ export interface UpgradeRequestDetails {
   license_id?: string | null;
   max_admins?: number | null;
   max_members?: number | null;
-  request_kind?: 'new' | 'trial_extension' | 'license_change' | string;
+  request_kind?: 'new' | 'license_change' | string;
   console_account_name?: string | null;
   passport_uid?: string | null;
   cloud_account?: string | null;
