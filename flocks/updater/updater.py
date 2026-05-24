@@ -1013,23 +1013,15 @@ def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str
     return "tar.gz"
 
 
-def _normalize_release_version_label(value: str) -> str:
-    normalized = value.strip().lower().removeprefix("refs/tags/")
-    normalized = normalized.removeprefix("pro-").removeprefix("v")
-    return normalized.replace("_", ".").replace("-", ".")
-
-
 def _console_manifest_display_version(data: dict[str, Any]) -> str:
-    compare_version = str(data.get("compare_version") or "").strip()
-    if compare_version:
-        return _normalize_release_version_label(compare_version)
-    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
-    if display_version:
-        return _normalize_release_version_label(display_version)
     component_version = str(data.get("flockspro_component_version") or "").strip()
     if component_version:
-        return _normalize_release_version_label(component_version)
-    return ""
+        return component_version
+    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
+    if display_version:
+        return display_version
+    compare_version = str(data.get("compare_version") or "").strip()
+    return f"pro-v{compare_version}" if compare_version else ""
 
 
 def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
@@ -1610,7 +1602,6 @@ def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256:
     marker.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "display_version": manifest.get("display_version"),
-        "compare_version": manifest.get("compare_version"),
         "installed_version": manifest.get("display_version"),
         "oss_version": manifest.get("oss_version"),
         "flockspro_component_version": manifest.get("flockspro_component_version"),
@@ -2295,13 +2286,14 @@ def _read_pro_bundle_installed_version() -> str:
         return ""
     if not isinstance(payload, dict):
         return ""
-    for key in ("compare_version", "display_version", "installed_version"):
-        version = _normalize_release_version_label(str(payload.get(key) or ""))
-        if version:
-            return version
-    component_version = _normalize_release_version_label(str(payload.get("flockspro_component_version") or ""))
+    component_version = str(payload.get("flockspro_component_version") or "").strip()
     if component_version:
         return component_version
+    installed_version = str(payload.get("installed_version") or "").strip()
+    if installed_version.startswith(("pro-v", "pro-V")):
+        return installed_version
+    if installed_version:
+        return f"pro-{installed_version}" if installed_version.startswith(("v", "V")) else f"pro-v{installed_version}"
     return ""
 
 

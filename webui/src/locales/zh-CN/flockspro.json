@@ -34,7 +34,7 @@
   "upgrade": {
     "title": "升级为Flocks Pro",
     "description": "查看当前授权信息、提交申请并跟踪审批进度。",
-    "installedTitle": "Flocks Pro",
+    "installedTitle": "Flocks Pro {{version}}",
     "installedDescription": "Flocks Pro 已安装并完成授权激活。",
     "installedVersion": "Flocks Pro 版本",
     "licenseStatus": "License 状态",

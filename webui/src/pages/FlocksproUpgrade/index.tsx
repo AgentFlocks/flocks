@@ -102,6 +102,11 @@ function proPackageStatusToLicenseStatus(status: ProPackageStatus): FlocksproLic
   };
 }
 
+function formatProVersion(version?: string | null): string {
+  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  return normalized ? `pro-v${normalized}` : 'pro-v...';
+}
+
 function formatDateTimeValue(value?: string | number | null): string {
   if (value === null || value === undefined || value === '') {
     return '-';
@@ -355,6 +360,16 @@ export default function FlocksproUpgradePage() {
     [requests],
   );
 
+  const proComponentVersion =
+    latestActivatedRequest?.details?.auto_install_pro_version ||
+    latestActivatedRequest?.details?.flockspro_component_version;
+  const proVersion = formatProVersion(
+    proComponentVersion ||
+      proPackageStatus?.flockspro_component_version ||
+      proPackageStatus?.installed_version ||
+      latestActivatedRequest?.details?.auto_install_version ||
+      latestActivatedRequest?.details?.auto_install_target,
+  );
   const isProRuntimeActive = licenseStatus?.pro_enabled === true || proPackageStatus?.pro_enabled === true;
   const canUseProFeatures = isProPackageInstalled && isProRuntimeActive;
   const isProLoaded = canUseProFeatures;
@@ -869,7 +884,7 @@ export default function FlocksproUpgradePage() {
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">
-              {isProLoaded ? t('upgrade.installedTitle') : t('upgrade.title')}
+              {isProLoaded ? t('upgrade.installedTitle', { version: proVersion }) : t('upgrade.title')}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
               {isProLoaded ? t('upgrade.installedDescription') : t('upgrade.description')}
@@ -1039,6 +1054,7 @@ export default function FlocksproUpgradePage() {
             }`}>
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-base font-semibold">{proVersion}</span>
                   <span
                     className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
                       currentLicenseInvalid ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'
