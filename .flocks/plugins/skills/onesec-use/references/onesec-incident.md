@@ -10,12 +10,18 @@
 ## 方式一：威胁图 / 事件详情页
 
 ```bash
-agent-browser --headed open "https://<onesec-domain>/pcedr/threatincidents"
-agent-browser wait --load networkidle
-agent-browser snapshot -i
-agent-browser --headed open "https://<onesec-domain>/pcedr/threatincidents/incident?umid=<umid>&guid=<guid>"
-agent-browser wait --load networkidle
-agent-browser get text body
+flocks browser -c '
+list_tid = new_tab("https://<onesec-domain>/pcedr/threatincidents", activate=True)
+wait_for_load()
+print(list_tid)
+detail_tid = new_tab(
+  "https://<onesec-domain>/pcedr/threatincidents/incident?umid=<umid>&guid=<guid>",
+  activate=True,
+)
+wait_for_load()
+print(detail_tid)
+print(js("document.body.innerText.slice(0, 2500)"))
+'
 ```
 
 详情页 URL 形式：
@@ -27,15 +33,21 @@ agent-browser get text body
 优先用 `tbody tr`，不行再用 `data-row-key`：
 
 ```bash
-agent-browser eval "document.querySelectorAll('tbody tr')[0]?.click()"
-agent-browser wait 500
-agent-browser get text body
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("document.querySelectorAll(\"tbody tr\")[0]?.click()")
+wait(0.8)
+print(js("document.body.innerText.slice(0, 2000)"))
+'
 ```
 
 ```bash
-agent-browser eval "document.querySelector('[data-row-key=\"table0\"]')?.click()"
-agent-browser wait 500
-agent-browser get text body
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("document.querySelector(\"[data-row-key=\\\"table0\\\"]\")?.click()")
+wait(0.8)
+print(js("document.body.innerText.slice(0, 2000)"))
+'
 ```
 
 > 事件概览只适合看摘要；需要完整攻击链时，优先用详情页。
