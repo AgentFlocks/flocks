@@ -99,6 +99,8 @@
     "afterUpgradeHint": "Starting upgrade will download the Pro bundle, install only the flockspro wheel, and restart automatically.",
     "bundleFilename": "Bundle File",
     "proComponentFilename": "Pro Component File",
+    "downloadProgressLabel": "{{percent}}% · {{downloaded}} / {{total}}",
+    "downloadProgressUnknown": "Downloaded {{downloaded}}",
     "stageLabels": {
       "fetching": "Download Pro bundle",
       "backing_up": "Backup",

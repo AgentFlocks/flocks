@@ -857,7 +857,13 @@ async def start_upgrade_request(request_id: str, request: Request) -> StreamingR
         try:
             await _maybe_activate_pro_license(raw)
             await _maybe_refresh_pro_license(raw)
-            async for progress in perform_pro_bundle_install(restart=True):
+            install_kwargs: dict[str, Any] = {"restart": True}
+            if _console_base_url():
+                console_session = await ConsoleLoginService.require_console_session()
+                console_session_token = str(console_session.get("console_session_token") or "").strip()
+                if console_session_token:
+                    install_kwargs["console_session_token"] = console_session_token
+            async for progress in perform_pro_bundle_install(**install_kwargs):
                 if progress.stage == "error":
                     details["auto_install_result"] = "failed"
                     details["auto_install_error"] = progress.message

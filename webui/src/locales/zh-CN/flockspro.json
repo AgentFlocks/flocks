@@ -99,6 +99,8 @@
     "afterUpgradeHint": "开始升级后将下载 Pro bundle，仅安装 flockspro wheel，并在完成后自动重启。",
     "bundleFilename": "Bundle 文件",
     "proComponentFilename": "Pro 组件文件",
+    "downloadProgressLabel": "{{percent}}% · {{downloaded}} / {{total}}",
+    "downloadProgressUnknown": "已下载 {{downloaded}}",
     "stageLabels": {
       "fetching": "下载 Pro bundle",
       "backing_up": "备份",
