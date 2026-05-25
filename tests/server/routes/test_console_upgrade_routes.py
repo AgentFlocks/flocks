@@ -723,8 +723,9 @@ async def test_start_approved_request_streams_upgrade_and_marks_activated(
     from flocks.storage.storage import Storage
     from flocks.updater.models import UpdateProgress
 
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "")
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
     monkeypatch.setattr(console_routes, "require_admin", lambda _req: _mock_admin())
+    await _set_bound_console_session()
     request_id = "req_start_001"
     await Storage.set(
         f"console:upgrade_request:{request_id}",
@@ -746,6 +747,7 @@ async def test_start_approved_request_streams_upgrade_and_marks_activated(
     async def _fake_perform_pro_bundle_install(*args, **kwargs):
         assert args == ()
         assert kwargs["restart"] is True
+        assert kwargs["console_session_token"] == "token_abc"
         yield UpdateProgress(stage="fetching", message="Downloading Flocks Pro bundle...", success=None)
         yield UpdateProgress(stage="restarting", message="Restarting service...", success=None)
 

@@ -230,6 +230,9 @@ async def test_download_console_bundle_sends_token_only_to_console_origin(
     seen_headers: list[dict | None] = []
 
     class _Resp:
+        status_code = 200
+        reason_phrase = "OK"
+
         def raise_for_status(self) -> None:
             return None
 
@@ -277,9 +280,71 @@ async def test_download_console_bundle_sends_token_only_to_console_origin(
     )
 
     assert seen_headers == [
-        {"Authorization": "Bearer cs_manifest"},
+        {
+            "Authorization": "Bearer cs_manifest",
+            "x-console-session-token": "cs_manifest",
+        },
         {},
     ]
+
+
+def test_absolute_console_url_normalizes_same_host_http_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://portal.agentflocks.com")
+
+    assert (
+        updater._absolute_console_url(
+            "http://portal.agentflocks.com/v1/pro-bundles/rel_1/download?license_id=lic_1"
+        )
+        == "https://portal.agentflocks.com/v1/pro-bundles/rel_1/download?license_id=lic_1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_download_console_bundle_reports_http_status_and_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    seen_urls: list[str] = []
+
+    class _Resp:
+        status_code = 401
+        reason_phrase = "Unauthorized"
+
+        async def aread(self):
+            return b"missing console_session_token"
+
+        async def aiter_bytes(self, chunk_size=65536):
+            yield b""
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None):
+            seen_urls.append(url)
+            return _Stream()
+
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://console.example.com")
+    monkeypatch.setattr(updater.httpx, "AsyncClient", _Client)
+
+    bundle_url = "https://console.example.com/v1/pro-bundles/rel_1/download?license_id=lic_1"
+    with pytest.raises(RuntimeError, match="HTTP 401 Unauthorized: missing console_session_token"):
+        await updater._download_console_bundle(bundle_url, "cs_manifest", tmp_path, "console.zip")
+
+    assert seen_urls == [bundle_url]
 
 
 @pytest.mark.asyncio

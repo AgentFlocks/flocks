@@ -77,6 +77,7 @@ class ConsoleManifestRelease:
     bundle_sha256: str | None
     bundle_format: str
     manifest: dict[str, Any]
+    console_session_token: str | None = None
 
 
 def _record_update_journal(message: str) -> None:
@@ -1045,6 +1046,14 @@ def _verify_download_sha256(path: Path, expected_sha256: str | None) -> None:
         raise ValueError(f"bundle sha256 mismatch: expected {expected}, got {actual}")
 
 
+async def _raise_download_status_error(resp: httpx.Response) -> None:
+    body = (await resp.aread()).decode("utf-8", errors="replace").strip()
+    detail = f"HTTP {resp.status_code} {resp.reason_phrase}".strip()
+    if body:
+        detail = f"{detail}: {body[:500]}"
+    raise RuntimeError(detail)
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitLab
 # ------------------------------------------------------------------ #
@@ -1144,7 +1153,7 @@ async def _load_console_session_token() -> str | None:
     return None
 
 
-async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
+async def _fetch_console_manifest_release_info(console_session_token: str | None = None) -> ConsoleManifestRelease:
     """
     Fetch latest Pro bundle manifest from console.
     """
@@ -1155,7 +1164,7 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
     channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
     url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
     headers: dict[str, str] = {}
-    token = await _load_console_session_token()
+    token = str(console_session_token or "").strip() or await _load_console_session_token()
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
@@ -1198,6 +1207,7 @@ async def _fetch_console_manifest_release_info() -> ConsoleManifestRelease:
         bundle_sha256=str(data.get("bundle_sha256") or "").strip() or None,
         bundle_format=bundle_format,
         manifest=data,
+        console_session_token=token,
     )
 
 
@@ -1351,7 +1361,8 @@ async def _download_archive(
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                await _raise_download_status_error(resp)
             with open(dest, "wb") as f:
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     f.write(chunk)
@@ -1368,10 +1379,18 @@ async def _download_console_bundle(
     """Download a Pro bundle, sending the console session token only to Console origin."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / _download_filename_for_url(url, filename)
-    headers = {"Authorization": f"Bearer {token}"} if token and _is_console_origin_url(url) else {}
+    headers = (
+        {
+            "Authorization": f"Bearer {token}",
+            "x-console-session-token": token,
+        }
+        if token and _is_console_origin_url(url)
+        else {}
+    )
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                await _raise_download_status_error(resp)
             with dest.open("wb") as handle:
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     handle.write(chunk)
@@ -2458,9 +2477,20 @@ async def check_update(
 
 
 def _absolute_console_url(url: str) -> str:
-    if url.startswith(("http://", "https://", "file://")):
-        return url
     manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
+    if manifest_base and not manifest_base.startswith(("http://", "https://")):
+        manifest_base = f"https://{manifest_base}"
+    if url.startswith(("http://", "https://")):
+        parsed_url = urlparse(url)
+        parsed_base = urlparse(manifest_base) if manifest_base else None
+        if parsed_base and (parsed_url.hostname or "").lower() == (parsed_base.hostname or "").lower():
+            url_port = parsed_url.port or _default_port(parsed_url.scheme)
+            base_port = parsed_base.port or _default_port(parsed_base.scheme)
+            if url_port in {None, 80, 443} and base_port in {None, 80, 443}:
+                return parsed_url._replace(scheme=parsed_base.scheme, netloc=parsed_base.netloc).geturl()
+        return url
+    if url.startswith("file://"):
+        return url
     if not manifest_base:
         return url
     if url.startswith("/"):
@@ -2509,10 +2539,14 @@ def _ensure_pro_heartbeat_env_default() -> None:
 async def perform_pro_bundle_install(
     *,
     restart: bool = True,
+    console_session_token: str | None = None,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """Apply the Console Pro bundle as a combined OSS core + Pro component upgrade."""
     try:
-        manifest_info = await _fetch_console_manifest_release_info()
+        if console_session_token:
+            manifest_info = await _fetch_console_manifest_release_info(console_session_token)
+        else:
+            manifest_info = await _fetch_console_manifest_release_info()
     except Exception as exc:
         log.error("updater.pro_bundle.manifest_failed", {"error": str(exc)})
         yield UpdateProgress(
@@ -2530,6 +2564,7 @@ async def perform_pro_bundle_install(
         tarball_url=tarball_url,
         bundle_sha256=manifest_info.bundle_sha256,
         bundle_format=manifest_info.bundle_format,
+        console_session_token=manifest_info.console_session_token,
         restart=restart,
         force_console_manifest=True,
     ):
@@ -2543,6 +2578,7 @@ async def perform_update(
     tarball_url: str | None = None,
     bundle_sha256: str | None = None,
     bundle_format: str | None = None,
+    console_session_token: str | None = None,
     restart: bool = True,
     locale: str | None = None,
     region: str | None = None,
@@ -2575,7 +2611,7 @@ async def perform_update(
     console_manifest_info: ConsoleManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
     if profile.sources == ["console-manifest"]:
-        if not (zipball_url or tarball_url):
+        if not (zipball_url or tarball_url) or console_session_token is None:
             try:
                 console_manifest_info = await _fetch_console_manifest_release_info()
             except Exception as exc:
@@ -2599,6 +2635,7 @@ async def perform_update(
                 tarball_url = console_manifest_info.bundle_url
             bundle_sha256 = console_manifest_info.bundle_sha256
             bundle_format = console_manifest_info.bundle_format
+            console_session_token = console_manifest_info.console_session_token
         primary_bundle_url = zipball_url or tarball_url or ""
         fmt = _archive_format_for_url(primary_bundle_url, bundle_format)
 
@@ -2628,7 +2665,7 @@ async def perform_update(
                 raise ValueError("Console manifest did not provide a bundle URL")
             archive_path = await _download_console_bundle(
                 primary_bundle_url,
-                await _load_console_session_token(),
+                console_session_token or await _load_console_session_token(),
                 tmp_dir,
                 archive_filename,
             )
@@ -2651,7 +2688,7 @@ async def perform_update(
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         log.error("updater.download.all_failed", {"error": str(exc)})
-        _dl_msg = "Failed to download the update. Please check your network connection."
+        _dl_msg = f"Failed to download the update: {exc}"
         _record_update_journal(f"ERROR {_dl_msg} ({exc})")
         yield UpdateProgress(
             stage="error",
