@@ -1,64 +1,12 @@
 import asyncio
-import threading
+from copy import copy
 from dataclasses import dataclass
 import time
 from typing import Any, Dict, Optional
-from weakref import WeakKeyDictionary
 
 from flocks.config.config import Config
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
 from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
-from flocks.workflow import _async_runtime as _async_runtime_mod
-
-
-_provider_locks_guard = threading.Lock()
-_provider_locks: Dict[str, threading.Lock] = {}
-
-# Tracks which event loop currently "owns" each provider's ``_client``.
-# Key   : the provider instance (weakly referenced so we don't pin singletons).
-# Value : ``id(loop)`` of the loop that created or last validated ``_client``.
-#
-# Rationale: ``httpx.AsyncClient`` (and the OpenAI/Anthropic SDK clients that
-# wrap it) bind themselves to the *currently running* event loop on first
-# ``await``. The session uses uvicorn's main loop while workflows use the
-# dedicated ``flocks-workflow-llm-loop``. If a workflow call inherits a
-# provider client that the session created on the main loop, attempting to
-# ``await`` it from the workflow loop raises "got Future attached to a
-# different loop" / hangs. We track the owning loop here so that
-# ``_prepare_provider`` can reset the client when the caller crosses loops,
-# while still reusing the connection pool for back-to-back same-loop calls.
-_provider_client_loop_marker: "WeakKeyDictionary[Any, int]" = WeakKeyDictionary()
-
-
-def _get_provider_lock(provider_id: str) -> threading.Lock:
-    """Return a process-wide lock keyed by ``provider_id``.
-
-    Used to serialize the (apply_config -> configure -> reset _client) sequence
-    in ``LLMClient._prepare_provider`` against any concurrent session/agent
-    request reading ``provider._config`` / ``provider._client``. Locks are
-    created lazily and cached forever — the set of provider ids is bounded
-    and small.
-    """
-    lock = _provider_locks.get(provider_id)
-    if lock is not None:
-        return lock
-    with _provider_locks_guard:
-        lock = _provider_locks.get(provider_id)
-        if lock is None:
-            lock = threading.Lock()
-            _provider_locks[provider_id] = lock
-    return lock
-
-
-def _workflow_loop_id() -> Optional[int]:
-    """Return ``id(loop)`` of the shared workflow async loop, or ``None``.
-
-    The workflow loop is created lazily on first ``_run_sync_on_shared_loop``
-    call. We read it directly from ``_async_runtime`` so callers don't need to
-    actually submit a coroutine just to discover the loop id.
-    """
-    loop = getattr(_async_runtime_mod, "_loop", None)
-    return id(loop) if loop is not None else None
 
 
 def _run_coro_sync(coro):
@@ -248,122 +196,98 @@ class LLMClient:
                 )
         return None
 
-    def _prepare_provider(self, provider_id: str) -> Any:
-        """Apply workflow-side overrides on the shared Provider singleton.
+    def _clone_provider_for_workflow(self, shared_provider: Any) -> Any:
+        """Create a workflow-local provider instance from the shared singleton.
 
-        Concurrency contract:
-            * The (apply_config -> configure -> _client reset) sequence is
-              serialized per-provider via :func:`_get_provider_lock` so that
-              an in-flight session ``provider.chat_stream`` cannot observe a
-              half-mutated ``provider._config`` / ``provider._client``.
-            * The reconfigure + client reset is *idempotent*: if the desired
-              ProviderConfig (api_key / base_url / relevant custom_settings)
-              already matches what the provider holds, we skip both
-              ``provider.configure(...)`` and ``provider._client = None``.
-              This protects long-running session HTTP connection pools from
-              being recreated on every workflow ``llm.ask()`` call.
+        Workflow calls run on a dedicated background loop while session / agent
+        calls run on the server loop. Sharing the same provider instance across
+        those callers makes both ``_config`` and any cached async client
+        (``_client``) a process-wide race point. The workflow therefore uses an
+        isolated provider instance seeded from the shared provider's current
+        config/runtime state, but never mutates the shared singleton itself.
         """
-        with _get_provider_lock(provider_id):
+        try:
+            isolated_provider = type(shared_provider)()
+        except Exception:
+            isolated_provider = copy(shared_provider)
+
+        for attr in ("id", "name", "_api_key", "_base_url", "_endpoint"):
+            if hasattr(shared_provider, attr):
+                try:
+                    setattr(isolated_provider, attr, getattr(shared_provider, attr))
+                except Exception:
+                    pass
+
+        for attr in ("_config_models", "_custom_models"):
+            if hasattr(shared_provider, attr):
+                value = getattr(shared_provider, attr)
+                cloned_value = list(value) if isinstance(value, list) else value
+                try:
+                    setattr(isolated_provider, attr, cloned_value)
+                except Exception:
+                    pass
+
+        if hasattr(isolated_provider, "_client"):
             try:
-                _run_coro_sync(Provider.apply_config(provider_id=provider_id))
+                setattr(isolated_provider, "_client", None)
             except Exception:
-                # Keep workflow runtime resilient: provider apply_config failure
-                # should not block ask() for environments driven by env vars.
                 pass
 
-            provider = self._get_provider(provider_id)
-            cfg = getattr(provider, "_config", None)
-            existing_custom = getattr(cfg, "custom_settings", None) or {}
-            custom_settings = (
-                dict(existing_custom) if isinstance(existing_custom, dict) else {}
-            )
-            # Only override ``trust_env`` when the user explicitly set
-            # ``workflow.llm.trust_env`` in flocks config. Otherwise inherit
-            # whatever the session / agent already configured.
-            if self.trust_env_explicit:
-                custom_settings["trust_env"] = self.trust_env
+        return isolated_provider
 
-            desired_api_key = (
-                self.api_key
-                if self.api_key is not None
-                else getattr(cfg, "api_key", None)
-            )
-            desired_base_url = (
-                self.base_url
-                if self.base_url is not None
-                else getattr(cfg, "base_url", None)
-            )
+    def _prepare_provider(self, provider_id: str) -> Any:
+        """Build a workflow-local provider without mutating the shared singleton."""
+        try:
+            _run_coro_sync(Provider.apply_config(provider_id=provider_id))
+        except Exception:
+            # Keep workflow runtime resilient: provider apply_config failure
+            # should not block ask() for environments driven by env vars.
+            pass
 
-            # Idempotency check: only reconfigure when something material
-            # actually changed. ``custom_settings`` may legitimately carry
-            # provider-specific tunables (verify_ssl, region, …) set by the
-            # session — comparing the full dict avoids accidental drops.
-            unchanged = (
-                cfg is not None
-                and getattr(cfg, "api_key", None) == desired_api_key
-                and getattr(cfg, "base_url", None) == desired_base_url
-                and (existing_custom if isinstance(existing_custom, dict) else {})
-                == custom_settings
-            )
-            if not unchanged:
-                provider.configure(
-                    ProviderConfig(
-                        provider_id=provider_id,
-                        api_key=desired_api_key,
-                        base_url=desired_base_url,
-                        custom_settings=custom_settings,
-                    )
+        shared_provider = self._get_provider(provider_id)
+        provider = self._clone_provider_for_workflow(shared_provider)
+        cfg = getattr(shared_provider, "_config", None)
+        existing_custom = getattr(cfg, "custom_settings", None) or {}
+        custom_settings = (
+            dict(existing_custom) if isinstance(existing_custom, dict) else {}
+        )
+        if self.trust_env_explicit:
+            custom_settings["trust_env"] = self.trust_env
+
+        desired_api_key = (
+            self.api_key
+            if self.api_key is not None
+            else getattr(cfg, "api_key", None)
+        )
+        if desired_api_key is None:
+            desired_api_key = getattr(shared_provider, "_api_key", None)
+
+        desired_base_url = (
+            self.base_url
+            if self.base_url is not None
+            else getattr(cfg, "base_url", None)
+        )
+        if desired_base_url is None:
+            desired_base_url = getattr(shared_provider, "_base_url", None)
+        if desired_base_url is None:
+            desired_base_url = getattr(shared_provider, "_endpoint", None)
+
+        if (
+            cfg is not None
+            or self.api_key is not None
+            or self.base_url is not None
+            or self.trust_env_explicit
+        ):
+            provider.configure(
+                ProviderConfig(
+                    provider_id=provider_id,
+                    api_key=desired_api_key,
+                    base_url=desired_base_url,
+                    custom_settings=custom_settings,
                 )
+            )
 
-            # Decide whether the existing SDK client can be reused safely.
-            #
-            # Two cases force a client reset (i.e. ``_client = None`` so that
-            # the next ``_get_client()`` rebuilds it on the workflow loop):
-            #
-            #   1. The provider config materially changed (handled above).
-            #   2. The current ``_client`` was last used by a *different*
-            #      event loop than the workflow loop. ``httpx.AsyncClient``
-            #      binds to the loop where it first awaited; cross-loop
-            #      reuse triggers "got Future attached to a different loop"
-            #      or silent hangs.
-            workflow_loop_id = _workflow_loop_id()
-            client_obj = getattr(provider, "_client", None)
-            client_loop_id = (
-                _provider_client_loop_marker.get(provider)
-                if client_obj is not None
-                else None
-            )
-            must_reset_for_loop = (
-                client_obj is not None
-                and workflow_loop_id is not None
-                and client_loop_id != workflow_loop_id
-            )
-            if not unchanged or must_reset_for_loop:
-                if hasattr(provider, "_client"):
-                    try:
-                        setattr(provider, "_client", None)
-                    except Exception:
-                        pass
-                # The next ``_get_client()`` will build a fresh client on
-                # the workflow loop; remember that ownership.
-                if workflow_loop_id is not None:
-                    try:
-                        _provider_client_loop_marker[provider] = workflow_loop_id
-                    except TypeError:
-                        # ``provider`` is not weak-referenceable (rare for
-                        # test doubles) — fall back to a regular attribute.
-                        try:
-                            setattr(provider, "_workflow_client_loop_id", workflow_loop_id)
-                        except Exception:
-                            pass
-            elif workflow_loop_id is not None and client_obj is not None:
-                # Client is being reused for another workflow call on the
-                # same loop — refresh the marker so we keep tracking it.
-                try:
-                    _provider_client_loop_marker[provider] = workflow_loop_id
-                except TypeError:
-                    pass
-            return provider
+        return provider
 
     def _format_target(self, target: _ResolvedTarget) -> str:
         return f"{target.provider_id}/{target.model_id}"
