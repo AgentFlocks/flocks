@@ -5,13 +5,18 @@ import Layout from '@/components/layout/Layout';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
 import AuthLayout from '@/components/layout/AuthLayout';
 import Home from '@/pages/Home';
-import SessionPage from '@/pages/Session';
-import AgentPage from '@/pages/Agent';
-import LoginPage from '@/pages/Login';
-import SetupAdminPage from '@/pages/SetupAdmin';
-import ForceChangePasswordPage from '@/pages/ForceChangePassword';
 import { useAuth } from '@/contexts/AuthContext';
 
+// All non-Home pages are code-split. Home stays eager because it's the very
+// first frame after auth and we don't want a Suspense flash on initial paint.
+// In particular, Session/Agent and the auth screens are kept lazy so heavy
+// transitive deps (SessionChat ~2.7k LOC + react-markdown + rehype/remark +
+// highlight.js) are not pulled into the main entry chunk.
+const SessionPage = lazy(() => import('@/pages/Session'));
+const AgentPage = lazy(() => import('@/pages/Agent'));
+const LoginPage = lazy(() => import('@/pages/Login'));
+const SetupAdminPage = lazy(() => import('@/pages/SetupAdmin'));
+const ForceChangePasswordPage = lazy(() => import('@/pages/ForceChangePassword'));
 const WorkflowListPage = lazy(() => import('@/pages/Workflow'));
 const WorkflowCreate = lazy(() => import('@/pages/WorkflowCreate'));
 const WorkflowEditor = lazy(() => import('@/pages/WorkflowEditor'));
@@ -67,24 +72,32 @@ export function Routes() {
 
   if (!bootstrapped) {
     return (
-      <RouterRoutes>
-        <Route path="/setup-admin" element={<SetupAdminPage />} />
-        <Route path="*" element={<Navigate to="/setup-admin" replace />} />
-      </RouterRoutes>
+      <Suspense fallback={<RoutePageSkeleton />}>
+        <RouterRoutes>
+          <Route path="/setup-admin" element={<SetupAdminPage />} />
+          <Route path="*" element={<Navigate to="/setup-admin" replace />} />
+        </RouterRoutes>
+      </Suspense>
     );
   }
 
   if (!user) {
     return (
-      <RouterRoutes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </RouterRoutes>
+      <Suspense fallback={<RoutePageSkeleton />}>
+        <RouterRoutes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </RouterRoutes>
+      </Suspense>
     );
   }
 
   if (user.must_reset_password) {
-    return <ForceChangePasswordPage />;
+    return (
+      <Suspense fallback={<RoutePageSkeleton />}>
+        <ForceChangePasswordPage />
+      </Suspense>
+    );
   }
 
   return (
@@ -93,17 +106,17 @@ export function Routes() {
       <Route path="/setup-admin" element={<Navigate to="/" replace />} />
       <Route path="/" element={<Layout />}>
         <Route index element={<Home />} />
-        
+
         {/* AI 工作台 */}
-        <Route path="sessions" element={<SessionPage />} />
-        <Route path="agents" element={<AgentPage />} />
+        <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
+        <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
         <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
         <Route path="workflows/:id" element={<LazyRoute><WorkflowDetail /></LazyRoute>} />
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
         <Route path="tasks" element={<LazyRoute><TaskPage /></LazyRoute>} />
         <Route path="workspace" element={<LazyRoute><WorkspacePage /></LazyRoute>} />
-        
+
         {/* 设备接入 */}
         <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
 
@@ -114,7 +127,7 @@ export function Routes() {
         <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
-        
+
         {/* 系统中心 */}
         <Route path="config" element={<LazyRoute><ConfigPage /></LazyRoute>} />
         <Route path="config/*" element={<Navigate to="/config" replace />} />
