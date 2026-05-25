@@ -385,9 +385,13 @@ function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
 }
 
-function isUploadedDocumentAttachment(
-  attachment: { status: string; workspacePath?: string; isImage?: boolean },
-): attachment is { status: string; workspacePath: string; isImage?: boolean } {
+function isUploadedDocumentAttachment<T extends {
+  status: string;
+  workspacePath?: string;
+  isImage?: boolean;
+}>(
+  attachment: T,
+): attachment is T & { workspacePath: string } {
   return attachment.status === 'success' && !attachment.isImage && Boolean(attachment.workspacePath);
 }
 
