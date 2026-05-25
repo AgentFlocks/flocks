@@ -33,6 +33,26 @@ class StorageError(Exception):
     pass
 
 
+class CheckpointBusyError(StorageError):
+    """``PRAGMA wal_checkpoint`` reported ``busy=1`` (no exception raised).
+
+    SQLite signals contention via the **return row** ``(busy, log_pages,
+    checkpointed_pages)`` rather than a SQL error, so callers must
+    actively inspect the result.  We surface that as a typed exception
+    so callers can distinguish "checkpoint silently no-op'd" from a real
+    success and retry / abort accordingly.
+    """
+
+    def __init__(self, mode: str, log_pages: int, checkpointed_pages: int) -> None:
+        super().__init__(
+            f"wal_checkpoint({mode}) busy: "
+            f"log_pages={log_pages}, checkpointed_pages={checkpointed_pages}"
+        )
+        self.mode = mode
+        self.log_pages = log_pages
+        self.checkpointed_pages = checkpointed_pages
+
+
 class Storage:
     """
     Storage namespace for persistent data operations
@@ -43,6 +63,7 @@ class Storage:
     
     NotFoundError = NotFoundError
     StorageError = StorageError
+    CheckpointBusyError = CheckpointBusyError
     
     _log = Log.create(service="storage")
     _db_path: Optional[Path] = None
@@ -443,7 +464,19 @@ class Storage:
                 "db_path": str(cls._db_path),
                 "size": cls._db_path.stat().st_size,
             })
-            cls._quarantine_corrupt_db(cls._db_path)
+            quarantined = cls._quarantine_corrupt_db(cls._db_path)
+            if quarantined is None:
+                # The pre-flight check confirmed the file is not SQLite,
+                # but the rename failed.  Continuing would let SQLite
+                # open the bad file, raise ``DatabaseError`` *and* delete
+                # the adjacent WAL/SHM sidecars we wanted to preserve
+                # for offline recovery.  Fail loudly instead so the
+                # operator can move the file aside manually.
+                raise StorageError(
+                    f"Storage path {cls._db_path} contains non-SQLite "
+                    f"content and could not be quarantined.  Move the "
+                    f"file aside manually before restarting (see logs)."
+                )
 
         # The schema bootstrap is the very first time we open the DB file
         # in this process, so it is also where any remaining on-disk
@@ -486,7 +519,7 @@ class Storage:
         })
 
     @classmethod
-    async def _checkpoint(cls, *, mode: str = "TRUNCATE") -> None:
+    async def _checkpoint(cls, *, mode: str = "TRUNCATE") -> tuple[int, int, int]:
         """Run ``PRAGMA wal_checkpoint(<mode>)`` against the active DB.
 
         ``TRUNCATE`` flushes the WAL back into the main DB and resets the
@@ -494,20 +527,51 @@ class Storage:
         does **not** need a WAL recovery step and therefore cannot crash
         midway through rewriting the main-DB header page.
 
-        Quietly returns when no DB has been initialised yet — callers can
-        invoke this unconditionally during shutdown.
+        SQLite reports contention by returning a row of integers rather
+        than raising — specifically ``(busy, log_pages, checkpointed_pages)``
+        where ``busy=1`` means at least one reader/writer was holding a
+        lock that prevented the requested mode from completing.  We
+        fetch that row, surface ``busy=1`` as :class:`CheckpointBusyError`,
+        and otherwise return the tuple so callers can record metrics.
+
+        Quietly returns ``(0, 0, 0)`` when no DB has been initialised
+        yet — callers can invoke this unconditionally during shutdown.
         """
         if cls._db_path is None:
-            return
+            return (0, 0, 0)
         if not cls._db_path.exists():
-            return
+            return (0, 0, 0)
         valid_modes = {"PASSIVE", "FULL", "RESTART", "TRUNCATE"}
         mode_normalised = mode.upper()
         if mode_normalised not in valid_modes:
             raise ValueError(f"invalid checkpoint mode: {mode!r}")
         async with cls.connect(cls._db_path) as db:
-            await db.execute(f"PRAGMA wal_checkpoint({mode_normalised})")
+            cursor = await db.execute(
+                f"PRAGMA wal_checkpoint({mode_normalised})"
+            )
+            row = await cursor.fetchone()
             await db.commit()
+
+        # Some aiosqlite paths / wrapped connections may return no row
+        # for a PRAGMA statement.  We treat that as success because we
+        # have no signal to act on — the caller would have observed an
+        # exception if the PRAGMA had actually failed.
+        if row is None or len(row) < 3:
+            return (0, 0, 0)
+
+        busy = int(row[0])
+        log_pages = int(row[1])
+        checkpointed_pages = int(row[2])
+        if busy != 0:
+            raise CheckpointBusyError(
+                mode_normalised, log_pages, checkpointed_pages
+            )
+        return (busy, log_pages, checkpointed_pages)
+
+    # Tunables for the shutdown WAL drain.  Kept as class attributes so
+    # tests can override them without touching globals.
+    _shutdown_checkpoint_attempts = 3
+    _shutdown_checkpoint_backoff_s = 0.1
 
     @classmethod
     async def shutdown(cls) -> None:
@@ -518,22 +582,76 @@ class Storage:
         consistent (no pending WAL frames waiting to be replayed), then
         clears the in-memory ``_initialized`` / ``_init_pid`` flags.
 
-        The call is wrapped in a try/except so it can be put at the very
-        end of an ASGI lifespan without risking a crash during shutdown
-        — the worst case is a slightly larger WAL on the next start, not
-        a broken shutdown path.
+        Failure handling:
+
+        * If the checkpoint cannot acquire the locks it needs (SQLite
+          returns ``busy=1`` without raising) we retry a few times with
+          a short backoff.  This handles the common case where a
+          background task is still draining when shutdown starts.
+        * If every attempt is still busy we record a structured
+          ``checkpoint.unfinished`` warning rather than a misleading
+          ``done`` so operators can spot the residual-WAL risk.
+        * Any other exception (e.g. disk full) is logged at ``warn`` so
+          shutdown cannot itself crash the lifespan.
+
+        The in-memory state is always cleared at the end because the
+        process is exiting regardless.
         """
         if not cls._initialized:
             return
+
+        attempts = max(int(cls._shutdown_checkpoint_attempts), 1)
+        backoff = max(float(cls._shutdown_checkpoint_backoff_s), 0.0)
+        last_busy: Optional[CheckpointBusyError] = None
+        last_failure: Optional[Exception] = None
+
         try:
-            await cls._checkpoint(mode="TRUNCATE")
-            cls._log.info("storage.shutdown.checkpoint.done", {
+            for attempt in range(1, attempts + 1):
+                try:
+                    _, log_pages, checkpointed = await cls._checkpoint(
+                        mode="TRUNCATE"
+                    )
+                    cls._log.info("storage.shutdown.checkpoint.done", {
+                        "db_path": str(cls._db_path) if cls._db_path else None,
+                        "log_pages": log_pages,
+                        "checkpointed_pages": checkpointed,
+                        "attempts": attempt,
+                    })
+                    return
+                except CheckpointBusyError as exc:
+                    last_busy = exc
+                    cls._log.warn("storage.shutdown.checkpoint.busy", {
+                        "attempt": attempt,
+                        "max_attempts": attempts,
+                        "mode": exc.mode,
+                        "log_pages": exc.log_pages,
+                        "checkpointed_pages": exc.checkpointed_pages,
+                    })
+                    if attempt < attempts:
+                        await asyncio.sleep(backoff * attempt)
+                except Exception as exc:
+                    last_failure = exc
+                    cls._log.warn("storage.shutdown.checkpoint.failed", {
+                        "db_path": str(cls._db_path) if cls._db_path else None,
+                        "error": str(exc),
+                        "error_type": type(exc).__name__,
+                    })
+                    break
+
+            # Reached only on persistent busy or fatal failure.  Do NOT
+            # log "done" — that would mask the residual-WAL risk this
+            # whole method exists to prevent.
+            cls._log.warn("storage.shutdown.checkpoint.unfinished", {
                 "db_path": str(cls._db_path) if cls._db_path else None,
-            })
-        except Exception as exc:
-            cls._log.warn("storage.shutdown.checkpoint.failed", {
-                "db_path": str(cls._db_path) if cls._db_path else None,
-                "error": str(exc),
+                "busy": last_busy is not None,
+                "log_pages": getattr(last_busy, "log_pages", None),
+                "checkpointed_pages": getattr(last_busy, "checkpointed_pages", None),
+                "fatal_error": str(last_failure) if last_failure else None,
+                "hint": (
+                    "WAL was not truncated; next startup will run WAL "
+                    "recovery and remains at risk of header corruption if "
+                    "killed mid-recovery."
+                ),
             })
         finally:
             cls._initialized = False

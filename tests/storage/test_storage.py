@@ -482,3 +482,121 @@ async def test_storage_shutdown_is_safe_to_call_when_not_initialised():
          patch.object(Storage, "_init_pid", None):
         # Must not raise.
         await Storage.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_storage_checkpoint_raises_when_sqlite_reports_busy(tmp_path):
+    """``PRAGMA wal_checkpoint`` returns ``busy=1`` *without* raising.
+
+    Reproduces the silent-failure mode flagged by review: a concurrent
+    reader holds a shared lock, so ``TRUNCATE`` cannot complete and SQLite
+    returns ``(1, log_pages, 0)`` from the PRAGMA — no SQL exception.
+    The contract is that ``Storage._checkpoint`` surfaces this as
+    :class:`CheckpointBusyError` so callers cannot mistakenly report
+    success.
+    """
+    import aiosqlite
+
+    db_path = tmp_path / "busy.db"
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None):
+        await Storage.init(db_path)
+
+        # Hold a long-running reader transaction to keep a shared lock.
+        # SQLite's ``TRUNCATE`` mode requires a brief exclusive moment,
+        # which this reader prevents → busy=1.
+        reader = await aiosqlite.connect(
+            str(db_path), timeout=Storage._sqlite_timeout_s
+        )
+        try:
+            await reader.execute("BEGIN")
+            await reader.execute("SELECT * FROM storage")
+            # Generate at least one WAL frame so the checkpoint has
+            # something to flush (otherwise it can trivially succeed).
+            await Storage.set("contend:key", {"v": 1})
+
+            with pytest.raises(Storage.CheckpointBusyError) as exc_info:
+                await Storage._checkpoint(mode="TRUNCATE")
+
+            err = exc_info.value
+            assert err.mode == "TRUNCATE"
+            # SQLite reports how many pages were *not* drained.
+            assert err.log_pages >= 0
+            assert err.checkpointed_pages >= 0
+        finally:
+            await reader.close()
+            await Storage.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_storage_shutdown_reports_unfinished_on_persistent_busy(tmp_path):
+    """A persistently busy checkpoint must not be logged as "done".
+
+    We replace ``_checkpoint`` with a stub that always raises
+    :class:`CheckpointBusyError` and assert that ``shutdown()``:
+      * does not raise,
+      * does not log the success path, and
+      * still clears the in-memory state (since the process is exiting).
+    """
+    db_path = tmp_path / "unfinished.db"
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None):
+        await Storage.init(db_path)
+
+        events: list[str] = []
+        real_info = Storage._log.info
+        real_warn = Storage._log.warn
+
+        def _spy_info(event, *_args, **_kwargs):
+            events.append(f"info:{event}")
+            return real_info(event, *_args, **_kwargs)
+
+        def _spy_warn(event, *_args, **_kwargs):
+            events.append(f"warn:{event}")
+            return real_warn(event, *_args, **_kwargs)
+
+        async def _always_busy(*, mode="TRUNCATE"):
+            raise Storage.CheckpointBusyError(mode, log_pages=42, checkpointed_pages=0)
+
+        with patch.object(Storage._log, "info", side_effect=_spy_info), \
+             patch.object(Storage._log, "warn", side_effect=_spy_warn), \
+             patch.object(Storage, "_checkpoint", side_effect=_always_busy), \
+             patch.object(Storage, "_shutdown_checkpoint_attempts", 2), \
+             patch.object(Storage, "_shutdown_checkpoint_backoff_s", 0.0):
+            await Storage.shutdown()
+
+        assert any("warn:storage.shutdown.checkpoint.busy" in e for e in events), events
+        assert any("warn:storage.shutdown.checkpoint.unfinished" in e for e in events), events
+        assert not any("info:storage.shutdown.checkpoint.done" in e for e in events), (
+            "shutdown must not log success when the WAL was not truncated"
+        )
+        assert Storage._initialized is False
+        assert Storage._init_pid is None
+
+
+@pytest.mark.asyncio
+async def test_storage_init_raises_when_quarantine_fails_on_invalid_header(tmp_path):
+    """Invalid-header fast-path must abort init when quarantine fails.
+
+    If we keep going after a failed rename, SQLite will open the bad
+    file and delete the adjacent WAL/SHM sidecars we wanted to preserve
+    for offline recovery — defeating the purpose of the fast-path
+    pre-flight check.
+    """
+    db_path = tmp_path / "garbage.db"
+    db_path.write_bytes(b"This is garbage, not a sqlite file\n")
+    db_path.with_name("garbage.db-wal").write_bytes(b"wal payload")
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None), \
+         patch.object(Storage, "_quarantine_corrupt_db", return_value=None):
+        with pytest.raises(Storage.StorageError, match="could not be quarantined"):
+            await Storage.init(db_path)
+
+    # Sidecars must still be present and untouched.
+    assert db_path.exists()
+    assert db_path.with_name("garbage.db-wal").exists()
+    assert db_path.with_name("garbage.db-wal").read_bytes() == b"wal payload"
