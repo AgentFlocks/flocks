@@ -1604,42 +1604,58 @@ export default function SessionChat({
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
-              <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
-                  <div className="flex items-center gap-2 text-sm text-amber-700">
-                    <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-                    <span>{compactingMessage || t('chat.compacting')}</span>
-                  </div>
-                  {compactionPercent !== null && (
-                    <div className="mt-2">
-                      <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
-                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
-                        <span>{compactionPercent}%</span>
-                      </div>
-                      <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
-                        <div
-                          className="h-full bg-amber-500 transition-all duration-300"
-                          style={{ width: `${compactionPercent}%` }}
-                        />
+              <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+                <div className={`flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}`}>
+                  <span
+                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${
+                      compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
+                    }`}
+                  >
+                    R
+                  </span>
+                  <div className="flex flex-col items-start flex-1 min-w-0">
+                    <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
+                      <span className="text-xs font-semibold text-zinc-700">Rex</span>
+                    </div>
+                    <div className="flex flex-col min-w-0 w-full">
+                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
+                        <div className="flex items-center gap-2 text-sm text-amber-700">
+                          <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                          <span>{compactingMessage || t('chat.compacting')}</span>
+                        </div>
+                        {compactionPercent !== null && (
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                              <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                              <span>{compactionPercent}%</span>
+                            </div>
+                            <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-500 transition-all duration-300"
+                                style={{ width: `${compactionPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {compactionStages.length > 0 && (
+                          <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                            {compactionStages
+                              .map((entry, idx) => {
+                                const text = describeCompactionStage(entry, t);
+                                if (!text) return null;
+                                return (
+                                  <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                                    <span className="text-amber-400">·</span>
+                                    <span>{text}</span>
+                                  </li>
+                                );
+                              })
+                              .filter(Boolean)}
+                          </ul>
+                        )}
                       </div>
                     </div>
-                  )}
-                  {compactionStages.length > 0 && (
-                    <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
-                      {compactionStages
-                        .map((entry, idx) => {
-                          const text = describeCompactionStage(entry, t);
-                          if (!text) return null;
-                          return (
-                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
-                              <span className="text-amber-400">·</span>
-                              <span>{text}</span>
-                            </li>
-                          );
-                        })
-                        .filter(Boolean)}
-                    </ul>
-                  )}
+                  </div>
                 </div>
               </div>
             )}

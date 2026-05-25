@@ -630,6 +630,13 @@ class InboundDispatcher:
                     scope_override=scope_override,
                 )
                 return True
+            if parsed.canonical_name == "compact":
+                await self._handle_compact_command(
+                    binding=binding,
+                    callbacks=callbacks,
+                    focus_instruction=command_args or None,
+                )
+                return True
             return False
 
         event = UserInputEvent(
@@ -802,6 +809,71 @@ class InboundDispatcher:
                 ]
             )
         )
+
+    @staticmethod
+    async def _handle_compact_command(
+        *,
+        binding,
+        callbacks: "ChannelDeliveryCallbacks",
+        focus_instruction: Optional[str] = None,
+    ) -> None:
+        """Run manual compaction for a channel session and deliver a status reply."""
+        from flocks.session.lifecycle.compaction import run_compaction
+        from flocks.session.lifecycle.compaction.orchestrator import build_compaction_policy
+        from flocks.session.message import Message, MessageRole
+        from flocks.session.session import Session
+
+        session_id = binding.session_id
+        session = await Session.get_by_id(session_id)
+        if not session:
+            await callbacks.deliver_text("当前会话不存在，请重新发送消息后重试。")
+            return
+
+        messages = await Message.list(session_id)
+        parent_message_id: Optional[str] = None
+        for m in reversed(messages):
+            if m.role == MessageRole.USER:
+                parent_message_id = m.id
+                break
+
+        if not parent_message_id:
+            await callbacks.deliver_text("当前会话没有可压缩的消息。")
+            return
+
+        # Resolve provider/model from session (same as session loop)
+        from flocks.session.session_loop import SessionLoop
+        provider_id, model_id = await SessionLoop._resolve_model(session, None, None)
+        if not provider_id or not model_id:
+            await callbacks.deliver_text("无法解析当前会话的模型，请先切换模型后重试。")
+            return
+
+        policy = build_compaction_policy(provider_id, model_id)
+
+        await callbacks.deliver_text("正在压缩上下文，请稍候…")
+        try:
+            result = await run_compaction(
+                session_id,
+                parent_message_id=parent_message_id,
+                messages=messages,
+                provider_id=provider_id,
+                model_id=model_id,
+                auto=False,
+                event_publish_callback=callbacks._publish_sse_event,
+                status_after="idle",
+                policy=policy,
+                focus_instruction=focus_instruction,
+            )
+            if result == "stop":
+                await callbacks.deliver_text("上下文压缩失败，请稍后重试。")
+            else:
+                focus_note = f"（聚焦：{focus_instruction}）" if focus_instruction else ""
+                await callbacks.deliver_text(f"上下文压缩完成{focus_note}，历史已归档为摘要。")
+        except Exception as e:
+            log.error("dispatcher.compact_command_failed", {
+                "session_id": session_id,
+                "error": str(e),
+            })
+            await callbacks.deliver_text(f"压缩时发生错误：{type(e).__name__}")
 
     @staticmethod
     async def _trigger_command_hook(action: str, session_id: str, context: dict[str, Any]) -> None:

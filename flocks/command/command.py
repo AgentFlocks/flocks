@@ -240,7 +240,8 @@ class Command:
                 agent="rex",
                 execution_kind="session_control",
                 allow_attachments=False,
-                visible_surfaces=("webui", "tui", "acp"),
+                visible_surfaces=("webui", "tui", "acp", "channel"),
+                channel_safe=True,
             ),
             CommandDef(
                 name="clear",
