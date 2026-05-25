@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Literal
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # ==================== Permission System ====================
@@ -187,11 +187,14 @@ class McpOAuthConfig(BaseModel):
 
 class McpLocalConfig(BaseModel):
     """MCP local server configuration"""
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow", "populate_by_name": True}
     
     type: Literal["local"]
     command: List[str]
-    environment: Optional[Dict[str, str]] = None
+    environment: Optional[Dict[str, str]] = Field(
+        None,
+        validation_alias=AliasChoices("environment", "env"),
+    )
     enabled: Optional[bool] = None
     timeout: Optional[int] = Field(None, gt=0)
 
