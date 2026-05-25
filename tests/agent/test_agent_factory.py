@@ -309,10 +309,10 @@ class TestLoadAgent:
 class TestScanAndLoad:
 
     def test_scans_builtin_agents(self):
-        """Built-in agents directory must yield at least 13 agents."""
+        """Built-in agents directory must yield at least 10 agents."""
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
-        assert len(result) >= 13
+        assert len(result) >= 10
 
     def test_all_builtin_agent_names_present(self):
         """Every agent shipped with the package must be discoverable and marked native.
@@ -324,8 +324,8 @@ class TestScanAndLoad:
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
         expected = [
-            "rex", "hephaestus", "plan", "explore",
-            "oracle", "librarian", "metis", "momus", "multimodal-looker",
+            "rex", "hephaestus", "explore",
+            "oracle", "librarian", "prometheus", "multimodal-looker",
             "self-enhance", "rex-junior",
         ]
         for name in expected:
@@ -473,7 +473,7 @@ class TestInjectDynamicPrompts:
         """Built-in agents with prompt.md should have non-empty prompts."""
         from flocks.agent.registry import Agent
         # Only built-in agents (native=True) — not dependent on local plugin installation
-        for name in ["explore", "oracle", "momus", "metis", "self-enhance", "multimodal-looker"]:
+        for name in ["explore", "oracle", "prometheus", "self-enhance", "multimodal-looker"]:
             agent = await Agent.get(name)
             assert agent is not None, f"Agent '{name}' not found"
             assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
@@ -624,7 +624,7 @@ class TestAgentConfigOverrides:
         from flocks.agent.agent_factory import scan_and_load
         result = scan_and_load()
         # All 13 built-ins should be present without a whitelist
-        assert len(result) >= 13
+        assert len(result) >= 10
 
 
 # ===========================================================================

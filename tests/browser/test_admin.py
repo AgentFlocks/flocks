@@ -271,7 +271,29 @@ def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> 
     assert "browser connection is stale; restarting" in out
     assert "daemon is up." in out
     assert restarted == [None]
-    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
+
+
+def test_run_setup_retries_at_most_once(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: False)
+    ensure_calls = []
+
+    def fake_ensure_daemon(**kwargs):
+        ensure_calls.append(kwargs)
+        raise RuntimeError("daemon didn't come up")
+
+    monkeypatch.setattr(admin, "ensure_daemon", fake_ensure_daemon)
+
+    assert admin.run_setup() == 1
+
+    out = capsys.readouterr()
+    assert "retrying once" in out.out
+    assert ensure_calls == [
+        {"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False},
+        {"wait": admin._SETUP_RETRY_WAIT, "_open_inspect": False},
+    ]
 
 
 def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:
@@ -286,7 +308,7 @@ def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch,
     out = capsys.readouterr().out
     assert "attaching via BU_CDP_WS" in out
     assert "daemon is up." in out
-    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
 
 
 def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
@@ -305,7 +327,7 @@ def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch,
     assert "restarting to attach via BU_CDP_URL" in out
     assert "daemon is up." in out
     assert restarted == [None]
-    assert ensure_calls == [{"wait": 20.0, "_open_inspect": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
 
 
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:

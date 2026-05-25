@@ -5,12 +5,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/types';
 
 import {
+  buildTodoWriteSummary,
+  dedupeUploadedDocumentAttachments,
   default as SessionChat,
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
+  getUserAvatarContainerClassName,
+  getUserAvatarSpacerClassName,
+  listUploadedDocumentPaths,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
@@ -112,6 +117,31 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   } as Message;
 }
 
+describe('dedupeUploadedDocumentAttachments', () => {
+  it('keeps the latest successful document for a workspace path', () => {
+    const items = dedupeUploadedDocumentAttachments([
+      { id: 'old', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
+      { id: 'image', status: 'success', isImage: true, workspacePath: '/tmp/uploads/diagram.png' },
+      { id: 'new', status: 'success', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
+      { id: 'error', status: 'error', workspacePath: '/tmp/uploads/report.pdf', isImage: false },
+    ]);
+
+    expect(items.map((item) => item.id)).toEqual(['image', 'new', 'error']);
+  });
+});
+
+describe('listUploadedDocumentPaths', () => {
+  it('returns unique successful document paths in attachment order', () => {
+    expect(listUploadedDocumentPaths([
+      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
+      { status: 'success', workspacePath: '/tmp/uploads/a.pdf', isImage: false },
+      { status: 'success', workspacePath: '/tmp/uploads/b.pdf', isImage: false },
+      { status: 'success', workspacePath: '/tmp/uploads/image.png', isImage: true },
+      { status: 'error', workspacePath: '/tmp/uploads/c.pdf', isImage: false },
+    ])).toEqual(['/tmp/uploads/a.pdf', '/tmp/uploads/b.pdf']);
+  });
+});
+
 describe('getMessageBubbleClassName', () => {
   // The bubble's max width is owned by its outer container (`max-w-[80%]` for
   // user, `w-full` for assistant; see SessionChat.tsx), so the inner bubble
@@ -210,6 +240,32 @@ describe('getStandaloneThinkingBubbleClassName', () => {
   });
 });
 
+describe('getUserAvatarContainerClassName', () => {
+  it('moves the user avatar to the bubble side without affecting bubble spacing', () => {
+    const className = getUserAvatarContainerClassName(false);
+
+    expect(className).toContain('absolute');
+    expect(className).toContain('left-full');
+    expect(className).toContain('ml-2.5');
+    expect(className).toContain('translate-y-1/2');
+    expect(className).toContain('h-8');
+  });
+
+  it('keeps the compact avatar aligned to the compact header height', () => {
+    expect(getUserAvatarContainerClassName(true)).toContain('h-7');
+  });
+});
+
+describe('getUserAvatarSpacerClassName', () => {
+  it('uses a shorter spacer in full layout to keep the top gap compact', () => {
+    expect(getUserAvatarSpacerClassName(false)).toBe('h-4');
+  });
+
+  it('uses a proportional spacer in compact layout', () => {
+    expect(getUserAvatarSpacerClassName(true)).toBe('h-3.5');
+  });
+});
+
 describe('SessionChat standalone thinking indicator', () => {
   it('keeps only the bouncing dots during the initial assistant loading state', async () => {
     useSessionMessagesMock.mockReturnValue({
@@ -259,6 +315,35 @@ describe('truncateToolDisplayText', () => {
     expect(result.length).toBe(121);
     expect(result.endsWith('…')).toBe(true);
     expect(result.startsWith('python3 -c "')).toBe(true);
+  });
+});
+
+describe('buildTodoWriteSummary', () => {
+  it('renders progress from structured todowrite input', () => {
+    expect(buildTodoWriteSummary({
+      input: {
+        todos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'in_progress' },
+          { id: '2', content: '补充回归测试', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+        ],
+      },
+    })).toBe('Progress 1/3 · In progress 1');
+  });
+
+  it('prefers current metadata todos when available', () => {
+    expect(buildTodoWriteSummary({
+      metadata: {
+        oldTodos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'pending' },
+          { id: '2', content: '补充回归测试', status: 'pending' },
+        ],
+        newTodos: [
+          { id: '1', content: '定位 todowrite 摘要问题', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'completed' },
+        ],
+      },
+    })).toBe('Completed 2/2');
   });
 });
 

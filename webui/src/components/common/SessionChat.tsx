@@ -355,6 +355,16 @@ export function getStandaloneThinkingBubbleClassName(compact: boolean): string {
   return getMessageBubbleClassName({ compact, isUser: false, isEditing: false });
 }
 
+export function getUserAvatarContainerClassName(compact: boolean): string {
+  return `pointer-events-none absolute left-full top-0 ml-2.5 translate-y-1/2 flex items-center justify-end ${
+    compact ? 'h-7' : 'h-8'
+  }`;
+}
+
+export function getUserAvatarSpacerClassName(compact: boolean): string {
+  return compact ? 'h-3.5' : 'h-4';
+}
+
 
 // ============================================================================
 // Main component
@@ -373,6 +383,38 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([
 
 function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function isUploadedDocumentAttachment(
+  attachment: { status: string; workspacePath?: string; isImage?: boolean },
+): attachment is { status: string; workspacePath: string; isImage?: boolean } {
+  return attachment.status === 'success' && !attachment.isImage && Boolean(attachment.workspacePath);
+}
+
+export function dedupeUploadedDocumentAttachments<T extends {
+  status: string;
+  workspacePath?: string;
+  isImage?: boolean;
+}>(items: T[]): T[] {
+  const latestIndexByPath = new Map<string, number>();
+  items.forEach((item, index) => {
+    if (isUploadedDocumentAttachment(item)) {
+      latestIndexByPath.set(item.workspacePath, index);
+    }
+  });
+  return items.filter((item, index) => (
+    !isUploadedDocumentAttachment(item) || latestIndexByPath.get(item.workspacePath) === index
+  ));
+}
+
+export function listUploadedDocumentPaths<T extends {
+  status: string;
+  workspacePath?: string;
+  isImage?: boolean;
+}>(items: T[]): string[] {
+  return dedupeUploadedDocumentAttachments(items)
+    .filter(isUploadedDocumentAttachment)
+    .map((item) => item.workspacePath);
 }
 
 export default function SessionChat({
@@ -858,10 +900,7 @@ export default function SessionChat({
 
   const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
     if (items.length === 0) return '';
-    const lines = items
-      .map((attachment) => attachment.workspacePath)
-      .filter((path): path is string => Boolean(path))
-      .map((path) => `- ${path}`);
+    const lines = listUploadedDocumentPaths(items).map((path) => `- ${path}`);
     if (lines.length === 0) return '';
     return `Attached files:\n${lines.join('\n')}`;
   }, []);
@@ -895,7 +934,7 @@ export default function SessionChat({
         'chat',
       );
       const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => prev.map((attachment) => {
+      setAttachments((prev) => dedupeUploadedDocumentAttachments(prev.map((attachment) => {
         const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
         if (entryIndex < 0) return attachment;
         const result = uploaded[entryIndex];
@@ -913,7 +952,7 @@ export default function SessionChat({
           workspacePath: result.abs_path ?? result.path,
           error: undefined,
         };
-      }));
+      })));
     } catch (err: any) {
       const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
       setAttachments((prev) => prev.map((attachment) => (
@@ -2368,10 +2407,11 @@ function ChatMessageBubbleInner({
   if (isUser) {
     return (
       <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end`}>
-        <div className={`flex flex-col items-end gap-2 ${messageGroupClass}`}>
-          <div className={`flex items-center justify-end ${headerHeight}`}>
+        <div className={`relative flex flex-col items-end gap-2 ${messageGroupClass}`}>
+          <div className={getUserAvatarContainerClassName(compact)}>
             {avatar}
           </div>
+          <div aria-hidden="true" className={getUserAvatarSpacerClassName(compact)} />
           <div className={`flex flex-col min-w-0 ${isEditing ? 'w-full' : 'w-fit max-w-full'}`}>
             {bubble}
             {footer}
@@ -2420,7 +2460,6 @@ function ChatMessageBubbleInner({
 // ============================================================================
 
 const TOOL_DISPLAY_MAX_LEN = 120;
-
 /** Truncate long tool titles / param summaries shown in the card header. */
 export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
   if (text.length <= maxLen) return text;
@@ -2431,6 +2470,65 @@ function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
     .map(([k, v]) => `${k}=${String(v)}`)
     .join(', ');
+}
+
+type TodoSummaryEntry = {
+  id?: string;
+  content: string;
+  status?: string;
+  activeForm?: string;
+};
+
+function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.content === 'string';
+}
+
+function readTodoEntries(value: unknown): TodoSummaryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isTodoSummaryEntry)
+    .map((todo) => ({
+      id: typeof todo.id === 'string' ? todo.id : undefined,
+      content: todo.content.trim(),
+      status: typeof todo.status === 'string' ? todo.status : undefined,
+      activeForm: typeof todo.activeForm === 'string' ? todo.activeForm : undefined,
+    }))
+    .filter((todo) => todo.content.length > 0);
+}
+
+function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
+  for (const candidate of candidates) {
+    const todos = readTodoEntries(candidate);
+    if (todos.length > 0) return todos;
+  }
+  return [];
+}
+
+export function buildTodoWriteSummary(state: Partial<ToolState>): string {
+  const metadata = state.metadata ?? {};
+  const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
+  if (currentTodos.length === 0) return '';
+  const totalCount = currentTodos.length;
+  const terminalCount = currentTodos.filter(
+    (todo) => todo.status === 'completed' || todo.status === 'cancelled',
+  ).length;
+  const inProgressCount = currentTodos.filter((todo) => todo.status === 'in_progress').length;
+  const hasCancelled = currentTodos.some((todo) => todo.status === 'cancelled');
+
+  let summary =
+    terminalCount === totalCount
+      ? hasCancelled
+        ? `Done ${terminalCount}/${totalCount}`
+        : `Completed ${terminalCount}/${totalCount}`
+      : `Progress ${terminalCount}/${totalCount}`;
+
+  if (inProgressCount > 0 && terminalCount < totalCount) {
+    summary += ` · In progress ${inProgressCount}`;
+  }
+
+  return summary;
 }
 
 export interface ChatToolPartProps {
@@ -2502,7 +2600,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
-    ? truncateToolDisplayText(buildToolInputSummary(state.input))
+    ? truncateToolDisplayText(
+        toolName === 'todowrite'
+          ? (buildTodoWriteSummary(state) || buildToolInputSummary(state.input))
+          : buildToolInputSummary(state.input),
+      )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
 

@@ -329,10 +329,10 @@ class TestWorkspaceUpload:
         assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"second"
 
     @pytest.mark.asyncio
-    async def test_chat_upload_renames_duplicate_file(
+    async def test_chat_upload_overwrites_duplicate_file(
         self, client: AsyncClient, mock_workspace: Path
     ):
-        """Chat uploads auto-rename duplicates to preserve attachment paths."""
+        """Chat uploads overwrite duplicate filenames to keep attachment paths stable."""
         first = await client.post(
             "/api/workspace/upload",
             params={"dest": "uploads", "purpose": "chat"},
@@ -348,37 +348,10 @@ class TestWorkspaceUpload:
         first_item = first.json()["uploaded"][0]
         second_item = second.json()["uploaded"][0]
         assert first_item["name"] == "report.pdf"
-        assert second_item["name"] == "report (1).pdf"
+        assert second_item["name"] == "report.pdf"
         assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report (1).pdf"
-        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"first"
-        assert (mock_workspace / "uploads" / "report (1).pdf").read_bytes() == b"second"
-
-    @pytest.mark.asyncio
-    async def test_chat_upload_returns_error_after_too_many_name_conflicts(
-        self, client: AsyncClient, mock_workspace: Path, monkeypatch: pytest.MonkeyPatch
-    ):
-        """Chat uploads stop probing once the rename limit is exhausted."""
-        from flocks.server.routes import workspace as workspace_routes
-
-        monkeypatch.setattr(workspace_routes, "_MAX_UPLOAD_RENAME_ATTEMPTS", 1)
-        uploads_dir = mock_workspace / "uploads"
-        uploads_dir.mkdir(exist_ok=True)
-        (uploads_dir / "report.pdf").write_bytes(b"first")
-        (uploads_dir / "report (1).pdf").write_bytes(b"second")
-
-        resp = await client.post(
-            "/api/workspace/upload",
-            params={"dest": "uploads", "purpose": "chat"},
-            files={"files": ("report.pdf", io.BytesIO(b"third"), "application/pdf")},
-        )
-
-        assert resp.status_code == status.HTTP_409_CONFLICT
-        assert "Too many conflicting filenames" in resp.json()["detail"]
-        result = resp.json()["uploaded"][0]
-        assert "Too many conflicting filenames" in result["error"]
-        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"first"
-        assert (mock_workspace / "uploads" / "report (1).pdf").read_bytes() == b"second"
+        assert second_item["path"] == "uploads/report.pdf"
+        assert (mock_workspace / "uploads" / "report.pdf").read_bytes() == b"second"
 
 
 # ===========================================================================

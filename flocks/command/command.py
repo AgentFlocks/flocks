@@ -261,7 +261,7 @@ class Command:
                 name="plan",
                 description="Create a plan for a task",
                 template="Create a detailed plan for: $ARGUMENTS",
-                agent="plan",
+                agent="prometheus",
                 execution_kind="llm",
                 allow_attachments=True,
             ),
