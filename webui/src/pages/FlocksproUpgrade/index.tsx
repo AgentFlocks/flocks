@@ -153,6 +153,28 @@ function compactIdentifier(value?: string | null, head = 10, tail = 8): string {
   return `${value.slice(0, head)}...${value.slice(-tail)}`;
 }
 
+function clampPercent(value?: number | null): number | null {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function formatBytes(value?: number | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return '-';
+  }
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 || size >= 10 ? 0 : 1;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
+}
+
 function normalizeLicenseType(value?: string | null): 'poc' | 'commercial' | null {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'poc') {
@@ -1316,6 +1338,8 @@ export default function FlocksproUpgradePage() {
                 {upgradeSteps.map((step) => {
                   const isError = step.stage === 'error';
                   const isRunning = step.stage === 'restarting' && proRestarting;
+                  const downloadPercent = clampPercent(step.percent);
+                  const hasDownloadProgress = step.stage === 'fetching' && typeof step.downloaded_bytes === 'number';
                   return (
                     <div key={step.stage} className="flex items-start gap-2 text-sm">
                       {isError ? (
@@ -1337,6 +1361,35 @@ export default function FlocksproUpgradePage() {
                             <div className="break-all">
                               <span className="font-medium text-slate-600">{t('upgrade.bundleFilename')}:</span>{' '}
                               {step.bundle_filename}
+                            </div>
+                          </div>
+                        )}
+                        {hasDownloadProgress && (
+                          <div className="mt-2 w-full max-w-xs space-y-1.5">
+                            <div className="flex items-center justify-between text-xs text-slate-500">
+                              <span>
+                                {downloadPercent === null
+                                  ? t('upgrade.downloadProgressUnknown', {
+                                      downloaded: formatBytes(step.downloaded_bytes),
+                                    })
+                                  : t('upgrade.downloadProgressLabel', {
+                                      percent: downloadPercent,
+                                      downloaded: formatBytes(step.downloaded_bytes),
+                                      total: formatBytes(step.total_bytes),
+                                    })}
+                              </span>
+                            </div>
+                            <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                              <div
+                                className={`h-full rounded-full bg-emerald-500 transition-all ${
+                                  downloadPercent === null ? 'w-1/2 animate-pulse' : ''
+                                }`}
+                                style={downloadPercent === null ? undefined : { width: `${downloadPercent}%` }}
+                                role="progressbar"
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={downloadPercent ?? undefined}
+                              />
                             </div>
                           </div>
                         )}

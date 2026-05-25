@@ -29,7 +29,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -1375,6 +1375,7 @@ async def _download_console_bundle(
     token: str | None,
     dest_dir: Path,
     filename: str,
+    progress_callback: Callable[[UpdateProgress], Awaitable[None]] | None = None,
 ) -> Path:
     """Download a Pro bundle, sending the console session token only to Console origin."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1391,9 +1392,48 @@ async def _download_console_bundle(
         async with client.stream("GET", url, headers=headers) as resp:
             if resp.status_code != 200:
                 await _raise_download_status_error(resp)
+            total_bytes = None
+            content_length = getattr(resp, "headers", {}).get("content-length")
+            if content_length:
+                try:
+                    parsed_content_length = int(content_length)
+                    total_bytes = parsed_content_length if parsed_content_length > 0 else None
+                except ValueError:
+                    total_bytes = None
+            downloaded_bytes = 0
+            last_progress_emit = 0.0
+            last_percent: int | None = None
             with dest.open("wb") as handle:
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     handle.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if not progress_callback:
+                        continue
+                    percent = (
+                        min(100, int(downloaded_bytes * 100 / total_bytes))
+                        if total_bytes
+                        else None
+                    )
+                    now = time.monotonic()
+                    should_emit = (
+                        downloaded_bytes == total_bytes
+                        or now - last_progress_emit >= 0.25
+                    )
+                    if percent is not None and percent == last_percent and downloaded_bytes != total_bytes:
+                        should_emit = False
+                    if should_emit:
+                        last_progress_emit = now
+                        last_percent = percent
+                        await progress_callback(
+                            UpdateProgress(
+                                stage="fetching",
+                                message="Downloading Flocks Pro bundle...",
+                                bundle_filename=dest.name,
+                                downloaded_bytes=downloaded_bytes,
+                                total_bytes=total_bytes,
+                                percent=percent,
+                            )
+                        )
     return dest
 
 
@@ -2663,12 +2703,28 @@ async def perform_update(
             primary_bundle_url = _absolute_console_url(zipball_url or tarball_url or "")
             if not primary_bundle_url:
                 raise ValueError("Console manifest did not provide a bundle URL")
-            archive_path = await _download_console_bundle(
-                primary_bundle_url,
-                console_session_token or await _load_console_session_token(),
-                tmp_dir,
-                archive_filename,
+            progress_queue: asyncio.Queue[UpdateProgress] = asyncio.Queue()
+
+            async def _queue_download_progress(progress: UpdateProgress) -> None:
+                await progress_queue.put(progress)
+
+            download_task = asyncio.create_task(
+                _download_console_bundle(
+                    primary_bundle_url,
+                    console_session_token or await _load_console_session_token(),
+                    tmp_dir,
+                    archive_filename,
+                    progress_callback=_queue_download_progress,
+                )
             )
+            while not download_task.done():
+                try:
+                    yield await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+            while not progress_queue.empty():
+                yield progress_queue.get_nowait()
+            archive_path = await download_task
             await asyncio.to_thread(_verify_download_sha256, archive_path, bundle_sha256)
         else:
             archive_path = await _download_with_fallback(

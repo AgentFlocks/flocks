@@ -40,3 +40,6 @@ class UpdateProgress(BaseModel):
     success: bool | None = None
     bundle_filename: str | None = None
     pro_component_filename: str | None = None
+    downloaded_bytes: int | None = None
+    total_bytes: int | None = None
+    percent: int | None = None

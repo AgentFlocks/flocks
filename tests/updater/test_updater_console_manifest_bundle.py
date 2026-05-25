@@ -288,6 +288,63 @@ async def test_download_console_bundle_sends_token_only_to_console_origin(
     ]
 
 
+@pytest.mark.asyncio
+async def test_download_console_bundle_emits_byte_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    class _Resp:
+        status_code = 200
+        reason_phrase = "OK"
+        headers = {"content-length": "11"}
+
+        async def aiter_bytes(self, chunk_size=65536):
+            yield b"hello"
+            yield b" "
+            yield b"world"
+
+    class _Stream:
+        async def __aenter__(self):
+            return _Resp()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers=None):
+            return _Stream()
+
+    progresses: list[updater.UpdateProgress] = []
+
+    async def _record_progress(progress: updater.UpdateProgress) -> None:
+        progresses.append(progress)
+
+    monkeypatch.setattr(updater.httpx, "AsyncClient", _Client)
+
+    await updater._download_console_bundle(
+        "https://cdn.example.com/flockspro/console.zip",
+        "cs_manifest",
+        tmp_path,
+        "console.zip",
+        progress_callback=_record_progress,
+    )
+
+    assert progresses
+    assert progresses[-1].stage == "fetching"
+    assert progresses[-1].downloaded_bytes == 11
+    assert progresses[-1].total_bytes == 11
+    assert progresses[-1].percent == 100
+
+
 def test_absolute_console_url_normalizes_same_host_http_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://portal.agentflocks.com")
 

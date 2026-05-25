@@ -27,6 +27,9 @@ export interface UpdateProgress {
   success: boolean | null;
   bundle_filename?: string | null;
   pro_component_filename?: string | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
+  percent?: number | null;
 }
 
 // ======================================================================
