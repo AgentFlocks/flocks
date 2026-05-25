@@ -1451,6 +1451,8 @@ class TestEditToolAdvanced:
         
         assert not result.success
         assert "could not find" in result.error.lower()
+        assert "re-read the file" in result.error.lower()
+        assert "slightly larger unique snippet" in result.error.lower()
     
     @pytest.mark.asyncio
     async def test_edit_create_new_file(self, tool_context, temp_dir):

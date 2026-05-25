@@ -1714,7 +1714,7 @@ async def delete_provider_credentials(provider_id: str):
             Provider._providers.pop(provider_id, None)
 
         log.info("provider.credentials.deleted", {"provider_id": provider_id})
-        return {"success": True, "cleared_defaults": affected_defaults}
+        return {"success": True, "cleared_defaults": bool(affected_defaults)}
 
 
     except HTTPException:
