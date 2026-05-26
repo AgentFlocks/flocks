@@ -935,6 +935,7 @@ def start_backend(config: ServiceConfig, console) -> None:
     backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
     backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
     backend_env["PYTHONUNBUFFERED"] = "1"
+    backend_env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
 
     console.print("[flocks] 启动后端服务...")
     process = _spawn_process(
