@@ -260,6 +260,83 @@ class TestMessageDedup:
         assert dedup.is_duplicate("msg_2") is False
 
 
+class TestParseSlashCommand:
+    """Regression coverage for ``dispatcher._parse_slash_command`` after the
+    PR #321 fix that tightened the channel fallback to bot-mention prefixes
+    only.  Group-IM platforms (WeCom, Feishu) inject short ``- BotName`` or
+    ``@BotName`` prefixes before commands; natural-language messages that
+    happen to contain ``/word`` must NOT be hijacked as slash commands.
+    """
+
+    def test_strict_leading_slash(self):
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("/compact") == ("compact", "")
+        assert _parse_slash_command("/compact focus_arg") == (
+            "compact",
+            "focus_arg",
+        )
+
+    def test_dash_prefix_wecom_style(self):
+        """WeCom group-mention injects ``- BotName`` before the command."""
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- rex /compact") == ("compact", "")
+        assert _parse_slash_command("- test /compact arg1") == (
+            "compact",
+            "arg1",
+        )
+
+    def test_at_prefix_feishu_style(self):
+        """Feishu group-mention injects ``@BotName`` before the command."""
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("@flocks_bot /compact") == ("compact", "")
+        assert _parse_slash_command("@bot /help") == ("help", "")
+
+    def test_unicode_bot_name_accepted(self):
+        """The bot name may contain Unicode word characters (e.g. CJK)."""
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- 测试机器人 /compact") == ("compact", "")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "请解释一下 /help",
+            "I want to know about /status",
+            "prefix /new thanks",
+            "see /tmp/foo.log",  # /tmp does not resolve, must be rejected
+            "hello /help",  # bare word + slash, missing mention prefix
+            "this is a long sentence about /model selection",
+        ],
+    )
+    def test_natural_language_with_slash_word_rejected(self, text: str):
+        """Plain chatter that *contains* a slash-prefixed word must NOT be
+        hijacked as a slash command — the LLM should see the original text.
+        """
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command(text) == (None, "")
+
+    def test_unknown_command_rejected_even_with_mention_prefix(self):
+        """Even with a valid bot-mention prefix, an unregistered command name
+        must fall through to the LLM rather than failing dispatch.
+        """
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- rex /this_is_not_a_command") == (
+            None,
+            "",
+        )
+
+    def test_empty_input(self):
+        from flocks.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("") == (None, "")
+        assert _parse_slash_command("   ") == (None, "")
+
+
 class TestFeishuNativeCommands:
     @pytest.mark.asyncio
     async def test_status_command_reports_session_state(self, monkeypatch):
