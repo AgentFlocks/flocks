@@ -27,6 +27,7 @@ const PermissionPage = lazy(() => import('@/pages/Permission'));
 const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
 const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
+const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
 const SocOverviewPage = lazy(() => import('@/pages/Soc'));
@@ -36,6 +37,10 @@ const SocIntelPage = lazy(() => import('@/pages/Soc/Intel'));
 const SocVulnerabilitiesPage = lazy(() => import('@/pages/Soc/Vulnerabilities'));
 const SocDrillsPage = lazy(() => import('@/pages/Soc/Drills'));
 const SocAttackSurfacePage = lazy(() => import('@/pages/Soc/AttackSurface'));
+const SocCasesPage = lazy(() => import('@/pages/Soc/Cases'));
+const SocCaseDetailPage = lazy(() => import('@/pages/Soc/CaseDetail'));
+const SocReportsPage = lazy(() => import('@/pages/Soc/Reports'));
+const KnowledgePage = lazy(() => import('@/pages/Knowledge'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -119,22 +124,29 @@ export function Routes() {
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
         <Route path="tasks" element={<LazyRoute><TaskPage /></LazyRoute>} />
         <Route path="workspace" element={<LazyRoute><WorkspacePage /></LazyRoute>} />
+        <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
+        <Route path="device-web2cli" element={<Navigate to="/devices?view=web2cli" replace />} />
 
         {/* SOC 场景实验室 */}
         <Route path="soc" element={<LazyRoute><SocOverviewPage /></LazyRoute>} />
         <Route path="soc/alerts" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
         <Route path="soc/alerts/:incidentId" element={<LazyRoute><SocAlertsPage /></LazyRoute>} />
+        <Route path="soc/inspections" element={<Navigate to="/soc/assets" replace />} />
         <Route path="soc/assets" element={<LazyRoute><SocAssetsPage /></LazyRoute>} />
         <Route path="soc/intel" element={<LazyRoute><SocIntelPage /></LazyRoute>} />
         <Route path="soc/vulnerabilities" element={<LazyRoute><SocVulnerabilitiesPage /></LazyRoute>} />
         <Route path="soc/drills" element={<LazyRoute><SocDrillsPage /></LazyRoute>} />
         <Route path="soc/attack-surface" element={<LazyRoute><SocAttackSurfacePage /></LazyRoute>} />
+        <Route path="soc/cases" element={<LazyRoute><SocCasesPage /></LazyRoute>} />
+        <Route path="soc/cases/:caseId" element={<LazyRoute><SocCaseDetailPage /></LazyRoute>} />
+        <Route path="soc/reports" element={<LazyRoute><SocReportsPage /></LazyRoute>} />
         
         {/* Agent Smith */}
         <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
         <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
         <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
         <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
+        <Route path="knowledge" element={<LazyRoute><KnowledgePage /></LazyRoute>} />
         {/* MCP 已整合到工具清单页面 */}
         <Route path="mcp" element={<Navigate to="/tools" replace />} />
         

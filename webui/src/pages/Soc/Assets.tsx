@@ -12,7 +12,7 @@ export default function SocAssetsPage() {
   return (
     <div className="h-full overflow-y-auto">
       <PageHeader
-        title="安全设备"
+        title="设备巡检"
         description="把设备管理、设备接入、API、web2cli、Skills、巡检和攻击面巡航放在同一个资产上下文里。"
         icon={<Network className="h-8 w-8" />}
         action={<ModeSwitch configureHref="/soc/assets?mode=configure" />}

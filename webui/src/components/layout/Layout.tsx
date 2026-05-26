@@ -11,7 +11,6 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
-  ChevronDown,
   Menu,
   Radio,
   FolderOpen,
@@ -23,6 +22,7 @@ import {
   Shield,
   AlertTriangle,
   Network,
+  ServerCog,
   Bug,
   MailWarning,
   Radar,
@@ -48,8 +48,7 @@ import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
-const NAV_SECTION_COLLAPSE_KEY = 'flocks-nav-section-collapsed';
-const DEFAULT_COLLAPSED_NAV_SECTIONS = new Set(['agentHub', 'management']);
+type WorkspaceId = 'agent' | 'soc' | 'system';
 
 function formatProVersion(version?: string | null): string | null {
   const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
@@ -87,14 +86,6 @@ export default function Layout() {
   const { user } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
-    try {
-      const saved = localStorage.getItem(NAV_SECTION_COLLAPSE_KEY);
-      return saved ? JSON.parse(saved) as Record<string, boolean> : {};
-    } catch {
-      return {};
-    }
-  });
   const isHome = location.pathname === '/';
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [showUpdate, setShowUpdate] = useState(false);
@@ -407,79 +398,101 @@ export default function Layout() {
     }
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
-  const toggleNavigationSection = useCallback((sectionId: string) => {
-    setCollapsedSections((prev) => {
-      const current = prev[sectionId] ?? DEFAULT_COLLAPSED_NAV_SECTIONS.has(sectionId);
-      const next = { ...prev, [sectionId]: !current };
-      localStorage.setItem(NAV_SECTION_COLLAPSE_KEY, JSON.stringify(next));
-      return next;
-    });
-  }, []);
-
   const isNavigationItemActive = useCallback((href: string) => {
+    if (href === '/') return location.pathname === '/';
     if (location.pathname === href) return true;
-    if (href === '/' || href === '/soc') return false;
     return location.pathname.startsWith(`${href}/`);
   }, [location.pathname]);
 
+  const systemPaths = ['/config', '/permissions', '/monitoring', '/audit-logs', '/flockspro-upgrade', '/system-logs'];
+  const isSystemPath = systemPaths.some((path) =>
+    location.pathname === path || location.pathname.startsWith(`${path}/`)
+  );
+  const currentWorkspace: WorkspaceId = location.pathname.startsWith('/soc/')
+    || location.pathname === '/soc'
+    ? 'soc'
+    : isSystemPath
+      ? 'system'
+      : 'agent';
 
-  const navigation = [
-    {
-      id: 'home',
-      name: t('home'),
-      items: [
-        { name: t('flocksHome'), href: '/', icon: Home },
-      ],
-    },
-    {
-      id: 'aiWorkbench',
-      name: t('aiWorkbench'),
-      items: [
-        { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-        { name: t('tasks'), href: '/tasks', icon: ListTodo },
-        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-      ],
-    },
-    {
-      id: 'socLab',
-      name: t('socLab'),
-      items: [
-        { name: t('socOverview'), href: '/soc', icon: Shield },
-        { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
-        { name: t('socAssets'), href: '/soc/assets', icon: Network },
-        { name: t('socIntel'), href: '/soc/intel', icon: Radar },
-        { name: t('socVulnerabilities'), href: '/soc/vulnerabilities', icon: Bug },
-        { name: t('socDrills'), href: '/soc/drills', icon: MailWarning },
-        { name: t('socAttackSurface'), href: '/soc/attack-surface', icon: Globe2 },
-      ],
-    },
-    {
-      id: 'agentHub',
-      name: t('agentHub'),
-      items: [
-        { name: t('agents'), href: '/agents', icon: Bot },
-        { name: t('workflows'), href: '/workflows', icon: Workflow },
-        { name: t('skills'), href: '/skills', icon: BookOpen },
-        { name: t('tools'), href: '/tools', icon: Wrench },
-        { name: t('hub'), href: '/hub', icon: Archive },
-        { name: t('models'), href: '/models', icon: Brain },
-        { name: t('channels'), href: '/channels', icon: Radio },
-      ],
-    },
-    {
-      id: 'management',
-      name: t('management'),
-      items: [
-        { name: t('accountManagement'), href: '/config', icon: UserCog },
-        ...(hasFlocksproCapability && user?.role === 'admin'
-          ? [{ name: t('auditLogs'), href: '/audit-logs', icon: ShieldCheck }]
-          : []),
-        ...(user?.role === 'admin'
-          ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
-          : []),
-      ],
-    },
+  const workspaceTabs: Array<{ id: WorkspaceId; name: string; href: string; icon: typeof Bot }> = [
+    { id: 'agent', name: t('agentWorkspace'), href: '/sessions', icon: Bot },
+    { id: 'soc', name: t('socWorkspace'), href: '/soc', icon: Shield },
+    { id: 'system', name: t('systemCenter'), href: '/config', icon: UserCog },
   ];
+
+  type NavItem = { name: string; href: string; icon: typeof Bot };
+  type NavSection = { id: string; name: string; items: NavItem[] };
+  const workspaceNavigation: Record<WorkspaceId, NavSection[]> = {
+    agent: [
+      {
+        id: 'home',
+        name: t('home'),
+        items: [
+          { name: t('flocksHome'), href: '/', icon: Home },
+        ],
+      },
+      {
+        id: 'aiWorkbench',
+        name: t('aiWorkbench'),
+        items: [
+          { name: t('sessions'), href: '/sessions', icon: MessageSquare },
+          { name: t('tasks'), href: '/tasks', icon: ListTodo },
+          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+          { name: t('workflows'), href: '/workflows', icon: Workflow },
+        ],
+      },
+      {
+        id: 'agentHub',
+        name: t('agentHub'),
+        items: [
+          { name: t('agents'), href: '/agents', icon: Bot },
+          { name: t('skills'), href: '/skills', icon: BookOpen },
+          { name: t('tools'), href: '/tools', icon: Wrench },
+          { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          { name: t('knowledge'), href: '/knowledge', icon: ShieldCheck },
+          { name: t('hub'), href: '/hub', icon: Archive },
+          { name: t('models'), href: '/models', icon: Brain },
+          { name: t('channels'), href: '/channels', icon: Radio },
+        ],
+      },
+    ],
+    soc: [
+      {
+        id: 'socWorkspace',
+        name: t('socWorkspace'),
+        items: [
+          { name: t('socOverview'), href: '/soc', icon: Shield },
+          { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
+          { name: t('socCases'), href: '/soc/cases', icon: MessageSquare },
+          { name: t('socAssets'), href: '/soc/assets', icon: Network },
+          { name: t('socIntel'), href: '/soc/intel', icon: Radar },
+          { name: t('socVulnerabilities'), href: '/soc/vulnerabilities', icon: Bug },
+          { name: t('socDrills'), href: '/soc/drills', icon: MailWarning },
+          { name: t('socAttackSurface'), href: '/soc/attack-surface', icon: Globe2 },
+          { name: t('socReports'), href: '/soc/reports', icon: Archive },
+        ],
+      },
+    ],
+    system: [
+      {
+        id: 'systemCenter',
+        name: t('systemCenter'),
+        items: [
+          { name: t('accountManagement'), href: '/config', icon: UserCog },
+          { name: t('permissions'), href: '/permissions', icon: ShieldCheck },
+          ...(hasFlocksproCapability && user?.role === 'admin'
+            ? [{ name: t('auditLogs'), href: '/audit-logs', icon: Shield }]
+            : []),
+          { name: t('monitoring'), href: '/monitoring', icon: Radio },
+          ...(user?.role === 'admin'
+            ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+            : []),
+        ],
+      },
+    ],
+  };
+  const navigationSections = workspaceNavigation[currentWorkspace];
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
@@ -564,63 +577,42 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section) => {
-              const sectionActive = section.items.some((item) => isNavigationItemActive(item.href))
-                || (section.id === 'socLab' && location.pathname.startsWith('/soc/'));
-              const sectionCollapsed = !collapsed
-                && !sectionActive
-                && (collapsedSections[section.id] ?? DEFAULT_COLLAPSED_NAV_SECTIONS.has(section.id));
-
-              return (
-                <div key={section.id} className="mb-3">
-                  {!collapsed && (
-                    <button
-                      type="button"
-                      onClick={() => toggleNavigationSection(section.id)}
-                      className="mb-1 flex w-full items-center justify-between rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider text-gray-400 transition-colors hover:bg-gray-50 hover:text-gray-600"
-                    >
-                      <span className="truncate">{section.name}</span>
-                      <ChevronDown
-                        className={`h-3.5 w-3.5 flex-shrink-0 transition-transform ${
-                          sectionCollapsed ? '-rotate-90' : 'rotate-0'
-                        }`}
-                      />
-                    </button>
-                  )}
-                  {collapsed && <div className="mb-1 border-t border-gray-100 first:border-none" />}
-                  {!sectionCollapsed && (
-                    <div className="space-y-0.5">
-                      {section.items.map((item) => {
-                        const isActive = isNavigationItemActive(item.href);
-                        return (
-                          <Link
-                            key={item.href}
-                            to={item.href}
-                            onClick={() => setSidebarOpen(false)}
-                            title={collapsed ? item.name : undefined}
-                            className={`
-                              flex items-center rounded-lg transition-colors duration-150
-                              ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
-                              ${isActive
-                                ? 'bg-slate-100 text-slate-800'
-                                : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
-                              }
-                            `}
-                          >
-                            <item.icon
-                              className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-slate-700' : 'text-gray-400'}`}
-                            />
-                            {!collapsed && (
-                              <span className="truncate">{item.name}</span>
-                            )}
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
+            {navigationSections.map((section) => (
+              <div key={section.id} className="mb-4">
+                {!collapsed && (
+                  <h3 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-gray-400">
+                    {section.name}
+                  </h3>
+                )}
+                <div className="space-y-0.5">
+                  {section.items.map((item) => {
+                    const isActive = isNavigationItemActive(item.href)
+                      || (item.href === '/soc' && location.pathname === '/soc');
+                    return (
+                      <Link
+                        key={item.href}
+                        to={item.href}
+                        onClick={() => setSidebarOpen(false)}
+                        title={collapsed ? item.name : undefined}
+                        className={`
+                          flex items-center rounded-lg transition-colors duration-150
+                          ${collapsed ? 'justify-center p-2.5' : 'px-3 py-2 text-sm font-medium'}
+                          ${isActive
+                            ? 'bg-slate-100 text-slate-800'
+                            : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                          }
+                        `}
+                      >
+                        <item.icon
+                          className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-slate-700' : 'text-gray-400'}`}
+                        />
+                        {!collapsed && <span className="truncate">{item.name}</span>}
+                      </Link>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </nav>
 
           {/* Bottom: Language switcher + version */}
@@ -715,6 +707,27 @@ export default function Layout() {
       <div
         className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-64'}`}
       >
+        <header className="border-b border-gray-200 bg-white px-6 py-3">
+          <nav className="flex items-center gap-2 overflow-x-auto">
+            {workspaceTabs.map((tab) => {
+              const isActive = tab.id === currentWorkspace;
+              return (
+                <Link
+                  key={tab.id}
+                  to={tab.href}
+                  className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${
+                    isActive
+                      ? 'bg-slate-900 text-white'
+                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                  }`}
+                >
+                  <tab.icon className="h-4 w-4" />
+                  {tab.name}
+                </Link>
+              );
+            })}
+          </nav>
+        </header>
         <main className="flex-1 overflow-hidden bg-gray-50">
           {isFullScreenPage ? (
             <Outlet />

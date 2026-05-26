@@ -16,7 +16,7 @@ export default function SocOverviewPage() {
     <div className="h-full overflow-y-auto">
       <PageHeader
         title="SOC 总览"
-        description="只使用 mock 数据的 Agentic SOC 作战室，展示从安全场景到 Flocks 配置的最短路径。"
+        description="使用预置数据构建的 Agentic SOC 作战室，展示从安全场景到 Flocks 配置的最短路径。"
         icon={<Shield className="h-8 w-8" />}
       />
 
@@ -31,7 +31,7 @@ export default function SocOverviewPage() {
               先处理 {sharedStory.incidentId}，再验证 {sharedStory.cve}
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">
-              该事件把 {sharedStory.attackerIp}、{sharedStory.asset}、漏洞情报和新增公网暴露面串在一起，适合作为首个 Agentic SOC demo 故事线。
+              该事件把 {sharedStory.attackerIp}、{sharedStory.asset}、漏洞情报和新增公网暴露面串在一起，适合作为首个 Agentic SOC 场景故事线。
             </p>
           </div>
           <Link
@@ -59,7 +59,7 @@ export default function SocOverviewPage() {
           <div className="mb-4 flex items-center justify-between">
             <div>
               <h3 className="font-semibold text-gray-900">场景入口</h3>
-              <p className="text-sm text-gray-500">每个场景都有运营演示和配置车间两种模式。</p>
+              <p className="text-sm text-gray-500">每个场景都有运营视图和配置车间两种模式。</p>
             </div>
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -78,7 +78,7 @@ export default function SocOverviewPage() {
                   <p className="mt-3 text-xs text-gray-500">{scenario.impact}</p>
                   <div className="mt-4 flex flex-wrap gap-2">
                     <Link to={scenario.href} className="text-sm font-medium text-red-600 hover:text-red-700">
-                      查看演示
+                      查看场景
                     </Link>
                     <Link to={scenario.configureHref} className="text-sm font-medium text-gray-600 hover:text-gray-900">
                       配置这个场景
@@ -159,7 +159,7 @@ export default function SocOverviewPage() {
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h3 className="font-semibold text-gray-900">Agentic SOC 成熟度</h3>
-            <p className="text-sm text-gray-500">Demo 用 mock 数据展示“看结果”和“配能力”如何连在一起。</p>
+            <p className="text-sm text-gray-500">使用预置数据展示“看结果”和“配能力”如何连在一起。</p>
           </div>
           <Badge tone="green">68%</Badge>
         </div>

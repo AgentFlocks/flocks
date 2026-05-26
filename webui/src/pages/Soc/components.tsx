@@ -63,7 +63,7 @@ export function ModeSwitch({ configureHref }: { configureHref: string }) {
         }`}
       >
         <PlayCircle className="h-4 w-4" />
-        运营演示
+        运营视图
       </Link>
       <Link
         to={configureHref}
@@ -101,7 +101,7 @@ export function ScenarioHero({
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xl font-semibold text-gray-900">{title}</h2>
-              <Badge tone="red">Agentic SOC Demo</Badge>
+              <Badge tone="red">Agentic SOC</Badge>
             </div>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-gray-600">{description}</p>
             {children}
@@ -153,10 +153,10 @@ export function ConfigWorkshop({ scenario }: { scenario: ScenarioKey }) {
         {showBlueprintDrawer && (
           <BlueprintConversationDrawer
             title="Rex 配置蓝图生成过程"
-            subtitle="mock 场景：NDR 接 syslog 告警并配置降噪研判流程。"
+            subtitle="场景：NDR 接 syslog 告警并配置降噪研判流程。"
             conversation={alertBlueprintConversation}
             footerTitle="配置已完成"
-            footerDescription="TDP syslog、降噪 Workflow、企业微信输出、关联设备上下文均已 mock 就绪。"
+            footerDescription="TDP syslog、降噪 Workflow、企业微信输出、关联设备上下文均已就绪。"
             footerLinkLabel="查看 Workflow"
             footerLinkTo="/workflows"
             onClose={() => setShowBlueprintDrawer(false)}
@@ -174,10 +174,10 @@ export function ConfigWorkshop({ scenario }: { scenario: ScenarioKey }) {
         {showBlueprintDrawer && (
           <BlueprintConversationDrawer
             title="Rex 安全设备接入过程"
-            subtitle="mock 场景：杭州机房两台同型号防火墙 API + web2cli 接入、巡检 Agent 和定时任务配置。"
+            subtitle="场景：杭州机房两台同型号防火墙 API + web2cli 接入、巡检 Agent 和定时任务配置。"
             conversation={assetBlueprintConversation}
             footerTitle="设备接入已完成"
-            footerDescription="21 个告警数据 API、2 个巡检 API、1 个 web2cli 接口、巡检 Agent 和每日定时任务均已 mock 就绪。"
+            footerDescription="21 个告警数据 API、2 个巡检 API、1 个 web2cli 接口、巡检 Agent 和每日定时任务均已就绪。"
             footerLinkLabel="查看安全设备"
             footerLinkTo="/soc/assets"
             onClose={() => setShowBlueprintDrawer(false)}
@@ -222,10 +222,10 @@ export function ConfigWorkshop({ scenario }: { scenario: ScenarioKey }) {
       {showBlueprintDrawer && (
         <BlueprintConversationDrawer
           title="Rex 配置蓝图生成过程"
-          subtitle="mock 场景：NDR 接 syslog 告警并配置降噪研判流程。"
+          subtitle="场景：NDR 接 syslog 告警并配置降噪研判流程。"
           conversation={alertBlueprintConversation}
           footerTitle="配置已完成"
-          footerDescription="TDP syslog、降噪 Workflow、企业微信输出、关联设备上下文均已 mock 就绪。"
+          footerDescription="TDP syslog、降噪 Workflow、企业微信输出、关联设备上下文均已就绪。"
           footerLinkLabel="查看 Workflow"
           footerLinkTo="/workflows"
           onClose={() => setShowBlueprintDrawer(false)}
@@ -491,7 +491,7 @@ function BlueprintSummary({ config }: { config: ScenarioConfig }) {
         {config.agents.map((agent) => (
           <div key={agent} className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
             <span className="text-sm text-gray-700">{agent}</span>
-            <Badge tone="green">mock ready</Badge>
+            <Badge tone="green">已就绪</Badge>
           </div>
         ))}
       </div>

@@ -461,7 +461,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
               <h2 className="text-lg font-semibold text-gray-900">Agent 调查过程</h2>
             </div>
             <p className="mt-1 text-sm text-gray-500">
-              mock 会话：Rex 调度 NDR、EDR、邮件网关和 OA 上下文 Agent 完成调查。
+              场景会话：Rex 调度 NDR、EDR、邮件网关和 OA 上下文 Agent 完成调查。
             </p>
           </div>
           <button
@@ -484,7 +484,7 @@ function AgentSessionDrawer({ onClose }: { onClose: () => void }) {
         <div className="border-t border-gray-200 bg-white px-5 py-4">
           <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-500">
             <Bot className="h-4 w-4 text-red-600" />
-            mock 会话已完成：可继续追问“哪些用户还收到同主题邮件？”或“生成处置工单”。
+            场景会话已完成：可继续追问“哪些用户还收到同主题邮件？”或“生成处置工单”。
           </div>
         </div>
       </aside>

@@ -90,12 +90,12 @@ export const scenarioSummaries: ScenarioSummary[] = [
   },
   {
     key: 'assets',
-    title: '安全设备',
-    description: '用业务语言配置设备、API、web2cli、Skills 和巡检。',
-    href: '/soc/assets',
-    configureHref: '/soc/assets?mode=configure',
+    title: '设备巡检',
+    description: '消费已发布的设备 Skill，按策略执行巡检并联动告警与案件。',
+    href: '/soc/inspections',
+    configureHref: '/devices',
     icon: Network,
-    status: '接入中',
+    status: '运行中',
     impact: `${sharedStory.region} 有 2 台同型号防火墙待绑定巡检`,
   },
   {
@@ -713,6 +713,39 @@ export const exposureFindings = [
   { title: '新增公网服务', detail: '发现 test-pay.example.com 暴露 8443 端口，未归属到 CMDB。' },
   { title: '证书即将过期', detail: 'api.example.com 证书 9 天后过期，建议自动创建提醒任务。' },
   { title: '影子资产认领', detail: '2 个子域名解析到云厂商临时 IP，Rex 建议关联业务 owner。' },
+];
+
+export const socReports = [
+  {
+    id: 'RPT-2026-0522-001',
+    type: '事件报告',
+    title: `${sharedStory.incidentId} 边界资产异常外联调查报告`,
+    caseId: 'INV-2026-0522-003',
+    owner: sharedStory.assetOwner,
+    updatedAt: '2026-05-22 11:45',
+    status: '已完成',
+    summary: `围绕 ${sharedStory.asset} 的外联行为完成证据闭环，已触发漏洞验证和修复复测。`,
+  },
+  {
+    id: 'RPT-2026-0522-002',
+    type: '值班日报',
+    title: '05-22 值班日报（告警研判与调查）',
+    caseId: 'INV-2026-0522-001',
+    owner: 'SOC 值班组',
+    updatedAt: '2026-05-22 20:15',
+    status: '已完成',
+    summary: '已完成 18 个事件簇研判，3 个高优先级事件进入深度调查并形成处置建议。',
+  },
+  {
+    id: 'RPT-2026-0522-003',
+    type: '管理摘要',
+    title: '安全运营周报管理摘要（第 21 周）',
+    caseId: 'INV-2026-0522-002',
+    owner: '安全运营负责人',
+    updatedAt: '2026-05-23 09:00',
+    status: '待确认',
+    summary: '聚焦边界资产风险、钓鱼事件趋势和漏洞复测进展，等待管理层确认。',
+  },
 ];
 
 export const intelCards = [
