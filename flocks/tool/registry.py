@@ -1070,8 +1070,23 @@ class ToolRegistry:
         - Service disabled  → force tool off.
         - Service enabled   → restore the tool to its factory/YAML default so
           that re-enabling a service (e.g. after adding a device) brings its
-          tools back automatically.  User-level overrides stored in
-          ``tool_settings`` are applied afterwards by :meth:`_apply_tool_settings`.
+          tools back automatically.
+
+        Calling contract — IMPORTANT:
+            This method overwrites ``tool.info.enabled`` with the factory
+            default whenever a service becomes enabled.  That would silently
+            re-open any tool the user had explicitly disabled via the
+            ``tool_settings`` overlay.  **Every call site that may flip a
+            service's enabled flag MUST pair the call with
+            :meth:`_apply_tool_settings` afterwards**, so the user overlay
+            wins the final write::
+
+                ToolRegistry._sync_api_service_states()
+                ToolRegistry._apply_tool_settings()
+
+            The bootstrap path (:meth:`_load_plugin_tools`) and the device
+            sync helper (:func:`flocks.tool.device.sync.sync_service_tool_state`)
+            already follow this discipline.
         """
         try:
             from flocks.config.config_writer import ConfigWriter
