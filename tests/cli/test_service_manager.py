@@ -1004,6 +1004,37 @@ def test_build_frontend_env_keeps_proxy_mode_for_loopback_backend_host(monkeypat
     assert "VITE_WS_BASE_URL" not in env
 
 
+def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -> None:
+    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL", raising=False)
+    monkeypatch.delenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", raising=False)
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
+    assert (
+        env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
+        == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+    )
+
+
+def test_build_frontend_env_allows_overriding_portal_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://custom.example.com")
+    monkeypatch.setenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", "custom.example.com")
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_CONSOLE_BASE_URL"] == "https://custom.example.com"
+    assert env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "custom.example.com"
+
+
 def test_build_frontend_env_allows_direct_backend_urls_when_opted_in(monkeypatch) -> None:
     monkeypatch.setenv(service_manager.WEBUI_DIRECT_BACKEND_URLS_ENV, "true")
     config = service_manager.ServiceConfig(
