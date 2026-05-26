@@ -383,6 +383,47 @@ def _cookie_source_header_auth_spec():
     return spec
 
 
+def _manual_header_auth_spec():
+    spec = _sample_spec()
+    spec["strategy"] = "HEADER"
+    spec["auth"] = {
+        "stateFile": "auth-state.json",
+        "requiredCookies": [],
+        "requiredHeaders": [
+            {"name": "Authorization", "source": "manual", "key": "authorization"},
+            {"name": "X-CSRF-Token", "source": "manual", "key": "x-csrf-token"},
+        ],
+    }
+    return spec
+
+
+def _multipart_spec():
+    spec = _sample_spec()
+    spec["strategy"] = "PUBLIC"
+    spec["auth"] = {"stateFile": "auth-state.json", "requiredCookies": [], "requiredHeaders": []}
+    spec["command"] = "upload_items"
+    spec["description"] = "Upload items with multipart payload"
+    spec["operation"] = {
+        "method": "POST",
+        "endpoint": "/api/upload",
+        "queryTemplate": {"page": "${page}"},
+        "bodyTemplate": {"note": "alpha", "upload": "${upload_file}"},
+        "payloadMode": "multipart",
+        "rawBodyTemplate": "",
+        "multipartFileFields": ["upload"],
+        "headers": {
+            "Content-Type": "multipart/form-data; boundary=----WebKitFormBoundary123",
+            "X-Requested-With": "XMLHttpRequest",
+        },
+    }
+    spec["args"] = [
+        {"name": "page", "type": "int", "default": 1, "help": "Page number"},
+        {"name": "upload_file", "type": "string", "default": "", "help": "File path for multipart field upload"},
+    ]
+    spec["verify"]["args"] = {"page": 1, "upload_file": "sample.txt"}
+    return spec
+
+
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -400,10 +441,29 @@ class _FakeRequestSession(_FakeSession):
         self._payload = payload
         self.request_calls = []
 
-    def request(self, method, url, json=None, params=None, data=None, headers=None):
-        self.request_calls.append(
-            {"method": method, "url": url, "json": json, "params": params, "data": data, "headers": headers}
-        )
+    @staticmethod
+    def _snapshot_files(files):
+        if files is None:
+            return None
+        snapshot = []
+        for key, value in files:
+            if (
+                isinstance(value, tuple)
+                and len(value) >= 2
+                and hasattr(value[1], "read")
+            ):
+                content = value[1].read()
+                value[1].seek(0)
+                snapshot.append((key, (value[0], content)))
+            else:
+                snapshot.append((key, value))
+        return snapshot
+
+    def request(self, method, url, json=None, params=None, data=None, headers=None, files=None):
+        record = {"method": method, "url": url, "json": json, "params": params, "data": data, "headers": headers}
+        if files is not None:
+            record["files"] = self._snapshot_files(files)
+        self.request_calls.append(record)
         return _FakeResponse(self._payload)
 
 
@@ -695,6 +755,93 @@ def test_generated_header_strategy_accepts_empty_cookie_values(tmp_path, monkeyp
 
     assert rows == [{"id": "1", "title": "Alpha"}]
     assert fake_session.request_calls[0]["headers"]["Cookie"] == "flag=; sid=cookie-123"
+
+
+def test_generated_manual_header_strategy_requires_values(monkeypatch):
+    module = _load_module()
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_manual_header_cli"}
+    exec(module.generate_python_cli_from_spec(_manual_header_auth_spec()), namespace)
+
+    try:
+        namespace["APIClient"](auth_state="auth-state.json")
+    except SystemExit as error:
+        assert str(error) == "missing required auth headers: Authorization, X-CSRF-Token"
+    else:
+        raise AssertionError("expected missing manual auth headers to exit")
+
+
+def test_generated_manual_header_strategy_accepts_cli_values(monkeypatch):
+    module = _load_module()
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_manual_header_cli"}
+    exec(module.generate_python_cli_from_spec(_manual_header_auth_spec()), namespace)
+
+    parser = namespace["build_parser"]()
+    parsed = parser.parse_args(
+        [
+            "--auth-header-authorization",
+            "Bearer token-123",
+            "--auth-header-x-csrf-token",
+            "csrf-abc",
+            "--page",
+            "2",
+            "--limit",
+            "5",
+        ]
+    )
+    runtime_args = {
+        item["name"]: getattr(parsed, item["name"])
+        for item in _manual_header_auth_spec()["args"]
+    }
+    manual_headers = {
+        "Authorization": parsed.auth_header_authorization,
+        "X-CSRF-Token": parsed.auth_header_x_csrf_token,
+    }
+
+    client = namespace["APIClient"](auth_state="auth-state.json", manual_headers=manual_headers)
+    rows = client.run(runtime_args)
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert fake_session.headers["Authorization"] == "Bearer token-123"
+    assert fake_session.headers["X-CSRF-Token"] == "csrf-abc"
+
+
+def test_generated_multipart_spec_cli_sends_files_and_strips_content_type(tmp_path, monkeypatch):
+    module = _load_module()
+    upload_path = tmp_path / "sample.txt"
+    upload_path.write_text("payload-data", encoding="utf-8")
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_multipart_cli"}
+    exec(module.generate_python_cli_from_spec(_multipart_spec()), namespace)
+
+    client = namespace["APIClient"]()
+    rows = client.run({"page": 4, "upload_file": str(upload_path)})
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert fake_session.request_calls == [
+        {
+            "method": "POST",
+            "url": "https://example.com/api/upload",
+            "json": None,
+            "params": {"page": 4},
+            "data": None,
+            "headers": {"X-Requested-With": "XMLHttpRequest"},
+            "files": [
+                ("note", (None, "alpha")),
+                ("upload", ("sample.txt", b"payload-data")),
+            ],
+        }
+    ]
 
 
 def test_generated_cli_normalizes_non_dict_auth_state_for_headers(tmp_path, monkeypatch):

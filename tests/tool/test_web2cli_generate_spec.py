@@ -131,6 +131,79 @@ def _raw_request():
     ]
 
 
+def _multipart_request():
+    return [
+        {
+            "type": "Fetch",
+            "method": "POST",
+            "url": "https://example.com/api/upload?page=1",
+            "origin": "https://example.com",
+            "pathname": "/api/upload",
+            "query": {"page": "1"},
+            "status": 200,
+            "captureReason": "nonGet",
+            "requestContentType": "multipart/form-data; boundary=----WebKitFormBoundary123",
+            "requestHeaders": {
+                "Content-Type": "multipart/form-data; boundary=----WebKitFormBoundary123",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            "requestBodyKind": "formData",
+            "requestBody": '{"page":"1","note":"alpha","upload":"[file]"}',
+            "response": '{"data":{"items":[{"id":"1","title":"Alpha"}]}}',
+        }
+    ]
+
+
+def _header_auth_request():
+    return [
+        {
+            "type": "Fetch",
+            "method": "GET",
+            "url": "https://example.com/api/items/list?page=1",
+            "origin": "https://example.com",
+            "pathname": "/api/items/list",
+            "query": {"page": "1"},
+            "status": 200,
+            "captureReason": "includePattern",
+            "requestHeaders": {
+                "Authorization": "Bearer secret",
+                "X-CSRF-Token": "csrf-abc",
+                "Accept": "application/json",
+            },
+            "response": '{"data":{"items":[{"id":"1","title":"Alpha"}]}}',
+        }
+    ]
+
+
+def _mixed_score_requests():
+    return [
+        {
+            "type": "Fetch",
+            "method": "POST",
+            "url": "https://example.com/api/items/list?page=1",
+            "origin": "https://example.com",
+            "pathname": "/api/items/list",
+            "query": {"page": "1"},
+            "status": 200,
+            "captureReason": "nonGet",
+            "requestHeaders": {"Content-Type": "application/json"},
+            "requestBody": '{"page": 1, "size": 20}',
+            "response": '{"data":{"items":[{"id":"1","title":"Alpha"}]}}',
+        },
+        {
+            "type": "Fetch",
+            "method": "GET",
+            "url": "https://example.com/api/items/detail?id=1",
+            "origin": "https://example.com",
+            "pathname": "/api/items/detail",
+            "query": {"id": "1"},
+            "status": 200,
+            "requestHeaders": {"Accept": "application/json"},
+            "response": '{"id":"1","title":"Alpha"}',
+        },
+    ]
+
+
 def test_generate_spec_from_requests_picks_primary_collection_endpoint():
     module = _load_module()
 
@@ -168,6 +241,17 @@ def test_generate_spec_from_requests_includes_multi_operation_entries():
     ]
 
 
+def test_generate_spec_from_requests_keeps_mid_score_object_endpoints():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_mixed_score_requests())
+
+    assert [entry["operation"]["endpoint"] for entry in spec["operations"]] == [
+        "/api/items/list",
+        "/api/items/detail",
+    ]
+
+
 def test_generate_spec_from_requests_preserves_form_payload_mode():
     module = _load_module()
 
@@ -187,6 +271,37 @@ def test_generate_spec_from_requests_preserves_raw_payload_mode():
     assert spec["operation"]["bodyTemplate"] == {}
     assert spec["operation"]["rawBodyTemplate"] == "keyword=alpha"
     assert spec["args"] == [{"name": "page", "type": "int", "default": 1, "help": "Page number"}]
+
+
+def test_generate_spec_from_requests_preserves_multipart_payload_mode():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_multipart_request())
+
+    assert spec["operation"]["payloadMode"] == "multipart"
+    assert spec["operation"]["bodyTemplate"] == {
+        "page": "${page}",
+        "note": "alpha",
+        "upload": "${upload_file}",
+    }
+    assert spec["operation"]["multipartFileFields"] == ["upload"]
+    assert spec["args"] == [
+        {"name": "page", "type": "int", "default": 1, "help": "Page number"},
+        {"name": "upload_file", "type": "string", "default": "", "help": "File path for multipart field upload"},
+    ]
+    assert spec["operation"]["headers"] == {"X-Requested-With": "XMLHttpRequest"}
+
+
+def test_generate_spec_from_requests_marks_manual_header_auth():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_header_auth_request())
+
+    assert spec["strategy"] == "HEADER"
+    assert spec["auth"]["requiredHeaders"] == [
+        {"name": "Authorization", "source": "manual", "key": "authorization"},
+        {"name": "x-csrf-token", "source": "manual", "key": "x-csrf-token"},
+    ]
 
 
 def test_main_writes_spec_file(tmp_path, monkeypatch, capsys):

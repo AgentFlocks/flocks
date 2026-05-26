@@ -270,7 +270,7 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-spec.py \
 
 - 目标站点与命令名
 - 鉴权策略（如 `PUBLIC` / `COOKIE` / `HEADER`）
-- 主请求的 method、endpoint、query/body 模板
+- 主请求的 method、endpoint、query/body/payload 模板
 - CLI 参数定义
 - 固定输出列定义
 - 验证材料初稿
@@ -314,16 +314,24 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
   --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
 ```
 
-### 10. CLI工具验证 和浏览器关闭
+### 10. CLI工具验证与修改
 
 根据生成的 CLI ，任意选择一个接口调用测试可用性
 - CLI 工具可用性
 - 认证状态可用性
 - `verify.json` 的输出约束是否满足
+- method、endpoint、query/body/payload 的一致性，必要时根据${CAPTURE_NAME}_api.json调整
 
 推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
 
-当验证完成，确保 CLI 可用后关闭浏览器或 Tab
+### 11. CLI 工具集成到skill
+
+将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
+
+### 12. summary并关闭浏览器 tab
+
+1. 总结当前生成的 CLI 工具有哪些接口/能力
+2. 确保 CLI 可用后关闭浏览器或 Tab
 
 #### 关闭浏览器或 Tab
 
@@ -342,17 +350,6 @@ else:
 ```
 
 必须保留用户原有的 tab 不受影响。
-
-### 11. CLI 工具集成到skill
-
-将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
-
-### 12. summary
-
-总结当前生成的 CLI 工具有哪些能力，然后可提示用户下一步操作：
-
-- 精简或修正 CLI
-- 若仍需扩展能力或沉淀为 skill，回到步骤 11
 
 ## 故障处理
 

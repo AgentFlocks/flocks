@@ -662,13 +662,23 @@ class SessionLoop:
                 log.error("loop.no_user_message", {"session_id": ctx.session.id})
                 break
             
+            last_assistant_parts = (
+                await Message.parts(last_assistant.id, ctx.session.id)
+                if last_assistant
+                else []
+            )
+
             # Check exit conditions (matching TUI lines 295-302)
-            if cls._should_exit(last_user, last_assistant):
+            if cls._should_exit(last_user, last_assistant, last_assistant_parts):
                 log.info("loop.exit_condition", {
                     "session_id": ctx.session.id,
                     "last_user_id": last_user.id,
                     "last_assistant_id": last_assistant.id if last_assistant else None,
                     "finish": last_assistant.finish if last_assistant else None,
+                    "has_tool_parts": any(
+                        getattr(part, "type", None) == "tool"
+                        for part in last_assistant_parts
+                    ),
                 })
                 last_message = last_assistant
                 break
@@ -1346,6 +1356,7 @@ class SessionLoop:
         cls,
         last_user: MessageInfo,
         last_assistant: Optional[MessageInfo],
+        last_assistant_parts: Optional[List[Any]] = None,
     ) -> bool:
         """
         Check if loop should exit
@@ -1355,6 +1366,12 @@ class SessionLoop:
         - Exit if assistant message is after user message
         """
         if not last_assistant:
+            return False
+
+        if any(
+            getattr(part, "type", None) == "tool"
+            for part in (last_assistant_parts or [])
+        ):
             return False
         
         # Check finish reason
