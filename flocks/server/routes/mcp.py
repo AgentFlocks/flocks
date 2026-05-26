@@ -481,7 +481,17 @@ async def update_mcp_server(name: str, request: McpUpdateRequest):
             previous_status is not None
             and previous_status.status == McpStatus.CONNECTED
         )
-        should_reconnect = was_connected and clean_config.get("enabled", True) is not False
+        # Reconnect when:
+        # 1. Server was already connected (config change) OR
+        # 2. Server is being enabled for the first time (was disabled/absent)
+        #    and there is no credential/config blocker.
+        # In both cases the new config must have enabled != False.
+        becoming_enabled = clean_config.get("enabled", True) is not False
+        was_previously_active = previous_status is not None
+        should_reconnect = becoming_enabled and (
+            was_connected
+            or (not was_previously_active and not get_connect_block_reason(clean_config))
+        )
 
         if previous_status is not None:
             await MCP.remove(name)
