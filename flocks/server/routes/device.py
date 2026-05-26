@@ -248,14 +248,34 @@ async def route_test_device(device_id: str, body: Optional[DeviceTestRequest] = 
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
 
     db_fields: dict = json.loads(row["fields"] or "{}")
-    persisted_base_url = (resolve_for_runtime(db_fields).get("base_url") or "").strip()
+    resolved = resolve_for_runtime(db_fields)
+    persisted_base_url = (resolved.get("base_url") or "").strip()
 
     # Form overrides take priority over the DB row so the toggle on screen is
     # what gets used for the probe.
     override_base_url = (body.base_url.strip() if body and body.base_url else "")
     base_url = override_base_url or persisted_base_url
+
+    # Some providers (e.g. Sangfor SIP) store host + port instead of base_url.
+    # Fall back to constructing the URL from those fields so the connectivity
+    # test works without requiring a separate base_url field.
     if not base_url:
-        return DeviceTestResult(success=False, message="未配置设备地址（base_url），请先填写")
+        host = (resolved.get("host") or "").strip()
+        port = (resolved.get("port") or "").strip()
+        if host:
+            # If the operator already typed a scheme into the host field
+            # (e.g. "http://10.1.2.3"), respect it instead of double-prefixing.
+            has_scheme = "://" in host
+            if has_scheme:
+                base_url = f"{host}:{port}" if port else host
+            else:
+                base_url = f"https://{host}:{port}" if port else f"https://{host}"
+
+    if not base_url:
+        return DeviceTestResult(
+            success=False,
+            message="未配置设备地址（base_url 或 host），请先填写",
+        )
 
     if body is not None and body.verify_ssl is not None:
         verify_ssl = bool(body.verify_ssl)

@@ -442,7 +442,20 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       // Probe with the form's current SSL toggle / base_url so the user can
       // validate unsaved changes immediately. Empty base_url means "fall
       // back to whatever is already in the DB".
-      const candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
+      // For providers that use host + port (e.g. Sangfor SIP) instead of
+      // base_url, construct the URL from those fields when available.
+      // If the operator already typed a scheme into ``host``, respect it
+      // instead of double-prefixing.
+      let candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
+      if (!candidateBaseUrl) {
+        const host = (fields.host ?? '').trim();
+        const port = (fields.port ?? '').trim();
+        if (host) {
+          const hasScheme = host.includes('://');
+          const prefix = hasScheme ? host : `https://${host}`;
+          candidateBaseUrl = port ? `${prefix}:${port}` : prefix;
+        }
+      }
       setTestResult(await onTest({
         verify_ssl: verifySsl,
         base_url: candidateBaseUrl || undefined,
