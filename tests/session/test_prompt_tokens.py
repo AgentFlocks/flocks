@@ -2,7 +2,7 @@
 Tests for flocks/session/prompt.py
 
 Covers:
-- SessionPrompt.count_tokens(): token counting with/without tiktoken
+- SessionPrompt.count_tokens(): token counting via chars/4 heuristic
 - SessionPrompt.estimate_tokens(): quick character-based estimate
 - SessionPrompt.count_message_tokens(): multi-message counting
 - SessionPrompt.load_template() / render_template(): template processing
