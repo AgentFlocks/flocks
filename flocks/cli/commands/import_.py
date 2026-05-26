@@ -275,9 +275,9 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
         session_key = f"session:{project_id}:{session_info['id']}"
         await Storage.set(session_key, session_info, "session")
         
-        # Store messages using the runtime's aggregated storage format.
-        # WebUI/back-end reads `message:<session_id>` and
-        # `message_parts:<session_id>` instead of legacy per-message keys.
+        # Store messages using the runtime's per-message parts format.
+        # WebUI/back-end still returns the same export JSON shape through
+        # Message.list_with_parts(); only the storage layout changes.
         message_count = 0
         serialized_messages = []
         serialized_parts = {}
@@ -296,7 +296,8 @@ async def _import_session(file_or_url: str, project_id: Optional[str]):
 
         session_id = session_info["id"]
         await Storage.set(f"message:{session_id}", serialized_messages, "message")
-        await Storage.set(f"message_parts:{session_id}", serialized_parts, "message_parts")
+        for message_id, parts in serialized_parts.items():
+            await Storage.set(f"message_parts:{session_id}:{message_id}", parts, "message_part")
         
         console.print(f"[green]Imported session: {session_info['id']}[/green]")
         console.print(f"  Title: {session_info.get('title', 'Untitled')}")

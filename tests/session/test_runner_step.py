@@ -553,7 +553,7 @@ class TestBuildTools:
             "flocks.skill.skill.Skill.list_enabled",
             AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
         ), patch(
-            "flocks.tool.system.skill_load.build_description",
+            "flocks.tool.skill.skill_load.build_description",
             return_value="Refreshed skill description",
         ):
             tools = await runner._build_callable_tool_schema(agent, [])

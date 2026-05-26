@@ -732,6 +732,13 @@ class SkillFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 0.5
+    _FLOCKS_SKILL_DIRS = (
+        "skill",
+        "skills",
+        os.path.join("plugins", "skill"),
+        os.path.join("plugins", "skills"),
+    )
+    _CLAUDE_SKILL_DIRS = ("skills",)
 
     def __init__(self, skill_cls: type):
         self._skill_cls = skill_cls
@@ -818,7 +825,7 @@ class SkillFileWatcher:
         log.info("skill.watcher.cache_cleared", {"reason": "SKILL.md changed on disk"})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Gather all directories that may contain skill files."""
+        """Gather concrete skill roots that may contain SKILL.md files."""
         dirs: Set[str] = set()
         home = os.path.expanduser("~")
 
@@ -831,11 +838,28 @@ class SkillFileWatcher:
         except Exception:
             worktree = current_dir
 
-        for target in (".flocks", ".claude"):
-            for d in Skill._find_dirs_up(target, current_dir, worktree):
-                dirs.add(d)
-            global_dir = os.path.join(home, target)
-            if os.path.isdir(global_dir):
-                dirs.add(global_dir)
+        flocks_roots = Skill._find_dirs_up(".flocks", current_dir, worktree)
+        global_flocks = os.path.join(home, ".flocks")
+        if os.path.isdir(global_flocks):
+            flocks_roots.append(global_flocks)
+        for root in flocks_roots:
+            dirs.update(self._existing_subdirs(root, self._FLOCKS_SKILL_DIRS))
 
-        return {d for d in dirs if os.path.isdir(d)}
+        claude_roots = Skill._find_dirs_up(".claude", current_dir, worktree)
+        global_claude = os.path.join(home, ".claude")
+        if os.path.isdir(global_claude):
+            claude_roots.append(global_claude)
+        for root in claude_roots:
+            dirs.update(self._existing_subdirs(root, self._CLAUDE_SKILL_DIRS))
+
+        return dirs
+
+    @staticmethod
+    def _existing_subdirs(root: str, relative_dirs: tuple[str, ...]) -> Set[str]:
+        """Return existing watch roots below a discovery root, with stable dedupe."""
+        dirs: Set[str] = set()
+        for rel in relative_dirs:
+            candidate = os.path.realpath(os.path.join(root, rel))
+            if os.path.isdir(candidate):
+                dirs.add(candidate)
+        return dirs

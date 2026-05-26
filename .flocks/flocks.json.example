@@ -34,6 +34,11 @@
       "enabled": false
     }
   },
+  "toolOutput": {
+    "readMaxLines": 2000,
+    "readMaxBytes": 51200,
+    "readMaxLineLength": 2000
+  },
   "sandbox": {
     "mode": "off",
     "scope": "agent",

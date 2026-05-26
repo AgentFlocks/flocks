@@ -194,6 +194,9 @@ class McpServerManager:
             
             # Credentials are already resolved via {secret:xxx} in config loading.
             # No separate injection needed.
+            server_env = config.get("environment")
+            if server_env is None:
+                server_env = config.get("env")
             
             # 1. Create client
             client = McpClient(
@@ -202,7 +205,7 @@ class McpServerManager:
                 url=config.get('url'),
                 command=config.get('command'),
                 headers=config.get('headers'),
-                env=config.get('environment'),
+                env=server_env,
                 auth_config=config.get('auth'),
                 transport=config.get('transport', 'auto'),
                 timeout=config.get('timeout', 30.0)

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import os
 import re
 import time
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional, Dict, Any, Literal
 
 # Optional progress sink injected by the route layer so the front-end can
@@ -30,10 +32,157 @@ from .models import (
     CompactionResult,
     DEFAULT_COMPACTION_PROMPT,
     PRESERVE_LAST_STEPS,
+    ITERATIVE_SUMMARY_REBUILD_INTERVAL,
 )
 from . import pruning, summary
 
 log = Log.create(service="session.compaction")
+
+
+# ---------------------------------------------------------------------------
+# Iterative summary state (E1 — see docs/design/context-compaction-v2.md §E1)
+# ---------------------------------------------------------------------------
+#
+# Process-local cache of the latest summary text + compaction count per
+# session.  Used to feed ``DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS`` so the
+# model only has to merge new turns into the prior summary rather than
+# rebuilding everything from scratch.
+#
+# Process-local (not persisted): on worker restart the cache empties and
+# the next compaction falls back to the full prompt — exactly the same
+# behaviour we want at the periodic "rebuild" milestone.  Keep size bounded
+# via a simple FIFO eviction so a long-running worker that has handled many
+# sessions does not grow unboundedly.
+_SUMMARY_CACHE_MAX = 1024
+_iterative_summary_cache: "OrderedDict[str, tuple[str, int]]" = OrderedDict()
+
+
+def _get_iterative_summary_state(session_id: str) -> tuple[Optional[str], int]:
+    """Return ``(previous_summary, compaction_count)`` for the session.
+
+    Returns ``(None, 0)`` when the session has never been compacted in
+    this process (or was evicted).
+    """
+    if not session_id:
+        return None, 0
+    cached = _iterative_summary_cache.get(session_id)
+    if cached is None:
+        return None, 0
+    previous, count = cached
+    # Refresh LRU ordering — keep hot sessions at the tail.
+    _iterative_summary_cache.move_to_end(session_id)
+    return previous, count
+
+
+def _store_iterative_summary_state(session_id: str, summary_text: str, count: int) -> None:
+    """Persist the latest summary for the next compaction round.
+
+    No-op when ``session_id`` or ``summary_text`` is empty.
+    """
+    if not session_id or not summary_text:
+        return
+    _iterative_summary_cache[session_id] = (summary_text, count)
+    _iterative_summary_cache.move_to_end(session_id)
+    # FIFO eviction once the cache exceeds the cap.
+    while len(_iterative_summary_cache) > _SUMMARY_CACHE_MAX:
+        _iterative_summary_cache.popitem(last=False)
+
+
+def _should_force_full_rebuild(count: int) -> bool:
+    """True every ``ITERATIVE_SUMMARY_REBUILD_INTERVAL`` compactions.
+
+    The first compaction always rebuilds (count=0 → no cached summary).
+    From then on we drop the cache every Nth compaction to bound any
+    semantic drift accumulating across iterative updates.
+    """
+    if count <= 0:
+        return False
+    return count % ITERATIVE_SUMMARY_REBUILD_INTERVAL == 0
+
+
+def reset_iterative_summary_cache(session_id: Optional[str] = None) -> None:
+    """Test / admin helper to clear cached summaries.
+
+    When ``session_id`` is None, clears the whole cache.  Otherwise drops
+    just the entry for that session.
+    """
+    if session_id is None:
+        _iterative_summary_cache.clear()
+        return
+    _iterative_summary_cache.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# E4 — Anti-thrashing compaction history
+# ---------------------------------------------------------------------------
+#
+# When pruning + summarisation only frees ~3% of the context window we have
+# almost certainly run into an irreducible payload (oversize tool result,
+# very long user message...).  Repeating compaction every turn in that case
+# wastes provider tokens AND user latency.  We track per-session
+# "ineffective" attempts and, after a few in a row, suppress the next K
+# compactions to give the conversation a chance to advance on its own.
+# ---------------------------------------------------------------------------
+
+# Savings below this fraction are considered "ineffective" (≈ 5%).  Tuned
+# so a Stage-3 fallback or a truncate-only round trips the counter while a
+# real summarisation (typically 60-90% savings) does not.
+INEFFECTIVE_SAVINGS_THRESHOLD = 0.05
+
+# Consecutive ineffective attempts allowed before we enter cooldown.
+COOLDOWN_AFTER_INEFFECTIVE = 3
+
+# How many subsequent compaction REQUESTS we silently skip while cooling.
+COOLDOWN_SUPPRESS_COMPACTIONS = 5
+
+
+@dataclass
+class CompactionHistory:
+    """Per-session anti-thrashing accounting and summary failure tracking.
+
+    ``last_savings_ratio`` is informational; the field that actually
+    drives the suppression behaviour is ``cooldown_remaining``: while
+    it's positive we silently return ``"continue"`` from ``process()``.
+
+    ``summary_cooldown_until`` (monotonic seconds) mirrors hermes-agent's
+    per-session summary failure cooldown so transient provider errors don't
+    trigger an LLM call on every compaction attempt until the window expires.
+    ``summary_last_error`` is a short description of the triggering failure
+    kept for log/debug purposes.
+    """
+    last_savings_ratio: float = 1.0
+    ineffective_count: int = 0
+    cooldown_remaining: int = 0
+    total_attempts: int = 0
+    total_skipped: int = 0
+    # Summary-failure cooldown (hermes-style per-error-type backoff)
+    summary_cooldown_until: float = 0.0
+    summary_last_error: str = ""
+
+
+_HISTORY_CACHE_MAX = 1024
+_compaction_history: "OrderedDict[str, CompactionHistory]" = OrderedDict()
+
+
+def _get_compaction_history(session_id: str) -> CompactionHistory:
+    if not session_id:
+        return CompactionHistory()
+    history = _compaction_history.get(session_id)
+    if history is None:
+        history = CompactionHistory()
+        _compaction_history[session_id] = history
+    _compaction_history.move_to_end(session_id)
+    while len(_compaction_history) > _HISTORY_CACHE_MAX:
+        _compaction_history.popitem(last=False)
+    return history
+
+
+def reset_compaction_history(session_id: Optional[str] = None) -> None:
+    """Test/admin helper to wipe anti-thrashing state."""
+    if session_id is None:
+        _compaction_history.clear()
+        return
+    _compaction_history.pop(session_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -238,138 +387,182 @@ def _flush_timeout_seconds() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Chunked-summarization preemptive trigger
+# Hermes-style pre-pruning for summarization (see docs comparison §工具处理)
 # ---------------------------------------------------------------------------
 #
-# Empirically a single ``summarize_single_pass`` call against a 10–14k char
-# conversation can take 60–90s on slow OpenAI-compatible providers (e.g.
-# minimax via threatbook).  ``summarize_chunked`` issues N small parallel
-# calls + 1 short merge call, so it scales much better with provider
-# latency even when the conversation would technically *fit* a single pass.
+# Before feeding chat_messages to the single-pass LLM, we apply three passes
+# that mirror hermes-agent's ``_prune_old_tool_results`` strategy:
 #
-# The legacy hand-off rule was ``total_chars > target_chars * 2``, which
-# means medium conversations (well below ~60k chars) always took the slow
-# path.  We add a second, looser trigger that splits at a fraction of the
-# target so even ~10k conversations get the parallel speedup.
+#   Pass 1 — MD5 dedup: messages with identical content outside the tail are
+#             replaced with a 1-line back-reference placeholder.
+#   Pass 2 — Large-content compression: messages outside the tail with
+#             >``_PRE_PRUNE_THRESHOLD_CHARS`` characters are reduced to a
+#             single informative line so the summarizer sees a compact record
+#             of every turn rather than raw multi-KB blobs.
 #
-# Tunables (all overridable via env for emergency tuning):
-#   * ``FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO`` (default 0.2):
-#     fraction of ``target_chars`` above which we proactively chunk.
-#   * ``FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS`` (default 3):
-#     desired number of chunks when preemptive chunking kicks in.
-#   * ``FLOCKS_COMPACTION_MIN_CHUNK_CHARS`` (default 3000):
-#     floor on chunk size so we never pay the merge-LLM tax for trivial
-#     conversations (where single_pass is genuinely faster).
+# "Tail" = the most recent messages that fit within
+# ``overflow_threshold × _PRE_PRUNE_TAIL_RATIO`` tokens; head = first
+# ``_PRE_PRUNE_HEAD_N`` messages (always protected regardless of budget).
 
-_DEFAULT_PREEMPTIVE_CHUNK_RATIO = 0.2
-_DEFAULT_TARGET_PARALLEL_CHUNKS = 3
-_DEFAULT_MIN_CHUNK_CHARS = 3000
+_PRE_PRUNE_THRESHOLD_CHARS = 200   # messages longer than this are candidates
+_PRE_PRUNE_TAIL_RATIO      = 0.20  # fraction of overflow_threshold kept as tail
+_PRE_PRUNE_HEAD_N          = 3     # always protect the first N messages (hermes: protect_first_n)
 
 
-def _env_float(key: str, default: float) -> float:
-    raw = os.getenv(key)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        log.warn("compaction.env.parse_error", {
-            "key": key, "raw": raw, "fallback": default,
-        })
-        return default
-    if value <= 0:
-        log.warn("compaction.env.non_positive", {
-            "key": key, "raw": raw, "fallback": default,
-        })
-        return default
-    return value
+def _md5_short(text: str) -> str:
+    """Return a 12-char hex MD5 of ``text`` for cheap content deduplication."""
+    return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
-def _env_int(key: str, default: int) -> int:
-    raw = os.getenv(key)
-    if raw is None or raw.strip() == "":
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        log.warn("compaction.env.parse_error", {
-            "key": key, "raw": raw, "fallback": default,
-        })
-        return default
-    if value <= 0:
-        log.warn("compaction.env.non_positive", {
-            "key": key, "raw": raw, "fallback": default,
-        })
-        return default
-    return value
+def _summarize_message_to_line(role: str, content: str) -> str:
+    """Compress a large message to a single informative line.
 
-
-def _decide_chunked_strategy(
-    *, total_chars: int, target_chars: int,
-) -> tuple[bool, Optional[int], str]:
-    """Decide whether to use chunked summarisation and at what chunk size.
-
-    Returns ``(use_chunked, chunk_size, reason)``:
-      * ``use_chunked``: ``True`` if the caller should invoke
-        ``summarize_chunked``; ``False`` for ``summarize_single_pass``.
-      * ``chunk_size``: when chunked, the per-chunk char budget passed
-        through to ``summarize_chunked``; ``None`` when not chunked.
-      * ``reason``: short tag for observability (logged at the call site).
-
-    Three branches:
-      1. ``"oversize"``    — legacy rule, conversation is much bigger
-         than the target; chunked is *required* for correctness.
-      2. ``"preemptive"``  — conversation fits single-pass but is large
-         enough that parallel chunked summarisation is faster than one
-         big LLM call.  Triggered when ``total_chars`` exceeds both
-         ``target_chars * ratio`` and ``min_chunk_chars * 2``.
-      3. ``"single_pass"`` — small conversation; parallelism overhead
-         (one extra merge LLM call) outweighs the speedup.
+    Parses flocks's ``[tool: name] output: ...`` format to produce a hermes-
+    style ``[tool_name] preview... (N lines, N chars)`` summary.  Falls back
+    to a generic role+preview line for non-tool content.
     """
-    if total_chars > target_chars * 2:
-        # Legacy hard requirement — content does not fit a single pass.
-        ratio_hint = _env_float(
-            "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
-            _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
-        )
-        target_parallel = _env_int(
-            "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
-            _DEFAULT_TARGET_PARALLEL_CHUNKS,
-        )
-        min_chunk = _env_int(
-            "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
-            _DEFAULT_MIN_CHUNK_CHARS,
-        )
-        # For oversize content keep the legacy behaviour: pass through
-        # the original target_chars as the split cap (chunk_size=None
-        # makes summarize_chunked default to target_chars).  Splitting
-        # finer for already-huge conversations would explode chunk
-        # count without obvious benefit.
-        del ratio_hint, target_parallel, min_chunk
-        return True, None, "oversize"
+    char_count = len(content)
+    line_count = content.count("\n") + 1
 
-    ratio = _env_float(
-        "FLOCKS_COMPACTION_PREEMPTIVE_CHUNK_RATIO",
-        _DEFAULT_PREEMPTIVE_CHUNK_RATIO,
-    )
-    min_chunk = _env_int(
-        "FLOCKS_COMPACTION_MIN_CHUNK_CHARS",
-        _DEFAULT_MIN_CHUNK_CHARS,
-    )
-    target_parallel = _env_int(
-        "FLOCKS_COMPACTION_TARGET_PARALLEL_CHUNKS",
-        _DEFAULT_TARGET_PARALLEL_CHUNKS,
-    )
+    # Collect all tool names mentioned in the content.
+    tool_names = re.findall(r'\[tool:\s*([^\]]+)\]', content)
+    if tool_names:
+        distinct = list(dict.fromkeys(t.strip() for t in tool_names))
+        tools_label = ", ".join(distinct[:3])
+        if len(distinct) > 3:
+            tools_label += f" +{len(distinct) - 3} more"
+        return f"[{role}|tools: {tools_label}] ({line_count} lines, {char_count:,} chars)"
 
-    threshold = max(min_chunk * 2, int(target_chars * ratio))
-    if total_chars < threshold:
-        return False, None, "single_pass"
+    preview = content.split("\n")[0][:80].strip()
+    if len(content) > 80:
+        preview += "…"
+    return f"[{role}] {preview} ({line_count} lines, {char_count:,} chars)"
 
-    # Aim for ``target_parallel`` chunks; never go below ``min_chunk``
-    # so we don't fragment a 6k conversation into 6 tiny calls.
-    raw_size = total_chars // max(1, target_parallel) + 1
-    chunk_size = max(min_chunk, raw_size)
-    return True, chunk_size, "preemptive"
+
+def _prune_chat_messages_for_summary(
+    chat_messages: list,
+    policy: Optional["CompactionPolicy"],
+) -> list:
+    """Apply hermes-style pre-pruning to chat_messages before summarization.
+
+    Returns a new list; the original is never mutated.
+
+    Three passes (all operate on messages *outside* the protected head+tail):
+      1. MD5 dedup — older messages with identical content get a 1-line
+         back-reference; the most recent copy is preserved intact.
+      2. Large-content compression — remaining old messages whose content
+         exceeds ``_PRE_PRUNE_THRESHOLD_CHARS`` are replaced by a single
+         informative line via ``_summarize_message_to_line``.
+
+    "Tail" budget = ``overflow_threshold × _PRE_PRUNE_TAIL_RATIO`` tokens
+    (converted to chars × 4).  Head = first ``_PRE_PRUNE_HEAD_N`` messages.
+    """
+    if not chat_messages:
+        return chat_messages
+
+    n = len(chat_messages)
+    head_n = min(_PRE_PRUNE_HEAD_N, n)
+
+    # Derive tail budget — two-step conversion so the unit math is auditable:
+    #   overflow_threshold is in tokens (85 % × context_window),
+    #   tail_budget_tokens is the slice we want to keep raw,
+    #   tail_budget_chars converts back via the chars/4 estimate the rest
+    #   of the file speaks in.
+    if policy and policy.overflow_threshold > 0:
+        tail_budget_tokens = int(policy.overflow_threshold * _PRE_PRUNE_TAIL_RATIO)
+    else:
+        tail_budget_tokens = 20_000  # ~20 K tokens default when no policy
+    tail_budget_chars = tail_budget_tokens * 4
+
+    # Walk backward to find the tail boundary index
+    tail_start = n
+    accumulated = 0
+    for i in range(n - 1, head_n - 1, -1):
+        msg = chat_messages[i]
+        content = msg.content if hasattr(msg, "content") else ""
+        if not isinstance(content, str):
+            content = str(content)
+        msg_chars = len(content)
+        if accumulated + msg_chars > tail_budget_chars and (n - i) >= 3:
+            tail_start = i + 1
+            break
+        accumulated += msg_chars
+        tail_start = i
+
+    # Ensure at least head_n messages are excluded from pruning
+    tail_start = max(tail_start, head_n)
+
+    # CRITICAL: ensure the most recent user message is in the tail.
+    # If a huge tool output occupies all of tail_budget_chars, the latest
+    # user message can slip into the middle region and get compressed into
+    # a one-line summary, effectively erasing the active task.  Mirrors
+    # hermes-agent's _ensure_last_user_message_in_tail (#10896 there).
+    last_user_idx = -1
+    for i in range(n - 1, head_n - 1, -1):
+        role = (chat_messages[i].role if hasattr(chat_messages[i], "role") else "")
+        if role == "user":
+            last_user_idx = i
+            break
+    if last_user_idx >= 0 and last_user_idx < tail_start:
+        log.debug("compaction.pre_prune.anchor_user_msg", {
+            "old_tail_start": tail_start,
+            "new_tail_start": last_user_idx,
+            "user_msg_idx": last_user_idx,
+        })
+        tail_start = last_user_idx
+
+    # Pass 1: MD5 dedup — walk backward so the *most recent* copy survives
+    seen_hashes: dict = {}  # hash → latest index that owns this content
+    for i in range(n - 1, -1, -1):
+        msg = chat_messages[i]
+        content = msg.content if hasattr(msg, "content") else ""
+        if not isinstance(content, str):
+            content = str(content)
+        if len(content) >= _PRE_PRUNE_THRESHOLD_CHARS:
+            h = _md5_short(content)
+            if h not in seen_hashes:
+                seen_hashes[h] = i  # first seen from the tail = the latest
+
+    # Build result applying both passes to the middle region
+    result = []
+    for i, msg in enumerate(chat_messages):
+        in_protected = (i < head_n) or (i >= tail_start)
+        content = msg.content if hasattr(msg, "content") else ""
+        if not isinstance(content, str):
+            content = str(content)
+
+        if in_protected or len(content) < _PRE_PRUNE_THRESHOLD_CHARS:
+            result.append(msg)
+            continue
+
+        # Pass 1: is this an older duplicate?
+        h = _md5_short(content)
+        if h in seen_hashes and seen_hashes[h] != i:
+            new_content = "[Duplicate message — same content as a more recent message]"
+            result.append(_make_chat_message(msg, new_content))
+            continue
+
+        # Pass 2: compress large old message to 1 line
+        role = msg.role if hasattr(msg, "role") else "unknown"
+        new_content = _summarize_message_to_line(role, content)
+        result.append(_make_chat_message(msg, new_content))
+
+    return result
+
+
+def _make_chat_message(original: Any, new_content: str) -> Any:
+    """Return a copy of ``original`` with ``new_content``.
+
+    Constructs the same class as ``original`` via ``cls(role=..., content=...)``.
+    A broken construction here means the upstream ``ChatMessage`` schema
+    changed in a way pre-prune cannot satisfy — we let that fail loudly
+    so callers see the schema mismatch instead of silently dropping into a
+    SimpleNamespace that downstream consumers (memory flush, model_dump
+    calls) would later choke on in confusing ways.
+    """
+    cls = type(original)
+    role = original.role if hasattr(original, "role") else "user"
+    return cls(role=role, content=new_content)
 
 
 def _get_flush_lock(session_id: str) -> asyncio.Lock:
@@ -738,7 +931,7 @@ class SessionCompaction:
         policy: Optional[CompactionPolicy] = None,
         focus_instruction: Optional[str] = None,
         progress_callback: Optional[ProgressCallback] = None,
-    ) -> Literal["continue", "stop"]:
+    ) -> Literal["continue", "stop", "skipped"]:
         """Process compaction by generating a summary message.
 
         Creates an assistant message with a summary of the conversation
@@ -760,12 +953,32 @@ class SessionCompaction:
         """
         effective_summary_tokens = policy.summary_max_tokens if policy else 4000
 
+        # ------------------------------------------------------------------
+        # E4: anti-thrashing cooldown.  If recent attempts barely freed any
+        # tokens we silently skip the next K compactions to let the
+        # conversation advance on its own (preventing every-turn churn).
+        # ------------------------------------------------------------------
+        history = _get_compaction_history(session_id)
+        history.total_attempts += 1
+        if history.cooldown_remaining > 0:
+            history.cooldown_remaining -= 1
+            history.total_skipped += 1
+            log.info("compaction.skipped_anti_thrashing", {
+                "session_id": session_id,
+                "cooldown_remaining": history.cooldown_remaining,
+                "last_savings_ratio": history.last_savings_ratio,
+                "total_skipped": history.total_skipped,
+            })
+            return "skipped"
+
         log.info("compaction.process.start", {
             "session_id": session_id,
             "auto": auto,
             "message_count": len(messages),
             "summary_max_tokens": effective_summary_tokens,
             "tier": policy.tier.value if policy else "legacy",
+            "history_attempts": history.total_attempts,
+            "history_skipped": history.total_skipped,
         })
 
         try:
@@ -804,6 +1017,25 @@ class SessionCompaction:
 
         prompt_text = custom_prompt or DEFAULT_COMPACTION_PROMPT
 
+        # ------------------------------------------------------------------
+        # E1: iterative summary state lookup
+        # ------------------------------------------------------------------
+        # Feed the previous summary into the next compaction unless the
+        # caller supplied a custom prompt (e.g. ``/compact <focus>``),
+        # which we honour verbatim.  Every Nth compaction the cached
+        # summary is dropped to force a full rebuild and prevent drift.
+        if not custom_prompt:
+            previous_summary, prior_compaction_count = _get_iterative_summary_state(session_id)
+            if _should_force_full_rebuild(prior_compaction_count):
+                log.info("compaction.iterative.force_rebuild", {
+                    "session_id": session_id,
+                    "compaction_count": prior_compaction_count,
+                    "rebuild_interval": ITERATIVE_SUMMARY_REBUILD_INTERVAL,
+                })
+                previous_summary = None
+        else:
+            previous_summary, prior_compaction_count = None, 0
+
         # Load messages WITH their parts for text content
         try:
             from flocks.session.message import Message as MsgStore
@@ -812,7 +1044,21 @@ class SessionCompaction:
             log.warn("compaction.process.load_parts_error", {"error": str(e)})
             msgs_with_parts = []
 
-        chat_messages = cls._extract_chat_messages(msgs_with_parts, ChatMessage, session_id, policy)
+        # Extract once; keep the original (un-pruned) list for memory flush
+        # so daily memory extraction sees the full content density of every
+        # turn.  Only the *summary LLM* path gets the hermes-style pruned
+        # view — collapsing old tool outputs to a 1-line placeholder is
+        # the wrong input for a fact extractor.
+        original_chat_messages = cls._extract_chat_messages(
+            msgs_with_parts, ChatMessage, session_id, policy,
+        )
+
+        # Hermes-style pre-prune: MD5 dedup + compress large old messages to
+        # 1-line summaries before feeding to the summary LLM.  Operates on
+        # the already-simplified (role, content) pairs produced above.
+        chat_messages = _prune_chat_messages_for_summary(
+            original_chat_messages, policy,
+        )
 
         loaded_total_chars = sum(len(m.content) for m in chat_messages)
         log.info("compaction.process.messages_loaded", {
@@ -831,7 +1077,11 @@ class SessionCompaction:
         usable = policy.usable_context if policy else 96_000
         reserve_tokens = effective_summary_tokens + 1000
         target_tokens = max(1000, usable - reserve_tokens)
-        target_chars = max(3000, target_tokens * 2)
+        # tokens × 4 mirrors the chars/4 estimate used by ``count_tokens``;
+        # the previous ``× 2`` was a stale conversion factor that silently
+        # halved the summarisation budget on the legacy string path
+        # (per-message path passes ``chat_messages=`` and ignores this value).
+        target_chars = max(3000, target_tokens * 4)
 
         conversation_text = "\n\n".join(m.content for m in chat_messages)
         total_chars = len(conversation_text)
@@ -845,64 +1095,202 @@ class SessionCompaction:
         })
 
         try:
-            use_chunked, chunk_size, decision = _decide_chunked_strategy(
-                total_chars=total_chars, target_chars=target_chars,
-            )
-
             log.info("compaction.process.strategy", {
                 "session_id": session_id,
-                "decision": decision,
-                "use_chunked": use_chunked,
-                "chunk_size": chunk_size,
+                "decision": "single_pass",
                 "total_chars": total_chars,
                 "target_chars": target_chars,
                 "has_focus": bool(focus_instruction and focus_instruction.strip()),
             })
-            # ``chunks`` here is an *upper-bound estimate* — the actual
-            # split happens inside ``summarize_chunked`` which may emit
-            # a slightly different N via ``chunk_done``.  For the UI
-            # progress bar this approximation is good enough and lets
-            # us show the segment count before the first chunk completes.
-            estimated_chunks: Optional[int] = None
-            if use_chunked:
-                split_at = chunk_size if (chunk_size and chunk_size > 0) else target_chars
-                estimated_chunks = max(1, -(-total_chars // max(1, split_at)))
             await _emit_progress(progress_callback, "strategy", {
-                "decision": decision,
-                "use_chunked": use_chunked,
-                "chunks": estimated_chunks,
+                "decision": "single_pass",
+                "use_chunked": False,
+                "chunks": None,
             })
 
-            if not use_chunked:
-                summary_text = await summary.summarize_single_pass(
-                    conversation_text, prompt_text, target_chars,
-                    provider_client, model_id, effective_summary_tokens,
-                    focus_instruction=focus_instruction,
-                )
+            # ------------------------------------------------------------------
+            # Single LLM call with hermes-style failure cooldown.
+            # After repeated provider errors we skip the LLM call for a
+            # back-off window so we don't hammer the provider every turn.
+            # Cooldown is stored per-session in CompactionHistory and is
+            # set below in the except branches.
+            # ------------------------------------------------------------------
+            _now = time.monotonic()
+            if history.summary_cooldown_until > _now:
+                _remaining = round(history.summary_cooldown_until - _now)
+                log.info("compaction.summary_cooldown_active", {
+                    "session_id": session_id,
+                    "remaining_seconds": _remaining,
+                    "last_error": history.summary_last_error,
+                })
+                summary_text = None
             else:
-                summary_text = await summary.summarize_chunked(
-                    chat_messages, prompt_text, target_chars,
-                    provider_client, model_id, effective_summary_tokens,
-                    session_id,
-                    chunk_size=chunk_size,
-                    focus_instruction=focus_instruction,
-                    progress_callback=progress_callback,
-                )
+                try:
+                    summary_text = await summary.summarize_single_pass(
+                        conversation_text, prompt_text, target_chars,
+                        provider_client, model_id, effective_summary_tokens,
+                        focus_instruction=focus_instruction,
+                        previous_summary=previous_summary,
+                        chat_messages=chat_messages,
+                    )
+                except RuntimeError as _e:
+                    # No provider configured — long cooldown (hermes: 600s)
+                    _err = str(_e)[:220]
+                    history.summary_cooldown_until = time.monotonic() + 600
+                    history.summary_last_error = _err
+                    log.warn("compaction.summary_failed.no_provider", {
+                        "session_id": session_id,
+                        "error": _err,
+                        "cooldown_seconds": 600,
+                    })
+                    summary_text = None
+                except asyncio.TimeoutError:
+                    # Timeout — medium cooldown (hermes: 60s)
+                    history.summary_cooldown_until = time.monotonic() + 60
+                    history.summary_last_error = "timeout"
+                    log.warn("compaction.summary_failed.timeout", {
+                        "session_id": session_id,
+                        "cooldown_seconds": 60,
+                    })
+                    summary_text = None
+                except Exception as _e:
+                    _err = str(_e)[:220]
+                    _err_lower = _err.lower()
+                    # Classify the error to pick a cooldown:
+                    #   * JSON decode failures (transient: bad proxy / 502
+                    #     HTML response) → short 30 s back-off.
+                    #   * Everything else (network, 5xx, rate-limit) →
+                    #     medium 60 s back-off.
+                    # Match against the actual exception class first
+                    # (most reliable) and only fall back to substrings
+                    # for SDK-wrapped errors that hide the original type.
+                    import json as _json
+                    _is_json = (
+                        isinstance(_e, _json.JSONDecodeError)
+                        or "expecting value" in _err_lower
+                        or "jsondecodeerror" in _err_lower
+                        or "json decode" in _err_lower
+                    )
+                    _is_rate = any(
+                        k in _err_lower for k in (
+                            "rate limit", "429", "503", "502", "504",
+                        )
+                    )
+                    _cd = 30 if _is_json else 60
+                    history.summary_cooldown_until = time.monotonic() + _cd
+                    history.summary_last_error = _err
+                    log.warn("compaction.summary_failed.error", {
+                        "session_id": session_id,
+                        "error": _err,
+                        "cooldown_seconds": _cd,
+                        "is_json_error": _is_json,
+                        "is_rate_limit": _is_rate,
+                    })
+                    summary_text = None
+
+            # Clear summary cooldown on success so the next compaction can
+            # attempt the LLM call even if prior rounds failed.
+            if summary_text and history.summary_cooldown_until > 0:
+                history.summary_cooldown_until = 0.0
+                history.summary_last_error = ""
 
             log.info("compaction.process.complete", {
                 "session_id": session_id,
                 "summary_length": len(summary_text) if summary_text else 0,
                 "summary_max_tokens": effective_summary_tokens,
-                "chunked": use_chunked,
-                "decision": decision,
             })
             await _emit_progress(progress_callback, "summarize_done", {
                 "summary_chars": len(summary_text) if summary_text else 0,
             })
 
+            # ------------------------------------------------------------------
+            # CRITICAL: when the LLM call failed (cooldown / timeout / error),
+            # do NOT fall through to archive.  Archiving here would replace
+            # the real conversation with ``build_fallback_summary`` (a 3K
+            # placeholder pulled from the last 10 messages) and the original
+            # context is lost forever — even after the cooldown expires.
+            #
+            # The right call is to leave the messages intact and return
+            # "continue".  ``session_loop`` keeps an attempts counter
+            # (``MAX_OVERFLOW_COMPACTION_ATTEMPTS=3``) so we still exit
+            # cleanly with a user-visible error if the provider stays down.
+            # Mirrors hermes-agent's "cooldown means do not touch state".
+            # ------------------------------------------------------------------
             if not summary_text:
-                log.warn("compaction.process.empty_summary_fallback", {"session_id": session_id})
-                summary_text = summary.build_fallback_summary(chat_messages)
+                log.warn("compaction.process.skip_archive_on_failure", {
+                    "session_id": session_id,
+                    "reason": (
+                        "summary_cooldown_active"
+                        if history.summary_cooldown_until > time.monotonic()
+                        else "empty_summary"
+                    ),
+                    "cooldown_remaining_seconds": max(
+                        0,
+                        round(history.summary_cooldown_until - time.monotonic()),
+                    ),
+                })
+                await _emit_progress(progress_callback, "complete", {
+                    "result": "skipped_no_summary",
+                })
+                # Returning "skipped" keeps the session alive without marking
+                # the round as a successful compaction — the caller must NOT
+                # update last_compaction_step or publish context.compacted.
+                return "skipped"
+
+            # E1: persist this summary for the NEXT compaction round so we
+            # can switch the prompt to "merge new turns into prior summary".
+            # Always increment the count even on first-time runs so the
+            # periodic rebuild guard advances in lockstep with actual
+            # compaction activity.
+            if not custom_prompt and summary_text:
+                _store_iterative_summary_state(
+                    session_id, summary_text, prior_compaction_count + 1,
+                )
+                log.info("compaction.iterative.state_updated", {
+                    "session_id": session_id,
+                    "compaction_count": prior_compaction_count + 1,
+                    "summary_chars": len(summary_text),
+                    "had_previous_summary": previous_summary is not None,
+                })
+
+            # E4: update anti-thrashing accounting.  ``savings_ratio`` is
+            # the fraction of pre-summary chars we eliminated.  When it
+            # stays below ``INEFFECTIVE_SAVINGS_THRESHOLD`` for several
+            # rounds in a row we enter cooldown.
+            try:
+                savings_ratio = 0.0
+                if total_chars > 0 and summary_text:
+                    savings_ratio = max(
+                        0.0,
+                        (total_chars - len(summary_text)) / float(total_chars),
+                    )
+                history.last_savings_ratio = savings_ratio
+                if savings_ratio < INEFFECTIVE_SAVINGS_THRESHOLD:
+                    history.ineffective_count += 1
+                    log.warn("compaction.ineffective_attempt", {
+                        "session_id": session_id,
+                        "savings_ratio": round(savings_ratio, 4),
+                        "consecutive_ineffective": history.ineffective_count,
+                        "threshold": INEFFECTIVE_SAVINGS_THRESHOLD,
+                    })
+                    if history.ineffective_count >= COOLDOWN_AFTER_INEFFECTIVE:
+                        history.cooldown_remaining = COOLDOWN_SUPPRESS_COMPACTIONS
+                        history.ineffective_count = 0
+                        log.warn("compaction.cooldown_engaged", {
+                            "session_id": session_id,
+                            "cooldown_remaining": history.cooldown_remaining,
+                        })
+                else:
+                    if history.ineffective_count > 0:
+                        log.info("compaction.ineffective_streak_reset", {
+                            "session_id": session_id,
+                            "savings_ratio": round(savings_ratio, 4),
+                        })
+                    history.ineffective_count = 0
+            except Exception as exc:
+                log.debug("compaction.history_update_error", {
+                    "session_id": session_id, "error": str(exc),
+                })
 
             # Memory flush — issues another LLM call to extract durable
             # memories. The compacted session does NOT depend on it for
@@ -912,7 +1300,10 @@ class SessionCompaction:
             await cls._dispatch_memory_flush(
                 session_id=session_id,
                 summary_text=summary_text,
-                chat_messages=chat_messages,
+                # Use the *un-pruned* list here: memory extraction wants full
+                # decisions, file paths, identifiers — not the 1-line
+                # placeholders produced by ``_prune_chat_messages_for_summary``.
+                chat_messages=original_chat_messages,
                 model_id=model_id,
                 provider_client=provider_client,
                 ChatMessage=ChatMessage,
@@ -1139,6 +1530,13 @@ class SessionCompaction:
                     t = getattr(part, "text", "") or ""
                     if t:
                         text_parts.append(t)
+                elif ptype in ("image", "image_url", "input_image", "file", "document"):
+                    # Multimodal parts (screenshots, uploaded files): strip the
+                    # binary payload and leave a lightweight text placeholder so
+                    # the summarizer knows something was present.  Mirrors
+                    # hermes-agent's _strip_image_parts_from_parts behaviour.
+                    label = "screenshot" if "image" in (ptype or "") else "file"
+                    text_parts.append(f"[{label}: removed to save context]")
                 elif ptype == "tool":
                     state = getattr(part, "state", None)
                     if state is not None:

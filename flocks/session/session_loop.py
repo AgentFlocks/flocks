@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -34,6 +35,7 @@ from flocks.session.lifecycle.compaction import (
     build_compaction_policy,
     run_compaction,
 )
+from flocks.session.lifecycle.compaction.compaction import _get_compaction_history
 from flocks.session.prompt import SessionPrompt
 from flocks.provider.provider import Provider
 
@@ -71,6 +73,12 @@ class LoopContext:
     # Cooldown window to prefer cheap cleanup over repeated full compaction.
     last_compaction_step: Optional[int] = None
     last_cleanup_step: Optional[int] = None
+    # ``input + cache.read + output`` reported by the provider on the most
+    # recent finished assistant turn.  When non-zero this beats the
+    # synthetic estimate from ``estimate_full_context_tokens`` because it
+    # is what the upstream will actually bill us for on the next turn
+    # (matches the "observed value wins" rule from docs/design/context-compaction-v2.md §B3).
+    last_observed_prompt_tokens: int = 0
 
     @property
     def trace_step(self) -> int:
@@ -780,8 +788,14 @@ class SessionLoop:
                             if callbacks.on_error:
                                 await callbacks.on_error("Compaction failed")
                             break
-                        
-                        # Continue after compaction
+
+                        if compaction_result == "skipped":
+                            log.info("loop.manual_compaction_skipped", {
+                                "session_id": ctx.session.id,
+                                "step": ctx.step,
+                            })
+
+                        # Continue after compaction (whether compacted or skipped)
                         continue
                         
                     except Exception as e:
@@ -813,35 +827,66 @@ class SessionLoop:
                         max_input_tokens=model_input,
                     )
                     
-                    # Build tokens_dict from last_finished.tokens if available
+                    # Build tokens_dict from last_finished.tokens if available.
+                    # last_finished.tokens may be a TokenUsage Pydantic model (not a
+                    # plain dict), so we normalise it to a dict here to ensure the
+                    # provider-reported usage is actually read instead of silently
+                    # falling through to the chars/4 estimation path.
                     tokens_dict = {}
-                    if hasattr(last_finished, 'tokens') and last_finished.tokens and isinstance(last_finished.tokens, dict):
-                        tokens_dict = last_finished.tokens
-                    
+                    if hasattr(last_finished, 'tokens') and last_finished.tokens:
+                        raw_tok = last_finished.tokens
+                        if isinstance(raw_tok, dict):
+                            tokens_dict = raw_tok
+                        elif hasattr(raw_tok, 'model_dump'):
+                            tokens_dict = raw_tok.model_dump()
+                        elif hasattr(raw_tok, '__dict__'):
+                            tokens_dict = vars(raw_tok)
+
                     # Check if provider returned actual usage data (not all zeros)
                     input_tokens = tokens_dict.get("input", 0)
-                    cache_read = tokens_dict.get("cache", {}).get("read", 0) if isinstance(tokens_dict.get("cache"), dict) else 0
+                    _cache = tokens_dict.get("cache") or {}
+                    cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
                     output_tokens = tokens_dict.get("output", 0)
                     reported_total = input_tokens + cache_read + output_tokens
-                    
-                    # Fallback: if provider didn't report usage (all zeros),
-                    # estimate token count from full message history including parts
-                    if reported_total == 0:
+
+                    # B3 — Observed-value-first token decision.  Always prefer
+                    # the provider's actual usage figure (input + cache_read)
+                    # over our synthetic estimate, because that is what the
+                    # next turn's prompt will be billed against.  Cache it on
+                    # the LoopContext so subsequent turns can reuse it as a
+                    # baseline.  Estimation only kicks in when the provider
+                    # genuinely reports no usage (all zero) — we feed the
+                    # compaction policy into ``estimate_full_context_tokens``
+                    # so it includes system-prompt + tool-schema overhead
+                    # and applies the 1.2 safety margin.
+                    if reported_total > 0:
+                        ctx.last_observed_prompt_tokens = input_tokens + cache_read + output_tokens
+                        log.info("loop.tokens_decision", {
+                            "session_id": ctx.session.id,
+                            "source": "observed",
+                            "effective_tokens": input_tokens + cache_read,
+                            "overflow_threshold": compaction_policy.overflow_threshold,
+                        })
+                    else:
                         estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
-                            ctx.session.id, messages
+                            ctx.session.id,
+                            messages,
+                            policy=compaction_policy,
                         )
                         tokens_dict = {"input": estimated_tokens, "output": 0, "cache": {"read": 0, "write": 0}}
-                        log.debug("loop.tokens_estimated_from_messages", {
+                        log.info("loop.tokens_decision", {
                             "session_id": ctx.session.id,
-                            "estimated_tokens": estimated_tokens,
+                            "source": "estimated",
+                            "effective_tokens": estimated_tokens,
                             "message_count": len(messages),
                             "overflow_threshold": compaction_policy.overflow_threshold,
                         })
                     
                     try:
+                        _tok_cache = tokens_dict.get("cache") or {}
                         current_input_tokens = (
                             tokens_dict.get("input", 0)
-                            + (tokens_dict.get("cache", {}).get("read", 0) if isinstance(tokens_dict.get("cache"), dict) else 0)
+                            + (_tok_cache.get("read", 0) if isinstance(_tok_cache, dict) else 0)
                         )
                         recent_compaction = cls._has_recent_compaction_cooldown(ctx)
                         near_overflow = current_input_tokens >= compaction_policy.preemptive_threshold
@@ -912,18 +957,70 @@ class SessionLoop:
                             # Check if we've exhausted compaction attempts
                             # (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
                             if ctx.overflow_compaction_attempts >= MAX_OVERFLOW_COMPACTION_ATTEMPTS:
+                                # Distinguish "provider down / in cooldown" from
+                                # "context genuinely too large" so users get
+                                # actionable advice instead of a generic error.
+                                compaction_hist = _get_compaction_history(ctx.session.id)
+                                _provider_error = compaction_hist.summary_last_error
+                                _in_cooldown = (
+                                    compaction_hist.summary_cooldown_until > 0
+                                    and compaction_hist.summary_cooldown_until
+                                    > time.monotonic()
+                                )
+                                _cooldown_secs = max(
+                                    0,
+                                    round(compaction_hist.summary_cooldown_until
+                                          - time.monotonic()),
+                                )
+
+                                if _in_cooldown or _provider_error:
+                                    # Provider-side issue: cooldown still active
+                                    # or last call recorded an error.  Tell the
+                                    # user to wait / retry rather than open a new
+                                    # session (their context is fine).
+                                    _notice_msg = (
+                                        "摘要模型暂时不可用，上下文压缩跳过了本轮压缩。"
+                                        + (
+                                            f"冷却剩余约 {_cooldown_secs} 秒，"
+                                            if _in_cooldown else ""
+                                        )
+                                        + "建议稍后继续，或切换到其他模型重试。"
+                                    )
+                                    _error_msg = (
+                                        "Compaction skipped: summary provider unavailable "
+                                        f"({_provider_error or 'cooldown active'})."
+                                        + (
+                                            f" Cooldown expires in ~{_cooldown_secs}s."
+                                            if _in_cooldown else ""
+                                        )
+                                        + " Wait for the provider to recover or switch models."
+                                    )
+                                else:
+                                    # Context is genuinely too large even after
+                                    # repeated compaction — advise reducing scope.
+                                    _notice_msg = (
+                                        "当前任务上下文过重，已经多次 compact 仍接近上限。"
+                                        "建议收敛工具输出、缩小搜索范围，或开启新会话。"
+                                    )
+                                    _error_msg = (
+                                        "Context overflow: prompt too large for the model after "
+                                        f"{ctx.overflow_compaction_attempts} compaction attempts. "
+                                        "Try starting a new session or use a larger-context model."
+                                    )
+
                                 await cls._publish_session_notice(
                                     callbacks,
                                     ctx.session.id,
                                     level="warning",
-                                    message=(
-                                        "当前任务上下文过重，已经多次 compact 仍接近上限。"
-                                        "建议收敛工具输出、缩小搜索范围，或开启新会话。"
-                                    ),
+                                    message=_notice_msg,
                                     details={
                                         "attempts": ctx.overflow_compaction_attempts,
                                         "maxAttempts": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
                                         "tokens": tokens_dict,
+                                        "providerError": _provider_error or None,
+                                        "cooldownRemainingSeconds": (
+                                            _cooldown_secs if _in_cooldown else 0
+                                        ),
                                     },
                                 )
                                 log.error("loop.overflow_compaction_exhausted", {
@@ -931,13 +1028,11 @@ class SessionLoop:
                                     "attempts": ctx.overflow_compaction_attempts,
                                     "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
                                     "tokens": tokens_dict,
+                                    "in_cooldown": _in_cooldown,
+                                    "provider_error": _provider_error or None,
                                 })
                                 if callbacks.on_error:
-                                    await callbacks.on_error(
-                                        "Context overflow: prompt too large for the model after "
-                                        f"{ctx.overflow_compaction_attempts} compaction attempts. "
-                                        "Try starting a new session or use a larger-context model."
-                                    )
+                                    await callbacks.on_error(_error_msg)
                                 break
 
                             # Recovery step 1: try truncating oversized tool
@@ -956,8 +1051,13 @@ class SessionLoop:
                                             "truncated": trunc_count,
                                         })
                                         # Re-check overflow after truncation
+                                        # (B3) Reuse the active v2 policy so the
+                                        # re-estimate includes the same overhead
+                                        # + safety margin as the first decision.
                                         re_est = await SessionPrompt.estimate_full_context_tokens(
-                                            ctx.session.id, messages
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
                                         )
                                         re_tokens = {"input": re_est, "output": 0, "cache": {"read": 0, "write": 0}}
                                         still_overflow = await SessionCompaction.is_overflow(
@@ -1038,26 +1138,39 @@ class SessionLoop:
                                 policy=compaction_policy,
                                 progress_callback=progress_callback_overflow,
                             )
-                            ctx.last_compaction_step = ctx.step
-                            set_context_state(
-                                ctx.session.id,
-                                compaction_performed=True,
-                                last_compaction_step=ctx.step,
-                                last_compaction_reason="full_compaction",
-                            )
-                            await cls._publish_runtime_event(callbacks, "context.compacted", {
-                                "sessionID": ctx.session.id,
-                                "step": ctx.step,
-                                "reason": "full_compaction",
-                                "attempt": ctx.overflow_compaction_attempts,
-                                "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
-                            })
-                            
+
                             if compaction_result == "stop":
                                 log.error("loop.compaction_failed", {"session_id": ctx.session.id})
                                 if callbacks.on_error:
                                     await callbacks.on_error("Compaction failed")
                                 break
+
+                            if compaction_result == "skipped":
+                                # Anti-thrashing cooldown or summary-provider
+                                # cooldown fired — nothing was archived, do NOT
+                                # update last_compaction_step or publish the
+                                # compacted event (would mislead cooldown logic
+                                # and UI into thinking compaction succeeded).
+                                log.info("loop.compaction_skipped", {
+                                    "session_id": ctx.session.id,
+                                    "step": ctx.step,
+                                })
+                            else:
+                                # compaction_result == "continue": real success
+                                ctx.last_compaction_step = ctx.step
+                                set_context_state(
+                                    ctx.session.id,
+                                    compaction_performed=True,
+                                    last_compaction_step=ctx.step,
+                                    last_compaction_reason="full_compaction",
+                                )
+                                await cls._publish_runtime_event(callbacks, "context.compacted", {
+                                    "sessionID": ctx.session.id,
+                                    "step": ctx.step,
+                                    "reason": "full_compaction",
+                                    "attempt": ctx.overflow_compaction_attempts,
+                                    "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
+                                })
                             
                             # Continuation user message is now created inside
                             # SessionCompaction.process() (matching Flocks).

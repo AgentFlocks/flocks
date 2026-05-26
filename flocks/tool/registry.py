@@ -683,6 +683,7 @@ class ToolRegistry:
         native: bool = False,
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
+        enabled: bool = True,
     ) -> Callable[[ToolHandler], ToolHandler]:
         """
         Decorator to register a function as a tool.
@@ -713,6 +714,7 @@ class ToolRegistry:
                 native=native,
                 always_load=always_load,
                 tags=list(tags or []),
+                enabled=enabled,
             )
             tool = Tool(info=info, handler=func)
             cls.register(tool)
@@ -1371,15 +1373,15 @@ class ToolRegistry:
             # web/ — internet access
             ("flocks.tool.web", ["webfetch", "websearch"]),
             # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task"]),
+            ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["task", "schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", ["schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, skill_load, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill_load", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
-            # skill/ — skill management (search, install, status, deps, remove)
-            ("flocks.tool.skill", ["flocks_skills"]),
+            # system/ — background tasks, questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # skill/ — skill management (search, install, status, deps, remove, load)
+            ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context
             ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
@@ -1399,7 +1401,7 @@ class ToolRegistry:
         # This is done in bulk here so individual @register_function call
         # sites don't need to pass native=True, and user plugin files using
         # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp"}
+        builtin_native_exceptions = {"lsp", "task"}
         for name in set(cls._tools.keys()) - before:
             if name in builtin_native_exceptions:
                 cls._tools[name].info.native = False

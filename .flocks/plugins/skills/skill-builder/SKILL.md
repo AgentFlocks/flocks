@@ -1,7 +1,7 @@
 ---
 name: skill-builder
 category: system
-description: Create or improve Flocks skills. Use when the user asks to create, add, generate, update, refactor, package, or test a skill, convert a repeated workflow into a reusable skill, write a `SKILL.md`, or add `references/`, `scripts/`, and `evals/evals.json` for a skill.
+description: Create or improve skill. Use when the user asks to create, add, generate, update, refactor, package, or test a skill, convert a repeated workflow into a reusable skill, write a `SKILL.md`, or add `references/`, `scripts/` for a skill.
 ---
 
 # Skill Builder

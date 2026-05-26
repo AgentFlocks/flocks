@@ -1,20 +1,17 @@
 """Regression tests for ``flocks.workflow.llm.LLMClient._prepare_provider``.
 
-These tests pin down the contract that protects concurrent ``session`` /
-``agent`` callers when a workflow runs ``llm.ask()`` against the same
-``Provider`` singleton:
+The workflow LLM path must no longer mutate the process-wide Provider
+singleton that the session / agent runner uses. Instead it should build an
+isolated provider instance seeded from the shared provider's current config.
 
-* The reconfigure-and-reset sequence is **idempotent**: if the workflow's
-  desired config matches what the provider already holds, neither
-  ``provider.configure(...)`` nor the ``provider._client = None`` reset is
-  performed. This keeps long-running httpx connection pools from being
-  thrown away on every workflow LLM call.
-* ``trust_env`` is only overridden when the user explicitly set
-  ``workflow.llm.trust_env`` in flocks config. Otherwise any value that the
-  session previously placed in ``provider._config.custom_settings`` is
-  preserved untouched.
-* When the config does materially change (e.g. api_key flip), the
-  reconfigure path still runs and ``_client`` is reset, as before.
+These tests pin down that contract:
+
+* ``_prepare_provider()`` returns a distinct provider instance and leaves the
+  shared provider's ``_config`` / ``_client`` untouched.
+* workflow-specific overrides (api_key / base_url / trust_env) are applied
+  only to the isolated provider instance.
+* Providers that are configured purely via runtime/env state (``_api_key``
+  with no ``_config``) remain usable when workflow overrides are applied.
 """
 
 from __future__ import annotations
@@ -29,10 +26,7 @@ from flocks.workflow import llm as workflow_llm
 
 
 class _FakeProvider:
-    """Minimal stand-in for a registered ``BaseProvider`` instance.
-
-    Records every ``configure`` invocation so tests can assert idempotency.
-    """
+    """Minimal stand-in for a registered provider instance."""
 
     def __init__(
         self,
@@ -41,14 +35,23 @@ class _FakeProvider:
         api_key: Optional[str] = "session-key",
         base_url: Optional[str] = "https://session.example.com",
         custom_settings: Optional[Dict[str, Any]] = None,
+        configured: bool = True,
     ) -> None:
         self.id = provider_id
-        self._config: Optional[ProviderConfig] = ProviderConfig(
-            provider_id=provider_id,
-            api_key=api_key,
-            base_url=base_url,
-            custom_settings=dict(custom_settings or {}),
+        self.name = f"Provider {provider_id}"
+        self._api_key = api_key
+        self._base_url = base_url
+        self._config: Optional[ProviderConfig] = (
+            ProviderConfig(
+                provider_id=provider_id,
+                api_key=api_key,
+                base_url=base_url,
+                custom_settings=dict(custom_settings or {}),
+            )
+            if configured
+            else None
         )
+        self._config_models: List[str] = ["model-a"]
         self._client: Any = object()
         self.configure_calls: List[ProviderConfig] = []
 
@@ -57,7 +60,8 @@ class _FakeProvider:
         self._config = config
 
     def is_configured(self) -> bool:
-        return self._config is not None and self._config.api_key is not None
+        api_key = self._config.api_key if self._config else self._api_key
+        return api_key is not None
 
 
 @pytest.fixture
@@ -121,144 +125,148 @@ def _build_client(
         )
 
 
-def test_prepare_provider_is_idempotent_when_config_unchanged(
+def test_prepare_provider_returns_isolated_instance_when_config_unchanged(
     patched_runtime, fake_provider: _FakeProvider
 ) -> None:
-    """No workflow overrides + no explicit trust_env => no reconfigure, no client reset."""
+    """Workflow should clone the provider instead of mutating the shared singleton."""
     client = _build_client()
 
     original_client = fake_provider._client
     assert original_client is not None
 
-    client._prepare_provider("fake-provider")
-    client._prepare_provider("fake-provider")
-    client._prepare_provider("fake-provider")
+    prepared = client._prepare_provider("fake-provider")
 
-    assert fake_provider.configure_calls == [], (
-        "expected zero reconfigure calls when desired config matches existing"
+    assert prepared is not fake_provider
+    assert prepared._client is None, (
+        "workflow provider should always start with an isolated client cache"
     )
     assert fake_provider._client is original_client, (
-        "expected provider._client to be preserved across idempotent calls"
+        "shared provider client must not be reset by workflow preparation"
     )
+    assert fake_provider.configure_calls == []
+    assert prepared._config is not None
+    assert prepared._config == fake_provider._config
+    assert prepared._config_models == fake_provider._config_models
+    assert prepared._config_models is not fake_provider._config_models
 
 
 def test_prepare_provider_does_not_override_session_trust_env(
     patched_runtime, fake_provider: _FakeProvider
 ) -> None:
-    """If workflow.llm.trust_env is not set, session-supplied custom_settings stay intact."""
+    """If workflow.llm.trust_env is not set, shared custom_settings stay untouched."""
     client = _build_client(
         workflow_trust_env_set=False, workflow_trust_env=False
     )
 
-    client._prepare_provider("fake-provider")
+    prepared = client._prepare_provider("fake-provider")
 
     assert fake_provider._config is not None
     assert fake_provider._config.custom_settings == {
         "trust_env": True,
         "verify_ssl": False,
     }
-    assert fake_provider.configure_calls == [], (
-        "trust_env was not explicitly set -> provider.configure must not be called"
-    )
+    assert fake_provider.configure_calls == []
+    assert prepared._config is not None
+    assert prepared._config.custom_settings == {
+        "trust_env": True,
+        "verify_ssl": False,
+    }
 
 
 def test_prepare_provider_overrides_when_workflow_trust_env_explicit(
     patched_runtime, fake_provider: _FakeProvider
 ) -> None:
-    """If workflow.llm.trust_env IS set, override custom_settings and reset _client."""
+    """If workflow.llm.trust_env IS set, only the isolated provider is overridden."""
     client = _build_client(
         workflow_trust_env_set=True, workflow_trust_env=False
     )
 
-    client._prepare_provider("fake-provider")
+    prepared = client._prepare_provider("fake-provider")
 
-    assert len(fake_provider.configure_calls) == 1
-    applied = fake_provider.configure_calls[0]
-    assert applied.custom_settings is not None
-    assert applied.custom_settings.get("trust_env") is False
-    # verify_ssl was carried over from the session-side custom_settings
-    assert applied.custom_settings.get("verify_ssl") is False
-    assert fake_provider._client is None, (
-        "trust_env actually changed -> the SDK client must be reset"
-    )
+    assert fake_provider.configure_calls == []
+    assert fake_provider._config is not None
+    assert fake_provider._config.custom_settings == {
+        "trust_env": True,
+        "verify_ssl": False,
+    }
+    assert prepared._config is not None
+    assert prepared._config.custom_settings == {
+        "trust_env": False,
+        "verify_ssl": False,
+    }
+    assert prepared._client is None
 
 
 def test_prepare_provider_reconfigures_when_api_key_changes(
     patched_runtime, fake_provider: _FakeProvider
 ) -> None:
-    """A new api_key is a material change -> reconfigure + client reset."""
+    """A workflow api_key override must only affect the isolated provider."""
     client = _build_client(api_key="workflow-supplied-key")
 
-    client._prepare_provider("fake-provider")
+    prepared = client._prepare_provider("fake-provider")
 
-    assert len(fake_provider.configure_calls) == 1
-    assert fake_provider.configure_calls[0].api_key == "workflow-supplied-key"
-    assert fake_provider._client is None
+    assert fake_provider.configure_calls == []
+    assert fake_provider._config is not None
+    assert fake_provider._config.api_key == "session-key"
+    assert prepared._config is not None
+    assert prepared._config.api_key == "workflow-supplied-key"
+    assert prepared._client is None
 
 
 def test_prepare_provider_reconfigures_when_base_url_changes(
     patched_runtime, fake_provider: _FakeProvider
 ) -> None:
-    """A new base_url is also a material change."""
+    """A workflow base_url override must only affect the isolated provider."""
     client = _build_client(base_url="https://workflow.example.com")
 
-    client._prepare_provider("fake-provider")
+    prepared = client._prepare_provider("fake-provider")
 
-    assert len(fake_provider.configure_calls) == 1
-    assert (
-        fake_provider.configure_calls[0].base_url
-        == "https://workflow.example.com"
-    )
-    assert fake_provider._client is None
-
-
-def test_get_provider_lock_is_per_provider(patched_runtime) -> None:
-    """Same provider_id returns the same lock instance; different ids get different locks."""
-    lock_a1 = workflow_llm._get_provider_lock("fake-provider")
-    lock_a2 = workflow_llm._get_provider_lock("fake-provider")
-    lock_b = workflow_llm._get_provider_lock("other-provider")
-
-    assert lock_a1 is lock_a2
-    assert lock_a1 is not lock_b
+    assert fake_provider.configure_calls == []
+    assert fake_provider._config is not None
+    assert fake_provider._config.base_url == "https://session.example.com"
+    assert prepared._config is not None
+    assert prepared._config.base_url == "https://workflow.example.com"
+    assert prepared._client is None
 
 
-def test_prepare_provider_resets_client_when_owning_loop_changes(
-    patched_runtime, fake_provider: _FakeProvider
+def test_prepare_provider_uses_runtime_api_key_when_shared_config_missing(
+    patched_runtime,
 ) -> None:
-    """If the existing _client belongs to a different loop, reset it even when config is unchanged.
+    """Workflow overrides must not erase runtime/env credentials.
 
-    This guards against ``httpx.AsyncClient`` cross-loop reuse: a session
-    bound the client to uvicorn's main loop, the workflow loop must not
-    inherit it without rebuilding on the workflow loop.
+    Providers may be configured only via constructor/runtime state with
+    ``_config is None``. When workflow sets ``trust_env``, the isolated
+    provider still needs a usable api_key copied from the shared provider.
     """
-    client = _build_client()
-    # Simulate the workflow loop having id=999, while ``_client`` was last
-    # used on a different loop (e.g. the session's main loop with id=111).
-    with patch.object(workflow_llm, "_workflow_loop_id", return_value=999):
-        workflow_llm._provider_client_loop_marker[fake_provider] = 111
+    shared_provider = _FakeProvider(
+        api_key="runtime-key",
+        base_url="https://runtime.example.com",
+        custom_settings={"verify_ssl": False},
+        configured=False,
+    )
 
-        original_client = fake_provider._client
-        assert original_client is not None
+    def _fake_run_coro_sync(coro):
+        try:
+            coro.close()
+        except Exception:
+            pass
+        return {}
 
-        client._prepare_provider("fake-provider")
+    with patch.object(
+        workflow_llm.Provider, "_ensure_initialized", lambda: None
+    ), patch.object(
+        workflow_llm.Provider, "get", lambda provider_id: shared_provider
+    ), patch.object(
+        workflow_llm, "_run_coro_sync", side_effect=_fake_run_coro_sync
+    ):
+        client = _build_client(
+            workflow_trust_env_set=True,
+            workflow_trust_env=False,
+        )
+        prepared = client._prepare_provider("fake-provider")
 
-        # Even though no config field changed, the client must be reset so
-        # the next ``_get_client()`` rebuilds it on the workflow loop.
-        assert fake_provider._client is None
-        # And the marker is updated to the workflow loop.
-        assert workflow_llm._provider_client_loop_marker.get(fake_provider) == 999
-
-
-def test_prepare_provider_keeps_client_when_owning_loop_matches(
-    patched_runtime, fake_provider: _FakeProvider
-) -> None:
-    """When the existing _client already belongs to the workflow loop, do not reset."""
-    client = _build_client()
-    with patch.object(workflow_llm, "_workflow_loop_id", return_value=555):
-        workflow_llm._provider_client_loop_marker[fake_provider] = 555
-
-        original_client = fake_provider._client
-        client._prepare_provider("fake-provider")
-
-        assert fake_provider._client is original_client
-        assert fake_provider.configure_calls == []
+    assert shared_provider._config is None
+    assert prepared._config is not None
+    assert prepared._config.api_key == "runtime-key"
+    assert prepared._config.base_url == "https://runtime.example.com"
+    assert prepared._config.custom_settings == {"trust_env": False}

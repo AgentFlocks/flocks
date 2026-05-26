@@ -240,7 +240,8 @@ class Command:
                 agent="rex",
                 execution_kind="session_control",
                 allow_attachments=False,
-                visible_surfaces=("webui", "tui", "acp"),
+                visible_surfaces=("webui", "tui", "acp", "channel"),
+                channel_safe=True,
             ),
             CommandDef(
                 name="clear",
@@ -261,7 +262,7 @@ class Command:
                 name="plan",
                 description="Create a plan for a task",
                 template="Create a detailed plan for: $ARGUMENTS",
-                agent="plan",
+                agent="prometheus",
                 execution_kind="llm",
                 allow_attachments=True,
             ),

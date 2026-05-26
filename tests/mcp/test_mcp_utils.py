@@ -151,6 +151,21 @@ class TestNormalizeMcpConfig:
             "command": ["uvx", "mcp-server", "--port", "8080"],
         }
 
+    def test_normalizes_legacy_env_alias_for_local_servers(self):
+        config = normalize_mcp_config(
+            {
+                "type": "stdio",
+                "command": "uvx",
+                "args": ["mcp-server"],
+                "env": {"DEMO_TOKEN": "secret"},
+            }
+        )
+        assert config == {
+            "type": "local",
+            "command": ["uvx", "mcp-server"],
+            "environment": {"DEMO_TOKEN": "secret"},
+        }
+
     def test_normalizes_sse_alias_to_remote_transport(self):
         config = normalize_mcp_config(
             {
