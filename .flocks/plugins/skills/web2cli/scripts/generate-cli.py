@@ -198,7 +198,7 @@ class APIClient:
         for index, cookie in enumerate(self.cookie_items):
             name = cookie.get("name")
             value = cookie.get("value")
-            if not name or value in (None, ""):
+            if not name or value is None:
                 continue
             domain = str(cookie.get("domain", ""))
             if domain and not self._domain_match(host, domain):
@@ -215,7 +215,7 @@ class APIClient:
                 selected[name] = (score, f"{name}={value}")
 
         return "; ".join(
-            header for _, header in sorted(selected.values(), key=lambda item: item[0][2])
+            header for _, header in sorted(selected.values(), key=lambda item: (-item[0][0], item[0][2]))
         )
 
     def __init__(self, base_url: str = __BASE_URL__, cookie_file: str = "auth-state.json"):
@@ -893,7 +893,7 @@ class APIClient:
         for index, cookie in enumerate(self._load_cookie_items(self.auth_state_path)):
             name = cookie.get("name")
             value = cookie.get("value")
-            if not name or value in (None, ""):
+            if not name or value is None:
                 continue
             domain = str(cookie.get("domain", ""))
             if domain and not self._domain_match(host, domain):
@@ -928,11 +928,9 @@ class APIClient:
             domain = str(cookie.get("domain", ""))
             if domain and not self._domain_match(host, domain):
                 continue
-            cookie_path = str(cookie.get("path", "/") or "/")
-            if not self._path_match(request_path, cookie_path):
-                continue
             if cookie.get("secure") and not is_https:
                 continue
+            cookie_path = str(cookie.get("path", "/") or "/")
             score = (len(cookie_path), len(domain.lstrip(".")), index)
             if selected is None or score > selected[0]:
                 selected = (score, str(cookie.get("value", "")))
@@ -998,6 +996,8 @@ class APIClient:
         self.base_url = (base_url or SPEC.get("baseUrl", "")).rstrip("/")
         self.auth_state_path = auth_state
         self.auth_state = _load_json(auth_state) if auth_state else {}
+        if not isinstance(self.auth_state, dict):
+            self.auth_state = {}
         self.session = requests.Session()
         self._apply_auth_state()
 
@@ -1017,7 +1017,7 @@ class APIClient:
                     value = self._resolve_cookie_value(rule.get("key"))
                 else:
                     value = self._resolve_header_value(self.auth_state, rule)
-                if value:
+                if value is not None:
                     self.session.headers[str(rule["name"])] = value
 
     def build_request(self, args: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:

@@ -194,7 +194,7 @@ def test_generated_client_loads_storage_state_cookie_object(tmp_path, monkeypatc
             "headers": {
                 "Accept": "application/json, text/plain, */*",
                 "Content-Type": "application/json; charset=UTF-8",
-                "Cookie": "sid=cookie-123; api=cookie-456",
+                "Cookie": "api=cookie-456; sid=cookie-123",
             },
         }
     ]
@@ -368,6 +368,17 @@ def _header_auth_spec():
         "stateFile": "auth-state.json",
         "requiredCookies": [],
         "requiredHeaders": [{"name": "X-CSRF-Token", "source": "localStorage", "key": "csrfToken"}],
+    }
+    return spec
+
+
+def _cookie_source_header_auth_spec():
+    spec = _sample_spec()
+    spec["strategy"] = "HEADER"
+    spec["auth"] = {
+        "stateFile": "auth-state.json",
+        "requiredCookies": [],
+        "requiredHeaders": [{"name": "X-CSRF-Token", "source": "cookie", "key": "csrf"}],
     }
     return spec
 
@@ -627,6 +638,85 @@ def test_generated_header_strategy_cli_sends_cookie_header_and_required_headers(
     ]
     assert client.session.headers["X-CSRF-Token"] == "csrf-abc"
     assert fake_session.cookies.set_calls == []
+
+
+def test_generated_header_strategy_cookie_source_ignores_base_url_path(tmp_path, monkeypatch):
+    module = _load_module()
+    auth_state = tmp_path / "auth-state.json"
+    auth_state.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"},
+                    {"name": "csrf", "value": "csrf-from-cookie", "domain": ".example.com", "path": "/api/items"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_cookie_header_cli"}
+    exec(module.generate_python_cli_from_spec(_cookie_source_header_auth_spec()), namespace)
+
+    client = namespace["APIClient"](auth_state=str(auth_state))
+    rows = client.run({"page": 1, "limit": 20})
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert client.session.headers["X-CSRF-Token"] == "csrf-from-cookie"
+    assert fake_session.request_calls[0]["headers"]["Cookie"] == "sid=cookie-123; csrf=csrf-from-cookie"
+
+
+def test_generated_header_strategy_accepts_empty_cookie_values(tmp_path, monkeypatch):
+    module = _load_module()
+    auth_state = tmp_path / "auth-state.json"
+    auth_state.write_text(
+        json.dumps(
+            {
+                "cookies": [
+                    {"name": "flag", "value": "", "domain": ".example.com", "path": "/"},
+                    {"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_empty_cookie_cli"}
+    exec(module.generate_python_cli_from_spec(_sample_spec()), namespace)
+
+    client = namespace["APIClient"](auth_state=str(auth_state))
+    rows = client.run({"page": 1, "limit": 20})
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert fake_session.request_calls[0]["headers"]["Cookie"] == "flag=; sid=cookie-123"
+
+
+def test_generated_cli_normalizes_non_dict_auth_state_for_headers(tmp_path, monkeypatch):
+    module = _load_module()
+    auth_state = tmp_path / "auth-state.json"
+    auth_state.write_text(
+        json.dumps([{"name": "sid", "value": "cookie-123", "domain": ".example.com", "path": "/"}]),
+        encoding="utf-8",
+    )
+    fake_session = _FakeRequestSession({"data": {"items": [{"id": "1", "title": "Alpha"}]}})
+    fake_requests = types.SimpleNamespace(Session=lambda: fake_session)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    namespace = {"__name__": "generated_list_auth_state_cli"}
+    exec(module.generate_python_cli_from_spec(_header_auth_spec()), namespace)
+
+    client = namespace["APIClient"](auth_state=str(auth_state))
+    rows = client.run({"page": 1, "limit": 20})
+
+    assert rows == [{"id": "1", "title": "Alpha"}]
+    assert client.auth_state == {}
+    assert "X-CSRF-Token" not in client.session.headers
 
 
 def test_capture_to_spec_to_cli_preserves_form_payload_mode(monkeypatch):

@@ -22,6 +22,8 @@ from .utils import load_env_file
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
 NAME = os.environ.get("BU_NAME", "default")
 INTERNAL = INTERNAL_URL_PREFIXES
+# Legacy compatibility for external imports; cookie export no longer uses site-root guessing.
+_COMMON_SECOND_LEVEL_SUFFIXES = {"ac", "co", "com", "edu", "gov", "mil", "net", "org"}
 _COOKIE_IMPORT_FIELDS = {
     "name",
     "value",
@@ -240,6 +242,20 @@ def _storage_origin_url(origin: str) -> str:
 
 def _stringify_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _site_root_from_hostname(hostname: str) -> str:
+    labels = [label for label in hostname.lower().strip(".").split(".") if label]
+    if len(labels) <= 2:
+        return ".".join(labels)
+    if len(labels[-1]) == 2 and labels[-2] in _COMMON_SECOND_LEVEL_SUFFIXES:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _domain_matches_site(domain: str | None, site_root: str) -> bool:
+    normalized = str(domain or "").lower().lstrip(".")
+    return bool(normalized) and (normalized == site_root or normalized.endswith(f".{site_root}"))
 
 
 def _domain_matches_host(domain: str | None, hostname: str) -> bool:

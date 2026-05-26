@@ -287,3 +287,33 @@ def test_hook_base_uses_content_type_to_parse_urlencoded_string_body():
     assert result["request"]["requestBody"] == '{\n  "page": "3",\n  "size": "10",\n  "keyword": "alpha"\n}'
     assert result["request"]["requestShape"]["$.page"] == "string"
     assert result["request"]["requestShape"]["$.keyword"] == "string"
+
+
+def test_hook_base_does_not_consume_request_body_without_clone():
+    result = _run_node_case(
+        """
+  let textCalls = 0;
+  const requestLike = {
+    url: "https://example.com/api/items/list",
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    text: async function() {
+      textCalls += 1;
+      return JSON.stringify({ page: 9 });
+    }
+  };
+
+  await env.context.window.fetch(requestLike);
+
+  process.stdout.write(JSON.stringify({
+    textCalls,
+    request: env.context.window.__capturedRequests[0]
+  }));
+"""
+    )
+
+    assert result["textCalls"] == 0
+    assert result["request"]["method"] == "POST"
+    assert result["request"]["requestBodyKind"] == "empty"

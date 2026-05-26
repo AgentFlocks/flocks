@@ -645,19 +645,6 @@
       } catch (error) {
         bodyPromise = Promise.resolve('');
       }
-    } else if (requestLike && typeof requestLike.text === 'function') {
-      try {
-        bodyPromise = requestLike.text().then(
-          function(text) {
-            return text || '';
-          },
-          function() {
-            return '';
-          }
-        );
-      } catch (error) {
-        bodyPromise = Promise.resolve('');
-      }
     } else {
       bodyPromise = Promise.resolve('');
     }
