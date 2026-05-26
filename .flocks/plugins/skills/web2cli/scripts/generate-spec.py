@@ -55,6 +55,19 @@ def parse_json_text(text: str) -> Any:
         return {"raw": text}
 
 
+def get_request_content_type(request: dict[str, Any]) -> str:
+    """Return the normalized request content type."""
+    direct = request.get("requestContentType")
+    if direct:
+        return str(direct).lower()
+
+    headers = request.get("requestHeaders", {}) or request.get("request_headers", {})
+    for key, value in headers.items():
+        if str(key).lower() == "content-type" and value:
+            return str(value).lower()
+    return ""
+
+
 def infer_type(value: Any) -> str:
     """Return a compact type name for spec/verify output."""
     if value is None:
@@ -237,8 +250,10 @@ def collect_columns(item: Any) -> list[dict[str, Any]]:
     return columns
 
 
-def build_templates(request: dict[str, Any], url_info: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Build query/body templates and CLI arg definitions."""
+def build_templates(
+    request: dict[str, Any], url_info: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], str, str]:
+    """Build query/body templates, payload mode, and CLI arg definitions."""
     args: list[dict[str, Any]] = []
     seen_args: set[str] = set()
 
@@ -264,15 +279,36 @@ def build_templates(request: dict[str, Any], url_info: dict[str, Any]) -> tuple[
                 result[key] = value
         return result
 
-    body = parse_json_text(str(request.get("requestBody", "")))
-    if not isinstance(body, dict) or "raw" in body:
-        body = {}
+    body_text = str(request.get("requestBody", ""))
+    body_kind = str(request.get("requestBodyKind", "")).lower()
+    content_type = get_request_content_type(request)
+    parsed_body = parse_json_text(body_text)
+    body: dict[str, Any] = {}
+    payload_mode = "none"
+    raw_body_template = ""
+
+    if isinstance(parsed_body, dict) and "raw" not in parsed_body:
+        body = parsed_body
+        if body:
+            if body_kind in {"urlencoded", "formdata"}:
+                payload_mode = "form"
+            elif "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+                payload_mode = "form"
+            else:
+                payload_mode = "json"
+    elif body_text:
+        if "application/x-www-form-urlencoded" in content_type:
+            body = dict(parse_qsl(body_text, keep_blank_values=True))
+            payload_mode = "form" if body else "raw"
+        else:
+            payload_mode = "raw"
+            raw_body_template = body_text
 
     query_template = transform_mapping(url_info["query"])
     body_template = transform_mapping(body)
 
     args.sort(key=lambda item: (0 if item["name"] == "page" else 1 if item["name"] == "limit" else 2, item["name"]))
-    return query_template, body_template, args
+    return query_template, body_template, args, payload_mode, raw_body_template
 
 
 def build_strategy(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -364,7 +400,7 @@ def build_operation_entry(request: dict[str, Any]) -> dict[str, Any]:
     response = parse_json_text(str(request.get("response", "")))
     collection = find_best_collection(response)
     row_item = collection["item"] if collection is not None else response
-    query_template, body_template, args = build_templates(request, url_info)
+    query_template, body_template, args, payload_mode, raw_body_template = build_templates(request, url_info)
     columns = collect_columns(row_item)
 
     defaults = {item["name"]: item["default"] for item in args}
@@ -386,6 +422,8 @@ def build_operation_entry(request: dict[str, Any]) -> dict[str, Any]:
             "endpoint": pathname,
             "queryTemplate": query_template,
             "bodyTemplate": body_template,
+            "payloadMode": payload_mode,
+            "rawBodyTemplate": raw_body_template,
             "headers": safe_headers(request),
             "captureSource": request.get("captureSource", "pageHook"),
             "captureReason": request.get("captureReason", ""),

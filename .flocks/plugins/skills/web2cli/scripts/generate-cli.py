@@ -145,7 +145,7 @@ Usage:
 import json
 import requests
 from typing import Dict, Any, Optional, List
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 
 class APIClient:
@@ -174,21 +174,54 @@ class APIClient:
 
         return [cookie for cookie in cookies if isinstance(cookie, dict)]
 
+    @staticmethod
+    def _domain_match(host: str, cookie_domain: str) -> bool:
+        pure_domain = str(cookie_domain or "").lstrip(".")
+        return bool(pure_domain) and (host == pure_domain or host.endswith(f".{pure_domain}"))
+
+    @staticmethod
+    def _path_match(request_path: str, cookie_path: str) -> bool:
+        normalized_cookie_path = str(cookie_path or "/")
+        normalized_request_path = request_path or "/"
+        if normalized_cookie_path == "/":
+            return True
+        prefix = normalized_cookie_path.rstrip("/") or "/"
+        return normalized_request_path == prefix or normalized_request_path.startswith(prefix + "/")
+
+    def _build_cookie_header(self, url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        request_path = parsed.path or "/"
+        is_https = parsed.scheme == "https"
+        selected = {}
+
+        for index, cookie in enumerate(self.cookie_items):
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not name or value in (None, ""):
+                continue
+            domain = str(cookie.get("domain", ""))
+            if domain and not self._domain_match(host, domain):
+                continue
+            cookie_path = str(cookie.get("path", "/") or "/")
+            if not self._path_match(request_path, cookie_path):
+                continue
+            if cookie.get("secure") and not is_https:
+                continue
+
+            score = (len(cookie_path), len(domain.lstrip(".")), index)
+            current = selected.get(name)
+            if current is None or score > current[0]:
+                selected[name] = (score, f"{name}={value}")
+
+        return "; ".join(
+            header for _, header in sorted(selected.values(), key=lambda item: item[0][2])
+        )
+
     def __init__(self, base_url: str = __BASE_URL__, cookie_file: str = "auth-state.json"):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
-
-        # Load cookies
-        for c in self._load_cookie_items(cookie_file):
-            name = c.get("name")
-            if not name:
-                continue
-            cookie_kwargs = {}
-            if c.get("domain"):
-                cookie_kwargs["domain"] = c["domain"]
-            if c.get("path"):
-                cookie_kwargs["path"] = c["path"]
-            self.session.cookies.set(name, c.get("value", ""), **cookie_kwargs)
+        self.cookie_items = self._load_cookie_items(cookie_file)
 
         # Common headers
         self.session.headers.update({
@@ -197,8 +230,12 @@ class APIClient:
         })
 
     def _request(self, method: str, endpoint: str, data: Optional[Dict] = None) -> Dict:
-        url = f"{{self.base_url}}{{endpoint}}"
-        resp = self.session.request(method, url, json=data)
+        url = f"{self.base_url}{endpoint}"
+        headers = dict(self.session.headers)
+        cookie_header = self._build_cookie_header(url)
+        if cookie_header:
+            headers["Cookie"] = cookie_header
+        resp = self.session.request(method, url, json=data, headers=headers)
         resp.raise_for_status()
         return resp.json()
 
@@ -572,6 +609,7 @@ def generate_markdown_docs_from_spec(spec: Dict[str, Any], title: str = "API Doc
 - **Base URL**: `{spec.get("baseUrl", "")}`
 - **Method**: `{operation.get("method", "GET")}`
 - **Endpoint**: `{operation.get("endpoint", "/")}`
+- **Payload Mode**: `{operation.get("payloadMode", "none")}`
 
 """
 
@@ -622,6 +660,8 @@ def generate_postman_collection_from_spec(spec: Dict[str, Any]) -> Dict[str, Any
         operation = entry["operation"]
         headers = operation.get("headers", {}) if isinstance(operation.get("headers"), dict) else {}
         body_template = operation.get("bodyTemplate", {}) if isinstance(operation.get("bodyTemplate"), dict) else {}
+        payload_mode = operation.get("payloadMode") or ("json" if body_template else "none")
+        raw_body_template = operation.get("rawBodyTemplate", "")
         endpoint = operation.get("endpoint", "/")
         path_parts = endpoint.lstrip("/").split("/") if endpoint.lstrip("/") else []
 
@@ -634,11 +674,22 @@ def generate_postman_collection_from_spec(spec: Dict[str, Any]) -> Dict[str, Any
             },
             "header": [{"key": key, "value": value} for key, value in headers.items()],
         }
-        if body_template:
+        if payload_mode == "json" and body_template:
             request["body"] = {
                 "mode": "raw",
                 "raw": json.dumps(body_template, ensure_ascii=False),
                 "options": {"raw": {"language": "json"}},
+            }
+        elif payload_mode == "form" and body_template:
+            request["body"] = {
+                "mode": "urlencoded",
+                "urlencoded": [{"key": key, "value": str(value)} for key, value in body_template.items()],
+            }
+        elif payload_mode == "raw" and raw_body_template:
+            request["body"] = {
+                "mode": "raw",
+                "raw": str(raw_body_template),
+                "options": {"raw": {"language": "text"}},
             }
         items.append(
             {
@@ -672,6 +723,7 @@ import json
 import re
 import sys
 from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 import requests
 
@@ -679,7 +731,7 @@ import requests
 SPEC = ''' + spec_json + '''
 
 
-def _load_json(path: str) -> Dict[str, Any]:
+def _load_json(path: str) -> Any:
     if not path:
         return {}
     try:
@@ -689,7 +741,18 @@ def _load_json(path: str) -> Dict[str, Any]:
         return {}
     except json.JSONDecodeError:
         return {}
-    return payload if isinstance(payload, dict) else {}
+    return payload
+
+
+def _resolve_string_template(value: str, args: Dict[str, Any]) -> Any:
+    exact_match = re.fullmatch(r"\\$\\{([A-Za-z0-9_]+)\\}", value)
+    if exact_match:
+        return args.get(exact_match.group(1), value)
+    return re.sub(
+        r"\\$\\{([A-Za-z0-9_]+)\\}",
+        lambda match: str(args.get(match.group(1), match.group(0))),
+        value,
+    )
 
 
 def _coerce_bool(value: str) -> bool:
@@ -783,13 +846,20 @@ class APIClient:
     @staticmethod
     def _load_cookie_items(auth_state_path: str) -> List[Dict[str, Any]]:
         payload = _load_json(auth_state_path)
-        cookies = payload.get("cookies", [])
+        if isinstance(payload, list):
+            cookies = payload
+        elif isinstance(payload, dict):
+            cookies = payload.get("cookies", [])
+        else:
+            cookies = []
         if isinstance(cookies, list):
             return [cookie for cookie in cookies if isinstance(cookie, dict)]
         return []
 
     @staticmethod
     def _load_storage_map(payload: Dict[str, Any]) -> Dict[str, str]:
+        if not isinstance(payload, dict):
+            return {}
         values = {}
         for origin_entry in payload.get("origins", []):
             if not isinstance(origin_entry, dict):
@@ -800,21 +870,86 @@ class APIClient:
         return values
 
     @staticmethod
+    def _domain_match(host: str, cookie_domain: str) -> bool:
+        pure_domain = str(cookie_domain or "").lstrip(".")
+        return bool(pure_domain) and (host == pure_domain or host.endswith(f".{pure_domain}"))
+
+    @staticmethod
+    def _path_match(request_path: str, cookie_path: str) -> bool:
+        normalized_cookie_path = str(cookie_path or "/")
+        normalized_request_path = request_path or "/"
+        if normalized_cookie_path == "/":
+            return True
+        prefix = normalized_cookie_path.rstrip("/") or "/"
+        return normalized_request_path == prefix or normalized_request_path.startswith(prefix + "/")
+
+    def _select_cookie_header(self, url: str) -> str:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        request_path = parsed.path or "/"
+        is_https = parsed.scheme == "https"
+        selected = {}
+
+        for index, cookie in enumerate(self._load_cookie_items(self.auth_state_path)):
+            name = cookie.get("name")
+            value = cookie.get("value")
+            if not name or value in (None, ""):
+                continue
+            domain = str(cookie.get("domain", ""))
+            if domain and not self._domain_match(host, domain):
+                continue
+            cookie_path = str(cookie.get("path", "/") or "/")
+            if not self._path_match(request_path, cookie_path):
+                continue
+            if cookie.get("secure") and not is_https:
+                continue
+
+            score = (len(cookie_path), len(domain.lstrip(".")), index)
+            current = selected.get(name)
+            if current is None or score > current[0]:
+                selected[name] = (score, f"{name}={value}")
+
+        return "; ".join(
+            header for _, header in sorted(selected.values(), key=lambda item: item[0][2])
+        )
+
+    def _resolve_cookie_value(self, key: Any) -> str | None:
+        target_name = str(key or "")
+        if not target_name:
+            return None
+        parsed = urlparse(self.base_url or "")
+        host = parsed.hostname or ""
+        request_path = parsed.path or "/"
+        is_https = parsed.scheme == "https"
+        selected = None
+        for index, cookie in enumerate(self._load_cookie_items(self.auth_state_path)):
+            if not isinstance(cookie, dict) or cookie.get("name") != target_name:
+                continue
+            domain = str(cookie.get("domain", ""))
+            if domain and not self._domain_match(host, domain):
+                continue
+            cookie_path = str(cookie.get("path", "/") or "/")
+            if not self._path_match(request_path, cookie_path):
+                continue
+            if cookie.get("secure") and not is_https:
+                continue
+            score = (len(cookie_path), len(domain.lstrip(".")), index)
+            if selected is None or score > selected[0]:
+                selected = (score, str(cookie.get("value", "")))
+        return selected[1] if selected else None
+
+    @staticmethod
     def _resolve_header_value(payload: Dict[str, Any], rule: Dict[str, Any]) -> str | None:
         source = rule.get("source")
         key = rule.get("key")
-        if source == "cookie":
-            for cookie in payload.get("cookies", []):
-                if isinstance(cookie, dict) and cookie.get("name") == key:
-                    return str(cookie.get("value", ""))
         if source == "localStorage":
             return APIClient._load_storage_map(payload).get(str(key))
         return None
 
     @staticmethod
     def _resolve_template(value: Any, args: Dict[str, Any]) -> Any:
-        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
-            return args.get(value[2:-1], value)
+        if isinstance(value, str):
+            return _resolve_string_template(value, args)
         if isinstance(value, dict):
             return {key: APIClient._resolve_template(item, args) for key, item in value.items()}
         if isinstance(value, list):
@@ -873,23 +1008,15 @@ class APIClient:
         if isinstance(headers, dict) and headers:
             self.session.headers.update(headers)
 
-        if strategy in {"COOKIE", "HEADER"}:
-            for cookie in self._load_cookie_items(self.auth_state_path):
-                name = cookie.get("name")
-                if not name:
-                    continue
-                kwargs = {}
-                if cookie.get("domain"):
-                    kwargs["domain"] = cookie["domain"]
-                if cookie.get("path"):
-                    kwargs["path"] = cookie["path"]
-                self.session.cookies.set(name, cookie.get("value", ""), **kwargs)
-
         if strategy == "HEADER":
             for rule in auth.get("requiredHeaders", []):
                 if not isinstance(rule, dict) or not rule.get("name"):
                     continue
-                value = self._resolve_header_value(self.auth_state, rule)
+                source = rule.get("source")
+                if source == "cookie":
+                    value = self._resolve_cookie_value(rule.get("key"))
+                else:
+                    value = self._resolve_header_value(self.auth_state, rule)
                 if value:
                     self.session.headers[str(rule["name"])] = value
 
@@ -898,13 +1025,35 @@ class APIClient:
         endpoint = operation.get("endpoint", "/")
         query = self._resolve_template(operation.get("queryTemplate", {}), args)
         body = self._resolve_template(operation.get("bodyTemplate", {}), args)
-        headers = operation.get("headers", {})
-        return {
+        payload_mode = str(operation.get("payloadMode") or ("json" if body else "none")).lower()
+        raw_body = self._resolve_template(operation.get("rawBodyTemplate", ""), args)
+        headers = dict(operation.get("headers", {}) or {})
+        cookie_strategy = str(SPEC.get("strategy", "PUBLIC") or "PUBLIC").upper()
+        request_options = {
             "method": operation.get("method", "GET"),
             "url": f"{self.base_url}{endpoint}",
             "params": query or None,
-            "json": body or None,
+            "json": None,
+            "data": None,
             "headers": headers or None,
+        }
+        if payload_mode == "json":
+            request_options["json"] = body or None
+        elif payload_mode == "form":
+            request_options["data"] = body or None
+        elif payload_mode == "raw":
+            request_options["data"] = raw_body or None
+        if cookie_strategy in {"COOKIE", "HEADER"}:
+            cookie_header = self._select_cookie_header(request_options["url"])
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+        return {
+            "method": request_options["method"],
+            "url": request_options["url"],
+            "params": request_options["params"],
+            "json": request_options["json"],
+            "data": request_options["data"],
+            "headers": request_options["headers"],
         }
 
     def _project_rows(self, payload: Any, entry: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -940,6 +1089,7 @@ class APIClient:
             request_options["url"],
             params=request_options["params"],
             json=request_options["json"],
+            data=request_options["data"],
             headers=request_options["headers"],
         )
         response.raise_for_status()
