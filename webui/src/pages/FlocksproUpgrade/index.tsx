@@ -19,6 +19,7 @@ interface UpgradeApplyFormState {
   licenseType: 'poc' | 'commercial';
   company: string;
   applicantName: string;
+  salesRepName: string;
   applicantEmail: string;
   applicantPhone: string;
   notes: string;
@@ -45,6 +46,7 @@ const DEFAULT_FORM: UpgradeApplyFormState = {
   licenseType: 'poc',
   company: '',
   applicantName: '',
+  salesRepName: '',
   applicantEmail: '',
   applicantPhone: '',
   notes: '',
@@ -621,6 +623,7 @@ export default function FlocksproUpgradePage() {
         request_kind: 'new',
         company,
         applicant_name: applicantName,
+        sales_rep_name: applyForm.salesRepName.trim() || undefined,
         applicant_email: applyForm.applicantEmail.trim() || undefined,
         applicant_phone: applyForm.applicantPhone.trim() || undefined,
         notes: applyForm.notes.trim() || undefined,
@@ -1266,6 +1269,26 @@ export default function FlocksproUpgradePage() {
                 placeholder={t('upgrade.applicantNamePlaceholderRequired')}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
               />
+              <div className="space-y-1">
+                <input
+                  value={applyForm.salesRepName}
+                  onChange={(event) => setApplyForm((prev) => ({ ...prev, salesRepName: event.target.value }))}
+                  placeholder={t('upgrade.salesRepNamePlaceholder')}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
+                />
+                <p className="text-xs text-gray-500">
+                  {t('upgrade.salesRepHintPrefix')}{' '}
+                  <a
+                    href="https://threatbook.cn/trial?"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-slate-900 underline underline-offset-2"
+                  >
+                    {t('upgrade.salesRepHintLinkText')}
+                  </a>
+                  {t('upgrade.salesRepHintSuffix')}
+                </p>
+              </div>
               <input
                 value={applyForm.applicantEmail}
                 onChange={(event) => setApplyForm((prev) => ({ ...prev, applicantEmail: event.target.value }))}

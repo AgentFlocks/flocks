@@ -7,6 +7,7 @@ export interface UpgradeRequestCreatePayload {
   request_kind?: 'new' | 'license_change';
   company: string;
   applicant_name: string;
+  sales_rep_name?: string;
   applicant_email?: string;
   applicant_phone?: string;
   notes?: string;
@@ -30,6 +31,7 @@ export interface UpgradeRequestDetails {
   company?: string;
   enterprise_name?: string;
   applicant_name?: string;
+  sales_rep_name?: string | null;
   applicant_email?: string | null;
   applicant_phone?: string | null;
   notes?: string | null;

@@ -43,6 +43,7 @@ class UpgradeRequestCreate(BaseModel):
     request_kind: Literal["new", "license_change"] = "new"
     company: str = Field(min_length=1)
     applicant_name: str = Field(min_length=1)
+    sales_rep_name: Optional[str] = None
     applicant_email: Optional[str] = None
     applicant_phone: Optional[str] = None
     notes: Optional[str] = None
@@ -578,6 +579,7 @@ async def create_upgrade_request(payload: UpgradeRequestCreate, request: Request
         "company": payload.company.strip(),
         "enterprise_name": payload.company.strip(),
         "applicant_name": payload.applicant_name.strip(),
+        "sales_rep_name": (payload.sales_rep_name or "").strip() or None,
         "applicant_email": (payload.applicant_email or "").strip() or None,
         "applicant_phone": (payload.applicant_phone or "").strip() or None,
         "notes": (payload.notes or "").strip() or None,

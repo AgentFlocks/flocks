@@ -56,6 +56,7 @@ async def test_upgrade_request_lifecycle_local_storage(client: AsyncClient, monk
             "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
+            "sales_rep_name": "bob",
             "applicant_email": "alice@example.com",
             "applicant_phone": "13800000000",
             "notes": "need flockspro",
@@ -68,6 +69,7 @@ async def test_upgrade_request_lifecycle_local_storage(client: AsyncClient, monk
     assert created["reason"] == "need flockspro"
     assert created["details"]["company"] == "acme"
     assert created["details"]["applicant_name"] == "alice"
+    assert created["details"]["sales_rep_name"] == "bob"
     assert created["details"]["request_kind"] == "new"
     assert created["details"]["console_account_name"] == "alice"
 
@@ -534,6 +536,7 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
             assert json["passport_uid"] == "pass_1"
             assert json["form_data"]["request_kind"] == "license_change"
             assert json["form_data"]["console_account_name"] == "alice"
+            assert json["form_data"]["sales_rep_name"] == "bob"
             assert headers == {"Authorization": "Bearer token_abc"}
             return _FakeResponse()
 
@@ -547,6 +550,7 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
             "request_kind": "license_change",
             "company": "acme",
             "applicant_name": "alice",
+            "sales_rep_name": "bob",
         },
     )
 
