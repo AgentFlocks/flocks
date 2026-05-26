@@ -1065,11 +1065,13 @@ class ToolRegistry:
 
     @classmethod
     def _sync_api_service_states(cls) -> None:
-        """Disable tools whose API service is disabled in flocks.json.
+        """Bi-directionally sync tool enabled state with their API service.
 
-        YAML plugin tools default to ``enabled=True``, but the corresponding
-        API service in ``api_services`` may be ``enabled: false``.  Without
-        this sync the runner exposes disabled-service tools to the LLM.
+        - Service disabled  → force tool off.
+        - Service enabled   → restore the tool to its factory/YAML default so
+          that re-enabling a service (e.g. after adding a device) brings its
+          tools back automatically.  User-level overrides stored in
+          ``tool_settings`` are applied afterwards by :meth:`_apply_tool_settings`.
         """
         try:
             from flocks.config.config_writer import ConfigWriter
@@ -1078,22 +1080,34 @@ class ToolRegistry:
             return
 
         disabled_count = 0
+        restored_count = 0
         for tool in cls._tools.values():
             provider = tool.info.provider
             if not provider:
                 continue
             svc = api_services.get(provider, {})
-            if not svc.get("enabled", False):
+            svc_enabled = svc.get("enabled", False)
+            if not svc_enabled:
                 tool.info.enabled = False
                 disabled_count += 1
+            else:
+                # Restore to factory default so tools re-appear when their
+                # service is re-enabled (e.g. after a device is re-added).
+                # _apply_tool_settings() runs after and can flip back to False
+                # when the user has explicitly disabled a specific tool.
+                default = cls._enabled_defaults.get(tool.info.name, True)
+                if not tool.info.enabled and default:
+                    tool.info.enabled = True
+                    restored_count += 1
 
-        if disabled_count:
+        if disabled_count or restored_count:
             disabled_providers = [
                 p for p, svc in api_services.items()
                 if not svc.get("enabled", False)
             ]
             log.debug("tool_registry.api_service_sync", {
                 "disabled_tools": disabled_count,
+                "restored_tools": restored_count,
                 "disabled_providers": disabled_providers,
             })
 
