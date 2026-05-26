@@ -96,6 +96,11 @@ function createEnvironment() {{
   async function fetchImpl() {{
     return {{
       status: 201,
+      headers: {{
+        get: function(name) {{
+          return String(name || "").toLowerCase() === "content-type" ? "application/json" : "";
+        }}
+      }},
       clone: function() {{
         return {{
           text: async function() {{
@@ -223,3 +228,92 @@ def test_hook_base_exposes_debug_state_and_truncates_large_responses():
     assert result["debugState"]["lastRequest"]["response"] == result["response"]
     assert result["debugState"]["lastRequest"]["pathname"] == "/api/debug"
     assert any("window.__apiCapture.getDebugState()" in line for line in result["logs"])
+
+
+def test_hook_base_captures_fetch_request_like_body_and_headers():
+    result = _run_node_case(
+        """
+  const requestLike = {
+    url: "https://example.com/api/items/list",
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Trace-Id": "trace-123"
+    },
+    clone: function() {
+      return {
+        text: async function() {
+          return JSON.stringify({ page: 2, size: 50 });
+        }
+      };
+    }
+  };
+
+  await env.context.window.fetch(requestLike);
+
+  process.stdout.write(JSON.stringify({
+    request: env.context.window.__capturedRequests[0]
+  }));
+"""
+    )
+
+    assert result["request"]["method"] == "POST"
+    assert result["request"]["requestHeaders"]["Content-Type"] == "application/json"
+    assert result["request"]["requestHeaders"]["X-Trace-Id"] == "trace-123"
+    assert result["request"]["requestBodyKind"] == "json"
+    assert result["request"]["requestShape"]["$.page"] == "number"
+    assert result["request"]["requestShape"]["$.size"] == "number"
+
+
+def test_hook_base_uses_content_type_to_parse_urlencoded_string_body():
+    result = _run_node_case(
+        """
+  await env.context.window.fetch("https://example.com/api/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    body: "page=3&size=10&keyword=alpha"
+  });
+
+  process.stdout.write(JSON.stringify({
+    request: env.context.window.__capturedRequests[0]
+  }));
+"""
+    )
+
+    assert result["request"]["method"] == "POST"
+    assert result["request"]["requestBodyKind"] == "urlencoded"
+    assert result["request"]["requestBody"] == '{\n  "page": "3",\n  "size": "10",\n  "keyword": "alpha"\n}'
+    assert result["request"]["requestShape"]["$.page"] == "string"
+    assert result["request"]["requestShape"]["$.keyword"] == "string"
+
+
+def test_hook_base_does_not_consume_request_body_without_clone():
+    result = _run_node_case(
+        """
+  let textCalls = 0;
+  const requestLike = {
+    url: "https://example.com/api/items/list",
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    text: async function() {
+      textCalls += 1;
+      return JSON.stringify({ page: 9 });
+    }
+  };
+
+  await env.context.window.fetch(requestLike);
+
+  process.stdout.write(JSON.stringify({
+    textCalls,
+    request: env.context.window.__capturedRequests[0]
+  }));
+"""
+    )
+
+    assert result["textCalls"] == 0
+    assert result["request"]["method"] == "POST"
+    assert result["request"]["requestBodyKind"] == "empty"

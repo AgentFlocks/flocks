@@ -89,6 +89,48 @@ def _multi_operation_requests():
     ]
 
 
+def _form_request():
+    return [
+        {
+            "type": "Fetch",
+            "method": "POST",
+            "url": "https://example.com/api/search",
+            "origin": "https://example.com",
+            "pathname": "/api/search",
+            "status": 200,
+            "captureReason": "nonGet",
+            "requestContentType": "application/x-www-form-urlencoded; charset=UTF-8",
+            "requestHeaders": {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Cookie": "sid=cookie-123",
+            },
+            "requestBodyKind": "urlencoded",
+            "requestBody": '{\n  "page": "1",\n  "size": "20",\n  "keyword": "alpha"\n}',
+            "response": '{"data":{"items":[{"id":"1","title":"Alpha"}]}}',
+        }
+    ]
+
+
+def _raw_request():
+    return [
+        {
+            "type": "Fetch",
+            "method": "POST",
+            "url": "https://example.com/api/raw-search?page=1",
+            "origin": "https://example.com",
+            "pathname": "/api/raw-search",
+            "query": {"page": "1"},
+            "status": 200,
+            "captureReason": "nonGet",
+            "requestContentType": "text/plain",
+            "requestHeaders": {"Content-Type": "text/plain", "Cookie": "sid=cookie-123"},
+            "requestBodyKind": "text",
+            "requestBody": "keyword=alpha",
+            "response": '{"data":{"items":[{"id":"1","title":"Alpha"}]}}',
+        }
+    ]
+
+
 def test_generate_spec_from_requests_picks_primary_collection_endpoint():
     module = _load_module()
 
@@ -124,6 +166,27 @@ def test_generate_spec_from_requests_includes_multi_operation_entries():
     assert spec["operations"][1]["columns"] == [
         {"name": "count", "path": "$.count", "relativePath": "count", "sourceField": "count", "type": "int"}
     ]
+
+
+def test_generate_spec_from_requests_preserves_form_payload_mode():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_form_request())
+
+    assert spec["operation"]["payloadMode"] == "form"
+    assert spec["operation"]["bodyTemplate"] == {"page": "${page}", "size": "${limit}", "keyword": "alpha"}
+    assert spec["operation"]["rawBodyTemplate"] == ""
+
+
+def test_generate_spec_from_requests_preserves_raw_payload_mode():
+    module = _load_module()
+
+    spec = module.generate_spec_from_requests(_raw_request())
+
+    assert spec["operation"]["payloadMode"] == "raw"
+    assert spec["operation"]["bodyTemplate"] == {}
+    assert spec["operation"]["rawBodyTemplate"] == "keyword=alpha"
+    assert spec["args"] == [{"name": "page", "type": "int", "default": 1, "help": "Page number"}]
 
 
 def test_main_writes_spec_file(tmp_path, monkeypatch, capsys):

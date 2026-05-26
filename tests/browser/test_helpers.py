@@ -415,12 +415,12 @@ def test_save_state_writes_portable_schema(tmp_path) -> None:
     out = tmp_path / "auth-state.json"
     cookies = [
         {"name": "sid", "value": "secret", "domain": ".zhihu.com", "path": "/"},
-        {"name": "api", "value": "token", "domain": "api.zhihu.com", "path": "/"},
-        {"name": "other", "value": "skip", "domain": ".example.com", "path": "/"},
+        {"name": "api", "value": "token", "domain": "api.zhihu.com", "path": "/app"},
     ]
 
     def fake_cdp(method, **kwargs):
-        if method == "Storage.getCookies":
+        if method == "Network.getCookies":
+            assert kwargs == {"urls": ["https://www.zhihu.com/app"]}
             return {"cookies": cookies}
         raise AssertionError((method, kwargs))
 
@@ -439,11 +439,56 @@ def test_save_state_writes_portable_schema(tmp_path) -> None:
         result = helpers.save_state(out)
 
     saved = json.loads(out.read_text(encoding="utf-8"))
-    assert result["cookies"] == 2
+    assert result["cookies"] == 1
     assert set(saved) == {"cookies", "origins"}
-    assert {item["domain"] for item in saved["cookies"]} == {".zhihu.com", "api.zhihu.com"}
+    assert {item["domain"] for item in saved["cookies"]} == {".zhihu.com"}
     assert saved["origins"] == [
         {"origin": "https://www.zhihu.com", "localStorage": [{"name": "token", "value": "abc"}]}
+    ]
+
+
+def test_save_state_falls_back_to_storage_cookies_and_filters_by_exact_url(tmp_path) -> None:
+    out = tmp_path / "auth-state.json"
+    storage_cookies = [
+        {"name": "shared", "value": "ok", "domain": ".threatbook-inc.cn", "path": "/", "secure": True},
+        {"name": "sensor", "value": "ok", "domain": "eagle-sensor.threatbook-inc.cn", "path": "/", "secure": True},
+        {"name": "path-match", "value": "ok", "domain": "eagle-sensor.threatbook-inc.cn", "path": "/skyeye", "secure": True},
+        {"name": "wrong-path", "value": "skip", "domain": "eagle-sensor.threatbook-inc.cn", "path": "/admin", "secure": True},
+        {"name": "wrong-host", "value": "skip", "domain": "wiki.threatbook-inc.cn", "path": "/", "secure": True},
+        {"name": "empty-value", "value": "", "domain": ".threatbook-inc.cn", "path": "/", "secure": True},
+    ]
+
+    def fake_cdp(method, **kwargs):
+        if method == "Network.getCookies":
+            assert kwargs == {"urls": ["https://eagle-sensor.threatbook-inc.cn/skyeye/alarm/list"]}
+            raise RuntimeError("Network.getCookies unavailable")
+        if method == "Storage.getCookies":
+            return {"cookies": storage_cookies}
+        raise AssertionError((method, kwargs))
+
+    def fake_js(expression):
+        if 'window["localStorage"]' in expression:
+            return '[{"name":"token","value":"abc"}]'
+        raise AssertionError(expression)
+
+    with (
+        patch(
+            "flocks.browser.helpers.page_info",
+            return_value={"url": "https://eagle-sensor.threatbook-inc.cn/skyeye/alarm/list", "title": "Sensor"},
+        ),
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers.js", side_effect=fake_js),
+    ):
+        result = helpers.save_state(out)
+
+    saved = json.loads(out.read_text(encoding="utf-8"))
+    assert result["cookies"] == 3
+    assert [item["name"] for item in saved["cookies"]] == ["shared", "sensor", "path-match"]
+    assert saved["origins"] == [
+        {
+            "origin": "https://eagle-sensor.threatbook-inc.cn",
+            "localStorage": [{"name": "token", "value": "abc"}],
+        }
     ]
 
 

@@ -78,11 +78,36 @@
     return result;
   }
 
+  function mergeHeaders(baseHeaders, overrideHeaders) {
+    var result = {};
+    var key;
+    var base = normalizeHeaders(baseHeaders);
+    var override = normalizeHeaders(overrideHeaders);
+    for (key in base) {
+      if (Object.prototype.hasOwnProperty.call(base, key)) {
+        result[key] = base[key];
+      }
+    }
+    for (key in override) {
+      if (Object.prototype.hasOwnProperty.call(override, key)) {
+        result[key] = override[key];
+      }
+    }
+    return result;
+  }
+
   function getHeader(headers, name) {
+    var key;
+    var expected = String(name || '').toLowerCase();
     if (!headers) {
       return '';
     }
-    return headers[name] || headers[name.toLowerCase()] || '';
+    for (key in headers) {
+      if (Object.prototype.hasOwnProperty.call(headers, key) && String(key).toLowerCase() === expected) {
+        return headers[key];
+      }
+    }
+    return '';
   }
 
   function hasStaticExtension(pathname) {
@@ -194,7 +219,22 @@
     };
   }
 
-  function summarizeBody(body) {
+  function parseUrlEncodedBody(text) {
+    var result = {};
+    try {
+      if (typeof URLSearchParams !== 'undefined') {
+        var params = new URLSearchParams(String(text || ''));
+        params.forEach(function(value, key) {
+          result[key] = value;
+        });
+      }
+    } catch (error) {
+      return null;
+    }
+    return result;
+  }
+
+  function summarizeBody(body, contentType) {
     var result = {
       kind: 'empty',
       display: '',
@@ -233,7 +273,17 @@
     }
 
     if (typeof body === 'string') {
+      var normalizedContentType = String(contentType || '').toLowerCase();
       result.display = truncateText(body, CONFIG.maxRequestBodyLength);
+      if (/application\/x-www-form-urlencoded/i.test(normalizedContentType)) {
+        result.parsed = parseUrlEncodedBody(body);
+        if (result.parsed && Object.keys(result.parsed).length) {
+          result.kind = 'urlencoded';
+          result.display = truncateText(JSON.stringify(result.parsed, null, 2), CONFIG.maxRequestBodyLength);
+          inferShape(result.parsed, '$', result.shape, 0);
+          return result;
+        }
+      }
       try {
         result.parsed = JSON.parse(body);
         result.kind = 'json';
@@ -451,9 +501,9 @@
   }
 
   function buildCaptureRecord(base) {
-    var requestBody = summarizeBody(base.requestBody);
-    var responseBody = summarizeResponse(base.responseText);
     var requestContentType = getHeader(base.requestHeaders, 'content-type');
+    var requestBody = summarizeBody(base.requestBody, requestContentType);
+    var responseBody = summarizeResponse(base.responseText);
     var responseContentType = base.responseContentType || '';
     var actionContext = snapshotActionContext();
     return {
@@ -568,14 +618,50 @@
     return originalXHRSend.apply(this, arguments);
   };
 
+  function isRequestLike(value) {
+    return !!(value && typeof value === 'object' && typeof value.url === 'string');
+  }
+
+  function resolveFetchRequestInfo(input, options) {
+    var init = options || {};
+    var requestLike = isRequestLike(input) ? input : null;
+    var hasOwnBody = Object.prototype.hasOwnProperty.call(init, 'body');
+    var requestHeaders = mergeHeaders(requestLike ? requestLike.headers : {}, init.headers || {});
+    var requestBody = hasOwnBody ? init.body : undefined;
+    var bodyPromise;
+
+    if (typeof requestBody !== 'undefined') {
+      bodyPromise = Promise.resolve(requestBody);
+    } else if (requestLike && typeof requestLike.clone === 'function') {
+      try {
+        bodyPromise = requestLike.clone().text().then(
+          function(text) {
+            return text || '';
+          },
+          function() {
+            return '';
+          }
+        );
+      } catch (error) {
+        bodyPromise = Promise.resolve('');
+      }
+    } else {
+      bodyPromise = Promise.resolve('');
+    }
+
+    return {
+      method: ((init.method || (requestLike && requestLike.method) || 'GET') + '').toUpperCase(),
+      requestHeaders: requestHeaders,
+      requestBodyPromise: bodyPromise,
+      url: typeof input === 'string' ? input : (input && input.url ? input.url : String(input))
+    };
+  }
+
   var originalFetch = window.fetch;
   window.fetch = function(url, options) {
-    options = options || {};
+    var requestInfo = resolveFetchRequestInfo(url, options);
     var startTime = Date.now();
-    var method = (options.method || 'GET').toUpperCase();
-    var requestHeaders = normalizeHeaders(options.headers || {});
-    var urlStr = typeof url === 'string' ? url : (url && url.url ? url.url : String(url));
-    var decision = getCaptureDecision(urlStr, method, requestHeaders);
+    var decision = getCaptureDecision(requestInfo.url, requestInfo.method, requestInfo.requestHeaders);
 
     if (!decision.capture) {
       return originalFetch.apply(this, arguments);
@@ -583,15 +669,20 @@
 
     return originalFetch.apply(this, arguments).then(function(response) {
       var cloned = response.clone();
-      return cloned.text().then(function(text) {
+      return Promise.all([
+        requestInfo.requestBodyPromise,
+        cloned.text()
+      ]).then(function(values) {
+        var requestBody = values[0];
+        var text = values[1];
         var record = buildCaptureRecord({
           type: 'Fetch',
-          method: method,
-          url: urlStr,
+          method: requestInfo.method,
+          url: requestInfo.url,
           urlInfo: decision.urlInfo,
           status: response.status,
-          requestHeaders: requestHeaders,
-          requestBody: options.body,
+          requestHeaders: requestInfo.requestHeaders,
+          requestBody: requestBody,
           responseText: text || '',
           responseContentType: response.headers && typeof response.headers.get === 'function'
             ? (response.headers.get('content-type') || '')
@@ -604,7 +695,7 @@
         window.__capturedRequests.push(record);
         console.log(
           '[API Capture] Fetch:',
-          method,
+          requestInfo.method,
           record.normalizedUrl,
           '->',
           response.status,
@@ -615,12 +706,12 @@
     }).catch(function(error) {
       var record = buildCaptureRecord({
         type: 'Fetch',
-        method: method,
-        url: urlStr,
+        method: requestInfo.method,
+        url: requestInfo.url,
         urlInfo: decision.urlInfo,
         status: 'error',
-        requestHeaders: requestHeaders,
-        requestBody: options.body,
+        requestHeaders: requestInfo.requestHeaders,
+        requestBody: '',
         responseText: '',
         responseContentType: '',
         pageContext: getPageContext(),
