@@ -597,6 +597,7 @@ class TestBuildSystemPrompts:
                 channel_context_prompt_factory=channel_mock,
                 tool_catalog_prompt_factory=lambda: "tool catalog",
                 device_asset_prompt_factory=device_mock,
+                device_revision=7,
             )
             prompts2 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
@@ -612,6 +613,7 @@ class TestBuildSystemPrompts:
                 channel_context_prompt_factory=channel_mock,
                 tool_catalog_prompt_factory=lambda: "tool catalog",
                 device_asset_prompt_factory=device_mock,
+                device_revision=7,
             )
 
         assert prompts1 == prompts2
@@ -656,6 +658,7 @@ class TestBuildSystemPrompts:
                 memory_bootstrap_data=memory_bootstrap_data,
                 tool_catalog_prompt_factory=lambda: "tool catalog",
                 device_asset_prompt_factory=device_mock,
+                device_revision=3,
                 sandbox_prompt_factory=sandbox_mock,
                 channel_context_prompt_factory=channel_mock,
             )
@@ -710,6 +713,7 @@ class TestBuildSystemPrompts:
                 channel_context_prompt_factory=channel_mock,
                 tool_catalog_prompt_factory=lambda: next(catalog_prompts),
                 device_asset_prompt_factory=device_mock,
+                device_revision=1,
             )
             agent.prompt = "agent prompt v2"
             prompts2 = await SessionPrompt.build_system_prompts(
@@ -726,6 +730,7 @@ class TestBuildSystemPrompts:
                 channel_context_prompt_factory=channel_mock,
                 tool_catalog_prompt_factory=lambda: next(catalog_prompts),
                 device_asset_prompt_factory=device_mock,
+                device_revision=1,
             )
 
         assert prompts1 != prompts2
@@ -797,6 +802,67 @@ class TestBuildSystemPrompts:
         sandbox_mock.assert_awaited_once()
         channel_mock.assert_awaited_once()
         device_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_device_revision_changes(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_device_revision")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        sandbox_mock = AsyncMock(return_value="sandbox prompt")
+        channel_mock = AsyncMock(return_value="channel prompt")
+        device_prompts = iter(["device prompt v1", "device prompt v2"])
+
+        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
+             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
+             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "tool catalog",
+                device_asset_prompt_factory=AsyncMock(side_effect=lambda: next(device_prompts)),
+                device_revision=1,
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                tool_revision=1,
+                static_cache=shared_cache,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "tool catalog",
+                device_asset_prompt_factory=AsyncMock(side_effect=lambda: next(device_prompts)),
+                device_revision=2,
+            )
+
+        assert prompts1 != prompts2
+        assert "device prompt v1" in prompts1
+        assert "device prompt v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+        sandbox_mock.assert_awaited_once()
+        channel_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_agent_prompt_changes(self):
@@ -2173,6 +2239,7 @@ async def test_process_step_passes_device_hint_factory_into_build_system_prompts
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     device_hint_mock = AsyncMock(return_value="device hint")
     monkeypatch.setattr(runner, "_build_device_asset_hint", device_hint_mock)
+    monkeypatch.setattr("flocks.tool.device.store.device_revision", lambda: 9)
     monkeypatch.setattr(
         runner,
         "_to_chat_messages",
@@ -2193,6 +2260,7 @@ async def test_process_step_passes_device_hint_factory_into_build_system_prompts
     assert result.content == "done"
     build_system_prompts.assert_awaited_once()
     kwargs = build_system_prompts.await_args.kwargs
+    assert kwargs["device_revision"] == 9
     assert kwargs["device_asset_prompt_factory"] is not None
     assert await kwargs["device_asset_prompt_factory"]() == "device hint"
 

@@ -1002,6 +1002,7 @@ class SessionPrompt:
         channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
         tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
         device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
+        device_revision: Optional[int] = None,
         use_text_tool_call_mode: bool = False,
     ) -> List[str]:
         """Build the runtime system prompt blocks for a session turn.
@@ -1087,8 +1088,11 @@ class SessionPrompt:
             blocks.append(await cls._build_cached_async_prompt_block(
                 static_cache=static_cache,
                 name="device_asset_hint",
-                cache_scope="agent",
-                digest_inputs={"agent_name": agent_name},
+                cache_scope="runtime",
+                digest_inputs={
+                    "session_id": session_id,
+                    "device_revision": device_revision,
+                },
                 builder=device_asset_prompt_factory,
             ))
 

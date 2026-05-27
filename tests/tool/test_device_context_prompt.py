@@ -70,6 +70,11 @@ async def test_device_context_deduplicates_tool_sets_and_references_them_from_de
     content = await build_device_context_section()
 
     assert content is not None
+    assert "工具名和描述:" in content
+    assert "工具能力:" not in content
+    assert "action 可选:" not in content
+    assert "以下是当前机房中已接入的安全设备及其工具集映射。" not in content
+    assert content.index("### 设备列表") < content.index("### 工具集")
     assert content.count("`tool_set_id=tdp_v3_3_10`") == 1
     assert content.count("tool_set_id: `tdp_v3_3_10`") == 2
     assert "`tdp_event_list`" in content

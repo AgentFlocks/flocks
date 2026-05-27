@@ -59,43 +59,9 @@ async def build_device_context_section() -> Optional[str]:
 
     lines: List[str] = [
         "<DeviceAssetContext>",
-        "## 已接入安全设备",
-        "",
-        "以下是当前机房中已接入的安全设备及其工具集映射。",
-        "调用工具时必须通过 `device_id` 参数指定目标设备，工具将自动使用该设备的凭据，例如：",
-        '`tdp_event_list(action="list", device_id="<device_id>")`',
-        "",
     ]
 
-    # --- Section 1: tool-set descriptions (written once per provider/tool set) ---
-    if all_tools_by_provider:
-        lines.append("### 工具集")
-        lines.append("")
-        all_tool_names: List[str] = [
-            name
-            for tools in all_tools_by_provider.values()
-            for name in tools
-        ]
-        has_name_collision = len(all_tool_names) != len(set(all_tool_names))
-
-        for provider, tools_by_name in sorted(all_tools_by_provider.items()):
-            sample = next(iter(tools_by_name.values()))
-            vendor_label = f" | 厂商: `{sample['vendor']}`" if sample.get("vendor") else ""
-            lines.append(f"- `tool_set_id={provider}`{vendor_label}")
-            lines.append("  工具能力:")
-            for tool_name, meta in sorted(tools_by_name.items()):
-                desc = (meta.get("description_cn") or meta.get("description") or "").strip()
-                first_sentence = desc.split("。")[0] if desc else ""
-                actions = meta.get("actions", [])
-                action_hint = f"  action 可选: {' | '.join(actions)}" if actions else ""
-                prefix = "    " if has_name_collision else "  "
-                if first_sentence:
-                    lines.append(f"{prefix}- `{tool_name}`: {first_sentence}。{action_hint}")
-                else:
-                    lines.append(f"{prefix}- `{tool_name}`{action_hint}")
-            lines.append("")
-
-    # --- Section 2: device list (references tool_set_id only) ---
+    # --- Section 1: device list (references tool_set_id only) ---
     lines.append("### 设备列表")
     lines.append("")
     for group_id, group_devices in by_group.items():
@@ -121,6 +87,32 @@ async def build_device_context_section() -> Optional[str]:
                 lines.append(f"  tool_set_id: `{d.storage_key}`")
                 lines.append("  可用工具: (未发现已注册工具)")
         lines.append("")
+
+    # --- Section 2: tool-set descriptions (written once per provider/tool set) ---
+    if all_tools_by_provider:
+        lines.append("### 工具集")
+        lines.append("")
+        all_tool_names: List[str] = [
+            name
+            for tools in all_tools_by_provider.values()
+            for name in tools
+        ]
+        has_name_collision = len(all_tool_names) != len(set(all_tool_names))
+
+        for provider, tools_by_name in sorted(all_tools_by_provider.items()):
+            sample = next(iter(tools_by_name.values()))
+            vendor_label = f" | 厂商: `{sample['vendor']}`" if sample.get("vendor") else ""
+            lines.append(f"- `tool_set_id={provider}`{vendor_label}")
+            lines.append("  工具名和描述:")
+            for tool_name, meta in sorted(tools_by_name.items()):
+                desc = (meta.get("description_cn") or meta.get("description") or "").strip()
+                first_sentence = desc.split("。")[0] if desc else ""
+                prefix = "    " if has_name_collision else "  "
+                if first_sentence:
+                    lines.append(f"{prefix}- `{tool_name}`: {first_sentence}。")
+                else:
+                    lines.append(f"{prefix}- `{tool_name}`")
+            lines.append("")
 
     lines.append("</DeviceAssetContext>")
     return "\n".join(lines)

@@ -1016,6 +1016,13 @@ class SessionRunner:
         async def device_asset_prompt_factory() -> Optional[str]:
             return await self._build_device_asset_hint()
 
+        try:
+            from flocks.tool.device.store import device_revision as get_device_revision
+
+            current_device_revision = get_device_revision()
+        except Exception:
+            current_device_revision = None
+
         prompts_started_at = time.perf_counter()
         system_prompts = await SessionPrompt.build_system_prompts(
             session_id=self.session.id,
@@ -1032,6 +1039,7 @@ class SessionRunner:
             channel_context_prompt_factory=channel_context_prompt_factory,
             tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
             device_asset_prompt_factory=device_asset_prompt_factory,
+            device_revision=current_device_revision,
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
@@ -1502,11 +1510,43 @@ class SessionRunner:
             })
     
     async def _build_device_asset_hint(self) -> Optional[str]:
-        """Return a static hint for device-aware tool usage."""
+        """Return concise device-aware tool guidance plus enabled device summary."""
+        try:
+            from flocks.tool.device.store import list_devices
+
+            devices = await list_devices()
+        except Exception as exc:
+            log.warn("runner.device_hint_failed", {"error": str(exc)})
+            devices = []
+
+        vendor_by_storage_key: Dict[str, str] = {}
+        try:
+            for tool_info in ToolRegistry.list_tools():
+                if getattr(tool_info, "source", None) != "device":
+                    continue
+                storage_key = str(getattr(tool_info, "provider", "") or "").strip()
+                vendor = str(getattr(tool_info, "vendor", "") or "").strip()
+                if storage_key and vendor and storage_key not in vendor_by_storage_key:
+                    vendor_by_storage_key[storage_key] = vendor
+        except Exception as exc:
+            log.warn("runner.device_hint_vendor_map_failed", {"error": str(exc)})
+
+        enabled_devices = [device for device in devices if getattr(device, "enabled", False)]
+        device_lines = []
+        for device in enabled_devices:
+            vendor = vendor_by_storage_key.get(device.storage_key) or "unknown"
+            device_lines.append(f"- `{device.name}` -> `{vendor}`")
+
+        summary = (
+            "当前已启用设备（名称 -> 厂商）:\n"
+            + ("\n".join(device_lines) if device_lines else "- 当前无已启用设备")
+        )
+
         return (
             "## 安全设备使用\n\n"
+            f"{summary}\n\n"
             "当用户要操作特定机房、设备或产品时，先调用 `device_context` 获取 `device_id` 等相关信息。"
-            "使用 `tool_search` 搜索并加载设备工具；执行设备工具时必须传入目标 `device_id`。"
+            "使用 `tool_search` 搜索工具名称查看用法；执行设备工具时必须传入目标 `device_id`。"
             "如果同类设备有多个候选，不要猜测，先询问用户选择。"
         )
 
