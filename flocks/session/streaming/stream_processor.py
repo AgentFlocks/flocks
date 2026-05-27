@@ -1064,6 +1064,17 @@ class StreamProcessor:
             metadata=event.metadata or {},
         )
         self.parts.append(self.current_text_part)
+
+        # Persist an empty placeholder immediately so the final stored part
+        # order matches the stream semantics. Without this, a tool part that
+        # starts after text streaming begins but before ``text-end`` would be
+        # stored earlier, and a completion-time refetch would reorder the UI as
+        # reasoning -> tool -> text instead of reasoning -> text -> tool.
+        await Message.store_part(
+            self.session_id,
+            self.assistant_message.id,
+            self.current_text_part,
+        )
         
         # Publish part created event (matches Flocks Session.updatePart)
         if self.event_publish_callback:
