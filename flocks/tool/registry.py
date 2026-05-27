@@ -793,27 +793,27 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        # Method-A: if caller passes device_id, activate per-device credential override.
         device_id = kwargs.pop("device_id", None)
 
-        # Fallback: device-source tools without an explicit device_id must
-        # still pick up that device's verify_ssl / credentials. Resolve the
-        # single enabled instance bound to this tool's provider (storage_key)
-        # and activate its credential override transparently. Multiple
-        # instances → require the LLM to disambiguate via device_id.
-        if not device_id and tool.info.source == "device" and tool.info.provider:
+        if tool.info.source == "device" and tool.info.provider:
             try:
-                resolved = await cls._resolve_default_device_id(tool.info.provider)
+                resolved_device_id, resolution_error = await cls._resolve_device_target(
+                    storage_key=tool.info.provider,
+                    requested_device_id=str(device_id).strip() if device_id else None,
+                )
             except Exception as exc:
-                log.warn("tool.device.default_resolve_failed", {
-                    "tool": tool_name, "provider": tool.info.provider, "error": str(exc),
+                log.warn("tool.device.target_resolve_failed", {
+                    "tool": tool_name,
+                    "provider": tool.info.provider,
+                    "device_id": device_id,
+                    "error": str(exc),
                 })
-                resolved = None
-            if resolved:
-                log.info("tool.device.default_resolved", {
-                    "tool": tool_name, "provider": tool.info.provider, "device_id": resolved,
-                })
-                device_id = resolved
+                resolved_device_id = None
+                resolution_error = "设备目标解析失败，请通过 device_context 工具确认设备后重试。"
+
+            if resolution_error:
+                return ToolResult(success=False, error=resolution_error)
+            device_id = resolved_device_id
 
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
@@ -864,6 +864,57 @@ class ToolRegistry:
         if len(candidates) == 1:
             return candidates[0].id
         return None
+
+    @classmethod
+    async def _resolve_device_target(
+        cls,
+        *,
+        storage_key: str,
+        requested_device_id: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve or validate the device target for a device-backed tool."""
+        try:
+            from flocks.tool.device.store import list_devices
+        except Exception:
+            return None, "设备模块不可用，请稍后重试。"
+
+        try:
+            devices = await list_devices()
+        except Exception:
+            return None, "读取设备列表失败，请稍后重试。"
+
+        enabled_candidates = [
+            device for device in devices
+            if device.storage_key == storage_key and device.enabled
+        ]
+
+        if requested_device_id:
+            requested = next((device for device in devices if device.id == requested_device_id), None)
+            if requested is None or not requested.enabled:
+                return None, (
+                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。"
+                )
+            if requested.storage_key != storage_key:
+                return None, (
+                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_context 工具确认目标设备。"
+                )
+            return requested.id, None
+
+        if len(enabled_candidates) == 1:
+            resolved = enabled_candidates[0].id
+            log.info("tool.device.default_resolved", {
+                "provider": storage_key,
+                "device_id": resolved,
+            })
+            return resolved, None
+
+        if not enabled_candidates:
+            return None, "当前没有可用的目标设备，请通过 device_context 工具确认设备状态。"
+
+        return None, (
+            "当前存在多台同类型设备，调用前必须显式传入 `device_id`。"
+            "请先调用 device_context 工具确认目标设备。"
+        )
 
     @classmethod
     async def execute_batch(

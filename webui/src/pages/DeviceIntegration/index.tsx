@@ -180,10 +180,17 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
   }, [templates, selectedVendor]);
 
   return (
-    <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
+    <div className="fixed inset-0 z-40 pointer-events-none">
+      <button
+        type="button"
+        aria-label="关闭添加设备面板"
+        onClick={onClose}
+        className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
+        style={{ top: 64, right: 440 }}
+      />
       <div
-        className="pointer-events-auto bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-        style={{ width: 440, marginTop: 64, height: 'calc(100vh - 64px)' }}
+        className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+        style={{ width: 440, top: 64 }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -530,10 +537,17 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
 
   return (
     <>
-      <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
+      <div className="fixed inset-0 z-40 pointer-events-none">
+        <button
+          type="button"
+          aria-label="关闭设备配置面板"
+          onClick={onClose}
+          className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
+          style={{ top: 64, right: 480 }}
+        />
         <div
-          className="pointer-events-auto bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ width: 480, marginTop: 64, height: 'calc(100vh - 64px)' }}
+          className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          style={{ width: 480, top: 64 }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">

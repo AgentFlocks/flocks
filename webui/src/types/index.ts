@@ -178,7 +178,7 @@ export interface ToolParameter {
   enum?: string[];
 }
 
-export type ToolSource = 'builtin' | 'mcp' | 'api' | 'custom' | 'plugin_py' | 'plugin_yaml';
+export type ToolSource = 'builtin' | 'mcp' | 'api' | 'device' | 'custom' | 'plugin_py' | 'plugin_yaml';
 
 export interface Tool {
   name: string;
