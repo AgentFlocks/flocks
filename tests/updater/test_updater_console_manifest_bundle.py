@@ -346,13 +346,13 @@ async def test_download_console_bundle_emits_byte_progress(
 
 
 def test_absolute_console_url_normalizes_same_host_http_bundle(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://portal.agentflocks.com")
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://portalflocks.threatbook.cn")
 
     assert (
         updater._absolute_console_url(
-            "http://portal.agentflocks.com/v1/pro-bundles/rel_1/download?license_id=lic_1"
+            "http://portalflocks.threatbook.cn/v1/pro-bundles/rel_1/download?license_id=lic_1"
         )
-        == "https://portal.agentflocks.com/v1/pro-bundles/rel_1/download?license_id=lic_1"
+        == "https://portalflocks.threatbook.cn/v1/pro-bundles/rel_1/download?license_id=lic_1"
     )
 
 

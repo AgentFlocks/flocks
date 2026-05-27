@@ -33,8 +33,8 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
-DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portal.agentflocks.com"
-DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portal.agentflocks.com"
+DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
+DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
 MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
