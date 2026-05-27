@@ -59,8 +59,39 @@ async def _heal_stale_service_ids() -> None:
         log.warn("tool.device.startup.heal_failed", {"error": str(exc)})
 
 
+def _device_type_storage_keys() -> set[str]:
+    """Return the set of ``storage_key`` values whose ``_provider.yaml``
+    declares ``integration_type: device``.
+
+    Pure-API plugins (``integration_type: api``) must be excluded from the
+    device sync loop: they have no rows in ``device_integrations``, so
+    ``sync_service_tool_state`` would always find 0 enabled devices and
+    incorrectly set ``api_services[sk].enabled = false``, silently disabling
+    those tools on every restart.
+
+    Scans every descriptor's YAML once per call (cheap at startup; we
+    intentionally don't memoize across calls so test fixtures that swap
+    plugin directories still see fresh data).
+    """
+    keys: set[str] = set()
+    try:
+        import yaml as _yaml
+        from flocks.config.api_versioning import discover_api_service_descriptors
+
+        for desc in discover_api_service_descriptors():
+            try:
+                data = _yaml.safe_load(desc.provider_yaml.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(data, dict) and data.get("integration_type") == "device":
+                keys.add(desc.storage_key)
+    except Exception:
+        pass
+    return keys
+
+
 async def _sync_all() -> None:
-    """Re-sync tool visibility for every service_id we know about.
+    """Re-sync tool visibility for every *device-type* service_id we know about.
 
     "Know about" includes both:
       * service_ids that still have rows in ``device_integrations``, and
@@ -69,6 +100,11 @@ async def _sync_all() -> None:
         service before restart).  Without sweeping the config we'd leave
         stale ``enabled=true`` flags on tools whose owning devices no
         longer exist.
+
+    Pure API integrations (``integration_type: api``) are intentionally
+    excluded: they never have ``device_integrations`` rows, so the sync
+    would always judge them as "0 enabled devices" and disable their tools
+    on every startup.
     """
     try:
         async with Storage.connect(Storage.get_db_path()) as db:
@@ -77,14 +113,20 @@ async def _sync_all() -> None:
 
         # Also discover service_ids from existing api_services entries so we
         # can clear out config rows whose backing devices have been removed.
+        # IMPORTANT: only include storage_keys whose integration_type is
+        # "device"; pure-API services are managed independently and must
+        # not be touched here.
         config_service_ids: list[str] = []
         try:
             from flocks.config.config_writer import ConfigWriter
             from flocks.tool.device.store import storage_key_to_service_id
 
+            device_keys = _device_type_storage_keys()
             existing = ConfigWriter.list_api_services_raw() or {}
             for sk in existing.keys():
                 if not isinstance(sk, str):
+                    continue
+                if sk not in device_keys:
                     continue
                 try:
                     config_service_ids.append(storage_key_to_service_id(sk))

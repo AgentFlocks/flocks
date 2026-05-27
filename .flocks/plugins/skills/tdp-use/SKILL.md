@@ -52,7 +52,7 @@ API 参数和适用场景见 [references/api-reference.md](references/api-refere
 - ⚠️ 如果 TDP 域名不清楚，请先询问用户，不要擅自填写域名。
 - ⚠️ 用 --headed 打开浏览器，人工完成登录
 
-只要进入浏览器模式，就请阅读并按照browser-workflow操作（不要直接使用agent-browser skill）。
+只要进入浏览器模式，就请阅读并按照 browser-workflow 操作，不要跳过本 skill 直接套用其他通用浏览器说明。
 
 请严格按照以下文档执行：
 - [references/browser-workflow.md](references/browser-workflow.md)

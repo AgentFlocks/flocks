@@ -18,13 +18,20 @@ from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
 from flocks.tool.path_utils import resolve_tool_path
+from flocks.tool.tool_output_limits import (
+    get_read_max_lines,
+    get_read_max_bytes,
+    get_read_max_line_length,
+)
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 
 
 log = Log.create(service="tool.read")
 
-# Constants — keep file reads paginated while allowing larger local context.
+# Built-in defaults — overridable via ``toolOutput`` in flocks.json.
+# Use the helpers from tool_output_limits instead of these constants directly
+# when performing a read, so that config overrides take effect at runtime.
 DEFAULT_READ_LIMIT = 2000
 MAX_LINE_LENGTH = 2000
 MAX_BYTES = 50 * 1024  # 50 KB
@@ -318,27 +325,32 @@ async def read_tool(
             title=title
         )
     
-    # Apply offset and limit
-    read_limit = limit if limit is not None else DEFAULT_READ_LIMIT
+    # Apply offset and limit — resolve at call time so flocks.json overrides
+    # take effect without restarting the server.
+    effective_max_lines = get_read_max_lines()
+    effective_max_bytes = get_read_max_bytes()
+    effective_max_line_length = get_read_max_line_length()
+
+    read_limit = limit if limit is not None else effective_max_lines
     read_offset = offset if offset is not None else 0
-    
+
     # Read lines with byte limit
     raw_lines: List[str] = []
     total_bytes = 0
     truncated_by_bytes = False
-    
+
     end_line = min(len(all_lines), read_offset + read_limit)
-    
+
     for i in range(read_offset, end_line):
         line = all_lines[i]
-        
+
         # Truncate long lines
-        if len(line) > MAX_LINE_LENGTH:
-            line = line[:MAX_LINE_LENGTH] + "..."
-        
+        if len(line) > effective_max_line_length:
+            line = line[:effective_max_line_length] + "..."
+
         # Check byte limit
         line_bytes = len(line.encode('utf-8')) + (1 if raw_lines else 0)
-        if total_bytes + line_bytes > MAX_BYTES:
+        if total_bytes + line_bytes > effective_max_bytes:
             truncated_by_bytes = True
             break
         
@@ -363,7 +375,7 @@ async def read_tool(
     if truncated_by_bytes:
         remaining = total_lines - last_read_line
         output += (
-            f"\n\n(Output truncated at {MAX_BYTES} bytes — showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
+            f"\n\n(Output truncated at {effective_max_bytes} bytes — showed lines {read_offset + 1}-{last_read_line} of {total_lines}. "
             f"{remaining} lines remaining. To continue reading, call read with offset={last_read_line})"
         )
     elif has_more_lines:

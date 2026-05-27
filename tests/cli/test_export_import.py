@@ -8,6 +8,7 @@ import flocks.cli.commands.import_ as import_cmd
 import flocks.mcp.server as mcp_server
 from flocks.session.message import Message, MessageWithParts, TextPart, UserMessageInfo
 from flocks.session.session import SessionInfo, SessionTime
+from flocks.storage.storage import Storage
 
 if not hasattr(mcp_server, "get_manager"):
     mcp_server.get_manager = lambda: None
@@ -67,9 +68,9 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
         assert include_archived is False
         return [message]
 
-    stored_entries: list[tuple[str, dict, str | None]] = []
+    stored_entries: list[tuple[str, object, str | None]] = []
 
-    async def fake_set(key: str, value: dict, category: str | None = None):
+    async def fake_set(key: str, value: object, category: str | None = None):
         stored_entries.append((key, value, category))
 
     monkeypatch.setattr(export_cmd.Session, "get_by_id", fake_get_by_id)
@@ -99,7 +100,9 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
     stored = {key: (value, category) for key, value, category in stored_entries}
     assert stored["session:proj_imported:ses_export_test"][0]["projectID"] == "proj_imported"
     assert stored["message:ses_export_test"][0][0]["id"] == "msg_export_test"
-    assert stored["message_parts:ses_export_test"][0]["msg_export_test"][0]["text"] == "hello export"
+    assert "message_parts:ses_export_test" not in stored
+    assert stored["message_parts:ses_export_test:msg_export_test"][0][0]["text"] == "hello export"
+    assert stored["message_parts:ses_export_test:msg_export_test"][1] == "message_part"
 
 
 @pytest.mark.asyncio
@@ -130,6 +133,9 @@ async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp
     assert len(imported[0].parts) == 1
     assert imported[0].parts[0].id == "part_export_test"
     assert imported[0].parts[0].text == "hello export"
+    assert await Storage.get(f"message_parts:{session.id}") is None
+    stored_parts = await Storage.get(f"message_parts:{session.id}:msg_export_test")
+    assert stored_parts[0]["text"] == "hello export"
 
 
 @pytest.mark.asyncio

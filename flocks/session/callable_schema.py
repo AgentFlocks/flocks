@@ -8,7 +8,7 @@ and the function schema exposed to the model for the current turn.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
@@ -39,6 +39,35 @@ def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], i
     return tool_infos, enabled_count
 
 
+async def _resolve_dynamic_always_load_tool_names() -> Set[str]:
+    """Return runtime-only always-load tools.
+
+    Device discovery should be available without an extra ``tool_search`` hop
+    when the workspace has at least one enabled device, but we do not want to
+    expose ``device_context`` in sessions that have no security devices.
+    """
+    dynamic_names: Set[str] = set()
+
+    try:
+        device_context_tool = ToolRegistry.get("device_context")
+        if device_context_tool is None or not getattr(device_context_tool.info, "enabled", True):
+            return dynamic_names
+    except Exception:
+        return dynamic_names
+
+    try:
+        from flocks.tool.device.store import list_devices
+
+        devices = await list_devices()
+    except Exception:
+        return dynamic_names
+
+    if any(device.enabled for device in devices):
+        dynamic_names.add("device_context")
+
+    return dynamic_names
+
+
 async def list_session_callable_tool_infos(
     session_id: str,
     declared_tool_names: Optional[Iterable[str]] = None,
@@ -47,7 +76,7 @@ async def list_session_callable_tool_infos(
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
-    always_load_names = get_always_load_tool_names()
+    always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
 
     if not callable_tool_names:
         base_tools = list(declared_tool_names) if declared_tool_names is not None else []

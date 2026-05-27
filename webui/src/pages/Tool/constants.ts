@@ -27,6 +27,7 @@ export function getTabIcon(key: TabKey) {
 export const SOURCE_BADGE: Record<string, { label?: string; labelKey?: string; className: string }> = {
   mcp: { label: 'MCP', className: 'bg-red-100 text-red-800' },
   api: { label: 'API', className: 'bg-purple-100 text-purple-800' },
+  device: { label: 'Device', className: 'bg-amber-100 text-amber-800' },
   plugin_py: { labelKey: 'source.local', className: 'bg-blue-100 text-blue-800' },
   plugin_yaml: { label: 'API Plugin', className: 'bg-violet-100 text-violet-800' },
   builtin: { labelKey: 'source.builtin', className: 'bg-green-100 text-green-800' },
@@ -47,10 +48,22 @@ export const CATEGORY_LABEL_KEY: Record<string, string> = {
 export const SOURCE_SORT_ORDER: Record<string, number> = {
   mcp: 0,
   api: 1,
-  plugin_py: 2,
-  plugin_yaml: 3,
-  builtin: 4,
-  custom: 5,
+  device: 2,
+  plugin_py: 3,
+  plugin_yaml: 4,
+  builtin: 5,
+  custom: 6,
 };
+
+export function getSourceLabel(
+  source: string,
+  t?: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const badge = SOURCE_BADGE[source] ?? SOURCE_BADGE.custom;
+  if (badge.labelKey && t) {
+    return t(badge.labelKey);
+  }
+  return badge.label ?? source;
+}
 
 export const PAGE_SIZE = 20;

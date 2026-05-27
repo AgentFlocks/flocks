@@ -104,10 +104,24 @@ class TestTextAccumulation:
     @pytest.mark.asyncio
     async def test_text_start_creates_text_part(self):
         proc = _make_processor()
-        with patch.object(proc, 'event_publish_callback', None):
+        with (
+            patch.object(proc, 'event_publish_callback', None),
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+        ):
             await proc.process_event(TextStartEvent())
         assert proc.current_text_part is not None
         assert proc.current_text_part.type == "text"
+
+    @pytest.mark.asyncio
+    async def test_text_start_persists_placeholder_immediately(self):
+        proc = _make_processor()
+        with patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()) as mock_store:
+            await proc.process_event(TextStartEvent())
+
+        mock_store.assert_awaited_once()
+        stored_part = mock_store.call_args.args[2]
+        assert stored_part.type == "text"
+        assert stored_part.text == ""
 
     @pytest.mark.asyncio
     async def test_text_delta_accumulates(self):
@@ -203,6 +217,34 @@ class TestTextAccumulation:
         assert tool_event.input == {"action": "ops_query_audit_log", "cur_page": 1, "page_size": 10}
         assert proc._text_tool_calls_executed is True
         assert proc.get_text_content() == ""
+
+    @pytest.mark.asyncio
+    async def test_text_placeholder_keeps_text_before_tool_in_stored_order(self):
+        proc = _make_processor()
+        stored_parts = []
+
+        async def fake_store_part(_session_id, _message_id, part):
+            for idx, existing in enumerate(stored_parts):
+                if existing.id == part.id:
+                    stored_parts[idx] = part
+                    break
+            else:
+                stored_parts.append(part)
+            return part
+
+        with patch(
+            "flocks.session.streaming.stream_processor.Message.store_part",
+            new=AsyncMock(side_effect=fake_store_part),
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r-order"))
+            await proc.process_event(ReasoningDeltaEvent(id="r-order", text="plan"))
+            await proc.process_event(ReasoningEndEvent(id="r-order"))
+            await proc.process_event(TextStartEvent())
+            await proc.process_event(TextDeltaEvent(text="answer"))
+            await proc.process_event(ToolInputStartEvent(id="tc-order", tool_name="bash"))
+            await proc.process_event(TextEndEvent())
+
+        assert [part.type for part in stored_parts] == ["reasoning", "text", "tool"]
 
 
 # ---------------------------------------------------------------------------

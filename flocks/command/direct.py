@@ -16,7 +16,8 @@ from flocks.skill.skill import Skill
 from flocks.tool.registry import ToolRegistry
 
 AGENT_SAFE_DIRECT_COMMANDS = frozenset({"help", "tools", "skills", "agents", "workflows", "mcp"})
-_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "custom"]
+_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "api", "mcp", "device", "plugin_py", "plugin_yaml", "custom"]
+_SOURCE_AWARE_GROUPS = frozenset({"api", "mcp", "device", "plugin_py", "plugin_yaml"})
 
 
 @dataclass
@@ -48,6 +49,14 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return normalized[: max(0, max_chars - 3)].rstrip() + "..."
 
 
+def _tool_catalog_group_key(tool: object) -> str:
+    source = str(getattr(tool, "source", "") or "").strip().lower()
+    if source in _SOURCE_AWARE_GROUPS:
+        return source
+    category = getattr(getattr(tool, "category", None), "value", getattr(tool, "category", "custom"))
+    return str(category)
+
+
 def format_tools_catalog_summary(
     tools: list,
     max_description_chars: int = 100,
@@ -57,13 +66,13 @@ def format_tools_catalog_summary(
     for tool in tools:
         if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):
             continue
-        category = getattr(tool.category, "value", str(tool.category))
-        grouped[category].append((
+        group_key = _tool_catalog_group_key(tool)
+        grouped[group_key].append((
             tool.name,
             _truncate_text(getattr(tool, "description", ""), max_description_chars),
         ))
 
-    lines = ["Available Tools (grouped by category):", ""]
+    lines = ["Available Tools (grouped by category/source):", ""]
     seen: set[str] = set()
     for category in _TOOL_CATEGORY_ORDER:
         if category not in grouped:

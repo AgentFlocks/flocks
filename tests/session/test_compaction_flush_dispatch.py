@@ -437,13 +437,19 @@ class _StubMessage:
 
 
 @pytest.mark.asyncio
-async def test_summarize_chunked_runs_chunks_in_parallel(monkeypatch):
-    """``summarize_chunked`` must dispatch chunk LLM calls concurrently."""
-    monkeypatch.setenv("FLOCKS_COMPACTION_CHUNK_CONCURRENCY", "4")
+async def test_summarize_chunked_runs_chunks_serially():
+    """``summarize_chunked`` is now the iterative path — chunks MUST run
+    serially so each one builds on the previous summary.
 
+    The legacy parallel-+-merge implementation was retired in PR-5 (E2):
+    serial iterative N-call summary has lower aggregate latency at
+    typical chunk counts, lower rate-limit pressure, and produces a
+    higher-quality summary because each call's prompt includes the
+    running summary so far.
+    """
     # Force chunking: small target_chars + many big messages.
     msgs = [_StubMessage("user", "x" * 200) for _ in range(12)]
-    provider = _StubProvider(latency=0.15)
+    provider = _StubProvider(latency=0.05)
 
     result = await summary_mod.summarize_chunked(
         chat_messages=msgs,
@@ -456,24 +462,23 @@ async def test_summarize_chunked_runs_chunks_in_parallel(monkeypatch):
     )
 
     assert result is not None
-    # At least 2 chunk calls plus the merge call → > 2 chats.
-    assert provider.calls >= 3
-    # Parallelism actually happened.  We deliberately do NOT add a
-    # wall-clock assertion here — `peak_in_flight` is the semantic
-    # check we care about, and elapsed-time bounds are flaky under CI
-    # load (cold provider, GC, container scheduling).
-    assert provider.peak_in_flight >= 2, (
-        f"chunked summarisation ran serially: peak_in_flight = {provider.peak_in_flight}"
+    # N chunks → exactly N LLM calls.  No separate merge.
+    assert provider.calls >= 2, (
+        f"expected at least 2 chunks, got {provider.calls} calls"
+    )
+    # Serial execution: at no point should two chunks be in flight together.
+    assert provider.peak_in_flight == 1, (
+        f"iterative path must be serial; peak_in_flight = {provider.peak_in_flight}"
     )
 
 
 @pytest.mark.asyncio
-async def test_summarize_chunked_concurrency_limit_respected(monkeypatch):
-    """Semaphore caps the number of in-flight chunk calls."""
-    monkeypatch.setenv("FLOCKS_COMPACTION_CHUNK_CONCURRENCY", "2")
-
+async def test_summarize_chunked_zero_concurrency_overhead():
+    """No in-flight overlap means the iterative path never trips
+    provider rate limits beyond the natural serial cadence.
+    """
     msgs = [_StubMessage("user", "x" * 200) for _ in range(12)]
-    provider = _StubProvider(latency=0.15)
+    provider = _StubProvider(latency=0.05)
 
     await summary_mod.summarize_chunked(
         chat_messages=msgs,
@@ -484,8 +489,7 @@ async def test_summarize_chunked_concurrency_limit_respected(monkeypatch):
         max_tokens=2000,
         session_id="sess-cap",
     )
-    # Final merge call runs alone after gather, so the *peak* during the
-    # parallel phase should be ≤ 2.
-    assert provider.peak_in_flight <= 2, (
-        f"concurrency limit violated: peak_in_flight = {provider.peak_in_flight}"
+    # Serial: peak in-flight is always 1.
+    assert provider.peak_in_flight <= 1, (
+        f"unexpected concurrency in iterative path: peak_in_flight = {provider.peak_in_flight}"
     )

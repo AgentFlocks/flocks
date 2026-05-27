@@ -2,7 +2,7 @@
 Tests for flocks/session/prompt.py
 
 Covers:
-- SessionPrompt.count_tokens(): token counting with/without tiktoken
+- SessionPrompt.count_tokens(): token counting via chars/4 heuristic
 - SessionPrompt.estimate_tokens(): quick character-based estimate
 - SessionPrompt.count_message_tokens(): multi-message counting
 - SessionPrompt.load_template() / render_template(): template processing
@@ -48,20 +48,14 @@ class TestCountTokens:
         long_ = SessionPrompt.count_tokens("This is a much longer piece of text with many words")
         assert long_ > short
 
-    def test_fallback_estimate_without_tiktoken(self):
-        with patch.object(SessionPrompt, '_get_tokenizer', return_value=None):
-            # Should fall back to char//4 estimate
-            text = "a" * 400
-            result = SessionPrompt.count_tokens(text)
-            assert result == 100  # 400 // 4
+    def test_always_uses_chars_over_4(self):
+        # count_tokens now always uses chars/4 — no tiktoken path remains.
+        text = "a" * 400
+        assert SessionPrompt.count_tokens(text) == 100  # 400 // 4
 
-    def test_with_tiktoken_mock(self):
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.encode.return_value = [1, 2, 3, 4, 5]  # 5 tokens
-        with patch.object(SessionPrompt, '_get_tokenizer', return_value=mock_tokenizer):
-            result = SessionPrompt.count_tokens("test text")
-        assert result == 5
-        mock_tokenizer.encode.assert_called_once_with("test text")
+    def test_short_text_chars_over_4(self):
+        text = "test text"  # 9 chars -> 9 // 4 = 2
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
 
 
 # ---------------------------------------------------------------------------
@@ -320,3 +314,67 @@ class TestPromptTemplate:
     def test_empty_variables(self):
         t = PromptTemplate(name="test", content="no vars", variables=[])
         assert t.variables == []
+
+
+# ---------------------------------------------------------------------------
+# estimate_full_context_tokens — B2 overhead + safety margin
+# ---------------------------------------------------------------------------
+
+class TestEstimateFullContextTokens:
+    """estimate_full_context_tokens returns pure chars/4 message sum.
+
+    No overhead fields and no safety margin are applied — the fixed
+    85 % context_window overflow threshold makes them unnecessary.
+    policy and apply_safety_margin parameters are accepted but ignored.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_message_parts(self, monkeypatch: pytest.MonkeyPatch):
+        # ``Message.parts`` requires DB lookup; stub it out so we only exercise
+        # the message-content arithmetic in this suite.
+        from flocks.session import message as message_mod
+
+        async def _fake_parts(message_id, session_id):  # noqa: ARG001
+            return []
+
+        monkeypatch.setattr(message_mod.Message, "parts", staticmethod(_fake_parts))
+        yield
+
+    @pytest.mark.asyncio
+    async def test_empty_messages_returns_zero(self):
+        """No messages → 0 tokens (no overhead added)."""
+        result = await SessionPrompt.estimate_full_context_tokens("ses_x", [])
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_policy_arg_ignored(self):
+        """policy argument is accepted but does not change the result."""
+        from flocks.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result_with = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy,
+        )
+        result_without = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [],
+        )
+        assert result_with == result_without == 0
+
+    @pytest.mark.asyncio
+    async def test_safety_margin_arg_ignored(self):
+        """apply_safety_margin=False has no effect (margin is never applied)."""
+        from flocks.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy, apply_safety_margin=False,
+        )
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_message_content_is_counted(self, monkeypatch: pytest.MonkeyPatch):
+        messages = [{"id": "m1", "content": "x" * 400}]  # 400 chars → 100 tokens
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", messages,
+        )
+        assert result == 100

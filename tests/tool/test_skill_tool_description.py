@@ -1,4 +1,4 @@
-"""Tests for flocks.tool.system.skill_load.
+"""Tests for flocks.tool.skill.skill_load.
 
 Two complementary aspects of the skill_load tool's load-on-demand design are
 exercised here:
@@ -25,7 +25,7 @@ import pytest
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.tool.registry import ToolContext, ToolRegistry
-from flocks.tool.system.skill_load import (
+from flocks.tool.skill.skill_load import (
     MAX_SKILL_DESCRIPTION_PREVIEW_CHARS,
     _truncate_skill_description,
     build_description,

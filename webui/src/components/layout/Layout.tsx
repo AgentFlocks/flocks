@@ -21,12 +21,24 @@ import {
   ServerCog,
   ScrollText,
 } from 'lucide-react';
-import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
 import LanguageSwitcher from '@/components/common/LanguageSwitcher';
-import OnboardingModal, { isOnboardingDismissed } from '@/components/common/OnboardingModal';
-import UpdateModal, { UPDATE_DISMISSED_KEY } from '@/components/common/UpdateModal';
-import NotificationModal from '@/components/common/NotificationModal';
+// Modals are only rendered after the user clicks/triggers them; pulling them
+// into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
+// the home page never needs. To keep the lazy split effective, we don't
+// re-import the dismissal helpers from the modal modules (a static named
+// import would force Rollup to bundle the whole module eagerly), and instead
+// inline the two localStorage keys here. Keep these in sync with the keys
+// declared in OnboardingModal.tsx / UpdateModal.tsx.
+const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
+const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
+function isOnboardingDismissed(): boolean {
+  return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
+}
+const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal'));
+const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
+const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import {
   ackNotification,
@@ -282,42 +294,50 @@ export default function Layout() {
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
 
-  const navigation = [
-    {
-      name: '',
-      items: [
-        { name: t('flocksHome'), href: '/', icon: Home },
-      ],
-    },
-    {
-      name: t('aiWorkbench'),
-      items: [
-        { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-        { name: t('tasks'), href: '/tasks', icon: ListTodo },
-        { name: t('workflows'), href: '/workflows', icon: Workflow },
-      ],
-    },
-    {
-      name: t('agentHub'),
-      items: [
-        { name: t('agents'), href: '/agents', icon: Bot },
-        { name: t('skills'), href: '/skills', icon: BookOpen },
-        { name: t('tools'), href: '/tools', icon: Wrench },
-        { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
-        { name: t('hub'), href: '/hub', icon: Archive },
-        { name: t('models'), href: '/models', icon: Brain },
-        { name: t('channels'), href: '/channels', icon: Radio },
-      ],
-    },
-    {
-      name: t('systemCenter'),
-      items: [
-        { name: t('accountManagement'), href: '/config', icon: UserCog },
-        { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
-      ],
-    },
-  ];
+  // Stable across re-renders triggered by location changes (sidebar nav clicks)
+  // — the array only depends on the i18n translation function, which itself is
+  // stable as long as the language doesn't change. Without this, every route
+  // switch rebuilt the whole nav structure and cascaded re-renders down to
+  // every <Link>, contributing to perceptible navigation lag.
+  const navigation = useMemo(
+    () => [
+      {
+        name: '',
+        items: [
+          { name: t('flocksHome'), href: '/', icon: Home },
+        ],
+      },
+      {
+        name: t('aiWorkbench'),
+        items: [
+          { name: t('sessions'), href: '/sessions', icon: MessageSquare },
+          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
+          { name: t('tasks'), href: '/tasks', icon: ListTodo },
+          { name: t('workflows'), href: '/workflows', icon: Workflow },
+        ],
+      },
+      {
+        name: t('agentHub'),
+        items: [
+          { name: t('agents'), href: '/agents', icon: Bot },
+          { name: t('skills'), href: '/skills', icon: BookOpen },
+          { name: t('tools'), href: '/tools', icon: Wrench },
+          { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          { name: t('hub'), href: '/hub', icon: Archive },
+          { name: t('models'), href: '/models', icon: Brain },
+          { name: t('channels'), href: '/channels', icon: Radio },
+        ],
+      },
+      {
+        name: t('systemCenter'),
+        items: [
+          { name: t('accountManagement'), href: '/config', icon: UserCog },
+          { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
+        ],
+      },
+    ],
+    [t],
+  );
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
@@ -327,27 +347,31 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {showOnboarding && (
-        <OnboardingModal
-          onClose={() => setShowOnboarding(false)}
-        />
-      )}
-      {showUpdate && (
-        <UpdateModal
-          initialInfo={updateInfo}
-          onClose={() => setShowUpdate(false)}
-          onDismiss={() => setShowUpdate(false)}
-        />
-      )}
-      {visibleNotifications.length > 0 && (
-        <NotificationModal
-          notifications={visibleNotifications}
-          acknowledgingIds={acknowledgingNotificationIds}
-          onAcknowledge={closeVisibleNotification}
-          onClose={closeVisibleNotification}
-          onDismissForever={dismissVisibleNotificationForever}
-        />
-      )}
+      {/* Modals render lazily — fallback={null} keeps the chunk download
+          invisible to the user (they're already triggering an async UI). */}
+      <Suspense fallback={null}>
+        {showOnboarding && (
+          <OnboardingModal
+            onClose={() => setShowOnboarding(false)}
+          />
+        )}
+        {showUpdate && (
+          <UpdateModal
+            initialInfo={updateInfo}
+            onClose={() => setShowUpdate(false)}
+            onDismiss={() => setShowUpdate(false)}
+          />
+        )}
+        {visibleNotifications.length > 0 && (
+          <NotificationModal
+            notifications={visibleNotifications}
+            acknowledgingIds={acknowledgingNotificationIds}
+            onAcknowledge={closeVisibleNotification}
+            onClose={closeVisibleNotification}
+            onDismissForever={dismissVisibleNotificationForever}
+          />
+        )}
+      </Suspense>
 
       {sidebarOpen && (
         <div

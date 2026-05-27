@@ -104,6 +104,11 @@ def normalize_mcp_config_aliases(config: Dict[str, Any]) -> Dict[str, Any]:
     elif server_type == "stdio":
         normalized["type"] = "local"
 
+    if normalized.get("type") in LOCAL_MCP_TYPES:
+        if "environment" not in normalized and "env" in normalized:
+            normalized["environment"] = normalized["env"]
+        normalized.pop("env", None)
+
     transport = str(normalized.get("transport", "")).strip().lower()
     if normalized.get("type") in REMOTE_MCP_TYPES:
         if transport in ("", "auto"):

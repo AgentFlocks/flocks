@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopContext, LoopResult
 from flocks.session.runner import SessionRunner, StepResult
 from flocks.session.session import SessionInfo
@@ -28,6 +29,23 @@ def _make_session_info(session_id: str = "test_session") -> SessionInfo:
         project_id="test_project",
         directory="/tmp",
         title="Test Session",
+    )
+
+
+def _make_completed_tool_part(message_id: str) -> ToolPart:
+    """Create a completed tool part that should force one more loop iteration."""
+    return ToolPart(
+        sessionID="test_session",
+        messageID=message_id,
+        callID="call_001",
+        tool="bash",
+        state=ToolStateCompleted(
+            input={"command": "echo hi"},
+            output="hi",
+            title="bash",
+            metadata={},
+            time={"start": 1, "end": 2},
+        ),
     )
 
 
@@ -234,6 +252,18 @@ class TestShouldExitWithInject:
 
         assert SessionLoop._should_exit(last_user, last_assistant) is False
 
+    def test_no_exit_when_assistant_has_completed_tool_parts(self):
+        """Should continue so completed tool results can be fed back to the model."""
+        last_user = self._make_msg("msg_001", "user")
+        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_assistant_parts = [_make_completed_tool_part(last_assistant.id)]
+
+        assert SessionLoop._should_exit(
+            last_user,
+            last_assistant,
+            last_assistant_parts,
+        ) is False
+
 
 class TestQueuedUserDetection:
     @staticmethod
@@ -347,6 +377,105 @@ class TestTurnLifecycle:
         cleanup_turn = event_callback.await_args_list[2].args[1]
         assert cleanup_turn["continue_reason"] == "pre_compact_cleanup"
         assert cleanup_turn["status"] == "continued"
+
+    @pytest.mark.asyncio
+    async def test_run_loop_skips_exit_condition_when_assistant_has_tool_parts(self):
+        session = SimpleNamespace(
+            id="loop_tool_part_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("msg_001", "user"),
+            self._make_msg("msg_002", "assistant", finish="stop"),
+        ]
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[messages, messages])
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+        log_info = MagicMock()
+
+        with patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[_make_completed_tool_part("msg_002")]),
+        ), patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ), patch(
+            "flocks.session.session_loop.fire_and_forget",
+            MagicMock(),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ), patch(
+            "flocks.session.session_loop.log.info",
+            log_info,
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        assert result.last_message is messages[1]
+        assert process_step.await_count == 1
+        assert not any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started", "turn.stopped"]
+
+    @pytest.mark.asyncio
+    async def test_run_loop_breaks_on_exit_condition_without_tool_parts(self):
+        session = SimpleNamespace(
+            id="loop_exit_condition_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("msg_001", "user"),
+            self._make_msg("msg_002", "assistant", finish="stop"),
+        ]
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(return_value=messages)
+        )
+        event_callback = AsyncMock()
+        callbacks = LoopCallbacks(event_publish_callback=event_callback)
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+        log_info = MagicMock()
+
+        with patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.log.info",
+            log_info,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            result = await SessionLoop._run_loop(ctx, callbacks)
+
+        assert result.action == "stop"
+        assert result.last_message is messages[1]
+        assert process_step.await_count == 0
+        assert any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
+        event_names = [call.args[0] for call in event_callback.await_args_list]
+        assert event_names == ["turn.started"]
 
 
 class TestExecuteSubtask:

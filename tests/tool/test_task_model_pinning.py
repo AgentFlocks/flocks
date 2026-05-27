@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from flocks.tool.registry import ToolContext
-from flocks.tool.task.task import _resolve_child_model, task_tool
+from flocks.tool.agent.task import _resolve_child_model, task_tool
 
 
 def _make_ctx() -> ToolContext:
@@ -52,9 +52,9 @@ class TestTaskModelPinning:
             model_pinned=False,
         )
 
-        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
-             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
-             patch("flocks.tool.task.task.get_background_manager", return_value=manager):
+        with patch("flocks.tool.agent.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.agent.task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
+             patch("flocks.tool.agent.task.get_background_manager", return_value=manager):
             result = await task_tool(
                 _make_ctx(),
                 description="delegate explore",
@@ -93,9 +93,9 @@ class TestTaskModelPinning:
             model_pinned=False,
         )
 
-        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
-             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
-             patch("flocks.tool.task.task.get_background_manager", return_value=manager), \
+        with patch("flocks.tool.agent.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.agent.task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
+             patch("flocks.tool.agent.task.get_background_manager", return_value=manager), \
              patch("flocks.storage.storage.Storage.read", AsyncMock(return_value={})), \
              patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=None)), \
              patch("flocks.config.config.Config.resolve_default_llm", AsyncMock(return_value={
@@ -131,10 +131,10 @@ class TestTaskModelPinning:
             agent="explore",
         )
 
-        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
-             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
-             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
-             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+        with patch("flocks.tool.agent.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.agent.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.agent.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.agent.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                  action="error",
                  error="subagent crashed",
                  last_message=None,
@@ -166,10 +166,10 @@ class TestTaskModelPinning:
             agent="explore",
         )
 
-        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
-             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
-             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
-             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+        with patch("flocks.tool.agent.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.agent.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.agent.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.agent.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                  action="stop",
                  error=None,
                  last_message=None,
@@ -208,10 +208,10 @@ class TestTaskModelPinning:
             error=None,
         )
 
-        with patch("flocks.tool.task.task.is_delegatable", return_value=True), \
-             patch("flocks.tool.task.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
-             patch("flocks.tool.task.task.Message.create", AsyncMock()), \
-             patch("flocks.tool.task.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+        with patch("flocks.tool.agent.task.is_delegatable", return_value=True), \
+             patch("flocks.tool.agent.task.Session.get_by_id", AsyncMock(side_effect=[parent_session, child_session])), \
+             patch("flocks.tool.agent.task.Message.create", AsyncMock()), \
+             patch("flocks.tool.agent.task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                  action="stop",
                  error=None,
                  last_message=last_message,

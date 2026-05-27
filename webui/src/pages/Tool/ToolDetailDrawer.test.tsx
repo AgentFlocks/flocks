@@ -58,8 +58,8 @@ describe('ToolDetailDrawer', () => {
         tool={{
           name: 'onesec_dns',
           description: longDescription,
-          source: 'custom',
-          source_name: 'OneSEC',
+          source: 'device',
+          source_name: 'TDP',
           category: 'custom',
           enabled: true,
           parameters: [
@@ -83,6 +83,7 @@ describe('ToolDetailDrawer', () => {
     const description = screen.getByText(longDescription);
     expect(description).toHaveClass('whitespace-pre-wrap');
     expect(description).toHaveClass('break-words');
+    expect(screen.getByText('Device')).toBeInTheDocument();
 
     const table = screen.getByRole('table');
     expect(table).toHaveClass('table-fixed');

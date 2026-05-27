@@ -1013,6 +1013,16 @@ class SessionRunner:
         async def channel_context_prompt_factory() -> Optional[str]:
             return await self._build_channel_context_prompt()
 
+        async def device_asset_prompt_factory() -> Optional[str]:
+            return await self._build_device_asset_hint()
+
+        try:
+            from flocks.tool.device.store import device_revision as get_device_revision
+
+            current_device_revision = get_device_revision()
+        except Exception:
+            current_device_revision = None
+
         prompts_started_at = time.perf_counter()
         system_prompts = await SessionPrompt.build_system_prompts(
             session_id=self.session.id,
@@ -1028,18 +1038,11 @@ class SessionRunner:
             sandbox_prompt_factory=sandbox_prompt_factory,
             channel_context_prompt_factory=channel_context_prompt_factory,
             tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
+            device_asset_prompt_factory=device_asset_prompt_factory,
+            device_revision=current_device_revision,
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
-
-        # Device asset hint depends on the live device list, which is mutable
-        # outside of any of the block digests `SessionPrompt.build_system_prompts`
-        # tracks.  Append it on a fresh list so we never mutate a cached
-        # `system_prompts` returned by the prompt cache, and so the hint is
-        # re-evaluated every turn (its content has no business being cached).
-        device_hint = await self._build_device_asset_hint()
-        if device_hint:
-            system_prompts = [*system_prompts, device_hint]
 
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
@@ -1507,33 +1510,45 @@ class SessionRunner:
             })
     
     async def _build_device_asset_hint(self) -> Optional[str]:
-        """Return a short hint listing the count of enabled security devices.
-
-        Migrated from the now-deleted ``_build_system_prompts`` method when
-        prompt assembly moved to ``SessionPrompt.build_system_prompts`` on
-        the ``dev`` branch.  The hint is intentionally tiny: the full
-        machine-room → device → tool tree is returned by the
-        ``device_context`` tool on demand, so the system prompt stays lean
-        and never duplicates the tool catalog.  Returns ``None`` when no
-        device is enabled (or device lookup fails) so the caller can skip
-        appending an empty block.
-        """
+        """Return concise device-aware tool guidance plus enabled device summary."""
         try:
             from flocks.tool.device.store import list_devices
 
             devices = await list_devices()
-            enabled = [d for d in devices if d.enabled]
-            if not enabled:
-                return None
-            return (
-                "## 安全设备资产\n\n"
-                f"当前共接入 {len(enabled)} 台安全设备（共 {len(devices)} 台）。"
-                "调用 `device_context` 工具可查看机房结构、设备名称与对应工具列表，"
-                "操作特定设备前请先确认其工具前缀。"
-            )
         except Exception as exc:
             log.warn("runner.device_hint_failed", {"error": str(exc)})
-            return None
+            devices = []
+
+        vendor_by_storage_key: Dict[str, str] = {}
+        try:
+            for tool_info in ToolRegistry.list_tools():
+                if getattr(tool_info, "source", None) != "device":
+                    continue
+                storage_key = str(getattr(tool_info, "provider", "") or "").strip()
+                vendor = str(getattr(tool_info, "vendor", "") or "").strip()
+                if storage_key and vendor and storage_key not in vendor_by_storage_key:
+                    vendor_by_storage_key[storage_key] = vendor
+        except Exception as exc:
+            log.warn("runner.device_hint_vendor_map_failed", {"error": str(exc)})
+
+        enabled_devices = [device for device in devices if getattr(device, "enabled", False)]
+        device_lines = []
+        for device in enabled_devices:
+            vendor = vendor_by_storage_key.get(device.storage_key) or "unknown"
+            device_lines.append(f"- `{device.name}` -> `{vendor}`")
+
+        summary = (
+            "当前已启用设备（名称 -> 厂商）:\n"
+            + ("\n".join(device_lines) if device_lines else "- 当前无已启用设备")
+        )
+
+        return (
+            "## 安全设备使用\n\n"
+            f"{summary}\n\n"
+            "当用户要操作特定机房、设备或产品时，先调用 `device_context` 获取 `device_id` 等相关信息。"
+            "使用 `tool_search` 搜索工具名称查看用法；执行设备工具时必须传入目标 `device_id`。"
+            "如果同类设备有多个候选，不要猜测，先询问用户选择。"
+        )
 
     async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
@@ -1646,6 +1661,7 @@ class SessionRunner:
             tool_info
             for tool_info in catalog_tools
             if tool_info.name not in excluded_tool_names
+            and getattr(tool_info, "source", None) != "device"
         ]
         if not catalog_tools:
             return None

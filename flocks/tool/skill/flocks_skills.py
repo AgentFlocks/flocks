@@ -33,15 +33,13 @@ _TIMEOUT_SEC = 120
 _MAX_OUTPUT = 8_000  # chars — keep responses concise for the model
 
 _DESCRIPTION = """\
-Manage agent skills: search the registry, install, check dependency status,
-install deps, and remove skills.  Use this tool (not bash) for any
-`flocks skills` operation.
+Search and install skills from the **external public registry**, manage \
+dependency status, and remove installed skills.  Use this tool (not bash) for \
+any `flocks skills` operation.
 
-⚠️ IMPORTANT DISTINCTION:
-  • To search for skills available in the **external public registry** (not yet installed):
-      → use this tool with subcommand="find"
-  • To see skills that are **already installed** in the current Flocks instance:
-      → use run_slash_command(command="skills") instead (not this tool)
+Do not use this tool when a dedicated tool is a better fit:
+- To load an already-installed skill: use skill_load instead.
+- To view installed / locally available skills: use run_slash_command(command="skills") instead.
 
 ## Subcommands
 
@@ -49,16 +47,14 @@ install deps, and remove skills.  Use this tool (not bash) for any
   Search the **external public skill registry** by keyword.
   This does NOT show installed skills — it discovers skills that can be installed.
   → Use BEFORE telling the user "I can't do X".  A matching skill may exist.
-  → To list already-installed skills, use run_slash_command(command="skills") instead.
   Example: flocks_skills(subcommand="find", args="malware phishing")
 
 **install <source>**
-  Install a skill from an external source.
+  Install a skill from an external public source.
   Source formats:
     github:<owner>/<repo>/<skill-dir>   e.g. github:octocat/skills/find-ioc
     clawhub:<name>                      e.g. clawhub:ndr-alert-analysis
     https://...                         direct SKILL.md URL
-    /local/path or ./relative           local directory
   → After install, always call status to check if deps are missing.
   Example: flocks_skills(subcommand="install", args="github:owner/repo/skill-name")
 
@@ -73,10 +69,6 @@ install deps, and remove skills.  Use this tool (not bash) for any
   → Run when status shows a skill is not eligible.
   Example: flocks_skills(subcommand="install-deps", args="find-ioc")
 
-**list**
-  List all locally discovered skills with source and description.
-  Example: flocks_skills(subcommand="list")
-
 **remove <skill-name>**
   Uninstall a user-managed skill from ~/.flocks.
   Example: flocks_skills(subcommand="remove", args="old-skill")
@@ -85,12 +77,12 @@ install deps, and remove skills.  Use this tool (not bash) for any
 # Allowed subcommands — enforced to prevent arbitrary shell injection via args.
 # Ordered for consistent display in tool schema enum and error messages.
 _ALLOWED_SUBCOMMANDS = frozenset(
-    ["find", "install", "status", "install-deps", "list", "remove"]
+    ["find", "install", "status", "install-deps", "remove"]
 )
-_SUBCOMMAND_ENUM = ["find", "install", "status", "install-deps", "list", "remove"]
+_SUBCOMMAND_ENUM = ["find", "install", "status", "install-deps", "remove"]
 
 # Read-only registry / discovery — no shell side effects; skip bash permission gate.
-_READ_ONLY_SUBCOMMANDS = frozenset({"find", "list", "status"})
+_READ_ONLY_SUBCOMMANDS = frozenset({"find", "status"})
 
 
 def _flocks_executable() -> Optional[str]:
@@ -108,7 +100,7 @@ def _flocks_executable() -> Optional[str]:
             type=ParameterType.STRING,
             description=(
                 "Skill management subcommand: "
-                "find | install | status | install-deps | list | remove"
+                "find | install | status | install-deps | remove"
             ),
             required=True,
             enum=_SUBCOMMAND_ENUM,
@@ -121,7 +113,7 @@ def _flocks_executable() -> Optional[str]:
                 "For find: search query.  "
                 "For install: source string.  "
                 "For install-deps / remove: skill name.  "
-                "For status / list: leave empty."
+                "For status: leave empty."
             ),
             required=False,
             default="",
@@ -161,7 +153,7 @@ async def flocks_skills(
 
     log.info("flocks_skills.run", {"cmd": cmd})
 
-    # Mutating subcommands need bash approval. Read-only (find/list/status) runs
+    # Mutating subcommands need bash approval. Read-only (find/status) runs
     # without prompting — same trust model as listing skills in the UI.
     #
     # For install/remove/install-deps, always-patterns must match the *full*

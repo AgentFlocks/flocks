@@ -72,6 +72,11 @@ _init_lock = asyncio.Lock()
 # Persistent connection shared by all SessionBindingService instances.
 _db_conn: Optional[aiosqlite.Connection] = None
 _db_ready = False
+# PID that owns ``_db_conn``.  Used to detect ``fork()`` (uvicorn
+# ``--reload`` / multi-worker launches) so a child process never reuses
+# its parent's open SQLite file descriptor — a documented SQLite
+# corruption vector.
+_db_owner_pid: Optional[int] = None
 
 # Register channel_bindings DDL with Storage so the tables are created
 # during Storage.init() as well (idempotent CREATE IF NOT EXISTS).
@@ -88,13 +93,41 @@ async def _get_db() -> aiosqlite.Connection:
     Uses ``Storage.get_db_path()`` to ensure the same database file is
     shared with the rest of the Flocks storage subsystem.
     """
-    global _db_conn, _db_ready
-    if _db_conn is not None and _db_ready:
+    global _db_conn, _db_ready, _db_owner_pid
+
+    current_pid = os.getpid()
+    if (
+        _db_conn is not None
+        and _db_ready
+        and _db_owner_pid is not None
+        and _db_owner_pid == current_pid
+    ):
         return _db_conn
 
     async with _init_lock:
-        if _db_conn is not None and _db_ready:
+        if (
+            _db_conn is not None
+            and _db_ready
+            and _db_owner_pid is not None
+            and _db_owner_pid == current_pid
+        ):
             return _db_conn
+
+        if (
+            _db_conn is not None
+            and _db_owner_pid is not None
+            and _db_owner_pid != current_pid
+        ):
+            # Inherited an open handle from a forked parent — drop the
+            # reference without closing it (closing would tear down the
+            # parent's state too) and rebuild a fresh connection.
+            log.warning("channel.binding.fork_detected", {
+                "parent_pid": _db_owner_pid,
+                "child_pid": current_pid,
+            })
+            _db_conn = None
+            _db_ready = False
+            _db_owner_pid = None
 
         from flocks.storage.storage import Storage
         db_path = Storage.get_db_path()
@@ -109,6 +142,7 @@ async def _get_db() -> aiosqlite.Connection:
         await _db_conn.executescript(_DDL)
         await _migrate_legacy_binding_agent_ids(_db_conn)
         _db_ready = True
+        _db_owner_pid = current_pid
         return _db_conn
 
 
@@ -158,7 +192,7 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
 
 async def close_binding_db() -> None:
     """Close the persistent connection (call during shutdown)."""
-    global _db_conn, _db_ready
+    global _db_conn, _db_ready, _db_owner_pid
     if _db_conn is not None:
         try:
             await _db_conn.close()
@@ -166,6 +200,7 @@ async def close_binding_db() -> None:
             pass
         _db_conn = None
         _db_ready = False
+        _db_owner_pid = None
 
 
 class SessionBindingService:

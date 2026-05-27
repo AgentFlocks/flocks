@@ -436,6 +436,8 @@ class Message:
     _parts_cache: Dict[str, Dict[str, List[PartType]]] = {}  # session_id -> message_id -> parts
     _parts_revision_cache: Dict[str, Dict[str, int]] = {}
     _parts_serialized_cache: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+    _parts_storage_format: Dict[str, Literal["legacy", "per_message"]] = {}
+    _parts_persisted_mids: Dict[str, set[str]] = {}
     _parts_flush_tasks: Dict[str, asyncio.Task] = {}
     _lru: OrderedDict[str, bool] = OrderedDict()  # LRU tracker: move_to_end() is O(1)
     
@@ -445,6 +447,7 @@ class Message:
     # Storage key prefixes
     _MESSAGE_PREFIX = "message"
     _PARTS_PREFIX = "message_parts"
+    _PARTS_ITEM_PREFIX = "message_parts"
     _PARTS_PERSIST_DEBOUNCE_MS = 75
 
     @classmethod
@@ -456,6 +459,22 @@ class Message:
     @classmethod
     def _serialize_message_parts(cls, parts: List[PartType]) -> List[Dict[str, Any]]:
         return [p.model_dump() for p in parts]
+
+    @classmethod
+    def _parts_blob_key(cls, session_id: str) -> str:
+        return f"{cls._PARTS_PREFIX}:{session_id}"
+
+    @classmethod
+    def _parts_item_prefix(cls, session_id: str) -> str:
+        return f"{cls._PARTS_ITEM_PREFIX}:{session_id}:"
+
+    @classmethod
+    def _parts_item_key(cls, session_id: str, message_id: str) -> str:
+        return f"{cls._PARTS_ITEM_PREFIX}:{session_id}:{message_id}"
+
+    @classmethod
+    def _is_parts_item_key(cls, key: str, session_id: str) -> bool:
+        return key.startswith(cls._parts_item_prefix(session_id)) and key.count(":") == 2
 
     @classmethod
     def _sync_serialized_parts_for_message(cls, session_id: str, message_id: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -569,6 +588,8 @@ class Message:
                 cls._parts_cache.pop(evict_id, None)
                 cls._parts_revision_cache.pop(evict_id, None)
                 cls._parts_serialized_cache.pop(evict_id, None)
+                cls._parts_storage_format.pop(evict_id, None)
+                cls._parts_persisted_mids.pop(evict_id, None)
                 _session_locks.discard(evict_id)
                 log.debug("message.cache.evicted", {"session_id": evict_id})
             
@@ -587,13 +608,36 @@ class Message:
             else:
                 cls._messages_cache[session_id] = []
             
-            parts_key = f"{cls._PARTS_PREFIX}:{session_id}"
-            stored_parts = await Storage.get(parts_key)
+            item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
+            stored_parts: Dict[str, List[Dict[str, Any]]] = {}
+            persisted_mids: set[str] = set()
+
+            for key, value in item_entries:
+                if not cls._is_parts_item_key(key, session_id):
+                    continue
+                if not isinstance(value, list):
+                    continue
+                msg_id = key.rsplit(":", 1)[1]
+                stored_parts[msg_id] = value
+                persisted_mids.add(msg_id)
+
+            if stored_parts:
+                cls._parts_storage_format[session_id] = "per_message"
+            else:
+                legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
+                if isinstance(legacy_parts, dict):
+                    stored_parts = legacy_parts
+                    persisted_mids = set(legacy_parts.keys())
+                    cls._parts_storage_format[session_id] = "legacy"
+                else:
+                    cls._parts_storage_format[session_id] = "per_message"
             
             if stored_parts:
                 cls._parts_cache[session_id] = {}
                 cls._parts_revision_cache[session_id] = {}
                 for msg_id, parts_data in stored_parts.items():
+                    if not isinstance(parts_data, list):
+                        continue
                     cls._parts_cache[session_id][msg_id] = [
                         cls.deserialize_part(p) for p in parts_data
                     ]
@@ -606,6 +650,7 @@ class Message:
                 cls._parts_cache[session_id] = {}
                 cls._parts_revision_cache[session_id] = {}
                 cls._parts_serialized_cache[session_id] = {}
+            cls._parts_persisted_mids[session_id] = persisted_mids
             
             cls._rebuild_id_index(session_id)
             cls._lru[session_id] = True
@@ -695,26 +740,57 @@ class Message:
     async def _persist_parts(cls, session_id: str, *, message_id: Optional[str] = None) -> None:
         """Persist parts to storage.
 
-        When *message_id* is given, only the parts for that single message are
-        serialised and merged into the stored blob.  This avoids re-serialising
-        every message on every tool-call update (the hot path).
-
-        Falls back to a full write when *message_id* is ``None``.
+        Existing legacy sessions keep writing the aggregated
+        ``message_parts:<session_id>`` blob.  New sessions write each message's
+        parts to ``message_parts:<session_id>:<message_id>`` so hot-path part
+        updates no longer rewrite the full session blob.
         """
-        parts_key = f"{cls._PARTS_PREFIX}:{session_id}"
         all_parts = cls._parts_cache.get(session_id, {})
         serialized = cls._parts_serialized_cache.setdefault(session_id, {})
+        storage_format = cls._parts_storage_format.setdefault(session_id, "per_message")
+
+        if storage_format == "legacy":
+            parts_key = cls._parts_blob_key(session_id)
+            if message_id is not None:
+                serialized[message_id] = cls._serialize_message_parts(all_parts.get(message_id, []))
+            else:
+                serialized = {
+                    mid: cls._serialize_message_parts(mparts)
+                    for mid, mparts in all_parts.items()
+                }
+                cls._parts_serialized_cache[session_id] = serialized
+            cls._parts_persisted_mids[session_id] = set(serialized.keys())
+            await Storage.set(parts_key, serialized, "message_parts")
+            return
 
         if message_id is not None:
-            serialized[message_id] = cls._serialize_message_parts(all_parts.get(message_id, []))
-            await Storage.set(parts_key, serialized)
-        else:
-            serialized = {
-                mid: cls._serialize_message_parts(mparts)
-                for mid, mparts in all_parts.items()
-            }
-            cls._parts_serialized_cache[session_id] = serialized
-            await Storage.set(parts_key, serialized)
+            serialized_one = cls._serialize_message_parts(all_parts.get(message_id, []))
+            serialized[message_id] = serialized_one
+            await Storage.set(
+                cls._parts_item_key(session_id, message_id),
+                serialized_one,
+                "message_part",
+            )
+            cls._parts_persisted_mids.setdefault(session_id, set()).add(message_id)
+            return
+
+        persisted_mids = cls._parts_persisted_mids.setdefault(session_id, set())
+        current_mids = set(all_parts.keys())
+        for mid, mparts in all_parts.items():
+            serialized_one = cls._serialize_message_parts(mparts)
+            if serialized.get(mid) != serialized_one or mid not in persisted_mids:
+                await Storage.set(
+                    cls._parts_item_key(session_id, mid),
+                    serialized_one,
+                    "message_part",
+                )
+            serialized[mid] = serialized_one
+            persisted_mids.add(mid)
+
+        for stale_mid in list(persisted_mids - current_mids):
+            await Storage.delete(cls._parts_item_key(session_id, stale_mid))
+            serialized.pop(stale_mid, None)
+            persisted_mids.discard(stale_mid)
     
     @classmethod
     async def create(
@@ -1176,9 +1252,15 @@ class Message:
                 cls._rebuild_id_index(session_id)
                 if session_id in cls._parts_cache:
                     cls._parts_cache[session_id].pop(message_id, None)
+                cls._parts_revision_cache.get(session_id, {}).pop(message_id, None)
+                cls._parts_serialized_cache.get(session_id, {}).pop(message_id, None)
                 cls._cancel_parts_flush_task(session_id)
                 await cls._persist_messages(session_id)
-                await cls._persist_parts(session_id)
+                if cls._parts_storage_format.get(session_id) == "legacy":
+                    await cls._persist_parts(session_id)
+                else:
+                    await Storage.delete(cls._parts_item_key(session_id, message_id))
+                    cls._parts_persisted_mids.setdefault(session_id, set()).discard(message_id)
                 log.info("message.deleted", {"id": message_id, "session_id": session_id})
                 return True
             return False
@@ -1232,11 +1314,16 @@ class Message:
             count = len(cls._messages_cache.get(session_id, []))
             cls._messages_cache[session_id] = []
             cls._parts_cache[session_id] = {}
+            cls._parts_revision_cache[session_id] = {}
+            cls._parts_serialized_cache[session_id] = {}
+            cls._parts_persisted_mids[session_id] = set()
+            cls._parts_storage_format[session_id] = "per_message"
             cls._cancel_parts_flush_task(session_id)
             
             # Persist changes
             await cls._persist_messages(session_id)
-            await cls._persist_parts(session_id)
+            await Storage.clear(prefix=cls._parts_item_prefix(session_id))
+            await Storage.delete(cls._parts_blob_key(session_id))
             
             log.info("messages.cleared", {
                 "session_id": session_id,
@@ -1261,6 +1348,8 @@ class Message:
             cls._parts_cache.pop(session_id, None)
             cls._parts_revision_cache.pop(session_id, None)
             cls._parts_serialized_cache.pop(session_id, None)
+            cls._parts_storage_format.pop(session_id, None)
+            cls._parts_persisted_mids.pop(session_id, None)
             _session_locks.discard(session_id)
         else:
             for sid in list(cls._parts_flush_tasks):
@@ -1271,6 +1360,8 @@ class Message:
             cls._parts_cache.clear()
             cls._parts_revision_cache.clear()
             cls._parts_serialized_cache.clear()
+            cls._parts_storage_format.clear()
+            cls._parts_persisted_mids.clear()
             _session_locks.clear()
         log.debug("message.cache.invalidated", {"session_id": session_id})
     

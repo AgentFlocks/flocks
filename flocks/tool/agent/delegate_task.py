@@ -33,6 +33,39 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.delegate_task")
 
 
+async def _subagent_session_permissions(agent_name: str) -> list:
+    """Build session permission rules for a delegated subagent."""
+    from flocks.agent.registry import Agent
+    from flocks.session.session import PermissionRule as SessionPermissionRule
+
+    agent = await Agent.get(agent_name)
+    rules: list = []
+    if agent_name != "prometheus":
+        rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
+
+    if agent and agent.permission:
+        for rule in agent.permission:
+            level = rule.level.value if hasattr(rule.level, "value") else str(rule.level)
+            rules.append(
+                SessionPermissionRule(
+                    permission=rule.permission or "*",
+                    action=level,
+                    pattern=rule.pattern or "*",
+                )
+            )
+        return rules
+
+    if agent_name == "prometheus":
+        rules.extend([
+            SessionPermissionRule(permission="question", action="allow", pattern="*"),
+            SessionPermissionRule(permission="edit", action="deny", pattern="*"),
+            SessionPermissionRule(permission="edit", action="allow", pattern=".flocks/plans/*"),
+        ])
+    elif not rules:
+        rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
+    return rules
+
+
 def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     if not model:
         return None
@@ -448,7 +481,7 @@ async def delegate_task_tool(
         title=f"{description} (@{agent_to_use} subagent)",
         parent_id=parent_session.id,
         agent=agent_to_use,
-        permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
+        permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
     await Message.create(

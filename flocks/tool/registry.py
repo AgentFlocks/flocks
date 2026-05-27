@@ -683,6 +683,7 @@ class ToolRegistry:
         native: bool = False,
         always_load: Optional[bool] = None,
         tags: Optional[List[str]] = None,
+        enabled: bool = True,
     ) -> Callable[[ToolHandler], ToolHandler]:
         """
         Decorator to register a function as a tool.
@@ -713,6 +714,7 @@ class ToolRegistry:
                 native=native,
                 always_load=always_load,
                 tags=list(tags or []),
+                enabled=enabled,
             )
             tool = Tool(info=info, handler=func)
             cls.register(tool)
@@ -791,27 +793,27 @@ class ToolRegistry:
             "params": list(kwargs.keys()),
         })
 
-        # Method-A: if caller passes device_id, activate per-device credential override.
         device_id = kwargs.pop("device_id", None)
 
-        # Fallback: device-source tools without an explicit device_id must
-        # still pick up that device's verify_ssl / credentials. Resolve the
-        # single enabled instance bound to this tool's provider (storage_key)
-        # and activate its credential override transparently. Multiple
-        # instances → require the LLM to disambiguate via device_id.
-        if not device_id and tool.info.source == "device" and tool.info.provider:
+        if tool.info.source == "device" and tool.info.provider:
             try:
-                resolved = await cls._resolve_default_device_id(tool.info.provider)
+                resolved_device_id, resolution_error = await cls._resolve_device_target(
+                    storage_key=tool.info.provider,
+                    requested_device_id=str(device_id).strip() if device_id else None,
+                )
             except Exception as exc:
-                log.warn("tool.device.default_resolve_failed", {
-                    "tool": tool_name, "provider": tool.info.provider, "error": str(exc),
+                log.warn("tool.device.target_resolve_failed", {
+                    "tool": tool_name,
+                    "provider": tool.info.provider,
+                    "device_id": device_id,
+                    "error": str(exc),
                 })
-                resolved = None
-            if resolved:
-                log.info("tool.device.default_resolved", {
-                    "tool": tool_name, "provider": tool.info.provider, "device_id": resolved,
-                })
-                device_id = resolved
+                resolved_device_id = None
+                resolution_error = "设备目标解析失败，请通过 device_context 工具确认设备后重试。"
+
+            if resolution_error:
+                return ToolResult(success=False, error=resolution_error)
+            device_id = resolved_device_id
 
         if device_id:
             from flocks.tool.credential_context import activate_device_credentials
@@ -862,6 +864,57 @@ class ToolRegistry:
         if len(candidates) == 1:
             return candidates[0].id
         return None
+
+    @classmethod
+    async def _resolve_device_target(
+        cls,
+        *,
+        storage_key: str,
+        requested_device_id: Optional[str],
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Resolve or validate the device target for a device-backed tool."""
+        try:
+            from flocks.tool.device.store import list_devices
+        except Exception:
+            return None, "设备模块不可用，请稍后重试。"
+
+        try:
+            devices = await list_devices()
+        except Exception:
+            return None, "读取设备列表失败，请稍后重试。"
+
+        enabled_candidates = [
+            device for device in devices
+            if device.storage_key == storage_key and device.enabled
+        ]
+
+        if requested_device_id:
+            requested = next((device for device in devices if device.id == requested_device_id), None)
+            if requested is None or not requested.enabled:
+                return None, (
+                    f"设备 {requested_device_id!r} 未找到或已禁用，请通过 device_context 工具确认 device_id 是否正确。"
+                )
+            if requested.storage_key != storage_key:
+                return None, (
+                    f"设备 {requested_device_id!r} 不属于当前工具对应的设备类型，请通过 device_context 工具确认目标设备。"
+                )
+            return requested.id, None
+
+        if len(enabled_candidates) == 1:
+            resolved = enabled_candidates[0].id
+            log.info("tool.device.default_resolved", {
+                "provider": storage_key,
+                "device_id": resolved,
+            })
+            return resolved, None
+
+        if not enabled_candidates:
+            return None, "当前没有可用的目标设备，请通过 device_context 工具确认设备状态。"
+
+        return None, (
+            "当前存在多台同类型设备，调用前必须显式传入 `device_id`。"
+            "请先调用 device_context 工具确认目标设备。"
+        )
 
     @classmethod
     async def execute_batch(
@@ -1065,11 +1118,28 @@ class ToolRegistry:
 
     @classmethod
     def _sync_api_service_states(cls) -> None:
-        """Disable tools whose API service is disabled in flocks.json.
+        """Bi-directionally sync tool enabled state with their API service.
 
-        YAML plugin tools default to ``enabled=True``, but the corresponding
-        API service in ``api_services`` may be ``enabled: false``.  Without
-        this sync the runner exposes disabled-service tools to the LLM.
+        - Service disabled  → force tool off.
+        - Service enabled   → restore the tool to its factory/YAML default so
+          that re-enabling a service (e.g. after adding a device) brings its
+          tools back automatically.
+
+        Calling contract — IMPORTANT:
+            This method overwrites ``tool.info.enabled`` with the factory
+            default whenever a service becomes enabled.  That would silently
+            re-open any tool the user had explicitly disabled via the
+            ``tool_settings`` overlay.  **Every call site that may flip a
+            service's enabled flag MUST pair the call with
+            :meth:`_apply_tool_settings` afterwards**, so the user overlay
+            wins the final write::
+
+                ToolRegistry._sync_api_service_states()
+                ToolRegistry._apply_tool_settings()
+
+            The bootstrap path (:meth:`_load_plugin_tools`) and the device
+            sync helper (:func:`flocks.tool.device.sync.sync_service_tool_state`)
+            already follow this discipline.
         """
         try:
             from flocks.config.config_writer import ConfigWriter
@@ -1078,22 +1148,34 @@ class ToolRegistry:
             return
 
         disabled_count = 0
+        restored_count = 0
         for tool in cls._tools.values():
             provider = tool.info.provider
             if not provider:
                 continue
             svc = api_services.get(provider, {})
-            if not svc.get("enabled", False):
+            svc_enabled = svc.get("enabled", False)
+            if not svc_enabled:
                 tool.info.enabled = False
                 disabled_count += 1
+            else:
+                # Restore to factory default so tools re-appear when their
+                # service is re-enabled (e.g. after a device is re-added).
+                # _apply_tool_settings() runs after and can flip back to False
+                # when the user has explicitly disabled a specific tool.
+                default = cls._enabled_defaults.get(tool.info.name, True)
+                if not tool.info.enabled and default:
+                    tool.info.enabled = True
+                    restored_count += 1
 
-        if disabled_count:
+        if disabled_count or restored_count:
             disabled_providers = [
                 p for p, svc in api_services.items()
                 if not svc.get("enabled", False)
             ]
             log.debug("tool_registry.api_service_sync", {
                 "disabled_tools": disabled_count,
+                "restored_tools": restored_count,
                 "disabled_providers": disabled_providers,
             })
 
@@ -1342,15 +1424,15 @@ class ToolRegistry:
             # web/ — internet access
             ("flocks.tool.web", ["webfetch", "websearch"]),
             # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task"]),
+            ("flocks.tool.agent", ["delegate_task", "task"]),
             # task/ — task/workflow
-            ("flocks.tool.task", ["task", "schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
+            ("flocks.tool.task", ["schedule_task_center", "todo", "plan", "run_workflow", "run_workflow_node"]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — background tasks, questions, model config, memory, skill_load, MCP management, session management, slash commands
-            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "skill_load", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
-            # skill/ — skill management (search, install, status, deps, remove)
-            ("flocks.tool.skill", ["flocks_skills"]),
+            # system/ — background tasks, questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["background_output", "background_cancel", "question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # skill/ — skill management (search, install, status, deps, remove, load)
+            ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context
             ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
@@ -1370,7 +1452,7 @@ class ToolRegistry:
         # This is done in bulk here so individual @register_function call
         # sites don't need to pass native=True, and user plugin files using
         # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp"}
+        builtin_native_exceptions = {"lsp", "task"}
         for name in set(cls._tools.keys()) - before:
             if name in builtin_native_exceptions:
                 cls._tools[name].info.native = False

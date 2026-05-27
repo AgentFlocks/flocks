@@ -5,6 +5,7 @@ Manages system prompts, context injection, and token counting.
 Based on Flocks' ported src/session/prompt.ts and src/session/system.ts
 """
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, Any, Iterable, List, Optional, TYPE_CHECKING, Union
 from pydantic import BaseModel, Field
@@ -429,39 +430,19 @@ class SessionPrompt:
     
     # Template cache
     _templates: Dict[str, PromptTemplate] = {}
-    _tokenizer = None
-    
-    @classmethod
-    def _get_tokenizer(cls):
-        """Get or create tiktoken tokenizer"""
-        if cls._tokenizer is None:
-            try:
-                from flocks.utils.tiktoken_cache import ensure as _ensure_tiktoken
-                _ensure_tiktoken()
-                import tiktoken
-                cls._tokenizer = tiktoken.encoding_for_model("gpt-4")
-            except ImportError:
-                log.warn("prompt.tokenizer", {"error": "tiktoken not installed"})
-                return None
-        return cls._tokenizer
-    
+
     @classmethod
     def count_tokens(cls, text: str) -> int:
-        """
-        Count tokens in text using tiktoken
-        
-        Args:
-            text: Text to count tokens for
-            
-        Returns:
-            Token count (or character estimate if tiktoken not available)
+        """Count tokens using fast chars/4 rough estimate.
+
+        Returns ``len(text) // 4`` directly — no tiktoken, no model call.
+        Fast enough for every-step overflow detection while staying within
+        the same order of magnitude as provider-side counts.  The fixed
+        85 % × context_window overflow threshold tolerates the slack from
+        this rough estimate without needing a safety margin.
         """
         if not text:
             return 0
-        tokenizer = cls._get_tokenizer()
-        if tokenizer:
-            return len(tokenizer.encode(text))
-        # Fallback: rough estimate (4 chars ≈ 1 token)
         return len(text) // 4
     
     @classmethod
@@ -488,88 +469,168 @@ class SessionPrompt:
     
     @classmethod
     def estimate_tokens(cls, text: str) -> int:
-        """Quick token estimate without tokenizer (4 chars ≈ 1 token)"""
-        if not text:
-            return 0
-        return len(text) // 4
+        """Alias for :meth:`count_tokens` — both return ``len(text) // 4``.
+
+        Kept for callers that still import ``estimate_tokens`` by name (pruning,
+        a handful of log statements, legacy tests).  ``count_tokens`` is the
+        canonical entry point; this thin wrapper forwards to it so the two
+        names cannot drift apart.
+        """
+        return cls.count_tokens(text)
     
+    # ------------------------------------------------------------------
+    # E6 — per-message token cache
+    # ------------------------------------------------------------------
+    # ``estimate_full_context_tokens`` is called once per agent step, and
+    # for long sessions the dominant cost is the message-level
+    # ``count_tokens`` invocations.  98%+ of the messages have not
+    # changed between turns, so we memoise the per-message token total
+    # keyed by message id.  Streaming / in-flight messages are excluded
+    # (they're identified by ``finish is None``) because their content
+    # is still mutating.
+    #
+    # The cache is bounded by ``_MESSAGE_CACHE_MAX``; eviction is FIFO
+    # via ``OrderedDict.popitem(last=False)``.  Callers that mutate a
+    # message in place (e.g. ``pruning.prune`` marks a tool part as
+    # compacted) MUST call :meth:`invalidate_message_cache` so the next
+    # estimate re-counts the message instead of returning the stale
+    # pre-compaction figure.
+    # ------------------------------------------------------------------
+    _MESSAGE_CACHE_MAX = 2_000
+    _message_token_cache: "OrderedDict[str, int]" = OrderedDict()
+
     @classmethod
     async def estimate_full_context_tokens(
         cls,
         session_id: str,
         messages: list,
+        *,
+        policy: Optional[Any] = None,
+        apply_safety_margin: Optional[bool] = None,
     ) -> int:
+        """Estimate total tokens in the context sent to the LLM.
+
+        Sums the message bodies and their parts (tool inputs/outputs,
+        reasoning) using the per-message LRU cache (E6).  Returns a pure
+        chars/4 figure with no overhead or safety multiplier — the fixed
+        85 % × context_window overflow threshold leaves enough headroom
+        for that slack.
+
+        ``policy`` and ``apply_safety_margin`` are accepted for backward
+        compatibility with callers built against the previous v2 contract,
+        but are unused in the current implementation.
         """
-        Estimate the total token count of the full context sent to the LLM.
-        
-        Unlike count_message_tokens() which only counts message content text,
-        this method also counts:
-        - Message text content
-        - Tool call inputs and outputs (from parts)
-        - Reasoning content (from parts)
-        - System prompt overhead estimate
-        
-        This provides a much more accurate estimate when the provider doesn't
-        report usage data.
-        
-        Args:
-            session_id: Session ID for parts lookup
-            messages: List of messages (MessageInfo objects or dicts)
-            
-        Returns:
-            Estimated total token count
+        del policy, apply_safety_margin  # legacy parameters, kept for ABI
+
+        total = 0
+        for msg in messages:
+            total += await cls._tokens_for_message(session_id, msg)
+        return total
+
+    @classmethod
+    async def _tokens_for_message(cls, session_id: str, msg: Any) -> int:
+        """Return the token contribution of a single message (E6).
+
+        Cached by ``msg.id`` for messages that have finished streaming
+        (``finish`` is non-None and not ``"streaming"``).  In-flight
+        messages skip the cache because their content / parts are still
+        mutating.  Tool parts whose ``state.time.compacted`` flag has
+        flipped are NOT re-counted automatically; callers that flip the
+        flag (currently ``pruning.prune`` and
+        ``pruning.truncate_oversized_tool_outputs``) MUST invalidate the
+        affected ``msg.id`` via :meth:`invalidate_message_cache`.
         """
         from flocks.session.message import Message
-        
+
+        msg_id = getattr(msg, 'id', None) if not isinstance(msg, dict) else msg.get('id')
+        finish = getattr(msg, 'finish', None) if not isinstance(msg, dict) else msg.get('finish')
+        # ``finish is None`` means the message is still being streamed.
+        cacheable = bool(msg_id) and finish is not None and finish != "streaming"
+        if cacheable and msg_id in cls._message_token_cache:
+            # Refresh LRU ordering so hot messages stay near the tail.
+            cls._message_token_cache.move_to_end(msg_id)
+            return cls._message_token_cache[msg_id]
+
         total = 0
-        
-        for msg in messages:
-            # Count message text content
-            content = ""
-            if isinstance(msg, dict):
-                content = msg.get("content", "")
-            elif hasattr(msg, "content"):
-                content = msg.content or ""
-            
-            total += cls.count_tokens(content)
-            
-            # Count parts (tool inputs/outputs, text parts, reasoning)
-            try:
-                msg_id = msg.id if hasattr(msg, 'id') else ""
-                parts = await Message.parts(msg_id, session_id)
-                for part in parts:
-                    if part.type == "text":
-                        total += cls.count_tokens(getattr(part, 'text', ''))
-                    elif part.type == "tool":
-                        state = getattr(part, 'state', None)
-                        if state:
-                            # Count tool input
-                            tool_input = getattr(state, 'input', None)
-                            if tool_input:
-                                input_str = str(tool_input) if not isinstance(tool_input, str) else tool_input
-                                total += cls.count_tokens(input_str)
-                            # Count tool output (respect compacted flag)
-                            time_info = getattr(state, 'time', None)
-                            is_compacted = isinstance(time_info, dict) and time_info.get("compacted")
-                            if is_compacted:
-                                total += 10  # placeholder token count
-                            else:
-                                tool_output = getattr(state, 'output', None)
-                                if tool_output:
-                                    output_str = str(tool_output) if not isinstance(tool_output, str) else tool_output
-                                    total += cls.count_tokens(output_str)
-                    elif part.type == "reasoning":
-                        total += cls.count_tokens(getattr(part, 'text', ''))
-            except Exception as _e:
-                log.debug("prompt.token_estimate.parts_failed", {"message_id": getattr(msg, 'id', '?'), "error": str(_e)})
-                total += 50
-        
-        # Add estimated system prompt overhead (instructions, tool schemas, etc.)
-        # System prompts typically add 500-2000 tokens depending on agent/tools
-        total += 800
-        
+
+        # Message text content
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+        elif hasattr(msg, "content"):
+            content = msg.content or ""
+        total += cls.count_tokens(content)
+
+        # Message parts (tool inputs/outputs, text parts, reasoning)
+        try:
+            parts = await Message.parts(msg_id or "", session_id)
+            for part in parts:
+                if part.type == "text":
+                    total += cls.count_tokens(getattr(part, 'text', ''))
+                elif part.type == "tool":
+                    state = getattr(part, 'state', None)
+                    if state:
+                        tool_input = getattr(state, 'input', None)
+                        if tool_input:
+                            input_str = (
+                                tool_input
+                                if isinstance(tool_input, str)
+                                else str(tool_input)
+                            )
+                            total += cls.count_tokens(input_str)
+                        time_info = getattr(state, 'time', None)
+                        is_compacted = (
+                            isinstance(time_info, dict)
+                            and time_info.get("compacted")
+                        )
+                        if is_compacted:
+                            total += 10  # post-compaction placeholder
+                        else:
+                            tool_output = getattr(state, 'output', None)
+                            if tool_output:
+                                output_str = (
+                                    tool_output
+                                    if isinstance(tool_output, str)
+                                    else str(tool_output)
+                                )
+                                total += cls.count_tokens(output_str)
+                elif part.type == "reasoning":
+                    total += cls.count_tokens(getattr(part, 'text', ''))
+        except Exception as _e:
+            log.debug("prompt.token_estimate.parts_failed", {
+                "message_id": msg_id or '?', "error": str(_e),
+            })
+            total += 50
+
+        if cacheable:
+            cls._message_token_cache[msg_id] = total
+            cls._message_token_cache.move_to_end(msg_id)
+            while len(cls._message_token_cache) > cls._MESSAGE_CACHE_MAX:
+                cls._message_token_cache.popitem(last=False)
+
         return total
-    
+
+    @classmethod
+    def invalidate_message_cache(
+        cls,
+        message_ids: Union[str, Iterable[str], None] = None,
+    ) -> None:
+        """Invalidate cached per-message token totals.
+
+        Pass a string for one message, an iterable for several, or
+        ``None`` to clear the whole cache.  Idempotent — silently
+        ignores keys that were never cached.
+        """
+        if message_ids is None:
+            cls._message_token_cache.clear()
+            return
+        if isinstance(message_ids, str):
+            cls._message_token_cache.pop(message_ids, None)
+            return
+        for mid in message_ids:
+            if mid:
+                cls._message_token_cache.pop(mid, None)
+
     @classmethod
     def load_template(cls, path: str) -> Optional[PromptTemplate]:
         """
@@ -940,6 +1001,8 @@ class SessionPrompt:
         sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
         channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
         tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
+        device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
+        device_revision: Optional[int] = None,
         use_text_tool_call_mode: bool = False,
     ) -> List[str]:
         """Build the runtime system prompt blocks for a session turn.
@@ -1019,6 +1082,21 @@ class SessionPrompt:
                 },
                 builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
             ),
+        ]
+
+        if device_asset_prompt_factory:
+            blocks.append(await cls._build_cached_async_prompt_block(
+                static_cache=static_cache,
+                name="device_asset_hint",
+                cache_scope="runtime",
+                digest_inputs={
+                    "session_id": session_id,
+                    "device_revision": device_revision,
+                },
+                builder=device_asset_prompt_factory,
+            ))
+
+        blocks.append(
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
                 name="environment_stable",
@@ -1031,8 +1109,8 @@ class SessionPrompt:
                 builder=lambda: cls._join_prompt_parts(
                     SystemPrompt.environment_stable(directory=session_directory, vcs=vcs),
                 ),
-            ),
-        ]
+            )
+        )
 
         custom_block = await cls._build_cached_async_prompt_block(
             static_cache=static_cache,

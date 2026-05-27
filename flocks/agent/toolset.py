@@ -65,7 +65,7 @@ def normalize_declared_tool_names(
             matches = [raw_name] if raw_name in available else []
 
         if not matches:
-            # Built-in agent definitions (librarian, metis, …) declare optional
+            # Built-in agent definitions (librarian, prometheus, …) declare optional
             # tools such as ``lsp_*`` / ``ast_grep_search`` that ship in separate
             # binaries; they are gracefully skipped when not installed.  Treat
             # this as informational only to avoid flooding operational logs.
@@ -107,7 +107,11 @@ def resolve_agent_initial_tools(
     if raw_tools is not None:
         if agent_name == "rex" and not raw_tools:
             return get_all_enabled_builtin_tool_names(), []
-        return normalize_declared_tool_names(raw_tools, available), []
+        tools = normalize_declared_tool_names(raw_tools, available)
+        permission_rules = []
+        if isinstance(legacy_permission_config, dict):
+            permission_rules = permission_from_config(legacy_permission_config)
+        return tools, permission_rules
     if isinstance(legacy_permission_config, dict):
         return expand_legacy_permission_to_tool_names(legacy_permission_config, available)
     # Stricter default: agents without an explicit tools list only receive

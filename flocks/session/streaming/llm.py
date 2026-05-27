@@ -517,29 +517,19 @@ class LLM:
         model: str = "gpt-4",
     ) -> int:
         """
-        Estimate token count for text
-        
-        Uses tiktoken if available, otherwise falls back to character estimate
-        
+        Estimate token count for text using a lightweight chars/4 heuristic.
+
         Args:
             text: Text to count
-            model: Model ID (for tokenizer selection)
-            
+            model: Model ID (kept for API compatibility)
+
         Returns:
             Estimated token count
         """
-        try:
-            from flocks.utils.tiktoken_cache import ensure as _ensure_tiktoken
-            _ensure_tiktoken()
-            import tiktoken
-            encoding = tiktoken.encoding_for_model(model)
-            return len(encoding.encode(text))
-        except ImportError:
-            # Fallback: ~4 chars per token for English
-            return len(text) // 4
-        except Exception as _tok_err:
-            log.debug("llm.token_count.fallback", {"error": str(_tok_err)})
-            return len(text) // 4
+        del model
+        if not text:
+            return 0
+        return len(text) // 4
     
     @classmethod
     async def retry_with_backoff(

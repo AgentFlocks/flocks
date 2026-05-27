@@ -94,6 +94,10 @@ async def sync_service_tool_state(
             ConfigWriter.set_api_service(sk, entry)
 
         ToolRegistry._sync_api_service_states()
+        # Re-apply user-level tool_settings so that individual tools the user
+        # explicitly disabled stay off even after a service is re-enabled, and
+        # tools the user explicitly enabled come back when the service is live.
+        ToolRegistry._apply_tool_settings()
 
         log.info("tool.device.sync", {
             "service_id": service_id,

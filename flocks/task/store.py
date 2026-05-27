@@ -1,6 +1,7 @@
 """Task Store — SQLite persistence for scheduler/execution domain."""
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,11 +27,28 @@ log = Log.create(service="task.store")
 class TaskStore:
     _initialized = False
     _conn: Optional[aiosqlite.Connection] = None
+    # PID of the process that opened ``_conn``.  Used to detect ``fork()``
+    # in uvicorn ``--reload`` / multi-worker launches and force a fresh
+    # connection in the child — SQLite explicitly warns that sharing a
+    # connection across ``fork()`` corrupts the DB.
+    _init_pid: Optional[int] = None
 
     @classmethod
     async def init(cls) -> None:
-        if cls._initialized:
+        current_pid = os.getpid()
+        if cls._initialized and cls._init_pid == current_pid:
             return
+        if cls._initialized and cls._init_pid is not None and cls._init_pid != current_pid:
+            # Inherited an open connection from a forked parent — discard
+            # the handle (do **not** close it; that would tear down the
+            # parent's connection state too) and rebuild from scratch.
+            log.warn("task.store.fork_detected", {
+                "parent_pid": cls._init_pid,
+                "child_pid": current_pid,
+            })
+            cls._conn = None
+            cls._initialized = False
+            cls._init_pid = None
         await Storage._ensure_init()
         cls._conn = await aiosqlite.connect(
             Storage._db_path,
@@ -43,6 +61,7 @@ class TaskStore:
         await cls._conn.commit()
         await cls._normalize_legacy_paused_executions()
         cls._initialized = True
+        cls._init_pid = current_pid
         log.info("task.store.initialized")
 
     @classmethod
@@ -51,9 +70,18 @@ class TaskStore:
             await cls._conn.close()
             cls._conn = None
             cls._initialized = False
+            cls._init_pid = None
 
     @classmethod
     async def _db(cls) -> aiosqlite.Connection:
+        # Trigger fork-safety re-init when called from a child process
+        # that inherited an already-initialised module.
+        if (
+            cls._initialized
+            and cls._init_pid is not None
+            and cls._init_pid != os.getpid()
+        ):
+            await cls.init()
         if not cls._conn:
             await cls.init()
         return cls._conn  # type: ignore[return-value]
