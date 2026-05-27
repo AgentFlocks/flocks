@@ -17,8 +17,10 @@ vi.mock('./client', () => ({
 describe('sessionApi message actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGet.mockResolvedValue({ data: { sessionID: 'session-1', items: [] } });
     mockPatch.mockResolvedValue({ data: { ok: true } });
     mockPost.mockResolvedValue({ data: { ok: true } });
+    mockDelete.mockResolvedValue({ data: { ok: true } });
   });
 
   it('updates a message part through the patch endpoint', async () => {
@@ -66,5 +68,30 @@ describe('sessionApi message actions', () => {
       {},
       { timeout: 0 },
     );
+  });
+
+  it('calls prompt queue endpoints', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.listPromptQueue('session-1');
+    await sessionApi.enqueuePrompt('session-1', {
+      parts: [{ type: 'text', text: 'queued prompt' }],
+      agent: 'rex',
+    });
+    await sessionApi.updateQueuedPrompt('session-1', 'queue-1', 'edited prompt');
+    await sessionApi.removeQueuedPrompt('session-1', 'queue-1');
+    await sessionApi.runQueuedPromptNow('session-1', 'queue-2');
+
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/prompt_queue');
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/prompt_queue',
+      { parts: [{ type: 'text', text: 'queued prompt' }], agent: 'rex' },
+    );
+    expect(mockPatch).toHaveBeenCalledWith(
+      '/api/session/session-1/prompt_queue/queue-1',
+      { text: 'edited prompt' },
+    );
+    expect(mockDelete).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-1');
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-2/run_now');
   });
 });

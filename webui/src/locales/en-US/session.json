@@ -67,6 +67,20 @@
     "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
+    "queue": {
+      "count": "{{count}} Queued",
+      "enqueue": "Add to queue",
+      "edit": "Edit queued prompt",
+      "remove": "Remove queued prompt",
+      "runNow": "Run now",
+      "full": "You can queue up to 50 prompts",
+      "enqueueFailed": "Failed to add to queue",
+      "updateFailed": "Failed to update queued prompt",
+      "removeFailed": "Failed to remove queued prompt",
+      "runNowFailed": "Failed to run queued prompt",
+      "attachmentOnly": "Attachment message",
+      "placeholderStreaming": "Rex is working. Send to add this to the queue…"
+    },
     "compactionStage": {
       "load": "Loaded {{count}} messages",
       "strategyGeneric": "Picked compaction strategy",

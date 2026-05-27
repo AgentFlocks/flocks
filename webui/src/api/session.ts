@@ -13,6 +13,24 @@ export interface SessionMessagePartPayload {
   metadata?: Record<string, unknown>;
 }
 
+export interface QueuedPrompt {
+  id: string;
+  sessionID: string;
+  parts: Array<Record<string, unknown>>;
+  agent?: string | null;
+  model?: Record<string, unknown> | null;
+  variant?: string | null;
+  messageID?: string | null;
+  status: 'pending' | 'executing' | string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PromptQueueResponse {
+  sessionID: string;
+  items: QueuedPrompt[];
+}
+
 export interface SessionListParams {
   limit?: number;
   offset?: number;
@@ -98,6 +116,36 @@ export const sessionApi = {
     mockReply?: string;
   }) => {
     const response = await client.post(`/api/session/${sessionId}/message`, data, { timeout: 0 });
+    return response.data;
+  },
+
+  listPromptQueue: async (sessionId: string): Promise<PromptQueueResponse> => {
+    const response = await client.get(`/api/session/${sessionId}/prompt_queue`);
+    return response.data;
+  },
+
+  enqueuePrompt: async (sessionId: string, data: {
+    parts: Array<Record<string, unknown>>;
+    agent?: string;
+    model?: Record<string, unknown>;
+    variant?: string;
+  }) => {
+    const response = await client.post(`/api/session/${sessionId}/prompt_queue`, data);
+    return response.data;
+  },
+
+  updateQueuedPrompt: async (sessionId: string, queueId: string, text: string) => {
+    const response = await client.patch(`/api/session/${sessionId}/prompt_queue/${queueId}`, { text });
+    return response.data;
+  },
+
+  removeQueuedPrompt: async (sessionId: string, queueId: string) => {
+    const response = await client.delete(`/api/session/${sessionId}/prompt_queue/${queueId}`);
+    return response.data;
+  },
+
+  runQueuedPromptNow: async (sessionId: string, queueId: string) => {
+    const response = await client.post(`/api/session/${sessionId}/prompt_queue/${queueId}/run_now`);
     return response.data;
   },
 

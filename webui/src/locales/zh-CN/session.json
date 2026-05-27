@@ -67,6 +67,20 @@
     "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
+    "queue": {
+      "count": "{{count}} 个排队任务",
+      "enqueue": "加入队列",
+      "edit": "编辑排队任务",
+      "remove": "撤销排队任务",
+      "runNow": "立即执行",
+      "full": "最多只能排队 50 个任务",
+      "enqueueFailed": "加入队列失败",
+      "updateFailed": "更新排队任务失败",
+      "removeFailed": "撤销排队任务失败",
+      "runNowFailed": "立即执行失败",
+      "attachmentOnly": "附件消息",
+      "placeholderStreaming": "Rex 正在处理中，发送后将加入队列…"
+    },
     "compactionStage": {
       "load": "加载消息（{{count}} 条）",
       "strategyGeneric": "选择压缩策略",

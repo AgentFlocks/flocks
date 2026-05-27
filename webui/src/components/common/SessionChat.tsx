@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2 } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -29,7 +29,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
-import { sessionApi } from '@/api/session';
+import { sessionApi, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import { useToast } from './Toast';
@@ -375,6 +375,138 @@ function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
 }
 
+function getQueuedPromptText(item: QueuedPrompt): string {
+  const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
+  return typeof textPart?.text === 'string' ? textPart.text : '';
+}
+
+interface QueuedPromptPanelProps {
+  items: QueuedPrompt[];
+  expanded: boolean;
+  editingId: string | null;
+  editingText: string;
+  actionId: string | null;
+  t: ReturnType<typeof useTranslation>['t'];
+  onToggle: () => void;
+  onEditStart: (item: QueuedPrompt) => void;
+  onEditChange: (text: string) => void;
+  onEditCancel: () => void;
+  onEditSave: (item: QueuedPrompt) => void;
+  onRemove: (item: QueuedPrompt) => void;
+  onRunNow: (item: QueuedPrompt) => void;
+}
+
+function QueuedPromptPanel({
+  items,
+  expanded,
+  editingId,
+  editingText,
+  actionId,
+  t,
+  onToggle,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onRemove,
+  onRunNow,
+}: QueuedPromptPanelProps) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 hover:bg-zinc-100/70 transition-colors"
+      >
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <span>{t('chat.queue.count', { count: items.length })}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-40 overflow-y-auto border-t border-zinc-200">
+          {items.map((item) => {
+            const isEditing = editingId === item.id;
+            const isBusy = actionId === item.id || item.status === 'executing';
+            const text = getQueuedPromptText(item);
+            return (
+              <div key={item.id} className="flex items-start gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0">
+                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  {isEditing ? (
+                    <textarea
+                      value={editingText}
+                      onChange={(event) => onEditChange(event.target.value)}
+                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100"
+                      rows={2}
+                    />
+                  ) : (
+                    <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                  )}
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  {isEditing ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditSave(item)}
+                        disabled={isBusy || !editingText.trim()}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.save')}
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onEditCancel}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.cancel')}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditStart(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.queue.edit')}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRunNow(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.queue.runNow')}
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemove(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                        title={t('chat.queue.remove')}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SessionChat({
   sessionId,
   live = false,
@@ -420,6 +552,11 @@ export default function SessionChat({
   const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const [queueExpanded, setQueueExpanded] = useState(true);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [editingQueueText, setEditingQueueText] = useState('');
+  const [queueActionId, setQueueActionId] = useState<string | null>(null);
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -523,7 +660,7 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !isStreaming && !hasUploadingFiles &&
+  const canSend = !sending && !hasUploadingFiles &&
     (!!input.trim() || successfulDocAttachments.length > 0 || successfulImageAttachments.length > 0);
 
   const scrollToBottom = useCallback(() => {
@@ -566,6 +703,19 @@ export default function SessionChat({
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
+
+  const fetchPromptQueue = useCallback(async () => {
+    if (!sessionId) {
+      setQueuedPrompts([]);
+      return;
+    }
+    try {
+      const response = await sessionApi.listPromptQueue(sessionId);
+      setQueuedPrompts(response.items ?? []);
+    } catch (err) {
+      console.warn('[SessionChat] Failed to fetch prompt queue:', err);
+    }
+  }, [sessionId]);
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
@@ -662,6 +812,10 @@ export default function SessionChat({
           }
           return [...prev, { stage, data, ts: Date.now() }];
         });
+      } else if (type === 'session.prompt_queue.updated' && properties.sessionID === sessionId) {
+        const items = Array.isArray(properties.items) ? properties.items : [];
+        setQueuedPrompts(items as QueuedPrompt[]);
+        if (items.length > 0) setQueueExpanded(true);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
@@ -712,6 +866,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       refetch();
+      fetchPromptQueue();
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
       });
@@ -747,6 +902,10 @@ export default function SessionChat({
     setIsCompacting(false);
     setCompactingMessage('');
     setCompactionStages([]);
+    setQueuedPrompts([]);
+    setEditingQueueId(null);
+    setEditingQueueText('');
+    setQueueActionId(null);
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
@@ -757,6 +916,10 @@ export default function SessionChat({
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
     setInput(readChatDraft(sessionId));
   }, [sessionId, clearPendingQuestions]);
+
+  useEffect(() => {
+    fetchPromptQueue();
+  }, [fetchPromptQueue]);
 
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
@@ -806,11 +969,14 @@ export default function SessionChat({
   useEffect(() => {
     if (!sessionId) return;
     const handler = () => {
-      if (document.visibilityState === 'visible') refetch();
+      if (document.visibilityState === 'visible') {
+        refetch();
+        fetchPromptQueue();
+      }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch]);
+  }, [sessionId, refetch, fetchPromptQueue]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -1173,6 +1339,26 @@ export default function SessionChat({
     }
   };
 
+  const enqueueText = async (text: string, imageParts: ImagePartData[] = []) => {
+    if (!sessionId) return;
+    try {
+      await sessionApi.enqueuePrompt(sessionId, {
+        parts: buildPromptParts(text, imageParts),
+        ...(agentName ? { agent: agentName } : {}),
+      });
+      await fetchPromptQueue();
+      setQueueExpanded(true);
+    } catch (err: any) {
+      const statusCode = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const message = statusCode === 409
+        ? t('chat.queue.full')
+        : detail || err?.message || t('chat.queue.enqueueFailed');
+      toast.error(message);
+      throw err;
+    }
+  };
+
   const handleSend = async () => {
     if (!canSend) return;
     const rawText = input.trim();
@@ -1192,18 +1378,29 @@ export default function SessionChat({
       filename: a.name,
     }));
 
-    // Route slash commands through the command API (requires an active session, no images)
+    // Keep client-side commands local even while Rex is streaming.
     const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
       ? parseSlashCommand(rawText) : null;
-    if (parsed) {
-      // Handle /new command locally: create a new session
-      if (parsed.command === 'new') {
-        if (onCreateNewSession) {
-          await onCreateNewSession();
-        }
-        return;
+    if (parsed?.command === 'new') {
+      if (onCreateNewSession) {
+        await onCreateNewSession();
       }
+      return;
+    }
 
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(text, imageParts);
+        setAttachments([]);
+      } catch {
+        setInput(rawText);
+        setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+      }
+      return;
+    }
+
+    // Route slash commands through the command API (requires an active session, no images)
+    if (parsed) {
       if (!sessionId) {
         // Slash commands need an existing session; restore input and do nothing
         setInput(rawText);
@@ -1323,6 +1520,61 @@ export default function SessionChat({
       abortedMessageIdRef.current = null;
     }
   }, [markMessageStopped, sessionId]);
+
+  const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
+    setEditingQueueId(item.id);
+    setEditingQueueText(getQueuedPromptText(item));
+  }, []);
+
+  const handleQueuedEditCancel = useCallback(() => {
+    setEditingQueueId(null);
+    setEditingQueueText('');
+  }, []);
+
+  const handleQueuedEditSave = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    const text = editingQueueText.trim();
+    if (!text) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.updateQueuedPrompt(sessionId, item.id, text);
+      handleQueuedEditCancel();
+      await fetchPromptQueue();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueText, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+
+  const handleQueuedRemove = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.removeQueuedPrompt(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+
+  const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.runQueuedPromptNow(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
+      setIsStreaming(true);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
 
   // Fire onStreamingDone when isStreaming transitions true → false
   useEffect(() => {
@@ -1704,6 +1956,21 @@ export default function SessionChat({
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
+            <QueuedPromptPanel
+              items={queuedPrompts}
+              expanded={queueExpanded}
+              editingId={editingQueueId}
+              editingText={editingQueueText}
+              actionId={queueActionId}
+              t={t}
+              onToggle={() => setQueueExpanded((value) => !value)}
+              onEditStart={handleQueuedEditStart}
+              onEditChange={setEditingQueueText}
+              onEditCancel={handleQueuedEditCancel}
+              onEditSave={handleQueuedEditSave}
+              onRemove={handleQueuedRemove}
+              onRunNow={handleQueuedRunNow}
+            />
             <input
               ref={fileInputRef}
               type="file"
@@ -1886,16 +2153,16 @@ export default function SessionChat({
                       isCompacting
                         ? t('chat.placeholderCompacting')
                         : isStreaming
-                          ? t('chat.placeholderStreaming')
+                          ? t('chat.queue.placeholderStreaming')
                           : nodeRef
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
                     className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
-                      isStreaming ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
+                      sending ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
                     }`}
                     style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
-                    disabled={sending || isStreaming}
+                    disabled={sending}
                     rows={1}
                   />
                 </div>
@@ -1905,7 +2172,7 @@ export default function SessionChat({
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={sending || isStreaming}
+                    disabled={sending}
                     title={t('chat.upload.selectWithImage')}
                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
@@ -1923,13 +2190,27 @@ export default function SessionChat({
                   <div className="flex-1" />
 
                   {isStreaming ? (
-                    <button
-                      onClick={handleAbort}
-                      title={t('chat.stopTitle')}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
-                    >
-                      <Square className="w-3 h-3 fill-current" />
-                    </button>
+                    <>
+                      <button
+                        onClick={handleSend}
+                        disabled={!canSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                          canSend
+                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                            : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
+                        }`}
+                      >
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                      </button>
+                      <button
+                        onClick={handleAbort}
+                        title={t('chat.stopTitle')}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                      >
+                        <Square className="w-3 h-3 fill-current" />
+                      </button>
+                    </>
                   ) : (
                     <button
                       onClick={handleSend}
