@@ -41,6 +41,7 @@ export interface UpgradeRequestDetails {
   flockspro_component_version?: string;
   auto_install_result?: string;
   auto_install_completed_at?: string;
+  license_refreshed_at?: string;
 }
 
 export interface UpgradeRequestStatus {

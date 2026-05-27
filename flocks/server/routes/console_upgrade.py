@@ -385,7 +385,9 @@ async def _maybe_refresh_pro_license(record: dict[str, Any]) -> None:
         refresh_fn = getattr(checker, "refresh", None)
         if callable(refresh_fn):
             await refresh_fn()  # type: ignore[misc]
-            details["license_refreshed_at"] = datetime.now(UTC).isoformat()
+            refreshed_at = datetime.now(UTC).isoformat()
+            details["license_refreshed_at"] = refreshed_at
+            record["updated_at"] = refreshed_at
     except Exception as exc:
         details["license_refresh_error"] = str(exc)
 
