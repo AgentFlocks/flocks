@@ -210,22 +210,34 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByLabelText('需要获取的接口或页面行为')).toBeInTheDocument();
   });
 
-  it('refreshes templates and enters device config when matching template appears', async () => {
+  it('submits webcli draft to Rex with skill-first device prompt', async () => {
     const user = userEvent.setup();
-    mocks.listApiServices
-      .mockResolvedValueOnce({ data: [buildTemplate()] })
-      .mockResolvedValueOnce({
-        data: [
-          buildTemplate(),
-          buildTemplate({
-            id: 'acme_guard_device_v1',
-            name: 'Acme Guard',
-            vendor: 'acme_security',
-            description_cn: '自定义接入设备',
-          }),
-        ],
-      });
+    render(<DeviceIntegrationPage />);
 
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
+    await user.click(screen.getByRole('button', { name: /WebCLI 接入/ }));
+
+    await user.type(screen.getByLabelText('设备产品名'), 'Acme Portal');
+    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
+    await user.type(screen.getByLabelText('产品 URL'), 'https://portal.example.com');
+    await user.type(screen.getByLabelText('需要获取的接口或页面行为'), '告警列表和资产详情');
+    await user.type(screen.getByLabelText('认证/权限提示'), 'Cookie + CSRF Token');
+    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
+
+    await waitFor(() => expect(mocks.createAndSend).toHaveBeenCalledTimes(1));
+    const arg = mocks.createAndSend.mock.calls[0][0];
+    expect(arg.text).toContain('接入方式：WebCLI');
+    expect(arg.text).toContain('https://portal.example.com');
+    expect(arg.text).toContain('references/cli-in-skill.md');
+    expect(arg.text).toContain('integration_type: device');
+    expect(arg.text).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
+    expect(arg.text).toContain('默认认证方式为 `auth-state`');
+    expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
+  });
+
+  it('hides refresh action and rex footer hint in chat view', async () => {
+    const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
     await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
@@ -237,11 +249,27 @@ describe('DeviceIntegrationPage', () => {
     await user.type(screen.getByLabelText('API 文档链接'), 'https://device.example.com/openapi');
     await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
 
-    await user.click(screen.getByRole('button', { name: /刷新设备模板/ }));
+    await screen.findByText('SessionChat:session-1');
+    expect(screen.queryByRole('button', { name: /刷新设备模板/ })).toBeNull();
+    expect(screen.queryByText(/已进入 Rex 对话/)).toBeNull();
+  });
 
-    await waitFor(() => expect(mocks.refreshTools).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText('填写配置')).toBeInTheDocument();
-    expect(screen.getByText('acme_guard_device_v1')).toBeInTheDocument();
+  it('navigates to the matching session from rex chat view', async () => {
+    const user = userEvent.setup();
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByRole('button', { name: /自定义设备/ }));
+    await user.click(screen.getByRole('button', { name: /API 接入/ }));
+    await user.type(screen.getByLabelText('设备产品名'), 'Acme Guard');
+    await user.type(screen.getByLabelText('厂商名称'), 'Acme Security');
+    await user.type(screen.getByLabelText('Base URL'), 'https://device.example.com/api');
+    await user.click(screen.getByRole('button', { name: /提交给 Rex/ }));
+
+    await screen.findByText('SessionChat:session-1');
+    await user.click(screen.getByRole('button', { name: /前往会话列表查看/ }));
+
+    expect(mocks.navigate).toHaveBeenCalledWith('/sessions?session=session-1');
   });
 
   it('redirects syslog flow to workflows page', async () => {

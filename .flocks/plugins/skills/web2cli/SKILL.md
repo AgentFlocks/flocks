@@ -325,9 +325,25 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
 
 推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
 
-### 11. CLI 工具集成到skill
+### 11. 将 WebCLI 能力沉淀为最终产物
 
-将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
+分为基础层和可选增强层：
+
+#### 基础要求：必须集成到 skill
+
+- 所有 `web2cli` 结果都必须先按 `references/cli-in-skill.md` 集成为可长期维护的 skill / CLI 资产
+- 这是必选步骤，因为认证失效、浏览器恢复、重新抓包、CLI 参数说明和日常排障都依赖 skill 文档入口
+- `references/browser-workflow.md` 必须记录浏览器连接检查、登录步骤、state 保存位置和认证恢复流程
+
+#### CLI 放置原则
+
+- 主 CLI 的落点是二选一：要么放在 skill 的 `scripts/`，要么放在 `tools/device/<plugin_id>/` 下
+- 通用网站、查询等场景：优先放在 skill 的 `scripts/`
+- 安全设备接入：按 `references/cli-in-device.md` 将能力整理成 `tools/device/<plugin_id>/` 下的 `_provider.yaml`、工具 YAML 和 handler
+- 不要同时维护两份独立演进的主 CLI，避免能力漂移和认证逻辑分叉
+- 无论主 CLI 放在哪，skill 集成都始终是必选
+
+不要只停留在一次性 CLI 或临时抓包结果；最终都要沉淀成可长期维护的资产。
 
 ### 12. summary并关闭浏览器 tab
 
@@ -384,4 +400,5 @@ else:
 - 登录状态失效：重新登录后再次执行保存状态命令。
 
 ## Reference
+- references/cli-in-device.md 在 skill 集成完成后，将 WebCLI 能力进一步封装为 device 插件
 - references/cli-in-skill.md 将生成的 CLI 集成到 skill 中使用

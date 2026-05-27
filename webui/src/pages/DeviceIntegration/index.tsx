@@ -300,7 +300,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                   {
                     key: 'webcli' as const,
                     title: 'WebCLI 接入',
-                    desc: '设备没有开放 API 时使用。提供产品 URL 和需要获取的接口，由浏览器抓取后生成 CLI 并集成到 skill。',
+                    desc: '设备没有开放 API 时使用。先生成并集成 skill/CLI 资产；如果是安全设备场景，再额外生成可在设备页使用的 device 插件。',
                   },
                   {
                     key: 'syslog' as const,
@@ -1213,8 +1213,6 @@ export default function DeviceIntegrationPage() {
           mode={panel.mode}
           onClose={() => setPanel(null)}
           onBack={() => setPanel({ kind: 'wizard' })}
-          onRefreshTemplates={() => fetchData(true)}
-          onTemplateMatched={(template) => setPanel({ kind: 'add', template })}
         />
       )}
 

@@ -27,10 +27,13 @@ describe('customDevice helpers', () => {
     expect(prompt).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
     expect(prompt).toContain('`name` 必须精确使用产品名：`Acme Guard`');
     expect(prompt).toContain('`service_id` 建议使用：`acme_guard_device`');
+    expect(prompt).toContain('`description` / `description_cn` 会直接展示在设备接入页、概览页和 Hub 列表');
+    expect(prompt).toContain('更长的兼容性、版本差异、使用限制和调试说明优先写进 `notes`');
     expect(prompt).toContain('tool-builder skill');
+    expect(prompt).toContain('返回设备页查看是否已经出现对应 device 插件');
   });
 
-  it('builds webcli prompt with browser capture guidance', () => {
+  it('builds webcli prompt with device plugin constraints', () => {
     const draft: CustomDeviceWebCliDraft = {
       accessMode: 'webcli',
       deviceName: 'Acme Portal',
@@ -48,8 +51,12 @@ describe('customDevice helpers', () => {
     expect(prompt).toContain('需要获取的接口/页面行为：告警列表和资产详情');
     expect(prompt).toContain('browser-use / web2cli');
     expect(prompt).toContain('web2cli skill');
-    expect(prompt).toContain('CLI');
-    expect(prompt).toContain('skill');
+    expect(prompt).toContain('integration_type: device');
+    expect(prompt).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
+    expect(prompt).toContain('`service_id` 建议使用：`acme_portal_device`');
+    expect(prompt).toContain('`auth_state_path`');
+    expect(prompt).toContain('`api`、`webcli_api`、`process`、`composed`');
+    expect(prompt).toContain('返回设备页查看是否已经出现对应 WebCLI device 插件');
   });
 
   it('sanitizes vendor key and service id', () => {

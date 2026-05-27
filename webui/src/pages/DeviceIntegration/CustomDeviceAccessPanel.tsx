@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState, type InputHTMLAttributes, type TextareaHTMLAttributes } from 'react';
-import { ChevronLeft, Loader2, MessageSquare, RefreshCw, Route, Workflow, X } from 'lucide-react';
+import { ChevronLeft, Loader2, MessageSquare, Route, Workflow, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useToast } from '@/components/common/Toast';
 import SessionChat from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
-import { toolAPI } from '@/api/tool';
 import type {
-  APIServiceSummary,
   CustomDeviceAccessMode,
   CustomDeviceApiDraft,
   CustomDeviceWebCliDraft,
@@ -15,7 +13,6 @@ import {
   buildCustomDevicePrompt,
   buildCustomDeviceSessionContext,
   buildCustomDeviceWelcomeMessage,
-  findTemplateForCustomDevice,
 } from './customDevice';
 
 type PanelView = 'details' | 'rex' | 'guide';
@@ -27,7 +24,7 @@ const EMPTY_API_DRAFT: CustomDeviceApiDraft = {
   version: '',
   baseUrl: '',
   docsUrl: '',
-  capabilities: '全部 API',
+  capabilities: '',
 };
 
 const EMPTY_WEBCLI_DRAFT: CustomDeviceWebCliDraft = {
@@ -89,14 +86,10 @@ export default function CustomDeviceAccessPanel({
   mode,
   onClose,
   onBack,
-  onRefreshTemplates,
-  onTemplateMatched,
 }: {
   mode: CustomDeviceAccessMode;
   onClose: () => void;
   onBack: () => void;
-  onRefreshTemplates: () => Promise<APIServiceSummary[]>;
-  onTemplateMatched: (template: APIServiceSummary) => void;
 }) {
   const navigate = useNavigate();
   const toast = useToast();
@@ -105,9 +98,9 @@ export default function CustomDeviceAccessPanel({
   const [apiDraft, setApiDraft] = useState<CustomDeviceApiDraft>(EMPTY_API_DRAFT);
   const [webcliDraft, setWebcliDraft] = useState<CustomDeviceWebCliDraft>(EMPTY_WEBCLI_DRAFT);
   const [submitting, setSubmitting] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
 
   const draft = mode === 'api' ? apiDraft : mode === 'webcli' ? webcliDraft : null;
+  const isRexView = !isSyslog && view === 'rex';
   const title = useMemo(() => {
     if (mode === 'api') return '自定义设备 API 接入';
     if (mode === 'webcli') return '自定义设备 WebCLI 接入';
@@ -142,23 +135,10 @@ export default function CustomDeviceAccessPanel({
     }
   };
 
-  const handleRefreshTemplates = async () => {
-    if (!draft) return;
-    setRefreshing(true);
-    try {
-      await toolAPI.refresh();
-      const matched = findTemplateForCustomDevice(await onRefreshTemplates(), draft.deviceName);
-      if (matched) {
-        toast.success('已找到新的设备模板，继续填写接入配置');
-        onTemplateMatched(matched);
-        return;
-      }
-      toast.info('已刷新设备模板，暂未找到同名设备，请继续在 Rex 中完善插件');
-    } catch {
-      toast.error('刷新设备模板失败');
-    } finally {
-      setRefreshing(false);
-    }
+  const handleOpenSession = () => {
+    if (!sessionId) return;
+    const params = new URLSearchParams({ session: sessionId });
+    navigate(`/sessions?${params.toString()}`);
   };
 
   const renderApiForm = () => (
@@ -321,7 +301,7 @@ export default function CustomDeviceAccessPanel({
               <h3 className="text-sm font-semibold text-zinc-900 truncate">{title}</h3>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {mode === 'api' && '提供 API 文档，生成可复用的 device 插件'}
-                {mode === 'webcli' && '提供产品 URL 和目标接口，生成 CLI 并集成到 skill'}
+                {mode === 'webcli' && '提供产品 URL 和目标接口，生成可在设备页使用的 WebCLI device 插件'}
                 {mode === 'syslog' && 'Syslog 仅支持在工作流集成页面配置'}
               </p>
             </div>
@@ -331,7 +311,7 @@ export default function CustomDeviceAccessPanel({
           </button>
         </div>
 
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        <div className={isRexView ? 'flex-1 min-h-0 overflow-hidden' : 'flex-1 min-h-0 overflow-y-auto px-5 py-4'}>
           {isSyslog ? (
             <div className="space-y-4">
               <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3">
@@ -358,25 +338,25 @@ export default function CustomDeviceAccessPanel({
                 <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
                   提交后会直接进入 Rex 对话。
                   {mode === 'api'
-                    ? '你可以继续补充 API 文档链接、上传文档文件或说明接口细节。插件生成完成后，再点击底部“刷新设备模板”继续接入。'
-                    : '你可以继续补充页面操作、抓包目标和认证方式。最终结果应当是 CLI 集成到 skill 中。'}
+                    ? '你可以继续补充 API 文档链接、上传文档文件或说明接口细节。插件生成完成后，可返回设备页继续后续配置。'
+                    : '你可以继续补充页面操作、抓包目标和认证方式。最终结果应当是可在设备页识别的 WebCLI device 插件；如果需要，也可以额外保留 CLI 作为调试入口。'}
                 </p>
               </div>
               {mode === 'api' ? renderApiForm() : renderWebCliForm()}
             </div>
           ) : (
-            <div className="h-full min-h-[420px] -mx-5 -my-4">
-              <div className="px-5 py-3 border-b border-zinc-100 bg-zinc-50">
+            <div className="flex h-full min-h-0 flex-col">
+              <div className="flex-shrink-0 px-5 py-3 border-b border-zinc-100 bg-zinc-50">
                 <p className="text-xs text-zinc-500 leading-relaxed">
                   {mode === 'api'
-                    ? '与 Rex 协作生成插件后，回到此处点击“刷新设备模板”。如果已生成同名 device 插件，页面会自动跳转到设备配置面板。若 API 文档不便粘贴，可直接在当前对话中上传。'
-                    : '与 Rex 协作完成后，请确认 CLI 已生成并集成到 skill 中。这里不会生成设备模板，也不需要刷新设备模板。'}
+                    ? '与 Rex 协作生成插件后，可返回设备页查看是否已出现对应 device 插件。若 API 文档不便粘贴，可直接在当前对话中上传。'
+                    : '与 Rex 协作完成后，请确认 WebCLI device 插件已生成。完成后可返回设备页继续查看和配置；CLI 仅作为可选调试入口保留。'}
                 </p>
               </div>
               <SessionChat
                 sessionId={sessionId}
                 live={!!sessionId}
-                className="h-[calc(100%-61px)]"
+                className="flex-1 min-h-0"
                 placeholder="继续补充接口说明、认证细节或调试信息"
                 emptyText="Rex 准备中..."
                 onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
@@ -385,7 +365,7 @@ export default function CustomDeviceAccessPanel({
           )}
         </div>
 
-        <div className="border-t border-zinc-100 px-5 py-4 flex-shrink-0">
+        <div className="border-t border-zinc-100 px-4 py-2.5 flex-shrink-0">
           {isSyslog ? (
             <div className="flex items-center justify-between gap-2">
               <button
@@ -405,40 +385,33 @@ export default function CustomDeviceAccessPanel({
               </button>
             </div>
           ) : (
-            <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-1.5">
+              <div className="flex items-center gap-1.5">
                 <button
                   onClick={view === 'details' ? onBack : () => setView('details')}
-                  className="px-4 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 transition-colors"
+                  className="px-3.5 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 transition-colors"
                 >
                   {view === 'details' ? '返回选择方式' : '返回资料填写'}
                 </button>
-                {mode === 'api' && view === 'rex' && (
+                {view === 'rex' && sessionId && (
                   <button
-                    onClick={() => void handleRefreshTemplates()}
-                    disabled={refreshing}
-                    className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 disabled:opacity-50 transition-colors"
+                    onClick={handleOpenSession}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm rounded-lg border border-zinc-200 text-zinc-600 hover:bg-zinc-50 transition-colors"
                   >
-                    {refreshing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-                    刷新设备模板
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    前往会话列表查看
                   </button>
                 )}
               </div>
-              {view === 'details' ? (
+              {view === 'details' && (
                 <button
                   onClick={() => void handleSubmitToRex()}
                   disabled={submitting}
-                  className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
                 >
                   {submitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageSquare className="w-3.5 h-3.5" />}
                   提交给 Rex
                 </button>
-              ) : (
-                <span className="text-xs text-zinc-400">
-                  {mode === 'api'
-                    ? '已进入 Rex 对话，可继续补充文档与需求'
-                    : '已进入 Rex 对话，可继续补充抓包目标并完成 CLI skill 集成'}
-                </span>
               )}
             </div>
           )}
