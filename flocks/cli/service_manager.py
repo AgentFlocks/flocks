@@ -26,6 +26,7 @@ from typing import Iterable, Sequence
 import httpx
 
 from flocks.browser.admin import stop_all_daemons as stop_all_browser_daemons
+from flocks.utils.log import rotate_log_file
 
 try:
     import fcntl
@@ -1670,6 +1671,7 @@ def _spawn_process(
         kwargs["start_new_session"] = True
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log_file(log_path)
     handle = log_path.open("a", encoding="utf-8")
     try:
         return subprocess.Popen(

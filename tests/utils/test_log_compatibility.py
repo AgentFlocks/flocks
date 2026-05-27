@@ -6,7 +6,7 @@ import pytest
 import time
 import tempfile
 from pathlib import Path
-from flocks.utils.log import Log, Logger, LogLevel
+from flocks.utils.log import Log, Logger, LogLevel, rotate_log_file
 
 
 class TestLoggerCompatibility:
@@ -225,6 +225,41 @@ class TestLoggerCompatibility:
             assert 'data={"nested": "value"}' in output or 'data={"nested":"value"}' in output
         finally:
             Log._writer = old_stderr
+
+    def test_large_object_values_are_truncated(self, monkeypatch):
+        """Test large objects are bounded before being written to logs."""
+        logger = Log.create(service="test")
+
+        import io
+        old_stderr = Log._writer
+        Log._writer = io.StringIO()
+        monkeypatch.setenv("FLOCKS_LOG_VALUE_MAX_CHARS", "20")
+
+        try:
+            logger.info("message", {"data": {"payload": "x" * 100}})
+            output = Log._writer.getvalue()
+
+            assert "data=" in output
+            assert "<truncated" in output
+            assert len(output) < 200
+        finally:
+            Log._writer = old_stderr
+
+    def test_rotate_log_file_keeps_bounded_backups(self, tmp_path: Path):
+        """Test oversized runtime logs rotate before another process appends."""
+        log_path = tmp_path / "backend.log"
+        log_path.write_text("x" * 20, encoding="utf-8")
+
+        rotate_log_file(log_path, max_bytes=10, backup_count=2)
+
+        assert not log_path.exists()
+        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "x" * 20
+
+        log_path.write_text("y" * 20, encoding="utf-8")
+        rotate_log_file(log_path, max_bytes=10, backup_count=2)
+
+        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "y" * 20
+        assert (tmp_path / "backend.log.2").read_text(encoding="utf-8") == "x" * 20
     
     def test_time_diff_calculation(self):
         """Test time difference calculation between logs"""
@@ -233,6 +268,7 @@ class TestLoggerCompatibility:
         import io
         old_stderr = Log._writer
         Log._writer = io.StringIO()
+        Log._last_time = int(time.time() * 1000)
         
         try:
             logger.info("first")

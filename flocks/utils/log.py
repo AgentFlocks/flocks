@@ -17,6 +17,11 @@ import json
 import glob as file_glob
 
 
+_DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
+_DEFAULT_LOG_BACKUP_COUNT = 3
+_DEFAULT_LOG_VALUE_MAX_CHARS = 8 * 1024
+
+
 def _log_dir() -> Path:
     """Log directory: FLOCKS_LOG_DIR, or FLOCKS_ROOT/logs, or ~/.flocks/logs. Matches config."""
     raw = os.getenv("FLOCKS_LOG_DIR")
@@ -31,6 +36,126 @@ def _log_dir() -> Path:
 def get_log_dir() -> Path:
     """Return the log directory for file handlers (e.g. workflow). Same as Log.init() uses."""
     return _log_dir()
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def get_log_max_bytes(default: int = _DEFAULT_LOG_MAX_BYTES) -> int:
+    """Return the per-file log size limit in bytes.
+
+    ``FLOCKS_LOG_MAX_BYTES`` is exact; ``FLOCKS_LOG_MAX_MB`` is a convenient
+    human-facing override. Values <= 0 disable rotation.
+    """
+    if os.getenv("FLOCKS_LOG_MAX_BYTES") is not None:
+        return _env_int("FLOCKS_LOG_MAX_BYTES", default)
+    max_mb = os.getenv("FLOCKS_LOG_MAX_MB")
+    if max_mb is not None:
+        try:
+            return int(float(max_mb) * 1024 * 1024)
+        except ValueError:
+            return default
+    return default
+
+
+def get_log_backup_count(default: int = _DEFAULT_LOG_BACKUP_COUNT) -> int:
+    """Return how many rotated backups to keep for long-lived log files."""
+    return max(0, _env_int("FLOCKS_LOG_BACKUP_COUNT", default))
+
+
+def rotate_log_file(
+    path: Path,
+    *,
+    max_bytes: Optional[int] = None,
+    backup_count: Optional[int] = None,
+) -> None:
+    """Rotate ``path`` if it is already over the configured size limit."""
+    limit = get_log_max_bytes() if max_bytes is None else max_bytes
+    backups = get_log_backup_count() if backup_count is None else backup_count
+    if limit <= 0 or not path.exists():
+        return
+    try:
+        if path.stat().st_size < limit:
+            return
+        if backups <= 0:
+            path.unlink(missing_ok=True)
+            return
+        for index in range(backups - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{index}")
+            dst = path.with_name(f"{path.name}.{index + 1}")
+            if src.exists():
+                src.replace(dst)
+        path.replace(path.with_name(f"{path.name}.1"))
+    except OSError:
+        return
+
+
+class _RotatingTextWriter:
+    """Small line-buffered writer with size-based rotation for Flocks logs."""
+
+    def __init__(self, path: Path, *, max_bytes: int, backup_count: int):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
+        self._handle: Optional[TextIO] = None
+        self._open()
+
+    def _open(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._handle = open(self.path, "a", buffering=1, encoding="utf-8")
+
+    def _should_rotate(self, message: str) -> bool:
+        if self.max_bytes <= 0:
+            return False
+        current_size = self.path.stat().st_size if self.path.exists() else 0
+        return current_size + len(message.encode("utf-8")) > self.max_bytes
+
+    def write(self, message: str) -> int:
+        if self._should_rotate(message):
+            self.close()
+            rotate_log_file(
+                self.path,
+                max_bytes=self.max_bytes,
+                backup_count=self.backup_count,
+            )
+            self._open()
+        assert self._handle is not None
+        return self._handle.write(message)
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+
+def _truncate_text(value: str, max_chars: Optional[int] = None) -> str:
+    limit = _env_int("FLOCKS_LOG_VALUE_MAX_CHARS", _DEFAULT_LOG_VALUE_MAX_CHARS) if max_chars is None else max_chars
+    if limit <= 0 or len(value) <= limit:
+        return value
+    omitted = len(value) - limit
+    return f"{value[:limit]}...<truncated {omitted} chars>"
+
+
+def _format_log_value(value: Any) -> str:
+    if isinstance(value, Exception):
+        return _truncate_text(Log._format_error(value))
+    if isinstance(value, (dict, list)):
+        try:
+            return _truncate_text(json.dumps(value))
+        except (TypeError, ValueError):
+            return _truncate_text(str(value))
+    return _truncate_text(str(value))
 
 
 def append_upgrade_text_log(message: str) -> None:
@@ -101,14 +226,7 @@ class Logger:
         # Build prefix (key=value pairs)
         prefix_parts = []
         for key, value in all_tags.items():
-            if isinstance(value, Exception):
-                # Format error with message and cause chain
-                prefix_parts.append(f"{key}={Log._format_error(value)}")
-            elif isinstance(value, dict):
-                # JSON stringify objects
-                prefix_parts.append(f"{key}={json.dumps(value)}")
-            else:
-                prefix_parts.append(f"{key}={value}")
+            prefix_parts.append(f"{key}={_format_log_value(value)}")
         
         prefix = " ".join(prefix_parts)
         
@@ -122,7 +240,7 @@ class Logger:
         Log._last_time = current_time_ms
         
         # Build full message
-        parts = [timestamp, f"+{diff_ms}ms", prefix, str(message) if message else ""]
+        parts = [timestamp, f"+{diff_ms}ms", prefix, _truncate_text(str(message)) if message else ""]
         return " ".join([p for p in parts if p]) + "\n"
     
     def debug(self, message: Any = None, extra: Optional[Dict[str, Any]] = None) -> None:
@@ -315,8 +433,12 @@ class Log:
         if cls._log_file.exists():
             cls._log_file.write_text("")
         
-        # Open for writing
-        cls._writer = open(cls._log_file, "a", buffering=1)  # Line buffered
+        # Open for writing with size-based rotation for long-running sessions.
+        cls._writer = _RotatingTextWriter(
+            cls._log_file,
+            max_bytes=get_log_max_bytes(),
+            backup_count=get_log_backup_count(),
+        )
         
         # Create default logger
         cls.Default = cls.create(service="default")
