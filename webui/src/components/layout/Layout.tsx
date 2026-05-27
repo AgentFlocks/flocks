@@ -99,6 +99,7 @@ export default function Layout() {
   const [isFlocksproActive, setIsFlocksproActive] = useState(false);
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
+  const canManageUpdates = user?.role === 'admin';
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -144,7 +145,8 @@ export default function Layout() {
         setLatestVersion(info.latest_version);
 
         if (
-          lastPromptedVersionRef.current !== info.latest_version
+          canManageUpdates
+          && lastPromptedVersionRef.current !== info.latest_version
           && localStorage.getItem(UPDATE_DISMISSED_KEY) !== info.current_version
         ) {
           lastPromptedVersionRef.current = info.latest_version;
@@ -163,7 +165,7 @@ export default function Layout() {
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [flocksproStatusReady, i18n.language, isFlocksproActive]);
+  }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
 
   useEffect(() => {
     if (!flocksproStatusReady) return undefined;
@@ -200,7 +202,6 @@ export default function Layout() {
     let cancelled = false;
     if (!user?.id || user.role !== 'admin') {
       setHasFlocksproCapability(false);
-      setFlocksproVersion(null);
       return () => {
         cancelled = true;
       };
@@ -229,7 +230,7 @@ export default function Layout() {
   useEffect(() => {
     let cancelled = false;
     setFlocksproStatusReady(false);
-    if (!user?.id || user.role !== 'admin') {
+    if (!user?.id) {
       setIsFlocksproActive(false);
       setFlocksproVersion(null);
       setFlocksproStatusReady(true);
@@ -240,12 +241,12 @@ export default function Layout() {
     const refreshFlocksproStatus = () => {
       setFlocksproStatusReady(false);
       void Promise.all([
-        flocksproUsersApi.getLicenseStatus(),
+        flocksproUsersApi.getLicenseStatus().catch(() => null),
         consoleUpgradeApi.getProPackageStatus().catch(() => null),
       ])
         .then(([licenseStatus, packageStatus]) => {
           if (cancelled) return;
-          const active = licenseStatus.pro_enabled === true;
+          const active = licenseStatus?.pro_enabled === true || packageStatus?.pro_enabled === true;
           setIsFlocksproActive(active);
           const version = active
             ? formatProVersion(packageStatus?.flockspro_component_version || packageStatus?.installed_version)
@@ -270,7 +271,7 @@ export default function Layout() {
       cancelled = true;
       window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
     };
-  }, [user?.id, user?.role]);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -433,7 +434,7 @@ export default function Layout() {
     matchPath('/sessions', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
-    ? flocksproVersion || (currentVersion ? `v${currentVersion}` : null)
+    ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
     : currentVersion ? `v${currentVersion}` : null;
   const currentVersionLabel = isFlocksproActive
     ? t('currentProductVersionLabel', { version: displayVersion || productName })
@@ -452,6 +453,7 @@ export default function Layout() {
         <UpdateModal
           initialInfo={updateInfo}
           edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+          canUpgrade={canManageUpdates}
           onClose={() => setShowUpdate(false)}
           onDismiss={() => setShowUpdate(false)}
         />
@@ -555,7 +557,7 @@ export default function Layout() {
             <LanguageSwitcher collapsed={collapsed} />
             {!collapsed && (
               <>
-                {hasUpdate ? (
+                {hasUpdate && canManageUpdates ? (
                   <button
                     onClick={() => setShowUpdate(true)}
                     className="mt-3 w-full rounded-xl border border-amber-200 bg-gradient-to-r from-amber-50 via-orange-50 to-rose-50 px-3 py-2 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
@@ -593,15 +595,15 @@ export default function Layout() {
             {collapsed && (
               <button
                 onClick={() => setShowUpdate(true)}
-                title={hasUpdate ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
+                title={hasUpdate && canManageUpdates ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
                 className={`relative rounded-xl p-2 transition-colors ${
-                  hasUpdate
+                  hasUpdate && canManageUpdates
                     ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
                     : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
                 }`}
               >
-                {hasUpdate ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
-                {hasUpdate && (
+                {hasUpdate && canManageUpdates ? <ArrowUpCircle className="w-4 h-4" /> : <Sparkles className="w-4 h-4" />}
+                {hasUpdate && canManageUpdates && (
                   <>
                     <span className="absolute inset-0 rounded-xl border border-amber-200 animate-pulse" />
                     <span className="absolute top-1 right-1 w-2 h-2 bg-amber-400 rounded-full" />

@@ -335,6 +335,37 @@ describe('Layout onboarding entry', () => {
     expect(checkUpdate).not.toHaveBeenCalled();
   });
 
+  it('shows Flocks Pro branding and version for member users', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-2',
+        username: 'member',
+        role: 'member',
+        status: 'active',
+        must_reset_password: false,
+      },
+    });
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({
+      pro_enabled: true,
+      active: true,
+      status: 'active',
+      license_status: 'active',
+    });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({
+      installed: true,
+      installed_version: '2026.05.22',
+      flockspro_component_version: '2026.05.22',
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByText('Flocks Pro')).toBeInTheDocument();
+    expect(await screen.findByText('Flocks Pro pro-v2026.05.22')).toBeInTheDocument();
+    expect(screen.queryByText('flocksproUpgrade')).not.toBeInTheDocument();
+    expect(checkUpdate).not.toHaveBeenCalled();
+  });
+
   it('enforces a ten-minute minimum gap for focus-triggered update checks', async () => {
     vi.useFakeTimers();
 
