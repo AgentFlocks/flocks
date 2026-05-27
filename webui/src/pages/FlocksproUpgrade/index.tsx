@@ -34,6 +34,8 @@ interface FlocksproLicenseStatus {
   inactive_reason?: string | null;
   reapply_allowed?: boolean | null;
   expires_at?: number | string | null;
+  last_sync_at?: number | string | null;
+  last_heartbeat_ok_at?: number | string | null;
   max_admins?: number | null;
   max_members?: number | null;
   fingerprint?: string | null;
@@ -396,14 +398,15 @@ export default function FlocksproUpgradePage() {
   const isProLoaded = canUseProFeatures;
   const hasRuntimeLicense = Boolean(licenseStatus?.license_id);
   const runtimeLicenseUsable = hasRuntimeLicense && !runtimeLicenseInvalid;
-  const preferRequestLicense =
-    Boolean(currentIssuedRequest) &&
-    (!runtimeLicenseId || currentIssuedRequestLicenseId !== runtimeLicenseId);
+  const preferRequestLicense = Boolean(currentIssuedRequest) && !runtimeLicenseUsable;
   const currentDisplayLicenseId = preferRequestLicense
     ? currentIssuedRequestLicenseId
     : runtimeLicenseUsable
     ? licenseStatus?.license_id
     : runtimeLicenseId || undefined;
+  const currentDisplayLicenseRequest = currentDisplayLicenseId
+    ? accountScopedRequests.find((item) => requestLicenseId(item) === currentDisplayLicenseId)
+    : null;
   const showCurrentLicenseCard = Boolean(currentDisplayLicenseId);
   const displayedLicenseStatus = (preferRequestLicense
     ? requestLicenseStatus(currentIssuedRequest as UpgradeRequestStatus)
@@ -426,7 +429,14 @@ export default function FlocksproUpgradePage() {
     ? requestMaxMembers(currentIssuedRequest)
     : licenseStatus?.max_members;
   const displayedLastSyncedAt =
-    preferRequestLicense && currentIssuedRequest ? currentIssuedRequest.updated_at : latestActivatedRequest?.updated_at;
+    preferRequestLicense && currentIssuedRequest
+      ? currentIssuedRequest.details?.license_refreshed_at || currentIssuedRequest.updated_at
+      : licenseStatus?.last_sync_at ||
+        currentDisplayLicenseRequest?.details?.license_refreshed_at ||
+        currentDisplayLicenseRequest?.updated_at ||
+        licenseStatus?.last_heartbeat_ok_at ||
+        latestActivatedRequest?.details?.license_refreshed_at ||
+        latestActivatedRequest?.updated_at;
   const licenseQuotaText = [
     displayedMaxAdmins
       ? t('upgrade.adminQuotaValue', { count: displayedMaxAdmins })

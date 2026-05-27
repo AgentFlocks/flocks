@@ -172,6 +172,34 @@ async def test_fallback_license_state_does_not_mark_license_activated(
     assert record["details"]["license_activate_fallback_saved_at"]
 
 
+async def test_refresh_pro_license_updates_record_timestamp(monkeypatch: pytest.MonkeyPatch):
+    from flocks.server.routes import console_upgrade as console_routes
+
+    class _Checker:
+        async def refresh(self):
+            return {"active": True}
+
+    runtime_module = ModuleType("flockspro.license.runtime")
+    flockspro_module = ModuleType("flockspro")
+    license_module = ModuleType("flockspro.license")
+    runtime_module.get_license_checker = lambda: _Checker()  # type: ignore[attr-defined]
+    monkeypatch.setitem(__import__("sys").modules, "flockspro", flockspro_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license", license_module)
+    monkeypatch.setitem(__import__("sys").modules, "flockspro.license.runtime", runtime_module)
+
+    record = {
+        "request_id": "req_refresh",
+        "details": {},
+        "updated_at": "2026-05-15T10:00:00+00:00",
+    }
+
+    await console_routes._maybe_refresh_pro_license(record)
+
+    assert record["details"]["license_refreshed_at"]
+    assert record["updated_at"] == record["details"]["license_refreshed_at"]
+    assert record["updated_at"] != "2026-05-15T10:00:00+00:00"
+
+
 async def test_pro_package_status_reports_installed_marker(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
