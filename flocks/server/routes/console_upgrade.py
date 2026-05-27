@@ -752,25 +752,21 @@ async def sync_console_license_revocations(request: Request) -> dict[str, Any]:
             import_fn([str(item) for item in revoked_license_ids])
             imported = True
 
+        revoked_set = {str(item) for item in revoked_license_ids}
         current_status = _get_pro_capability_status()
         current_license_id = str(current_status.get("license_id") or "")
-        current_inactive = (
-            current_license_id in {str(item) for item in revoked_license_ids}
-            or str(current_status.get("license_status") or "").lower() in _INACTIVE_LICENSE_STATUSES
-            or not current_status.get("pro_enabled")
+        target = await _latest_usable_issued_record(
+            revoked_set,
+            account_key=_console_session_account_key(console_session),
         )
-        if current_inactive:
-            target = await _latest_usable_issued_record(
-                {str(item) for item in revoked_license_ids},
-                account_key=_console_session_account_key(console_session),
-            )
-            target_license_id = _record_license_id(target) if target else ""
-            if target and target_license_id and target_license_id != current_license_id:
+        target_license_id = _record_license_id(target) if target else ""
+        if target and target_license_id:
+            if target_license_id != current_license_id:
                 await _maybe_activate_pro_license(target, force=True)
-                await _maybe_refresh_pro_license(target)
                 activated_license_id = target_license_id
-                refreshed_license_id = target_license_id
-                await Storage.set(_request_key(str(target["request_id"])), target, "json")
+            await _maybe_refresh_pro_license(target)
+            refreshed_license_id = target_license_id
+            await Storage.set(_request_key(str(target["request_id"])), target, "json")
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)) from exc
 
