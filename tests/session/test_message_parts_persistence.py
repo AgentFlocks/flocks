@@ -22,9 +22,15 @@ def _user_message(session_id: str, message_id: str) -> UserMessageInfo:
     )
 
 
-def _text_part(session_id: str, message_id: str, text: str) -> TextPart:
+def _text_part(
+    session_id: str,
+    message_id: str,
+    text: str,
+    *,
+    part_id: str | None = None,
+) -> TextPart:
     return TextPart(
-        id=f"part_{message_id}",
+        id=part_id or f"part_{message_id}",
         sessionID=session_id,
         messageID=message_id,
         text=text,
@@ -92,6 +98,47 @@ async def test_legacy_session_updates_continue_writing_legacy_blob() -> None:
     legacy_parts = await Storage.get(f"message_parts:{session_id}")
     assert legacy_parts["msg_a"][0]["text"] == "new"
     assert await Storage.list_keys(prefix=f"message_parts:{session_id}:") == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_session_reads_per_message_and_legacy_fallback() -> None:
+    session_id = "ses_parts_mixed_read"
+    serialized_messages = [
+        _user_message(session_id, "msg_a").model_dump(),
+        _user_message(session_id, "msg_b").model_dump(),
+    ]
+    legacy_parts = {
+        "msg_a": [
+            _text_part(session_id, "msg_a", "legacy-a1", part_id="part_a1").model_dump(),
+            _text_part(session_id, "msg_a", "legacy-a2", part_id="part_a2").model_dump(),
+        ],
+        "msg_b": [
+            _text_part(session_id, "msg_b", "legacy-b1", part_id="part_b1").model_dump(),
+        ],
+    }
+    per_message_msg_a = [
+        _text_part(session_id, "msg_a", "new-a2", part_id="part_a2").model_dump(),
+    ]
+
+    await Storage.set(f"message:{session_id}", serialized_messages, "message")
+    await Storage.set(f"message_parts:{session_id}", legacy_parts, "message_parts")
+    await Storage.set(
+        f"message_parts:{session_id}:msg_a",
+        per_message_msg_a,
+        "message_part",
+    )
+    Message.invalidate_cache(session_id)
+
+    messages = await Message.list_with_parts(session_id)
+    by_id = {message.info.id: message for message in messages}
+
+    assert [part.id for part in by_id["msg_a"].parts] == ["part_a1", "part_a2"]
+    assert [part.text for part in by_id["msg_a"].parts] == ["legacy-a1", "new-a2"]
+    assert [part.id for part in by_id["msg_b"].parts] == ["part_b1"]
+    assert [part.text for part in by_id["msg_b"].parts] == ["legacy-b1"]
+
+    assert await Storage.get(f"message_parts:{session_id}") == legacy_parts
+    assert await Storage.get(f"message_parts:{session_id}:msg_a") == per_message_msg_a
 
 
 @pytest.mark.asyncio

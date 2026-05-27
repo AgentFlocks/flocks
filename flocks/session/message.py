@@ -485,6 +485,91 @@ class Message:
         return serialized
 
     @classmethod
+    def _merge_serialized_parts(
+        cls,
+        primary_parts: Optional[List[Dict[str, Any]]],
+        fallback_parts: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        """Merge mixed-format part lists without rewriting storage.
+
+        ``primary_parts`` is the preferred source (per-message keys).  When it is
+        missing entries, ``fallback_parts`` (legacy blob) fills the gaps by part
+        ID while preserving the legacy order for shared entries.
+        """
+        if not isinstance(primary_parts, list) or not primary_parts:
+            return list(fallback_parts or [])
+        if not isinstance(fallback_parts, list) or not fallback_parts:
+            return list(primary_parts)
+
+        primary_by_id: Dict[str, Dict[str, Any]] = {}
+        for raw_part in primary_parts:
+            if not isinstance(raw_part, dict):
+                continue
+            part_id = raw_part.get("id")
+            if isinstance(part_id, str) and part_id:
+                primary_by_id[part_id] = dict(raw_part)
+
+        merged: List[Dict[str, Any]] = []
+        consumed_primary_ids: set[str] = set()
+
+        for raw_part in fallback_parts:
+            if not isinstance(raw_part, dict):
+                continue
+            part_id = raw_part.get("id")
+            if isinstance(part_id, str) and part_id in primary_by_id:
+                merged.append(primary_by_id[part_id])
+                consumed_primary_ids.add(part_id)
+            else:
+                merged.append(dict(raw_part))
+
+        for raw_part in primary_parts:
+            if not isinstance(raw_part, dict):
+                continue
+            part_id = raw_part.get("id")
+            if isinstance(part_id, str) and part_id:
+                if part_id in consumed_primary_ids:
+                    continue
+            merged.append(dict(raw_part))
+
+        return merged
+
+    @classmethod
+    def _deserialize_parts_list(
+        cls,
+        session_id: str,
+        message_id: str,
+        parts_data: List[Dict[str, Any]],
+    ) -> List[PartType]:
+        """Best-effort deserialize a message's stored parts."""
+        parts: List[PartType] = []
+        for index, raw_part in enumerate(parts_data):
+            if not isinstance(raw_part, dict):
+                log.debug("message.part.deserialize_skipped", {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "index": index,
+                    "reason": "non_dict_part",
+                })
+                continue
+
+            normalized_part = dict(raw_part)
+            normalized_part["sessionID"] = session_id
+            normalized_part["messageID"] = message_id
+
+            try:
+                parts.append(cls.deserialize_part(normalized_part))
+            except Exception as exc:
+                log.warn("message.part.deserialize_failed", {
+                    "session_id": session_id,
+                    "message_id": message_id,
+                    "index": index,
+                    "part_id": normalized_part.get("id"),
+                    "type": normalized_part.get("type"),
+                    "error": str(exc),
+                })
+        return parts
+
+    @classmethod
     def _touch_parts_revision(cls, session_id: str, message_id: str) -> int:
         revisions = cls._parts_revision_cache.setdefault(session_id, {})
         next_revision = int(revisions.get(message_id, 0)) + 1
@@ -609,8 +694,8 @@ class Message:
                 cls._messages_cache[session_id] = []
             
             item_entries = await Storage.list_entries(prefix=cls._parts_item_prefix(session_id))
-            stored_parts: Dict[str, List[Dict[str, Any]]] = {}
-            persisted_mids: set[str] = set()
+            per_message_parts: Dict[str, List[Dict[str, Any]]] = {}
+            per_message_mids: set[str] = set()
 
             for key, value in item_entries:
                 if not cls._is_parts_item_key(key, session_id):
@@ -618,19 +703,38 @@ class Message:
                 if not isinstance(value, list):
                     continue
                 msg_id = key.rsplit(":", 1)[1]
-                stored_parts[msg_id] = value
-                persisted_mids.add(msg_id)
+                per_message_parts[msg_id] = value
+                per_message_mids.add(msg_id)
 
-            if stored_parts:
-                cls._parts_storage_format[session_id] = "per_message"
-            else:
-                legacy_parts = await Storage.get(cls._parts_blob_key(session_id))
-                if isinstance(legacy_parts, dict):
-                    stored_parts = legacy_parts
-                    persisted_mids = set(legacy_parts.keys())
+            legacy_parts: Dict[str, List[Dict[str, Any]]] = {}
+            cls._parts_storage_format[session_id] = "per_message"
+
+            legacy_blob = await Storage.get(cls._parts_blob_key(session_id))
+            if isinstance(legacy_blob, dict):
+                legacy_parts = {
+                    msg_id: parts_data
+                    for msg_id, parts_data in legacy_blob.items()
+                    if isinstance(parts_data, list)
+                }
+                if not per_message_parts:
                     cls._parts_storage_format[session_id] = "legacy"
-                else:
-                    cls._parts_storage_format[session_id] = "per_message"
+
+            stored_parts: Dict[str, List[Dict[str, Any]]] = {}
+            all_message_ids = {
+                message.id for message in cls._messages_cache.get(session_id, [])
+            }
+            all_message_ids.update(per_message_parts.keys())
+            all_message_ids.update(legacy_parts.keys())
+
+            for msg_id in all_message_ids:
+                merged_parts = cls._merge_serialized_parts(
+                    per_message_parts.get(msg_id),
+                    legacy_parts.get(msg_id),
+                )
+                if merged_parts:
+                    stored_parts[msg_id] = merged_parts
+
+            persisted_mids = set(stored_parts.keys())
             
             if stored_parts:
                 cls._parts_cache[session_id] = {}
@@ -638,9 +742,11 @@ class Message:
                 for msg_id, parts_data in stored_parts.items():
                     if not isinstance(parts_data, list):
                         continue
-                    cls._parts_cache[session_id][msg_id] = [
-                        cls.deserialize_part(p) for p in parts_data
-                    ]
+                    cls._parts_cache[session_id][msg_id] = cls._deserialize_parts_list(
+                        session_id,
+                        msg_id,
+                        parts_data,
+                    )
                     cls._parts_revision_cache[session_id][msg_id] = 0
                 cls._parts_serialized_cache[session_id] = {
                     msg_id: list(parts_data)
