@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { authApi, type LocalUser } from '@/api/auth';
 import { flocksproUsersApi, type FlocksproUserQuota } from '@/api/flocksproUsers';
@@ -16,6 +16,15 @@ function formatDateTime(value: string | null | undefined, locale: string) {
 
 function roleLabel(role: string, t: (key: string) => string) {
   return role === 'admin' ? t('admin.roleAdmin') : t('admin.roleMember');
+}
+
+function normalizeQuotaLimit(...values: Array<number | null | undefined>): number {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+  }
+  return 0;
 }
 
 export default function AdminUsersPage() {
@@ -56,14 +65,60 @@ export default function AdminUsersPage() {
     }
   };
 
-  const loadProUsers = async () => {
-    const [userList, quotaSnapshot] = await Promise.all([
+  const loadProUsers = useCallback(async () => {
+    const [userList, licenseStatus, quotaSnapshot] = await Promise.all([
       flocksproUsersApi.listUsers(),
-      flocksproUsersApi.getQuota(),
+      flocksproUsersApi.getLicenseStatus(),
+      flocksproUsersApi.getQuota().catch(() => null),
     ]);
+    const adminCount = userList.filter((item) => item.role === 'admin').length;
+    const memberCount = userList.filter((item) => item.role !== 'admin').length;
+    const maxAdmins = normalizeQuotaLimit(
+      licenseStatus.max_admins,
+      licenseStatus.effective_max_admins,
+      quotaSnapshot?.max_admins,
+    );
+    const maxMembers = normalizeQuotaLimit(
+      licenseStatus.max_members,
+      licenseStatus.effective_max_members,
+      quotaSnapshot?.max_members,
+    );
     setUsers(userList);
-    setQuota(quotaSnapshot);
-  };
+    setQuota({
+      max_admins: maxAdmins,
+      max_members: maxMembers,
+      admin_count: adminCount,
+      member_count: memberCount,
+      pro_enabled: licenseStatus.pro_enabled ?? quotaSnapshot?.pro_enabled,
+      license_status: licenseStatus.license_status ?? licenseStatus.status ?? quotaSnapshot?.license_status,
+    });
+  }, []);
+
+  const refreshProCapabilityAndData = useCallback(async (showErrorToast = true) => {
+    if (!user || user.role !== 'admin') {
+      setIsProEnabled(false);
+      setUsers([]);
+      setQuota(null);
+      return;
+    }
+    const enabled = await flocksproUsersApi.hasCapability();
+    setIsProEnabled(enabled);
+    if (!enabled) {
+      setUsers([]);
+      setQuota(null);
+      return;
+    }
+    try {
+      await loadProUsers();
+    } catch (err: any) {
+      if (showErrorToast) {
+        toast.error(
+          t('admin.pro.loadFailed'),
+          err?.response?.data?.detail || err?.message || t('admin.pro.loadFailed'),
+        );
+      }
+    }
+  }, [loadProUsers, t, toast, user]);
 
   useEffect(() => {
     let mounted = true;
@@ -73,20 +128,9 @@ export default function AdminUsersPage() {
         return;
       }
       setLoading(true);
-      const enabled = await flocksproUsersApi.hasCapability();
       if (!mounted) return;
-      setIsProEnabled(enabled);
-      if (!enabled || user.role !== 'admin') {
-        setLoading(false);
-        return;
-      }
       try {
-        await loadProUsers();
-      } catch (err: any) {
-        toast.error(
-          t('admin.pro.loadFailed'),
-          err?.response?.data?.detail || err?.message || t('admin.pro.loadFailed'),
-        );
+        await refreshProCapabilityAndData();
       } finally {
         if (mounted) setLoading(false);
       }
@@ -95,7 +139,31 @@ export default function AdminUsersPage() {
     return () => {
       mounted = false;
     };
-  }, [user, toast, t]);
+  }, [refreshProCapabilityAndData, user]);
+
+  useEffect(() => {
+    if (!showProAdminView) return undefined;
+
+    const refreshSilently = () => {
+      void refreshProCapabilityAndData(false);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshSilently();
+      }
+    };
+
+    window.addEventListener('flockspro-license-status-changed', refreshSilently);
+    window.addEventListener('focus', refreshSilently);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('flockspro-license-status-changed', refreshSilently);
+      window.removeEventListener('focus', refreshSilently);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [refreshProCapabilityAndData, showProAdminView]);
 
   const resetOwnPassword = async () => {
     const confirmed = await confirm({

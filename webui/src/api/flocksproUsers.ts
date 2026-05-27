@@ -31,6 +31,10 @@ export interface FlocksproLicenseStatus {
   license_status?: string | null;
   inactive_reason?: string | null;
   reapply_allowed?: boolean | null;
+  max_admins?: number | null;
+  max_members?: number | null;
+  effective_max_admins?: number | null;
+  effective_max_members?: number | null;
 }
 
 export const flocksproUsersApi = {
@@ -53,12 +57,16 @@ export const flocksproUsersApi = {
   },
 
   listUsers: async (): Promise<LocalUser[]> => {
-    const response = await client.get('/api/flockspro/users');
+    const response = await client.get('/api/flockspro/users', {
+      params: { _t: Date.now() },
+    });
     return response.data;
   },
 
   getQuota: async (): Promise<FlocksproUserQuota> => {
-    const response = await client.get('/api/flockspro/users/quota');
+    const response = await client.get('/api/flockspro/users/quota', {
+      params: { _t: Date.now() },
+    });
     return response.data;
   },
 
