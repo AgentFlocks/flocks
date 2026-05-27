@@ -262,6 +262,29 @@ export interface APIServiceMetadata {
   verify_ssl?: boolean;
 }
 
+export type CustomDeviceAccessMode = 'api' | 'webcli' | 'syslog';
+
+export interface CustomDeviceBaseDraft {
+  accessMode: CustomDeviceAccessMode;
+  deviceName: string;
+  vendorName: string;
+  version: string;
+}
+
+export interface CustomDeviceApiDraft extends CustomDeviceBaseDraft {
+  accessMode: 'api';
+  baseUrl: string;
+  docsUrl: string;
+  capabilities: string;
+}
+
+export interface CustomDeviceWebCliDraft extends CustomDeviceBaseDraft {
+  accessMode: 'webcli';
+  productUrl: string;
+  targetInterfaces: string;
+  authHint: string;
+}
+
 export interface MCPServerConfig {
   type: 'stdio' | 'sse';
   url?: string;

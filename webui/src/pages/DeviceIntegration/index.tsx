@@ -10,9 +10,10 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup } from '@/api/device';
-import type { APIServiceSummary, APIServiceCredentialField, Tool } from '@/types';
+import type { APIServiceSummary, APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
+import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
 
 // ============================================================================
 // Vendor catalog
@@ -126,14 +127,16 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // Add device wizard panel (step 1: vendor, step 2: product)
 // ============================================================================
 
-function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onClose }: {
+function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onClose }: {
   templates: APIServiceSummary[];
   instanceCounts: Record<string, number>;
   initialVendor?: DeviceVendor;
   onSelect: (template: APIServiceSummary) => void;
+  onSelectCustom: (mode: CustomDeviceAccessMode) => void;
   onClose: () => void;
 }) {
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
+  const [showCustomModes, setShowCustomModes] = useState(false);
 
   // Distinct vendor keys from the live template list. Templates whose YAML
   // omits `vendor` are bucketed under the special "(未指定)" key so they
@@ -179,6 +182,8 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     return templates.filter((t) => (t.vendor || '__unspecified__') === selectedVendor.id);
   }, [templates, selectedVendor]);
 
+  const inModeSelection = showCustomModes && !selectedVendor;
+
   return (
     <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
       <div
@@ -188,9 +193,12 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
           <div className="flex items-center gap-2.5">
-            {selectedVendor && (
+            {(selectedVendor || inModeSelection) && (
               <button
-                onClick={() => setSelectedVendor(null)}
+                onClick={() => {
+                  setSelectedVendor(null);
+                  setShowCustomModes(false);
+                }}
                 className="p-1.5 rounded-lg hover:bg-zinc-100 text-zinc-500 hover:text-zinc-700 transition-colors"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -198,20 +206,20 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
             )}
             <div>
               <h3 className="text-sm font-semibold text-zinc-900">
-                {selectedVendor ? `选择 ${selectedVendor.nameCn} 设备` : '添加设备'}
+                {selectedVendor ? `选择 ${selectedVendor.nameCn} 设备` : inModeSelection ? '选择接入方式' : '添加设备'}
               </h3>
               <div className="flex items-center gap-1.5 mt-0.5">
                 {/* Breadcrumb */}
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                  1 选择厂商
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
+                  1 选择厂商 / 自定义
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                  2 选择设备
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                  2 选择设备 / 方式
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
                 <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                  3 填写配置
+                  3 填写资料 / 配置
                 </span>
               </div>
             </div>
@@ -223,11 +231,27 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
-          {!selectedVendor ? (
+          {!selectedVendor && !inModeSelection ? (
             /* Step 1: Vendor selection */
             <>
-              <p className="text-xs text-zinc-400 mb-4">选择设备所属厂商，共 {availableVendors.length} 家</p>
+              <p className="text-xs text-zinc-400 mb-4">选择设备所属厂商，或创建自定义设备接入</p>
               <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={() => setShowCustomModes(true)}
+                  className="flex flex-col items-center gap-2.5 p-5 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 hover:border-blue-300 hover:bg-blue-50 transition-all duration-150 group"
+                >
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center text-lg font-bold bg-blue-100 text-blue-700">
+                    自
+                  </div>
+                  <div className="text-center">
+                    <p className="text-sm font-semibold text-zinc-800">自定义设备</p>
+                    <p className="text-xs text-zinc-400">API / WebCLI / Syslog</p>
+                    <p className="text-[10px] text-blue-600 mt-0.5 font-medium">
+                      创建新的接入方式
+                    </p>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 text-blue-400 transition-colors" />
+                </button>
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
                   const productCount = templates.filter(
@@ -254,6 +278,44 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                     </button>
                   );
                 })}
+              </div>
+            </>
+          ) : inModeSelection ? (
+            <>
+              <p className="text-xs text-zinc-400 mb-4">请选择自定义设备的接入方式</p>
+              <div className="space-y-3">
+                {[
+                  {
+                    key: 'api' as const,
+                    title: 'API 接入',
+                    desc: '设备提供 API 能力时使用。需要提供 API 文档，最终生成可复用的 device 插件。',
+                  },
+                  {
+                    key: 'webcli' as const,
+                    title: 'WebCLI 接入',
+                    desc: '设备没有开放 API 时使用。提供产品 URL 和需要获取的接口，由浏览器抓取后生成 CLI 并集成到 skill。',
+                  },
+                  {
+                    key: 'syslog' as const,
+                    title: 'Syslog 接入',
+                    desc: '目前只能在工作流中使用。设备页会引导你前往工作流集成页面完成监听配置。',
+                  },
+                ].map((mode) => (
+                  <button
+                    key={mode.key}
+                    onClick={() => onSelectCustom(mode.key)}
+                    className="w-full text-left flex items-start gap-3 px-4 py-4 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
+                  >
+                    <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
+                      <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-zinc-800 leading-snug">{mode.title}</p>
+                      <p className="text-xs text-zinc-400 mt-1 leading-relaxed">{mode.desc}</p>
+                    </div>
+                    <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
+                  </button>
+                ))}
               </div>
             </>
           ) : (
@@ -901,6 +963,7 @@ function GroupBanner({ group, onRenamed }: {
 type PanelMode =
   | { kind: 'wizard'; initialVendor?: DeviceVendor }
   | { kind: 'add'; template: APIServiceSummary }
+  | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
 
@@ -915,7 +978,7 @@ export default function DeviceIntegrationPage() {
 
   const currentGroup: DeviceGroup | undefined = groups[0];
 
-  const fetchData = useCallback(async (silent = false) => {
+  const fetchData = useCallback(async (silent = false): Promise<APIServiceSummary[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
@@ -924,11 +987,14 @@ export default function DeviceIntegrationPage() {
         providerAPI.listApiServices(),
         deviceAPI.listGroups(),
       ]);
+      const nextTemplates = (tplRes.data || []).filter((s) => s.integration_type === 'device');
       setDevices(devRes.data || []);
-      setTemplates((tplRes.data || []).filter((s) => s.integration_type === 'device'));
+      setTemplates(nextTemplates);
       setGroups(grpRes.data || []);
+      return nextTemplates;
     } catch {
       toast.error('加载失败');
+      return [];
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -1123,7 +1189,18 @@ export default function DeviceIntegrationPage() {
           instanceCounts={instanceCounts}
           initialVendor={panel.initialVendor}
           onSelect={(tpl) => setPanel({ kind: 'add', template: tpl })}
+          onSelectCustom={(mode) => setPanel({ kind: 'custom', mode })}
           onClose={() => setPanel(null)}
+        />
+      )}
+
+      {panel?.kind === 'custom' && (
+        <CustomDeviceAccessPanel
+          mode={panel.mode}
+          onClose={() => setPanel(null)}
+          onBack={() => setPanel({ kind: 'wizard' })}
+          onRefreshTemplates={() => fetchData(true)}
+          onTemplateMatched={(template) => setPanel({ kind: 'add', template })}
         />
       )}
 
