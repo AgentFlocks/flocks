@@ -45,11 +45,9 @@ async def build_device_context_section() -> Optional[str]:
     for device in devices:
         by_group.setdefault(device.group_id, []).append(device)
 
-    # --- Global dedup: keyed by (provider, tool_name) so tools with the same
-    # name but from different providers/versions are kept separate, while the
-    # same tool registered multiple times under the same provider is written
-    # only once (O(unique tools), not O(tools × devices)).
-    # Structure: {provider: {tool_name: meta}}
+    # Tool capabilities are grouped by storage_key/tool-set rather than by
+    # device instance so multiple devices of the same product only contribute
+    # one shared capability description block.
     all_tools_by_provider: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for device in devices:
         if not device.enabled:
@@ -61,51 +59,9 @@ async def build_device_context_section() -> Optional[str]:
 
     lines: List[str] = [
         "<DeviceAssetContext>",
-        "## 已接入安全设备",
-        "",
-        "以下是当前机房中已接入的安全设备及其可用工具。",
-        "调用工具时必须通过 `device_id` 参数指定目标设备，工具将自动使用该设备的凭据，例如：",
-        '`tdp_event_list(action="list", device_id="<device_id>")`',
-        "",
     ]
 
-    # --- Section 1: tool descriptions (written once per provider, regardless of device count) ---
-    if all_tools_by_provider:
-        lines.append("### 工具说明")
-        lines.append("")
-        # Detect cross-provider tool name collisions to decide rendering style.
-        # If the same tool name appears in multiple providers, we must show the
-        # provider label so the agent can tell them apart.
-        all_tool_names: List[str] = [
-            name
-            for tools in all_tools_by_provider.values()
-            for name in tools
-        ]
-        has_name_collision = len(all_tool_names) != len(set(all_tool_names))
-
-        for provider, tools_by_name in sorted(all_tools_by_provider.items()):
-            if has_name_collision:
-                # Grab vendor from any tool in this provider group
-                sample = next(iter(tools_by_name.values()))
-                vendor_label = f" ({sample['vendor']})" if sample.get("vendor") else ""
-                lines.append(f"**{provider}{vendor_label}**")
-                lines.append("")
-            for tool_name, meta in sorted(tools_by_name.items()):
-                desc = (meta.get("description_cn") or meta.get("description") or "").strip()
-                first_sentence = desc.split("。")[0] if desc else ""
-                actions = meta.get("actions", [])
-                action_hint = f"  action 可选: {' | '.join(actions)}" if actions else ""
-                prefix = "  " if has_name_collision else ""
-                if first_sentence:
-                    lines.append(f"{prefix}- `{tool_name}`: {first_sentence}。{action_hint}")
-                else:
-                    lines.append(f"{prefix}- `{tool_name}`{action_hint}")
-            if has_name_collision:
-                lines.append("")
-        if not has_name_collision:
-            lines.append("")
-
-    # --- Section 2: device list (tool names only, no repeated descriptions) ---
+    # --- Section 1: device list (references tool_set_id only) ---
     lines.append("### 设备列表")
     lines.append("")
     for group_id, group_devices in by_group.items():
@@ -117,21 +73,46 @@ async def build_device_context_section() -> Optional[str]:
         for d in group_devices:
             status = "✅ 已启用" if d.enabled else "❌ 已禁用"
             tools = tool_map.get(d.storage_key, [])
-            # Vendor is the same across all tools backed by the same storage_key,
-            # so we can read it from any one of them.
             vendor = tools[0].get("vendor") if tools else ""
             vendor_label = f" | 厂商: `{vendor}`" if vendor else ""
 
             lines.append(f"- **{d.name}** | device_id: `{d.id}`{vendor_label} | {status}")
             if d.enabled and tools:
-                tool_names = " ".join(f"`{m['name']}`" for m in sorted(tools, key=lambda t: t["name"]))
-                lines.append(f"  可用工具: {tool_names}")
+                lines.append(f"  tool_set_id: `{d.storage_key}`")
                 lines.append(f"  调用方式: 附带 `device_id=\"{d.id}\"` 参数")
             elif not d.enabled:
+                lines.append(f"  tool_set_id: `{d.storage_key}`")
                 lines.append("  可用工具: (已禁用，不可调用)")
             else:
+                lines.append(f"  tool_set_id: `{d.storage_key}`")
                 lines.append("  可用工具: (未发现已注册工具)")
         lines.append("")
+
+    # --- Section 2: tool-set descriptions (written once per provider/tool set) ---
+    if all_tools_by_provider:
+        lines.append("### 工具集")
+        lines.append("")
+        all_tool_names: List[str] = [
+            name
+            for tools in all_tools_by_provider.values()
+            for name in tools
+        ]
+        has_name_collision = len(all_tool_names) != len(set(all_tool_names))
+
+        for provider, tools_by_name in sorted(all_tools_by_provider.items()):
+            sample = next(iter(tools_by_name.values()))
+            vendor_label = f" | 厂商: `{sample['vendor']}`" if sample.get("vendor") else ""
+            lines.append(f"- `tool_set_id={provider}`{vendor_label}")
+            lines.append("  工具名和描述:")
+            for tool_name, meta in sorted(tools_by_name.items()):
+                desc = (meta.get("description_cn") or meta.get("description") or "").strip()
+                first_sentence = desc.split("。")[0] if desc else ""
+                prefix = "    " if has_name_collision else "  "
+                if first_sentence:
+                    lines.append(f"{prefix}- `{tool_name}`: {first_sentence}。")
+                else:
+                    lines.append(f"{prefix}- `{tool_name}`")
+            lines.append("")
 
     lines.append("</DeviceAssetContext>")
     return "\n".join(lines)

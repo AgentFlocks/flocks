@@ -1001,6 +1001,8 @@ class SessionPrompt:
         sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
         channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
         tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
+        device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
+        device_revision: Optional[int] = None,
         use_text_tool_call_mode: bool = False,
     ) -> List[str]:
         """Build the runtime system prompt blocks for a session turn.
@@ -1080,6 +1082,21 @@ class SessionPrompt:
                 },
                 builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
             ),
+        ]
+
+        if device_asset_prompt_factory:
+            blocks.append(await cls._build_cached_async_prompt_block(
+                static_cache=static_cache,
+                name="device_asset_hint",
+                cache_scope="runtime",
+                digest_inputs={
+                    "session_id": session_id,
+                    "device_revision": device_revision,
+                },
+                builder=device_asset_prompt_factory,
+            ))
+
+        blocks.append(
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
                 name="environment_stable",
@@ -1092,8 +1109,8 @@ class SessionPrompt:
                 builder=lambda: cls._join_prompt_parts(
                     SystemPrompt.environment_stable(directory=session_directory, vcs=vcs),
                 ),
-            ),
-        ]
+            )
+        )
 
         custom_block = await cls._build_cached_async_prompt_block(
             static_cache=static_cache,

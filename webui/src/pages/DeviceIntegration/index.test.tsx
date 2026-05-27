@@ -1,7 +1,8 @@
 import React from 'react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+
 import DeviceIntegrationPage from './index';
 
 const mocks = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   createAndSend: vi.fn().mockResolvedValue('session-1'),
   resetSession: vi.fn(),
   listDevices: vi.fn(),
+  getDevice: vi.fn(),
   listGroups: vi.fn(),
   updateGroup: vi.fn(),
   createDevice: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock('@/components/common/Toast', () => ({
     success: mocks.toastSuccess,
     error: mocks.toastError,
     info: mocks.toastInfo,
+    warning: vi.fn(),
   }),
 }));
 
@@ -49,7 +52,7 @@ vi.mock('@/components/common/PageHeader', () => ({
   }) => (
     <div>
       <h1>{title}</h1>
-      {description && <p>{description}</p>}
+      {description ? <p>{description}</p> : null}
       <div>{action}</div>
     </div>
   ),
@@ -84,6 +87,7 @@ vi.mock('@/hooks/useSessionChat', () => ({
 vi.mock('@/api/device', () => ({
   deviceAPI: {
     list: (...args: unknown[]) => mocks.listDevices(...args),
+    get: (...args: unknown[]) => mocks.getDevice(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
     updateGroup: (...args: unknown[]) => mocks.updateGroup(...args),
     create: (...args: unknown[]) => mocks.createDevice(...args),
@@ -126,12 +130,29 @@ describe('DeviceIntegrationPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listDevices.mockResolvedValue({ data: [] });
+    mocks.getDevice.mockResolvedValue({
+      data: {
+        id: 'device-1',
+        group_id: 'group-1',
+        name: 'TDP-test-02',
+        storage_key: 'tdp_api_v3_3_10',
+        service_id: 'tdp',
+        enabled: true,
+        verify_ssl: false,
+        fields: { base_url: 'https://tdp.example.com' },
+        fields_set: { api_key: true, secret: true, base_url: true },
+        status: 'connected',
+        created_at: 0,
+        updated_at: 0,
+      },
+    });
     mocks.listGroups.mockResolvedValue({
       data: [{ id: 'default', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 }],
     });
     mocks.listApiServices.mockResolvedValue({ data: [buildTemplate()] });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
     mocks.listTools.mockResolvedValue({ data: [] });
+    mocks.setToolEnabled.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
   });
 
@@ -234,5 +255,99 @@ describe('DeviceIntegrationPage', () => {
     await user.click(screen.getByRole('button', { name: /前往工作流列表/ }));
 
     expect(mocks.navigate).toHaveBeenCalledWith('/workflows');
+  });
+
+  it('clicking the blank backdrop closes the config panel', async () => {
+    const user = userEvent.setup();
+    mocks.listDevices.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'device-1',
+          group_id: 'group-1',
+          name: 'TDP-test-02',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp',
+          enabled: true,
+          verify_ssl: false,
+          fields: { base_url: 'https://tdp.example.com' },
+          fields_set: { api_key: true, secret: true, base_url: true },
+          status: 'connected',
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+    });
+    mocks.listApiServices.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'tdp_api_v3_3_10',
+          name: 'TDP',
+          enabled: true,
+          status: 'ready',
+          tool_count: 21,
+          verify_ssl: false,
+          integration_type: 'device',
+          vendor: 'threatbook',
+        },
+      ],
+    });
+    mocks.listGroups.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'group-1',
+          name: '默认机房',
+          sort_order: 0,
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+    });
+    mocks.getServiceMetadata.mockResolvedValueOnce({
+      data: {
+        name: 'TDP',
+        credential_schema: [
+          {
+            key: 'api_key',
+            label: 'API Key',
+            storage: 'secret',
+            sensitive: true,
+            required: true,
+            input_type: 'password',
+            config_key: 'api_key',
+          },
+          {
+            key: 'secret',
+            label: 'Secret',
+            storage: 'secret',
+            sensitive: true,
+            required: true,
+            input_type: 'password',
+            config_key: 'secret',
+          },
+          {
+            key: 'base_url',
+            label: 'Base URL',
+            storage: 'config',
+            sensitive: false,
+            required: true,
+            input_type: 'url',
+            config_key: 'base_url',
+          },
+        ],
+      },
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    const cardTitle = await screen.findByText('TDP-test-02');
+    await user.click(cardTitle);
+
+    expect(await screen.findByRole('button', { name: '关闭设备配置面板' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '关闭设备配置面板' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
+    });
   });
 });

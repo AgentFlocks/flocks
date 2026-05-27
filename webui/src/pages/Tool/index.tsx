@@ -55,6 +55,7 @@ import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
 import LocalTabContent from './components/LocalTabContent';
 import { getToolTabCounts } from './tabCounts';
+import { getSourceLabel } from './constants';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
 
@@ -71,14 +72,15 @@ interface TabConfig {
   sourceFilter?: ToolSource | ToolSource[];
 }
 
-/** 类别 badge (source) - labels for MCP/API are proper nouns; builtin/custom use i18n */
-const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
-  mcp: { label: 'MCP', className: 'bg-slate-100 text-slate-800' },
-  api: { label: 'API', className: 'bg-purple-100 text-purple-800' },
-  plugin_py: { label: 'Local', className: 'bg-blue-100 text-blue-800' },
-  plugin_yaml: { label: 'API Plugin', className: 'bg-violet-100 text-violet-800' },
-  builtin: { label: 'Built-in', className: 'bg-green-100 text-green-800' },
-  custom: { label: 'Custom', className: 'bg-orange-100 text-orange-800' },
+/** 类别 badge (source) - preserve existing Tool page colors while fixing device label rendering */
+const SOURCE_BADGE: Record<string, { className: string }> = {
+  mcp: { className: 'bg-slate-100 text-slate-800' },
+  api: { className: 'bg-purple-100 text-purple-800' },
+  device: { className: 'bg-amber-100 text-amber-800' },
+  plugin_py: { className: 'bg-blue-100 text-blue-800' },
+  plugin_yaml: { className: 'bg-violet-100 text-violet-800' },
+  builtin: { className: 'bg-green-100 text-green-800' },
+  custom: { className: 'bg-orange-100 text-orange-800' },
 };
 
 /** 功能类 label key map (category) - maps category key to i18n key */
@@ -100,6 +102,7 @@ const SOURCE_SORT_ORDER: Record<string, number> = {
   plugin_yaml: 3,
   builtin: 4,
   custom: 5,
+  device: 6,
 };
 
 const PAGE_SIZE = 20;
@@ -3194,7 +3197,7 @@ function ToolTable({
             onSort={onSort}
             onToggleFilter={onToggleFilter}
             onClearFilter={onClearFilter}
-            renderLabel={(v) => SOURCE_BADGE[v]?.label || v}
+            renderLabel={(v) => getSourceLabel(v, t)}
             asDiv
           />
         </div>
@@ -3232,6 +3235,7 @@ function ToolTable({
       <div className="flex-1 divide-y divide-gray-100">
         {tools.map((tool) => {
           const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+          const sourceLabel = getSourceLabel(tool.source, t);
           const categoryLabel = t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category });
 
           return (
@@ -3270,7 +3274,7 @@ function ToolTable({
               {/* Source column */}
               <div className="text-center">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${sb.className}`}>
-                  {sb.label}
+                  {sourceLabel}
                 </span>
               </div>
 
@@ -3423,6 +3427,7 @@ export function ToolDetailDrawer({
   const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
   const [fixturesLoading, setFixturesLoading] = useState(true);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+  const sourceLabel = getSourceLabel(tool.source, t);
   const canDirectTest = canDirectlyTestTool(tool);
 
   useEffect(() => {
@@ -3498,7 +3503,7 @@ export function ToolDetailDrawer({
               <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
-                  {sb.label}
+                  {sourceLabel}
                 </span>
                 {tool.source_name && (
                   <span className="text-xs text-gray-500 truncate">{tool.source_name}</span>

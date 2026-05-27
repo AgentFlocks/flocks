@@ -33,12 +33,14 @@ def _make_ctx() -> ToolContext:
     return ToolContext(session_id="test-session", message_id="test-msg", agent="test")
 
 
-def _make_tool_info(name: str, category_value: str) -> MagicMock:
+def _make_tool_info(name: str, category_value: str, *, source: str | None = None) -> MagicMock:
     """Fake ToolRegistry list item with .name and .category.value."""
     item = MagicMock()
     item.name = name
     item.description = f"Description of {name}"
     item.category.value = category_value
+    item.source = source
+    item.enabled = True
     return item
 
 
@@ -136,6 +138,21 @@ class TestToolsCommand:
         assert "file" in result.output.lower()
         assert "terminal" in result.output.lower()
         assert "search" in result.output.lower()
+
+    async def test_source_aware_grouping_splits_external_tools_out_of_custom(self):
+        mock_tools = [
+            _make_tool_info("tdp_event_list", "custom", source="device"),
+            _make_tool_info("threatbook_ip_query", "custom", source="api"),
+            _make_tool_info("read", "file"),
+        ]
+        with patch("flocks.tool.system.slash_command.ToolRegistry.list_tools", return_value=mock_tools), \
+             patch("flocks.tool.system.slash_command.ToolRegistry.init"):
+            result = await run_slash_command_tool(_make_ctx(), "tools")
+
+        assert "**device**" in result.output
+        assert "**api**" in result.output
+        assert "- tdp_event_list: Description of tdp_event_list" in result.output
+        assert "- threatbook_ip_query: Description of threatbook_ip_query" in result.output
 
     async def test_all_tool_names_present(self, mock_tools):
         with patch("flocks.tool.system.slash_command.ToolRegistry.list_tools", return_value=mock_tools), \
