@@ -6,9 +6,10 @@ import asyncio
 import json
 from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
+from flocks.server.auth import require_admin
 from flocks.updater import check_update, perform_update, detect_deploy_mode
 from flocks.updater.models import VersionInfo
 from flocks.utils.log import Log
@@ -46,6 +47,7 @@ async def check_version(
     ),
 )
 async def apply_update(
+    request: Request,
     target_version: str | None = Query(
         default=None,
         description="Target version (e.g. 2026.03.24). Omit to auto-detect the latest.",
@@ -65,6 +67,8 @@ async def apply_update(
     Each event is a JSON-serialised UpdateProgress object:
         data: {"stage": "fetching", "message": "...", "success": null}
     """
+
+    require_admin(request)
 
     async def _error(msg: str):
         yield f"data: {json.dumps({'stage': 'error', 'message': msg, 'success': False})}\n\n"

@@ -35,11 +35,12 @@ function formatUpdateVersion(version?: string | null): string {
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
   edition?: UpdateEdition;
+  canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, onDismiss }: UpdateModalProps) {
+export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrade = true, onClose, onDismiss }: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -49,6 +50,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, 
   const [restarting, setRestarting] = useState(false);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const localizedReleaseNotes = getLocalizedReleaseNotes(info?.release_notes, i18n.language);
+  const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -187,7 +189,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, 
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-gray-500" />
-                <span className="text-sm font-semibold text-gray-800">{t('title')}</span>
+                <span className="text-sm font-semibold text-gray-800">{modalTitle}</span>
               </div>
               <button
                 onClick={safeClose}
@@ -281,7 +283,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, 
               </span>
               <div>
                 <div className="text-sm font-semibold text-amber-950">
-                  {info?.has_update ? t('newVersionTitle') : t('title')}
+                  {info?.has_update ? t('newVersionTitle') : modalTitle}
                 </div>
                 {info?.latest_version && (
                   <div className="text-xs text-amber-700">{formatUpdateVersion(info.latest_version)}</div>
@@ -419,7 +421,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', onClose, 
               </button>
             )}
 
-            {info?.has_update && info.update_allowed !== false && (
+            {canUpgrade && info?.has_update && info.update_allowed !== false && (
               <button
                 onClick={handleUpgrade}
                 className="ml-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 rounded-lg shadow-sm transition-colors"

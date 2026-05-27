@@ -19,7 +19,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from flocks.console.login import ConsoleLoginService
-from flocks.server.auth import require_admin
+from flocks.server.auth import require_admin, require_user
 from flocks.storage.storage import Storage
 from flocks.updater import perform_pro_bundle_install
 
@@ -671,7 +671,7 @@ async def list_upgrade_requests(request: Request) -> list[UpgradeRequestStatus]:
 
 @router.get("/pro-package-status")
 async def get_pro_package_status(request: Request) -> dict[str, Any]:
-    require_admin(request)
+    require_user(request)
     marker = _read_pro_bundle_install_marker()
     capability = _get_pro_capability_status()
     installed = _is_pro_component_installed()
