@@ -168,6 +168,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         model=model,
         native=False,
         hidden=agent_data.get("hidden", False),
+        delegatable=agent_data.get("delegatable"),
         tools=agent_data.get("tools", []),
         tags=agent_data.get("tags", []),
     )

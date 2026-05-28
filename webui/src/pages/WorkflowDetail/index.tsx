@@ -9,6 +9,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
 import RightPanel from './RightPanel';
+import { getLatestStoredSessionId } from './sessionStorage';
 import { extractErrorMessage } from '@/utils/error';
 import NodeInfoPanel from './NodeInfoPanel';
 
@@ -28,6 +29,12 @@ export function buildSessionsPath(sessionId: string | null) {
   return sessionId
     ? `/sessions?session=${encodeURIComponent(sessionId)}`
     : '/sessions';
+}
+
+export function resolveWorkflowSessionId(chatSessionId: string | null, workflowId?: string) {
+  if (chatSessionId) return chatSessionId;
+  if (!workflowId) return null;
+  return getLatestStoredSessionId(workflowId);
 }
 
 export default function WorkflowDetail() {
@@ -126,6 +133,14 @@ export default function WorkflowDetail() {
     void loadWorkflow();
   }, [id, loadWorkflow]);
 
+  useEffect(() => {
+    if (!workflow?.id) {
+      setChatSessionId(null);
+      return;
+    }
+    setChatSessionId(getLatestStoredSessionId(workflow.id));
+  }, [workflow?.id]);
+
   const refreshWorkflowStats = useCallback(() => {
     void loadWorkflow({ preserveExecution: true, silent: true });
   }, [loadWorkflow]);
@@ -181,8 +196,9 @@ export default function WorkflowDetail() {
   }, [workflow]);
 
   const handleViewSessions = useCallback(() => {
-    navigate(buildSessionsPath(chatSessionId));
-  }, [chatSessionId, navigate]);
+    const sessionId = resolveWorkflowSessionId(chatSessionId, workflow?.id);
+    navigate(buildSessionsPath(sessionId));
+  }, [chatSessionId, navigate, workflow]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {

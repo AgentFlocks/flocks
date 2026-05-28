@@ -425,4 +425,31 @@ describe('areChatMessagePartsRenderEqual', () => {
       ],
     )).toBe(true);
   });
+
+  it('detects legacy tool payload updates that still drive the UI', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'first' },
+          },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'updated' },
+          },
+        } as Message['parts'][number],
+      ],
+    )).toBe(false);
+  });
 });

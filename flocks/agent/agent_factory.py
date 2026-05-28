@@ -319,7 +319,7 @@ def inject_dynamic_prompts(
 def _find_yaml_file(name: str, *, include_project: bool = True, include_user: bool = True) -> Optional[Path]:
     """Find the YAML source file for a plugin agent by name.
 
-    Search order mirrors runtime scan precedence for editable plugin agents:
+    Search order follows API edit precedence, not full runtime scan order:
     user-level plugins first, then project-level plugins.
     """
     search_roots: List[Path] = []

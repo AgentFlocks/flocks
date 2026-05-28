@@ -387,6 +387,14 @@ function areToolStatesRenderEqual(
   );
 }
 
+function areLegacyToolPayloadsRenderEqual(
+  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+): boolean {
+  if (prevPayload === nextPayload) return true;
+  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
+}
+
 export function areChatMessagePartsRenderEqual(
   prevParts?: MessagePart[],
   nextParts?: MessagePart[],
@@ -421,6 +429,12 @@ export function areChatMessagePartsRenderEqual(
     }
 
     if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
       return false;
     }
   }

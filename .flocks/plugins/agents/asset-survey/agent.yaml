@@ -1,42 +1,43 @@
 name: asset-survey
-description: Internet asset survey and reconnaissance agent. Translates natural language
-  queries into structured asset mapping searches. Discovers and analyzes internet-facing
-  assets including IPs, domains, ports, services, certificates, and web applications
-  via internet_assets_query. Supports organizational asset enumeration, feature-based
-  search, industry analysis, product fingerprinting, brand impersonation detection,
-  and attack surface assessment. Supplements mapping results with web_search, web_browsing,
-  domain_query, and ip_query.
-description_cn: 互联网资产测绘与暴露面梳理：将自然语言转为结构化资产查询；发现 IP、域名、端口、服务、证书与 Web 应用。 支持组织资产枚举、行业与产品指纹、仿冒品牌与攻击面评估；可结合联网搜索与域名/IP
-  查询补充情报。
+description: >-
+  Internet asset survey and reconnaissance agent. Translates natural language queries into
+  structured asset mapping searches. Discovers and analyzes internet-facing assets including
+  IPs, domains, ports, services, certificates, and web applications via internet_assets_query.
+  Supports organizational asset enumeration, feature-based search, industry analysis,
+  product fingerprinting, brand impersonation detection, and attack surface assessment.
+  Supplements mapping results with web_search, web_browsing, domain_query, and ip_query.
+description_cn: >-
+  互联网资产测绘与暴露面梳理：将自然语言转为结构化资产查询；发现 IP、域名、端口、服务、证书与 Web 应用。
+  支持组织资产枚举、行业与产品指纹、仿冒品牌与攻击面评估；可结合联网搜索与域名/IP 查询补充情报。
 mode: subagent
 hidden: false
-color: '#1ABC9C'
+color: "#1ABC9C"
 delegatable: true
 tags:
-- security
-- asset-survey
+  - security
+  - asset-survey
 tools:
-- read
-- glob
-- grep
-- edit
-- write
-- bash
-- todoread
-- todowrite
-- websearch
-- webfetch
-- threatbook_mcp_hrti_query
-- threatbook_mcp_internet_assets_query
-- threatbook_mcp_web_search
-- threatbook_mcp_web_browsing
-- threatbook_mcp_domain_query
-- threatbook_mcp_ip_query
-- fofa_info
-- fofa_search
-- fofa_host
-- fofa_stats
-- virustotal_ip_query
-- virustotal_domain_query
-- virustotal_url_query
-- virustotal_analysis_status
+  - read
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
+  - websearch
+  - webfetch
+  - threatbook_mcp_hrti_query
+  - threatbook_mcp_internet_assets_query
+  - threatbook_mcp_web_search
+  - threatbook_mcp_web_browsing
+  - threatbook_mcp_domain_query
+  - threatbook_mcp_ip_query
+  - fofa_info
+  - fofa_search
+  - fofa_host
+  - fofa_stats
+  - virustotal_ip_query
+  - virustotal_domain_query
+  - virustotal_url_query
+  - virustotal_analysis_status

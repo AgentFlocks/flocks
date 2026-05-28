@@ -39,8 +39,9 @@ export function useStreamingContent(content: string, isStreaming: boolean): stri
     }
 
     // Drain progressively so a stalled frame does not dump the whole backlog
-    // in a single repaint. Larger backlogs catch up faster.
-    const charsToRenderCount = Math.max(1, Math.ceil(queuedCharsRef.current.length / 6));
+    // in a single repaint. Larger backlogs should still catch up within a
+    // handful of frames instead of lagging behind for visibly too long.
+    const charsToRenderCount = Math.max(1, Math.ceil(queuedCharsRef.current.length / 3));
     const nextChunk = queuedCharsRef.current.splice(0, charsToRenderCount).join('');
     displayedContentRef.current += nextChunk;
     setDisplayContent(displayedContentRef.current);

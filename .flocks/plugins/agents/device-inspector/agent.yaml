@@ -20,8 +20,6 @@ tools:
   - read
   - glob
   - grep
-  - edit
-  - write
   - bash
   - todoread
   - todowrite

@@ -188,6 +188,28 @@ class TestAgentUpdate:
         assert get_resp.status_code == status.HTTP_200_OK
         assert get_resp.json()["delegatable"] is False
 
+    @pytest.mark.asyncio
+    async def test_update_subagent_delegatable_survives_registry_reload(self, client: AsyncClient):
+        """Storage-backed delegatable updates survive a fresh registry load."""
+        from flocks.agent.registry import Agent
+
+        create_resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        update_resp = await client.put(
+            "/api/agent/test-subagent",
+            json={"delegatable": False},
+        )
+        assert update_resp.status_code == status.HTTP_200_OK
+        assert update_resp.json()["delegatable"] is False
+
+        Agent._custom_agents.clear()
+        Agent.invalidate_cache()
+
+        get_resp = await client.get("/api/agent/test-subagent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
+
 
 # ===========================================================================
 # Delete

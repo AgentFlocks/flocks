@@ -144,6 +144,32 @@ describe('useStreamingContent', () => {
     act(() => { flushRaf(); });
     expect(result.current).toBe('abcd');
   });
+
+  it('streaming: catches up large backlogs within a bounded number of frames', () => {
+    const fullContent = `a${'b'.repeat(120)}`;
+    const { result, rerender } = renderHook(
+      ({ content, isStreaming }) => useStreamingContent(content, isStreaming),
+      { initialProps: { content: 'a', isStreaming: true } },
+    );
+
+    act(() => {
+      rerender({ content: fullContent, isStreaming: true });
+    });
+
+    act(() => {
+      flushRaf();
+    });
+    expect(result.current.length).toBeGreaterThan('a'.length);
+    expect(result.current.length).toBeLessThan(fullContent.length);
+
+    for (let i = 0; i < 12; i += 1) {
+      act(() => {
+        flushRaf();
+      });
+    }
+
+    expect(result.current).toBe(fullContent);
+  });
 });
 
 describe('StreamingMarkdown', () => {
