@@ -24,6 +24,12 @@ function getInitialPanelWidth() {
   return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
 }
 
+export function buildSessionsPath(sessionId: string | null) {
+  return sessionId
+    ? `/sessions?session=${encodeURIComponent(sessionId)}`
+    : '/sessions';
+}
+
 export default function WorkflowDetail() {
   const { t } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
@@ -43,6 +49,7 @@ export default function WorkflowDetail() {
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
   const [showMdHint, setShowMdHint] = useState(false);
@@ -172,6 +179,10 @@ export default function WorkflowDetail() {
     a.click();
     URL.revokeObjectURL(url);
   }, [workflow]);
+
+  const handleViewSessions = useCallback(() => {
+    navigate(buildSessionsPath(chatSessionId));
+  }, [chatSessionId, navigate]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {
@@ -397,8 +408,10 @@ export default function WorkflowDetail() {
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
+          onSessionChange={setChatSessionId}
           selectedNode={drawerNode}
           onDeselectNode={() => setDrawerNode(null)}
+          onViewSessions={handleViewSessions}
           onDelete={handleDelete}
         />
       </div>

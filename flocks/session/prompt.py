@@ -265,6 +265,8 @@ class SystemPrompt:
             f"  Source code directory: {working_dir}",
             f"  Is directory a git repo: {'yes' if is_git else 'no'}",
             f"  Platform: {platform.system().lower()}",
+            "   Python executor: uv python",
+            "   Python package manager: uv pip",
             "</env>",
         ]
         return ["\n".join(env_info)]

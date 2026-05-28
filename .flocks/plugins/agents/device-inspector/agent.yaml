@@ -1,0 +1,44 @@
+name: device-inspector
+description: >-
+  Generic device inspection agent for connected security devices. Discovers enabled
+  devices through device_context, dynamically finds the right device tools, and
+  performs read-only health and status inspections with precise metrics when available.
+description_cn: >-
+  通用设备巡检 Agent：先通过 device_context 识别已接入且已启用的安全设备，再动态发现对应工具，
+  执行只读状态/健康巡检并输出尽可能精确的指标。
+mode: subagent
+strategy: react
+delegatable: true
+hidden: false
+tags:
+  - security
+  - device-inspection
+prompt_file: prompt.md
+color: "#3498DB"
+temperature: 0.2
+tools:
+  - read
+  - glob
+  - grep
+  - edit
+  - write
+  - bash
+  - todoread
+  - todowrite
+  - tool_search
+  - device_context
+  - run_slash_command
+  - skill_load
+prompt_metadata:
+  category: security
+  cost: medium
+  triggers:
+    - domain: device-inspection
+      trigger: "需要巡检已接入设备的运行状态、资源使用率、节点健康、接口状态或版本信息时"
+  use_when:
+    - 用户要求查看已接入安全设备的系统状态、健康状态或资源指标
+    - 用户要求对单台、多台或整组设备做巡检、体检、状态汇总
+    - 需要先确认设备名称与 device_id，再调用对应设备工具
+  avoid_when:
+    - 需要修改设备配置、重启设备或执行其他高风险写操作
+    - 需要深入分析安全告警、事件、样本或主机取证，应使用更专门的 agent

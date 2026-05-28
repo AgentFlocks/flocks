@@ -76,7 +76,8 @@
       "deleteConfirmDesc": "Are you sure you want to delete workflow \"{{name}}\"? This action cannot be undone.",
       "deleteConfirmText": "Delete",
       "deleteFailed": "Delete failed",
-      "deleting": "Deleting..."
+      "deleting": "Deleting...",
+      "viewSessions": "Go to session list"
     },
     "overview": {
       "configInfo": "Configuration",

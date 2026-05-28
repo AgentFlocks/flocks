@@ -54,6 +54,7 @@ interface ChatTabProps {
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
+  onSessionChange?: (sessionId: string | null) => void;
   selectedNode?: WorkflowNode | null;
   onNodeRefDismiss?: () => void;
 }
@@ -63,6 +64,7 @@ export default function ChatTab({
   onLatestExecutionChange,
   onWorkflowUpdated,
   onFirstMessageSent,
+  onSessionChange,
   selectedNode,
   onNodeRefDismiss,
 }: ChatTabProps) {
@@ -102,6 +104,10 @@ export default function ChatTab({
   });
 
   const sessionId = activeSessionId || hookSessionId;
+
+  useEffect(() => {
+    onSessionChange?.(sessionId ?? null);
+  }, [onSessionChange, sessionId]);
 
   // Load stored sessions and validate only the active one (lightweight check)
   useEffect(() => {

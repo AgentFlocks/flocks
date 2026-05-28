@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Message } from '@/types';
 
 import {
+  areChatMessagePartsRenderEqual,
   buildTodoWriteSummary,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
@@ -380,5 +381,48 @@ describe('shouldRefetchFinishedMessage', () => {
       finishedMessageId: 'assistant-2',
       abortedMessageId: 'assistant-1',
     })).toBe(true);
+  });
+});
+
+describe('areChatMessagePartsRenderEqual', () => {
+  it('detects streamed text updates even when a later tool part exists', () => {
+    const sharedToolPart = {
+      id: 'tool-1',
+      type: 'tool',
+      tool: 'todowrite',
+      state: { status: 'running', metadata: { step: 1 } },
+    } as Message['parts'][number];
+
+    expect(areChatMessagePartsRenderEqual(
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 wor' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 workflow.json' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+    )).toBe(false);
+  });
+
+  it('keeps skipping rerenders when semantically identical parts are recreated', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+    )).toBe(true);
   });
 });

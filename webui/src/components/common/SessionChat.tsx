@@ -365,6 +365,69 @@ export function getUserAvatarSpacerClassName(compact: boolean): string {
   return compact ? 'h-3.5' : 'h-4';
 }
 
+function areToolStatesRenderEqual(
+  prevState?: ToolState,
+  nextState?: ToolState,
+): boolean {
+  if (prevState === nextState) return true;
+  if (
+    prevState?.status !== nextState?.status ||
+    prevState?.title !== nextState?.title ||
+    prevState?.error !== nextState?.error ||
+    prevState?.time?.start !== nextState?.time?.start ||
+    prevState?.time?.end !== nextState?.time?.end
+  ) {
+    return false;
+  }
+
+  return (
+    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
+    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
+    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
+  );
+}
+
+export function areChatMessagePartsRenderEqual(
+  prevParts?: MessagePart[],
+  nextParts?: MessagePart[],
+): boolean {
+  if (prevParts === nextParts) return true;
+  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
+
+  const total = prevParts?.length ?? 0;
+  for (let i = 0; i < total; i++) {
+    const prevPart = prevParts?.[i];
+    const nextPart = nextParts?.[i];
+
+    if (prevPart === nextPart) continue;
+    if (!prevPart || !nextPart) return false;
+
+    if (
+      prevPart.id !== nextPart.id ||
+      prevPart.type !== nextPart.type ||
+      prevPart.text !== nextPart.text ||
+      prevPart.thinking !== nextPart.thinking ||
+      prevPart.synthetic !== nextPart.synthetic ||
+      prevPart.ignored !== nextPart.ignored ||
+      prevPart.tool !== nextPart.tool ||
+      prevPart.callID !== nextPart.callID ||
+      prevPart.mime !== nextPart.mime ||
+      prevPart.filename !== nextPart.filename ||
+      prevPart.url !== nextPart.url ||
+      prevPart.image?.url !== nextPart.image?.url ||
+      prevPart.image?.alt !== nextPart.image?.alt
+    ) {
+      return false;
+    }
+
+    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 
 // ============================================================================
 // Main component
@@ -2714,9 +2777,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 /**
  * Memoized export of ChatMessageBubble.
  *
- * Fast path (O(1) field checks, aligned with Open WebUI's approach):
+ * Fast path:
  * - structural props: isActive, role, finish, parts.length
- * - content probe: last part's text/thinking field
+ * - per-part render probe with early exits and ref equality reuse
  *
  * Only triggers a re-render when something actually visible has changed,
  * avoiding unnecessary reconciliation during high-frequency streaming.
@@ -2733,14 +2796,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
   if (prev.pendingQuestions !== next.pendingQuestions) return false;
-  // O(1) content probe on the last part — covers the streaming delta case
-  const prevLast = prevParts?.[prevParts.length - 1];
-  const nextLast = nextParts?.[nextParts.length - 1];
-  return (
-    prevLast?.text === nextLast?.text &&
-    prevLast?.thinking === nextLast?.thinking &&
-    prevLast?.state?.status === nextLast?.state?.status &&
-    JSON.stringify(prevLast?.state?.metadata) ===
-      JSON.stringify(nextLast?.state?.metadata)
-  );
+  // Text placeholders can now be created before later tool parts arrive.
+  // Compare each rendered part so mid-array text streaming still repaints.
+  return areChatMessagePartsRenderEqual(prev.message.parts, next.message.parts);
 });
