@@ -8,42 +8,9 @@ import type { ImagePartData } from '@/utils/imageUpload';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
 import client from '@/api/client';
+import { getStoredSessions, pushStoredSession, type StoredSession } from '../sessionStorage';
 
 const FALLBACK_POLL_MS = 30_000;
-const MAX_STORED_SESSIONS = 15;
-
-// ─────────────────────────────────────────────
-// LocalStorage helpers
-// ─────────────────────────────────────────────
-
-interface StoredSession {
-  id: string;
-  title: string;
-  createdAt: number;
-}
-
-function lsKey(workflowId: string) {
-  return `wf-sessions-${workflowId}`;
-}
-
-function getStoredSessions(workflowId: string): StoredSession[] {
-  try {
-    const raw = localStorage.getItem(lsKey(workflowId));
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function pushStoredSession(workflowId: string, session: StoredSession) {
-  const existing = getStoredSessions(workflowId).filter((s) => s.id !== session.id);
-  localStorage.setItem(
-    lsKey(workflowId),
-    JSON.stringify([session, ...existing].slice(0, MAX_STORED_SESSIONS)),
-  );
-}
 
 // ─────────────────────────────────────────────
 // ChatTab
@@ -54,6 +21,7 @@ interface ChatTabProps {
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
+  onSessionChange?: (sessionId: string | null) => void;
   selectedNode?: WorkflowNode | null;
   onNodeRefDismiss?: () => void;
 }
@@ -63,6 +31,7 @@ export default function ChatTab({
   onLatestExecutionChange,
   onWorkflowUpdated,
   onFirstMessageSent,
+  onSessionChange,
   selectedNode,
   onNodeRefDismiss,
 }: ChatTabProps) {
@@ -102,6 +71,10 @@ export default function ChatTab({
   });
 
   const sessionId = activeSessionId || hookSessionId;
+
+  useEffect(() => {
+    onSessionChange?.(sessionId ?? null);
+  }, [onSessionChange, sessionId]);
 
   // Load stored sessions and validate only the active one (lightweight check)
   useEffect(() => {

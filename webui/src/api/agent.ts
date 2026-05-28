@@ -60,6 +60,7 @@ export const agentAPI = {
     color?: string;
     mode?: string;
     model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
     skills?: string[];
     tools?: string[];
   }) =>
@@ -72,6 +73,7 @@ export const agentAPI = {
     temperature?: number;
     color?: string;
     model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
     skills?: string[];
     tools?: string[];
   }) =>
@@ -79,6 +81,9 @@ export const agentAPI = {
 
   updateModel: (name: string, model: { modelID: string; providerID: string } | null, temperature?: number) =>
     client.put<Agent>(`/api/agent/${name}/model`, { model, temperature }),
+
+  setDelegatable: (name: string, delegatable: boolean) =>
+    client.patch<Agent>(`/api/agent/${name}/delegatable`, { delegatable }),
 
   delete: (name: string) =>
     client.delete(`/api/agent/${name}`),

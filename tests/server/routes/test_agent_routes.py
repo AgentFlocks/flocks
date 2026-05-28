@@ -13,6 +13,9 @@ Covers:
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from fastapi import status
 from httpx import AsyncClient
@@ -26,6 +29,26 @@ _AGENT_PAYLOAD = {
     "options": {},
     "prompt": "You are a test assistant.",
 }
+
+_SUBAGENT_PAYLOAD = {
+    **_AGENT_PAYLOAD,
+    "name": "test-subagent",
+    "mode": "subagent",
+}
+
+
+@pytest.fixture(autouse=True)
+def _isolated_delegatable_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    settings_file = tmp_path / "agent_delegatable_settings.json"
+    monkeypatch.setattr("flocks.agent.delegatable_settings.settings_path", lambda: settings_file)
+
+    from flocks.agent.registry import Agent
+
+    Agent._delegatable_settings_mtime = 0.0
+    Agent.invalidate_cache()
+    yield settings_file
+    Agent._delegatable_settings_mtime = 0.0
+    Agent.invalidate_cache()
 
 
 # ===========================================================================
@@ -130,6 +153,13 @@ class TestAgentCreate:
         assert list_resp.status_code == status.HTTP_200_OK
         assert "test-agent" in [agent["name"] for agent in list_resp.json()]
 
+    @pytest.mark.asyncio
+    async def test_create_subagent_defaults_to_delegatable(self, client: AsyncClient):
+        """Sub-agents default to delegatable=true when the field is omitted."""
+        resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["delegatable"] is True
+
 
 # ===========================================================================
 # Update
@@ -156,6 +186,116 @@ class TestAgentUpdate:
             json=_AGENT_PAYLOAD,
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_update_subagent_delegatable(self, client: AsyncClient):
+        """PUT /api/agent/{name} can disable delegation for a sub-agent."""
+        create_resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert create_resp.status_code == status.HTTP_200_OK
+        assert create_resp.json()["delegatable"] is True
+
+        resp = await client.put(
+            "/api/agent/test-subagent",
+            json={"delegatable": False},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["delegatable"] is False
+
+        get_resp = await client.get("/api/agent/test-subagent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_subagent_delegatable_survives_registry_reload(self, client: AsyncClient):
+        """Storage-backed delegatable updates survive a fresh registry load."""
+        from flocks.agent.registry import Agent
+
+        create_resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        update_resp = await client.put(
+            "/api/agent/test-subagent",
+            json={"delegatable": False},
+        )
+        assert update_resp.status_code == status.HTTP_200_OK
+        assert update_resp.json()["delegatable"] is False
+
+        Agent._custom_agents.clear()
+        Agent.invalidate_cache()
+
+        get_resp = await client.get("/api/agent/test-subagent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
+
+    @pytest.mark.asyncio
+    async def test_patch_delegatable_updates_storage_custom_agent_without_sidecar(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        create_resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        patch_resp = await client.patch(
+            "/api/agent/test-subagent/delegatable",
+            json={"delegatable": False},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert patch_resp.json()["delegatable"] is False
+
+        get_resp = await client.get("/api/agent/test-subagent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
+
+        if _isolated_delegatable_settings.exists():
+            payload = json.loads(_isolated_delegatable_settings.read_text(encoding="utf-8"))
+            assert payload.get("delegatable_overrides", {}).get("test-subagent") is None
+
+    @pytest.mark.asyncio
+    async def test_patch_delegatable_overrides_builtin_agent_without_rewriting_yaml(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        patch_resp = await client.patch(
+            "/api/agent/explore/delegatable",
+            json={"delegatable": False},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert patch_resp.json()["delegatable"] is False
+
+        get_resp = await client.get("/api/agent/explore")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
+
+        payload = json.loads(_isolated_delegatable_settings.read_text(encoding="utf-8"))
+        assert payload["delegatable_overrides"]["explore"] is False
+
+    @pytest.mark.asyncio
+    async def test_patch_delegatable_syncs_is_delegatable_without_followup_list(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        """PATCH must refresh _agents_ref so delegate_task sees the new value immediately."""
+        from flocks.agent.registry import Agent, is_delegatable
+
+        await Agent.state()
+        assert is_delegatable("explore") is True
+
+        patch_resp = await client.patch(
+            "/api/agent/explore/delegatable",
+            json={"delegatable": False},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert is_delegatable("explore") is False
+
+        patch_resp = await client.patch(
+            "/api/agent/explore/delegatable",
+            json={"delegatable": True},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert is_delegatable("explore") is True
 
 
 # ===========================================================================

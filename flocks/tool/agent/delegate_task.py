@@ -237,14 +237,13 @@ Use this tool when:
 Usage notes:
 - Provide a clear description (3-5 words)
 - Provide detailed prompt with context
-- run_in_background=true: returns task_id immediately, collect results later with background_output
-- run_in_background=false: waits for completion and returns results inline
 - Pass session_id to continue a previous agent with full context
+- run_in_background=false: (default) waits for completion and returns results inline
 
 REQUIRED: prompt.
 LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
-RUN_IN_BACKGROUND defaults to false (sync).
+RUN_IN_BACKGROUND defaults to false (sync). if true, need: returns task_id immediately, collect results later with background_output
 USE EITHER subagent_type OR category — NEVER both simultaneously.
 """
 
