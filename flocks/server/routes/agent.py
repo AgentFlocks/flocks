@@ -557,13 +557,16 @@ async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest
             from flocks.agent.registry import Agent as AgentRegistry
 
             AgentRegistry.register(name, _agent_data_to_info(agent_data))
-            AgentRegistry.invalidate_cache()
+            await AgentRegistry.refresh()
 
             log.info("agent.delegatable.updated", {"name": name, "source": "storage", "delegatable": req.delegatable})
             return _custom_agent_data_to_response(agent_data)
 
         delegatable_settings.set_override(name, req.delegatable)
-        Agent.invalidate_cache()
+        await Agent.refresh()
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
 
         overrides = await _load_model_overrides()
         delegatable_overrides = _load_delegatable_overrides()

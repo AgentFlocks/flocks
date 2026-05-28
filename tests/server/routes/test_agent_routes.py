@@ -271,6 +271,32 @@ class TestAgentUpdate:
         payload = json.loads(_isolated_delegatable_settings.read_text(encoding="utf-8"))
         assert payload["delegatable_overrides"]["explore"] is False
 
+    @pytest.mark.asyncio
+    async def test_patch_delegatable_syncs_is_delegatable_without_followup_list(
+        self,
+        client: AsyncClient,
+        _isolated_delegatable_settings: Path,
+    ):
+        """PATCH must refresh _agents_ref so delegate_task sees the new value immediately."""
+        from flocks.agent.registry import Agent, is_delegatable
+
+        await Agent.state()
+        assert is_delegatable("explore") is True
+
+        patch_resp = await client.patch(
+            "/api/agent/explore/delegatable",
+            json={"delegatable": False},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert is_delegatable("explore") is False
+
+        patch_resp = await client.patch(
+            "/api/agent/explore/delegatable",
+            json={"delegatable": True},
+        )
+        assert patch_resp.status_code == status.HTTP_200_OK
+        assert is_delegatable("explore") is True
+
 
 # ===========================================================================
 # Delete
