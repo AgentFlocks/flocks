@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { buildSessionsPath, resolveWorkflowSessionId } from './index';
-import { pushStoredSession } from './sessionStorage';
+import { getStoredSessions, pushStoredSession, setStoredSessions } from './sessionStorage';
 
 describe('WorkflowDetail', () => {
   beforeEach(() => {
@@ -25,5 +25,21 @@ describe('WorkflowDetail', () => {
 
     const sessionId = resolveWorkflowSessionId(null, 'wf-1');
     expect(buildSessionsPath(sessionId)).toBe('/sessions?session=session-123');
+  });
+
+  it('覆盖本地历史时会限制最大会话数量', () => {
+    setStoredSessions(
+      'wf-1',
+      Array.from({ length: 20 }, (_, index) => ({
+        id: `session-${index}`,
+        title: `会话 ${index}`,
+        createdAt: index,
+      })),
+    );
+
+    const sessions = getStoredSessions('wf-1');
+    expect(sessions).toHaveLength(15);
+    expect(sessions[0]?.id).toBe('session-0');
+    expect(sessions[14]?.id).toBe('session-14');
   });
 });

@@ -10,6 +10,13 @@ function lsKey(workflowId: string) {
   return `wf-sessions-${workflowId}`;
 }
 
+export function setStoredSessions(workflowId: string, sessions: StoredSession[]) {
+  localStorage.setItem(
+    lsKey(workflowId),
+    JSON.stringify(sessions.slice(0, MAX_STORED_SESSIONS)),
+  );
+}
+
 export function getStoredSessions(workflowId: string): StoredSession[] {
   try {
     const raw = localStorage.getItem(lsKey(workflowId));
@@ -27,8 +34,5 @@ export function getLatestStoredSessionId(workflowId: string): string | null {
 
 export function pushStoredSession(workflowId: string, session: StoredSession) {
   const existing = getStoredSessions(workflowId).filter((stored) => stored.id !== session.id);
-  localStorage.setItem(
-    lsKey(workflowId),
-    JSON.stringify([session, ...existing].slice(0, MAX_STORED_SESSIONS)),
-  );
+  setStoredSessions(workflowId, [session, ...existing]);
 }

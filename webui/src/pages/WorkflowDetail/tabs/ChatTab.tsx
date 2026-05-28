@@ -8,7 +8,12 @@ import type { ImagePartData } from '@/utils/imageUpload';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { formatSessionDate } from '@/utils/time';
 import client from '@/api/client';
-import { getStoredSessions, pushStoredSession, type StoredSession } from '../sessionStorage';
+import {
+  getStoredSessions,
+  pushStoredSession,
+  setStoredSessions,
+  type StoredSession,
+} from '../sessionStorage';
 
 const FALLBACK_POLL_MS = 30_000;
 
@@ -102,7 +107,7 @@ export default function ChatTab({
             break; // found a valid one, stop
           } catch { /* continue */ }
         }
-        localStorage.setItem(lsKey(workflow.id), JSON.stringify(valid));
+        setStoredSessions(workflow.id, valid);
         setSessions(valid);
         if (valid.length > 0) {
           setActiveSessionId(valid[0].id);
