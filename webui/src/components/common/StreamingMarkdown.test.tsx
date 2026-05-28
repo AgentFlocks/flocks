@@ -1,43 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, render } from '@testing-library/react';
 
-// Extract the hook for isolated testing by re-implementing it here.
-// This mirrors the approach in useSessions.test.ts: test pure logic directly.
-import { useState, useEffect, useRef } from 'react';
-import { StreamingMarkdown } from './StreamingMarkdown';
-
-function useStreamingContent(content: string, isStreaming: boolean): string {
-  const [displayContent, setDisplayContent] = useState(content);
-  const pendingRafRef = useRef<number | null>(null);
-  const latestContentRef = useRef(content);
-
-  useEffect(() => {
-    latestContentRef.current = content;
-    if (!isStreaming) {
-      if (pendingRafRef.current !== null) {
-        cancelAnimationFrame(pendingRafRef.current);
-        pendingRafRef.current = null;
-      }
-      setDisplayContent(content);
-    } else if (pendingRafRef.current === null) {
-      pendingRafRef.current = requestAnimationFrame(() => {
-        pendingRafRef.current = null;
-        setDisplayContent(latestContentRef.current);
-      });
-    }
-  }, [content, isStreaming]);
-
-  useEffect(
-    () => () => {
-      if (pendingRafRef.current !== null) {
-        cancelAnimationFrame(pendingRafRef.current);
-      }
-    },
-    [],
-  );
-
-  return displayContent;
-}
+import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 
 // ─── rAF fake setup ──────────────────────────────────────────────────────────
 
@@ -97,7 +61,7 @@ describe('useStreamingContent', () => {
     expect(result.current).toBe('b');
   });
 
-  it('streaming: does not update displayContent until rAF fires', () => {
+  it('streaming: does not update displayContent until rAF fires, then advances smoothly', () => {
     const { result, rerender } = renderHook(
       ({ content, isStreaming }) => useStreamingContent(content, isStreaming),
       { initialProps: { content: 'chunk1', isStreaming: true } },
@@ -112,11 +76,12 @@ describe('useStreamingContent', () => {
     });
     expect(result.current).toBe('chunk1');
 
-    // After rAF fires, picks up latest content
+    // After rAF fires, it advances, but no longer jumps straight to the latest content.
     act(() => {
       flushRaf();
     });
-    expect(result.current).toBe('chunk1 chunk2');
+    expect(result.current.length).toBeGreaterThan('chunk1'.length);
+    expect(result.current.length).toBeLessThan('chunk1 chunk2'.length);
   });
 
   it('streaming: multiple content updates in same frame only trigger one rAF', () => {
@@ -158,20 +123,26 @@ describe('useStreamingContent', () => {
     expect(result.current).toBe('chunk1 chunk2 final');
   });
 
-  it('streaming: after rAF fires it picks up the very latest content ref value', () => {
+  it('streaming: drains queued deltas progressively instead of jumping to latest content', () => {
     const { result, rerender } = renderHook(
       ({ content, isStreaming }) => useStreamingContent(content, isStreaming),
-      { initialProps: { content: 'v1', isStreaming: true } },
+      { initialProps: { content: 'a', isStreaming: true } },
     );
 
     // Multiple updates before the frame fires
-    act(() => { rerender({ content: 'v2', isStreaming: true }); });
-    act(() => { rerender({ content: 'v3', isStreaming: true }); });
-    act(() => { rerender({ content: 'v4', isStreaming: true }); });
+    act(() => { rerender({ content: 'ab', isStreaming: true }); });
+    act(() => { rerender({ content: 'abc', isStreaming: true }); });
+    act(() => { rerender({ content: 'abcd', isStreaming: true }); });
 
-    // Only one frame scheduled; it should use the latest ref value (v4)
+    // One frame should advance the text, but not jump straight to the latest content.
     act(() => { flushRaf(); });
-    expect(result.current).toBe('v4');
+    expect(result.current).toBe('ab');
+
+    act(() => { flushRaf(); });
+    expect(result.current).toBe('abc');
+
+    act(() => { flushRaf(); });
+    expect(result.current).toBe('abcd');
   });
 });
 

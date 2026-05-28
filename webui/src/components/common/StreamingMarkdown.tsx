@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
@@ -13,20 +13,45 @@ const sanitizeSchema = {
 };
 
 /**
- * Throttles content updates to at most once per animation frame while streaming.
- * When streaming ends, immediately flushes the latest content.
- *
- * Mirrors Open WebUI's Markdown.svelte approach:
- *   if (done) { cancelAnimationFrame(pending); parseTokens(); }
- *   else if (!pending) { pending = rAF(() => { pending = null; parseTokens(); }) }
+ * Smooths streamed content by queueing appended text and draining it across
+ * animation frames. The previous implementation collapsed all updates that
+ * arrived before the next rAF into a single "jump to latest" repaint, which
+ * caused visible bursts after a brief main-thread stall.
  */
-function useStreamingContent(content: string, isStreaming: boolean): string {
+export function useStreamingContent(content: string, isStreaming: boolean): string {
   const [displayContent, setDisplayContent] = useState(content);
   const pendingRafRef = useRef<number | null>(null);
-  const latestContentRef = useRef(content);
+  const incomingContentRef = useRef(content);
+  const displayedContentRef = useRef(content);
+  const queuedCharsRef = useRef<string[]>([]);
+  const isStreamingRef = useRef(isStreaming);
+
+  const scheduleDrain = useCallback((drainQueue: (time: number) => void) => {
+    if (pendingRafRef.current !== null) return;
+    pendingRafRef.current = requestAnimationFrame(drainQueue);
+  }, []);
+
+  const drainQueue = useCallback(() => {
+    pendingRafRef.current = null;
+
+    if (queuedCharsRef.current.length === 0) {
+      return;
+    }
+
+    // Drain progressively so a stalled frame does not dump the whole backlog
+    // in a single repaint. Larger backlogs catch up faster.
+    const charsToRenderCount = Math.max(1, Math.ceil(queuedCharsRef.current.length / 6));
+    const nextChunk = queuedCharsRef.current.splice(0, charsToRenderCount).join('');
+    displayedContentRef.current += nextChunk;
+    setDisplayContent(displayedContentRef.current);
+
+    if (queuedCharsRef.current.length > 0 && isStreamingRef.current) {
+      scheduleDrain(drainQueue);
+    }
+  }, [scheduleDrain]);
 
   useEffect(() => {
-    latestContentRef.current = content;
+    isStreamingRef.current = isStreaming;
 
     if (!isStreaming) {
       // Streaming done: cancel any pending frame and apply final content immediately
@@ -34,17 +59,30 @@ function useStreamingContent(content: string, isStreaming: boolean): string {
         cancelAnimationFrame(pendingRafRef.current);
         pendingRafRef.current = null;
       }
+      queuedCharsRef.current = [];
+      incomingContentRef.current = content;
+      displayedContentRef.current = content;
       setDisplayContent(content);
-    } else if (pendingRafRef.current === null) {
-      // Streaming: schedule at most one update per frame
-      pendingRafRef.current = requestAnimationFrame(() => {
-        pendingRafRef.current = null;
-        setDisplayContent(latestContentRef.current);
-      });
+      return;
     }
-    // If pendingRafRef.current !== null, a frame is already scheduled;
-    // latestContentRef ensures it will pick up the most recent content when it fires.
-  }, [content, isStreaming]);
+
+    const previousIncoming = incomingContentRef.current;
+    incomingContentRef.current = content;
+
+    if (!content.startsWith(previousIncoming)) {
+      // Content replaced or rewound: reset immediately to preserve correctness.
+      queuedCharsRef.current = [];
+      displayedContentRef.current = content;
+      setDisplayContent(content);
+      return;
+    }
+
+    const delta = content.slice(previousIncoming.length);
+    if (!delta) return;
+
+    queuedCharsRef.current.push(...Array.from(delta));
+    scheduleDrain(drainQueue);
+  }, [content, isStreaming, drainQueue, scheduleDrain]);
 
   // Cancel any pending rAF on unmount
   useEffect(

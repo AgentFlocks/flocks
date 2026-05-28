@@ -91,7 +91,7 @@ def agent_to_response(
     tools: Optional[List[str]] = None,
 ) -> AgentResponse:
     """Convert internal AgentInfo to API response format."""
-    delegatable = agent.delegatable if agent.delegatable is not None else True
+    delegatable = agent.delegatable if agent.delegatable is not None else agent.mode != "primary"
 
     if model_override:
         model_info = AgentModelInfo(
@@ -134,6 +134,10 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
     Used after create/update to keep ``_custom_agents`` in sync with Storage.
     """
     model_data = agent_data.get("model")
+    mode = agent_data.get("mode", "primary")
+    delegatable = agent_data.get("delegatable")
+    if delegatable is None:
+        delegatable = mode != "primary"
     return AgentInfoModel(
         name=agent_data["name"],
         description=agent_data.get("description") or "",
@@ -141,13 +145,14 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         prompt=agent_data.get("prompt") or "",
         temperature=agent_data.get("temperature"),
         color=agent_data.get("color"),
-        mode=agent_data.get("mode", "primary"),
+        mode=mode,
         model=AgentModelConfig(
             model_id=model_data["modelID"],
             provider_id=model_data["providerID"],
         ) if model_data else None,
         native=False,
         hidden=False,
+        delegatable=delegatable,
     )
 
 
@@ -155,6 +160,10 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
     """Build an AgentResponse from a custom agent's stored data dict."""
     model_data = agent_data.get("model")
     model_info = AgentModelInfo(**model_data) if model_data else None
+    mode = agent_data.get("mode", "primary")
+    delegatable = agent_data.get("delegatable")
+    if delegatable is None:
+        delegatable = mode != "primary"
     return AgentResponse(
         name=agent_data["name"],
         description=agent_data.get("description"),
@@ -162,12 +171,13 @@ def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
         prompt=agent_data.get("prompt"),
         temperature=agent_data.get("temperature"),
         color=agent_data.get("color"),
-        mode=agent_data.get("mode", "primary"),
+        mode=mode,
         model=model_info,
         native=agent_data.get("native", False),
         hidden=agent_data.get("hidden", False),
         permission=[],
         options={},
+        delegatable=delegatable,
         skills=agent_data.get("skills", []),
         tools=agent_data.get("tools", []),
         tags=agent_data.get("tags", []),
@@ -321,6 +331,7 @@ class AgentCreateRequest(BaseModel):
     color: Optional[str] = Field(None, description="Color")
     mode: str = Field("primary", description="Agent mode")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
+    delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
     skills: List[str] = Field(default_factory=list, description="Enabled skill names")
     tools: List[str] = Field(default_factory=list, description="Enabled tool names")
 
@@ -333,6 +344,7 @@ class AgentUpdateRequest(BaseModel):
     temperature: Optional[float] = Field(None, description="Temperature")
     color: Optional[str] = Field(None, description="Color")
     model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
+    delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
     skills: Optional[List[str]] = Field(None, description="Enabled skill names")
     tools: Optional[List[str]] = Field(None, description="Enabled tool names")
 
@@ -366,6 +378,7 @@ async def create_agent(req: AgentCreateRequest):
             "color": req.color,
             "mode": req.mode,
             "model": req.model.model_dump() if req.model else None,
+            "delegatable": req.delegatable if req.delegatable is not None else req.mode != "primary",
             "native": False,
             "hidden": False,
             "skills": req.skills,
@@ -416,6 +429,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 agent_data["color"] = req.color
             if req.model is not None:
                 agent_data["model"] = req.model.model_dump()
+            if req.delegatable is not None:
+                agent_data["delegatable"] = req.delegatable
             if req.skills is not None:
                 agent_data["skills"] = req.skills
             if req.tools is not None:
@@ -445,6 +460,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 updates["color"] = req.color
             if req.model is not None:
                 updates["model"] = req.model.model_dump()
+            if req.delegatable is not None:
+                updates["delegatable"] = req.delegatable
 
             if not update_yaml_agent(name, updates):
                 raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
@@ -478,6 +495,8 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                         model_id=req.model.modelID,
                         provider_id=req.model.providerID,
                     )
+                if req.delegatable is not None:
+                    agent.delegatable = req.delegatable
                 overrides = await _load_model_overrides()
                 all_tool_names = _get_all_tool_names()
                 return await _build_single_agent_response(agent, overrides, all_tool_names)

@@ -27,6 +27,12 @@ _AGENT_PAYLOAD = {
     "prompt": "You are a test assistant.",
 }
 
+_SUBAGENT_PAYLOAD = {
+    **_AGENT_PAYLOAD,
+    "name": "test-subagent",
+    "mode": "subagent",
+}
+
 
 # ===========================================================================
 # List
@@ -130,6 +136,13 @@ class TestAgentCreate:
         assert list_resp.status_code == status.HTTP_200_OK
         assert "test-agent" in [agent["name"] for agent in list_resp.json()]
 
+    @pytest.mark.asyncio
+    async def test_create_subagent_defaults_to_delegatable(self, client: AsyncClient):
+        """Sub-agents default to delegatable=true when the field is omitted."""
+        resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["delegatable"] is True
+
 
 # ===========================================================================
 # Update
@@ -156,6 +169,24 @@ class TestAgentUpdate:
             json=_AGENT_PAYLOAD,
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_update_subagent_delegatable(self, client: AsyncClient):
+        """PUT /api/agent/{name} can disable delegation for a sub-agent."""
+        create_resp = await client.post("/api/agent", json=_SUBAGENT_PAYLOAD)
+        assert create_resp.status_code == status.HTTP_200_OK
+        assert create_resp.json()["delegatable"] is True
+
+        resp = await client.put(
+            "/api/agent/test-subagent",
+            json={"delegatable": False},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["delegatable"] is False
+
+        get_resp = await client.get("/api/agent/test-subagent")
+        assert get_resp.status_code == status.HTTP_200_OK
+        assert get_resp.json()["delegatable"] is False
 
 
 # ===========================================================================
