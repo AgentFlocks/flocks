@@ -95,7 +95,7 @@ export default function AgentPage() {
     if (togglingAgents[agent.name]) return;
     setTogglingAgents((prev) => ({ ...prev, [agent.name]: true }));
     try {
-      const response = await agentAPI.update(agent.name, { delegatable });
+      const response = await agentAPI.setDelegatable(agent.name, delegatable);
       if (editingAgent?.name === agent.name) {
         setEditingAgent(response.data);
       }
