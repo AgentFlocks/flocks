@@ -14,8 +14,10 @@ from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-from flocks.auth.context import get_current_auth_user
+from flocks.auth.context import get_current_auth_user, set_current_auth_user, reset_current_auth_user
 from flocks.server.routes._timing import log_route_timing
+from flocks.audit import emit_audit_event
+from flocks.license import assert_license_active
 from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
@@ -114,7 +116,10 @@ class SessionResponse(BaseModel):
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
+    ownerUsername: Optional[str] = Field(None, description="Session owner username")
+    canWrite: bool = Field(False, description="Whether current user can continue this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
+    isShared: bool = Field(False, description="Whether this session is locally shared")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -125,7 +130,9 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     They are retrieved from the latest user message in the session.
     """
     current_user = get_current_auth_user()
+    can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
+    is_shared = SessionPolicy.is_local_shared(session)
 
     return SessionResponse(
         id=session.id,
@@ -146,14 +153,48 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
         ownerUserID=session.owner_user_id,
+        ownerUsername=session.owner_username,
+        canWrite=can_write,
         canDelete=can_delete,
+        isShared=is_shared,
     )
+
+
+def _require_session_read_access(session: SessionModel, user) -> None:
+    if not SessionPolicy.can_read(session, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者或受邀只读用户可访问会话")
+
+
+def _require_session_write_access(session: SessionModel, user) -> None:
+    if not SessionPolicy.can_write(session, user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
 
 
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
     return bool(metadata.get("hideFromSessionManager"))
+
+
+def _share_metadata(session: SessionModel, *, shared: bool, actor_user_id: str) -> Dict[str, Any]:
+    metadata = dict(session.metadata) if isinstance(session.metadata, dict) else {}
+    metadata["shared_local"] = shared
+    if shared:
+        metadata["shared_local_by"] = actor_user_id
+        metadata["shared_local_at"] = int(time.time() * 1000)
+    else:
+        metadata.pop("shared_local_by", None)
+        metadata.pop("shared_local_at", None)
+    return metadata
+
+
+async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionModel]:
+    """Fetch session by id while bypassing policy filtering."""
+    token = set_current_auth_user(None)
+    try:
+        return await Session.get_by_id(session_id)
+    finally:
+        reset_current_auth_user(token)
 
 
 # =============================================================================
@@ -258,6 +299,7 @@ async def list_sessions(
 async def create_session(http_request: Request, request: Optional[SessionCreateRequest] = None) -> SessionResponse:
     """Create a new session"""
     current_user = require_user(http_request)
+    await assert_license_active(feature="session_create")
     import os
     
     if request is None:
@@ -325,6 +367,22 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     )
 
     log.info("session.created", {"session_id": session.id})
+    try:
+        await emit_audit_event(
+            "session_action",
+            {
+                "action": "create",
+                "actor_id": current_user.username,
+                "actor_name": current_user.username,
+                "user_name": current_user.username,
+                "username": current_user.username,
+                "session_id": session.id,
+                "owner_user_id": current_user.id,
+                "project_id": session.project_id,
+            },
+        )
+    except Exception:
+        pass
     return _session_to_response(session)
 
 
@@ -339,14 +397,14 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
 async def get_session(sessionID: str, request: Request) -> SessionResponse:
     """Get session by ID"""
     _current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_read_access(session, _current_user)
     return _session_to_response(session)
 
 
@@ -356,17 +414,18 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
     summary="Get session children",
     description="Get all child sessions forked from the specified parent",
 )
-async def get_session_children(sessionID: str) -> List[SessionResponse]:
+async def get_session_children(sessionID: str, request: Request) -> List[SessionResponse]:
     """Get child sessions"""
-    session = await Session.get_by_id(sessionID)
+    current_user = require_user(request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_read_access(session, current_user)
     children = await Session.children(session.project_id, sessionID)
-    return [_session_to_response(s) for s in children]
+    return [_session_to_response(s) for s in children if SessionPolicy.can_read(s, current_user)]
 
 
 class TodoInfo(BaseModel):
@@ -389,13 +448,13 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     """Get session todos"""
     from flocks.storage.storage import Storage
     _current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-
+    _require_session_read_access(session, _current_user)
     try:
         todos = await Storage.read(["todo", sessionID])
         if todos is None:
@@ -417,13 +476,13 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
     from flocks.storage.storage import Storage
     from flocks.server.routes.event import publish_event
     _current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-
+    _require_session_write_access(session, _current_user)
     try:
         await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
         
@@ -447,7 +506,7 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
 async def delete_session(sessionID: str, request: Request) -> bool:
     """Delete session by ID (returns true)"""
     current_user = require_user(request)
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     
     if not session:
         raise HTTPException(
@@ -456,7 +515,7 @@ async def delete_session(sessionID: str, request: Request) -> bool:
         )
     
     if not SessionPolicy.can_delete(session, current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员或会话所有者可删除会话")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可删除会话")
 
     await Session.delete(session.project_id, sessionID)
 
@@ -485,6 +544,22 @@ async def delete_session(sessionID: str, request: Request) -> bool:
         })
 
     log.info("session.deleted", {"session_id": sessionID})
+    try:
+        await emit_audit_event(
+            "session_action",
+            {
+                "action": "delete",
+                "actor_id": current_user.username,
+                "actor_name": current_user.username,
+                "user_name": current_user.username,
+                "username": current_user.username,
+                "session_id": sessionID,
+                "owner_user_id": current_user.id,
+                "project_id": session.project_id,
+            },
+        )
+    except Exception:
+        pass
     return True
 
 
@@ -505,16 +580,19 @@ class SessionUpdateRequest(BaseModel):
 async def update_session(
     sessionID: str,
     request: SessionUpdateRequest,
+    http_request: Request,
 ) -> SessionResponse:
     """Update session"""
-    existing = await Session.get_by_id(sessionID)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    current_user = require_user(http_request)
+    _require_session_write_access(existing, current_user)
+
     updates = {}
     if request.title is not None:
         updates["title"] = request.title
@@ -537,6 +615,72 @@ async def update_session(
     return _session_to_response(session)
 
 
+@router.post(
+    "/{sessionID}/share-local",
+    response_model=SessionResponse,
+    summary="Share session locally",
+    description="Share this session to all local accounts as read-only",
+)
+async def share_session_local(sessionID: str, http_request: Request) -> SessionResponse:
+    current_user = require_user(http_request)
+    token = set_current_auth_user(current_user)
+    try:
+        existing = await Session.get_by_id(sessionID)
+    finally:
+        reset_current_auth_user(token)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_write_access(existing, current_user)
+    metadata = _share_metadata(existing, shared=True, actor_user_id=current_user.id)
+    session = await Session.update(
+        project_id=existing.project_id,
+        session_id=sessionID,
+        metadata=metadata,
+    )
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    return _session_to_response(session)
+
+
+@router.post(
+    "/{sessionID}/unshare-local",
+    response_model=SessionResponse,
+    summary="Unshare session locally",
+    description="Cancel local sharing of this session",
+)
+async def unshare_session_local(sessionID: str, http_request: Request) -> SessionResponse:
+    current_user = require_user(http_request)
+    token = set_current_auth_user(current_user)
+    try:
+        existing = await Session.get_by_id(sessionID)
+    finally:
+        reset_current_auth_user(token)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_write_access(existing, current_user)
+    metadata = _share_metadata(existing, shared=False, actor_user_id=current_user.id)
+    session = await Session.update(
+        project_id=existing.project_id,
+        session_id=sessionID,
+        metadata=metadata,
+    )
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    return _session_to_response(session)
+
+
 # =============================================================================
 # Session Actions
 # =============================================================================
@@ -546,7 +690,7 @@ async def update_session(
     summary="Abort session",
     description="Abort an active session and stop any ongoing processing",
 )
-async def abort_session(sessionID: str) -> bool:
+async def abort_session(sessionID: str, http_request: Request) -> bool:
     """Abort session processing.
 
     Aborts both the SessionLoop (sets abort_event so the next step check
@@ -560,6 +704,15 @@ async def abort_session(sessionID: str) -> bool:
     from flocks.session.runner import SessionRunner
     from flocks.session.session_loop import SessionLoop
     from flocks.server.routes.question import reject_session_questions
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_write_access(session, current_user)
 
     # Abort the loop-level context (propagates to runner via shared abort_event)
     loop_aborted = SessionLoop.abort(sessionID)
@@ -623,17 +776,19 @@ class InitRequest(BaseModel):
     summary="Initialize session",
     description="Analyze the current application and create an AGENTS.md file with project-specific agent configurations",
 )
-async def initialize_session(sessionID: str, request: InitRequest) -> bool:
+async def initialize_session(sessionID: str, request: InitRequest, http_request: Request) -> bool:
     """Initialize session"""
     from flocks.session.runner import SessionRunner
-    
-    session = await Session.get_by_id(sessionID)
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     # Execute INIT command
     await SessionRunner.command(
         session_id=sessionID,
@@ -653,15 +808,17 @@ async def initialize_session(sessionID: str, request: InitRequest) -> bool:
     summary="Fork session",
     description="Create a new session by forking at a specific message point",
 )
-async def fork_session(sessionID: str, request: Optional[ForkRequest] = None) -> SessionResponse:
+async def fork_session(sessionID: str, http_request: Request, request: Optional[ForkRequest] = None) -> SessionResponse:
     """Fork session"""
-    session = await Session.get_by_id(sessionID)
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     message_id = request.messageID if request else None
     forked = await Session.fork(session.project_id, sessionID, message_id)
     
@@ -711,20 +868,22 @@ class SummarizeRequest(BaseModel):
     summary="Summarize session",
     description="Generate a summary using AI compaction",
 )
-async def summarize_session(sessionID: str, request: SummarizeRequest) -> bool:
+async def summarize_session(sessionID: str, request: SummarizeRequest, http_request: Request) -> bool:
     """Summarize session"""
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
     from flocks.server.routes.event import publish_event
     from flocks.session.message import Message, MessageRole
-    
-    session = await Session.get_by_id(sessionID)
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     # Get all messages to find current agent from last user message
     # This matches Flocks logic in session.ts:520-528
     messages = await Message.list(sessionID)
@@ -782,17 +941,19 @@ class RevertRequest(BaseModel):
     summary="Revert session",
     description="Revert session to a specific message point",
 )
-async def revert_session(sessionID: str, request: RevertRequest) -> SessionResponse:
+async def revert_session(sessionID: str, request: RevertRequest, http_request: Request) -> SessionResponse:
     """Revert session"""
     from flocks.session.lifecycle.revert import SessionRevert
-    
-    session = await Session.get_by_id(sessionID)
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     updated = await SessionRevert.revert(
         session_id=sessionID,
         message_id=request.messageID,
@@ -809,17 +970,19 @@ async def revert_session(sessionID: str, request: RevertRequest) -> SessionRespo
     summary="Unrevert session",
     description="Restore previously reverted messages",
 )
-async def unrevert_session(sessionID: str) -> SessionResponse:
+async def unrevert_session(sessionID: str, http_request: Request) -> SessionResponse:
     """Unrevert session"""
     from flocks.session.lifecycle.revert import SessionRevert
-    
-    session = await Session.get_by_id(sessionID)
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     updated = await SessionRevert.unrevert(session_id=sessionID)
     
     log.info("session.unreverted", {"session_id": sessionID})
@@ -1002,12 +1165,22 @@ class MessageEditRequest(BaseModel):
 )
 async def get_session_messages(
     sessionID: str,
+    http_request: Request,
     limit: Optional[int] = Query(None, ge=1, description="Maximum messages to return"),
 ) -> List[MessageWithParts]:
     """Get session messages"""
     from flocks.session.message import Message
     import os
-    
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_read_access(session, current_user)
+
     try:
         messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
         if limit:
@@ -1131,11 +1304,20 @@ async def get_session_messages(
     summary="Get message",
     description="Get a specific message by ID",
 )
-async def get_message(sessionID: str, messageID: str) -> MessageWithParts:
+async def get_message(sessionID: str, messageID: str, http_request: Request) -> MessageWithParts:
     """Get single message"""
     from flocks.session.message import Message
     import os
-    
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_read_access(session, current_user)
+
     msg_with_parts = await Message.get_with_parts(sessionID, messageID)
     if msg_with_parts:
         msg = msg_with_parts.info
@@ -1224,10 +1406,19 @@ async def get_message(sessionID: str, messageID: str) -> MessageWithParts:
     summary="Delete message part",
     description="Delete a specific part from a message",
 )
-async def delete_message_part(sessionID: str, messageID: str, partID: str) -> bool:
+async def delete_message_part(sessionID: str, messageID: str, partID: str, http_request: Request) -> bool:
     """Delete message part"""
     from flocks.session.message import Message
-    
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_write_access(session, current_user)
+
     try:
         await Message.remove_part(sessionID, messageID, partID)
         log.info("message.part.deleted", {
@@ -1252,6 +1443,7 @@ async def update_message_part(
     messageID: str,
     partID: str,
     body: MessagePartInfo,
+    http_request: Request,
 ) -> MessagePartInfo:
     """Update message part"""
     if body.id != partID or body.messageID != messageID or body.sessionID != sessionID:
@@ -1261,7 +1453,16 @@ async def update_message_part(
         )
     
     from flocks.session.message import Message
-    
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+    _require_session_write_access(session, current_user)
+
     try:
         await Message.update_part(sessionID, messageID, partID, **body.model_dump())
         log.info("message.part.updated", {
@@ -1541,6 +1742,7 @@ async def resend_session_message(
     sessionID: str,
     messageID: str,
     body: MessageEditRequest,
+    http_request: Request,
 ) -> Dict[str, str]:
     import os
 
@@ -1564,12 +1766,14 @@ async def resend_session_message(
             detail="Only user messages can be resent",
         )
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
 
     if SessionLoop.is_running(sessionID):
         raise HTTPException(
@@ -1621,6 +1825,7 @@ async def resend_session_message(
 async def regenerate_session_message(
     sessionID: str,
     messageID: str,
+    http_request: Request,
 ) -> Dict[str, str]:
     import os
 
@@ -1656,12 +1861,14 @@ async def regenerate_session_message(
             detail="Assistant parent message must be a user message",
         )
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
 
     if SessionLoop.is_running(sessionID):
         raise HTTPException(
@@ -1706,7 +1913,7 @@ async def regenerate_session_message(
     summary="Send message",
     description="Send a new message and get AI response",
 )
-async def send_session_message(sessionID: str, request: PromptRequest):
+async def send_session_message(sessionID: str, request: PromptRequest, http_request: Request):
     """
     Send message to session
     
@@ -1725,12 +1932,14 @@ async def send_session_message(sessionID: str, request: PromptRequest):
     import json
     import os
     
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
     
     working_directory = session.directory or os.getcwd()
     
@@ -2791,17 +3000,20 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
 async def send_session_message_async(
     sessionID: str,
     request: PromptRequest,
+    http_request: Request,
 ):
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
     from flocks.input.events import UserInputEvent
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
     
     working_directory = session.directory or os.getcwd()
     
@@ -2903,7 +3115,7 @@ class CommandRequest(BaseModel):
     summary="Send command",
     description="Execute a slash command in the session (returns 202, result via SSE)",
 )
-async def send_session_command(sessionID: str, request: CommandRequest):
+async def send_session_command(sessionID: str, request: CommandRequest, http_request: Request):
     """
     Execute a slash command.
 
@@ -2924,12 +3136,14 @@ async def send_session_command(sessionID: str, request: CommandRequest):
 
     from flocks.input.events import UserInputEvent
 
-    session = await Session.get_by_id(sessionID)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
+    current_user = require_user(http_request)
+    _require_session_write_access(session, current_user)
 
     working_directory = session.directory or os.getcwd()
 
@@ -3009,17 +3223,19 @@ class ShellRequest(BaseModel):
     summary="Run shell command",
     description="Execute a shell command in the session context",
 )
-async def run_shell_command(sessionID: str, request: ShellRequest):
+async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
     from flocks.session.runner import SessionRunner
-    
-    session = await Session.get_by_id(sessionID)
+
+    current_user = require_user(http_request)
+    session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    
+    _require_session_write_access(session, current_user)
+
     model = None
     if request.model:
         model = {"providerID": request.model.providerID, "modelID": request.model.modelID}
@@ -3237,7 +3453,7 @@ async def get_session_statistics(sessionID: str):
 
 
 @router.post("/{sessionID}/clear")
-async def clear_session(sessionID: str):
+async def clear_session(sessionID: str, http_request: Request):
     """
     Clear session messages
     
@@ -3245,12 +3461,14 @@ async def clear_session(sessionID: str):
     """
     try:
         # Verify session exists
-        session_info = await Session.get_by_id(sessionID)
+        session_info = await _get_session_by_id_unfiltered(sessionID)
         if not session_info:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session {sessionID} not found",
             )
+        current_user = require_user(http_request)
+        _require_session_write_access(session_info, current_user)
 
         # Use Message.clear which handles bulk deletion atomically
         from flocks.session.message import Message

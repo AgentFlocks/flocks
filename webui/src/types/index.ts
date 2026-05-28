@@ -19,7 +19,9 @@ export interface Session {
   category?: string;
   ownerUserID?: string;
   ownerUsername?: string;
+  canWrite?: boolean;
   canDelete?: boolean;
+  isShared?: boolean;
 }
 
 export interface SessionTime {

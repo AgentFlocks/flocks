@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft,
+  Wrench, ChevronRight, ChevronLeft, Link2, TerminalSquare, ShieldCheck, ArrowRight,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -71,6 +72,34 @@ function StatusBadge({ status, enabled }: { status: string; enabled: boolean }) 
     <span className="inline-flex items-center gap-1 text-xs text-zinc-400"><AlertTriangle className="w-3 h-3" />未检测</span>
   );
 }
+
+type CapabilityDimension = 'api' | 'web2cli' | 'skill';
+
+const CAPABILITY_DIMENSIONS: Array<{
+  key: CapabilityDimension;
+  label: string;
+  description: string;
+  icon: typeof Link2;
+}> = [
+  {
+    key: 'api',
+    label: '设备 API 接入',
+    description: '管理 endpoint、凭证、SSL 校验和连通性检测。',
+    icon: Link2,
+  },
+  {
+    key: 'web2cli',
+    label: '设备 web2cli',
+    description: '通过浏览器动作/CLI 能力补齐没有标准 API 的操作。',
+    icon: TerminalSquare,
+  },
+  {
+    key: 'skill',
+    label: '设备 Skill',
+    description: '将设备巡检、研判和处置能力沉淀为可复用 Skill。',
+    icon: ShieldCheck,
+  },
+];
 
 // ============================================================================
 // Active device card
@@ -920,6 +949,7 @@ type PanelMode =
 
 export default function DeviceIntegrationPage() {
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
   const [templates, setTemplates] = useState<APIServiceSummary[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
@@ -987,6 +1017,32 @@ export default function DeviceIntegrationPage() {
   );
 
   const panelDeviceId = panel?.kind === 'edit' ? panel.device.id : null;
+  const requestedView = searchParams.get('view');
+  const activeDimension: CapabilityDimension =
+    requestedView === 'web2cli' || requestedView === 'skill' ? requestedView : 'api';
+  const activeDimensionConfig = CAPABILITY_DIMENSIONS.find((item) => item.key === activeDimension) ?? CAPABILITY_DIMENSIONS[0];
+  const ActiveDimensionIcon = activeDimensionConfig.icon;
+  const installedStorageKeys = useMemo(
+    () => new Set(devices.map((device) => device.storage_key)),
+    [devices],
+  );
+  const capabilityStats = useMemo(() => {
+    const connected = devices.filter((device) => device.enabled && (device.status === 'ok' || device.status === 'connected')).length;
+    const needsAttention = devices.filter((device) => device.enabled && device.status !== 'ok' && device.status !== 'connected').length;
+    const notInstalledTemplates = templates.filter((template) => !installedStorageKeys.has(template.id)).length;
+    return {
+      total: devices.length,
+      connected,
+      needsAttention,
+      notInstalledTemplates,
+    };
+  }, [devices, installedStorageKeys, templates]);
+
+  const setActiveDimension = (dimension: CapabilityDimension) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('view', dimension);
+    setSearchParams(next, { replace: true });
+  };
 
   const handleSave = async (data: { name: string; fields: Record<string, string>; enabled: boolean; verify_ssl: boolean }) => {
     if (panel?.kind === 'add') {
@@ -1079,6 +1135,87 @@ export default function DeviceIntegrationPage() {
       />
 
       <GroupBanner group={currentGroup} onRenamed={() => void fetchData(true)} />
+
+      <section className="mx-6 mt-4 rounded-2xl border border-zinc-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <Server className="h-4 w-4 text-red-600" />
+              <h2 className="text-sm font-semibold text-zinc-900">数据源与设备能力概览</h2>
+            </div>
+            <p className="mt-1 text-xs text-zinc-500">
+              同一页面保留可落库的设备 API 配置，同时按 API、web2cli、设备 Skill 三个维度查看接入进度。
+            </p>
+          </div>
+          <Link
+            to="/soc/inspections"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
+          >
+            去 SOC 查看设备巡检
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+
+        <div className="mt-4 grid gap-3 md:grid-cols-4">
+          <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3">
+            <div className="text-xs text-blue-700">已接入设备</div>
+            <div className="mt-1 text-2xl font-semibold text-blue-900">{capabilityStats.total}</div>
+          </div>
+          <div className="rounded-xl border border-green-100 bg-green-50 px-4 py-3">
+            <div className="text-xs text-green-700">已连接</div>
+            <div className="mt-1 text-2xl font-semibold text-green-900">{capabilityStats.connected}</div>
+          </div>
+          <div className="rounded-xl border border-orange-100 bg-orange-50 px-4 py-3">
+            <div className="text-xs text-orange-700">待处理连接</div>
+            <div className="mt-1 text-2xl font-semibold text-orange-900">{capabilityStats.needsAttention}</div>
+          </div>
+          <div className="rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3">
+            <div className="text-xs text-zinc-600">可新增模板</div>
+            <div className="mt-1 text-2xl font-semibold text-zinc-900">{capabilityStats.notInstalledTemplates}</div>
+          </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-2">
+          {CAPABILITY_DIMENSIONS.map((dimension) => {
+            const Icon = dimension.icon;
+            const active = dimension.key === activeDimension;
+            return (
+              <button
+                key={dimension.key}
+                type="button"
+                onClick={() => setActiveDimension(dimension.key)}
+                className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                  active
+                    ? 'border-zinc-900 bg-zinc-900 text-white'
+                    : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+                {dimension.label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-3 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-900">
+            <ActiveDimensionIcon className="h-4 w-4 text-red-600" />
+            {activeDimensionConfig.label}
+          </div>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">{activeDimensionConfig.description}</p>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            <Link to="/tools" className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-zinc-600 hover:bg-zinc-50">
+              维护 API 工具
+            </Link>
+            <Link to="/workflows" className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-zinc-600 hover:bg-zinc-50">
+              绑定默认编排
+            </Link>
+            <Link to="/skills" className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-zinc-600 hover:bg-zinc-50">
+              管理设备 Skill
+            </Link>
+          </div>
+        </div>
+      </section>
 
       {loading ? (
         <div className="flex-1 flex items-center justify-center"><LoadingSpinner /></div>

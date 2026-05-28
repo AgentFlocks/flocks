@@ -18,8 +18,16 @@ import {
   ArrowUpCircle,
   UserCog,
   Archive,
-  ServerCog,
   ScrollText,
+  ShieldCheck,
+  Shield,
+  AlertTriangle,
+  Network,
+  ServerCog,
+  Bug,
+  MailWarning,
+  Radar,
+  Globe2,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -40,17 +48,31 @@ const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal')
 const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
 const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
 import { checkUpdate, type VersionInfo } from '@/api/update';
+import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
   ackNotification,
   getActiveNotifications,
   getNotificationAckStatus,
   type UserNotification,
 } from '@/api/notifications';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { useAuth } from '@/contexts/AuthContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+type WorkspaceId = 'agent' | 'soc' | 'system';
+
+function formatProVersion(version?: string | null): string | null {
+  const normalized = (version || '').trim().replace(/^pro-v/i, '').replace(/^v/i, '');
+  return normalized ? `pro-v${normalized}` : null;
+}
+
+function formatUpdateVersion(version?: string | null): string | null {
+  const raw = (version || '').trim();
+  if (!raw) return null;
+  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+}
 
 function buildUpdateNotification(info: VersionInfo | null, language: string): UserNotification | null {
   const releaseNotes = getLocalizedReleaseNotes(info?.release_notes, language);
@@ -63,7 +85,7 @@ function buildUpdateNotification(info: VersionInfo | null, language: string): Us
   return {
     id: `whats-new-${version}`,
     kind: 'whats_new',
-    title: isZh ? `Flocks v${version} 更新内容` : `What's new in Flocks v${version}`,
+    title: isZh ? `Flocks ${formatUpdateVersion(version)} 更新内容` : `What's new in Flocks ${formatUpdateVersion(version)}`,
     summary: isZh ? '这里是本次版本值得关注的新功能和变化。' : 'Here are the highlights from this version.',
     body: releaseNotes,
     highlights: [],
@@ -95,6 +117,10 @@ export default function Layout() {
   const [updateNotificationReady, setUpdateNotificationReady] = useState(false);
   const [acknowledgingNotificationIds, setAcknowledgingNotificationIds] = useState<string[]>([]);
   const lastNotificationFetchKeyRef = useRef<string | null>(null);
+  const [hasFlocksproCapability, setHasFlocksproCapability] = useState(false);
+  const [isFlocksproActive, setIsFlocksproActive] = useState(false);
+  const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
+  const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
   useLayoutEffect(() => {
@@ -111,6 +137,15 @@ export default function Layout() {
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (force = false) => {
+    if (!flocksproStatusReady) return;
+    if (isFlocksproActive) {
+      setUpdateInfo(null);
+      setHasUpdate(false);
+      setLatestVersion(null);
+      setHasCompletedUpdateCheck(true);
+      return;
+    }
+
     const now = Date.now();
     if (checkingUpdateRef.current) return;
     if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
@@ -150,9 +185,11 @@ export default function Layout() {
       checkingUpdateRef.current = false;
       setHasCompletedUpdateCheck(true);
     }
-  }, [i18n.language]);
+  }, [flocksproStatusReady, i18n.language, isFlocksproActive]);
 
   useEffect(() => {
+    if (!flocksproStatusReady) return undefined;
+
     refreshUpdateStatus(true);
 
     const intervalId = window.setInterval(() => {
@@ -179,7 +216,88 @@ export default function Layout() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [refreshUpdateStatus]);
+  }, [flocksproStatusReady, refreshUpdateStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!user?.id || user.role !== 'admin') {
+      setHasFlocksproCapability(false);
+      setFlocksproVersion(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const refreshCapability = () => {
+      void flocksproUsersApi.hasCapability()
+        .then((ok) => {
+          if (!cancelled) {
+            setHasFlocksproCapability(ok);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setHasFlocksproCapability(false);
+          }
+        });
+    };
+    refreshCapability();
+    window.addEventListener('flockspro-license-status-changed', refreshCapability);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('flockspro-license-status-changed', refreshCapability);
+    };
+  }, [user?.id, user?.role]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setFlocksproStatusReady(false);
+    if (!user?.id || user.role !== 'admin') {
+      setIsFlocksproActive(false);
+      setFlocksproVersion(null);
+      setFlocksproStatusReady(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+    const refreshFlocksproStatus = () => {
+      setFlocksproStatusReady(false);
+      void Promise.all([
+        flocksproUsersApi.getLicenseStatus(),
+        consoleUpgradeApi.getProPackageStatus().catch(() => null),
+      ])
+        .then(([licenseStatus, packageStatus]) => {
+          if (cancelled) return;
+          const active = licenseStatus.pro_enabled === true;
+          setIsFlocksproActive(active);
+          const version = active
+            ? formatProVersion(
+                packageStatus?.compare_version ||
+                  packageStatus?.display_version ||
+                  packageStatus?.installed_version ||
+                  packageStatus?.flockspro_component_version,
+              )
+            : null;
+          setFlocksproVersion(version);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setIsFlocksproActive(false);
+            setFlocksproVersion(null);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setFlocksproStatusReady(true);
+          }
+        });
+    };
+    refreshFlocksproStatus();
+    window.addEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('flockspro-license-status-changed', refreshFlocksproStatus);
+    };
+  }, [user?.id, user?.role]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -293,57 +411,117 @@ export default function Layout() {
     }
   }, [acknowledgingNotificationIds.length, removeNotifications, visibleNotifications]);
 
+  const isNavigationItemActive = useCallback((href: string) => {
+    if (href === '/') return location.pathname === '/';
+    if (location.pathname === href) return true;
+    return location.pathname.startsWith(`${href}/`);
+  }, [location.pathname]);
 
-  // Stable across re-renders triggered by location changes (sidebar nav clicks)
-  // — the array only depends on the i18n translation function, which itself is
-  // stable as long as the language doesn't change. Without this, every route
-  // switch rebuilt the whole nav structure and cascaded re-renders down to
-  // every <Link>, contributing to perceptible navigation lag.
-  const navigation = useMemo(
-    () => [
+  const systemPaths = ['/config', '/permissions', '/monitoring', '/audit-logs', '/flockspro-upgrade', '/system-logs'];
+  const isSystemPath = systemPaths.some((path) =>
+    location.pathname === path || location.pathname.startsWith(`${path}/`)
+  );
+  const currentWorkspace: WorkspaceId = location.pathname.startsWith('/soc/')
+    || location.pathname === '/soc'
+    ? 'soc'
+    : isSystemPath
+      ? 'system'
+      : 'agent';
+
+  const workspaceTabs: Array<{ id: WorkspaceId; name: string; href: string; icon: typeof Bot }> = [
+    { id: 'agent', name: t('agentWorkspace'), href: '/sessions', icon: Bot },
+    { id: 'soc', name: t('socWorkspace'), href: '/soc', icon: Shield },
+    { id: 'system', name: t('systemCenter'), href: '/config', icon: UserCog },
+  ];
+
+  type NavItem = { name: string; href: string; icon: typeof Bot };
+  type NavSection = { id: string; name: string; items: NavItem[] };
+  const workspaceNavigation: Record<WorkspaceId, NavSection[]> = useMemo(() => ({
+    agent: [
       {
-        name: '',
+        id: 'home',
+        name: t('home'),
         items: [
           { name: t('flocksHome'), href: '/', icon: Home },
         ],
       },
       {
+        id: 'aiWorkbench',
         name: t('aiWorkbench'),
         items: [
           { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
           { name: t('tasks'), href: '/tasks', icon: ListTodo },
+          { name: t('workspace'), href: '/workspace', icon: FolderOpen },
           { name: t('workflows'), href: '/workflows', icon: Workflow },
         ],
       },
       {
+        id: 'agentHub',
         name: t('agentHub'),
         items: [
           { name: t('agents'), href: '/agents', icon: Bot },
           { name: t('skills'), href: '/skills', icon: BookOpen },
           { name: t('tools'), href: '/tools', icon: Wrench },
           { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
+          { name: t('knowledge'), href: '/knowledge', icon: ShieldCheck },
           { name: t('hub'), href: '/hub', icon: Archive },
           { name: t('models'), href: '/models', icon: Brain },
           { name: t('channels'), href: '/channels', icon: Radio },
         ],
       },
+    ],
+    soc: [
       {
+        id: 'socWorkspace',
+        name: t('socWorkspace'),
+        items: [
+          { name: t('socOverview'), href: '/soc', icon: Shield },
+          { name: t('socAlerts'), href: '/soc/alerts', icon: AlertTriangle },
+          { name: t('socCases'), href: '/soc/cases', icon: MessageSquare },
+          { name: t('socAssets'), href: '/soc/assets', icon: Network },
+          { name: t('socIntel'), href: '/soc/intel', icon: Radar },
+          { name: t('socVulnerabilities'), href: '/soc/vulnerabilities', icon: Bug },
+          { name: t('socDrills'), href: '/soc/drills', icon: MailWarning },
+          { name: t('socAttackSurface'), href: '/soc/attack-surface', icon: Globe2 },
+          { name: t('socReports'), href: '/soc/reports', icon: Archive },
+        ],
+      },
+    ],
+    system: [
+      {
+        id: 'systemCenter',
         name: t('systemCenter'),
         items: [
           { name: t('accountManagement'), href: '/config', icon: UserCog },
+          { name: t('permissions'), href: '/permissions', icon: ShieldCheck },
+          ...(hasFlocksproCapability && user?.role === 'admin'
+            ? [{ name: t('auditLogs'), href: '/audit-logs', icon: Shield }]
+            : []),
+          { name: t('monitoring'), href: '/monitoring', icon: Radio },
+          ...(user?.role === 'admin'
+            ? [{ name: t('flocksproUpgrade'), href: '/flockspro-upgrade', icon: ArrowUpCircle }]
+            : []),
           { name: t('systemLog'), href: '/system-logs', icon: ScrollText },
         ],
       },
     ],
-    [t],
-  );
+  }), [hasFlocksproCapability, t, user?.role]);
+  const navigationSections = workspaceNavigation[currentWorkspace];
 
   const isFullScreenPage =
     matchPath('/workflows/create', location.pathname) ||
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
     matchPath('/sessions', location.pathname);
+  const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
+  const displayVersion = isFlocksproActive
+    ? flocksproVersion || (currentVersion ? `v${currentVersion}` : null)
+    : currentVersion ? `v${currentVersion}` : null;
+  const currentVersionLabel = isFlocksproActive
+    ? t('currentProductVersionLabel', { version: displayVersion || productName })
+    : currentVersion
+    ? t('currentVersionLabel', { version: currentVersion })
+    : productName;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -358,6 +536,7 @@ export default function Layout() {
         {showUpdate && (
           <UpdateModal
             initialInfo={updateInfo}
+            edition={isFlocksproActive ? 'flockspro' : 'flocks'}
             onClose={() => setShowUpdate(false)}
             onDismiss={() => setShowUpdate(false)}
           />
@@ -395,13 +574,15 @@ export default function Layout() {
             {collapsed ? (
               <div
                 className="w-8 h-8 rounded-lg border border-zinc-200 bg-white flex items-center justify-center flex-shrink-0 shadow-sm"
-                title="Flocks"
+                title={productName}
               >
                 <Sparkles className="w-4 h-4 text-zinc-500" />
               </div>
             ) : (
               <>
-                <span className="flex-1 min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap">Flocks</span>
+                <div className="flex items-center flex-1 min-w-0">
+                  <span className="text-xl font-bold text-zinc-900 whitespace-nowrap">{productName}</span>
+                </div>
                 <button
                   onClick={() => setSidebarOpen(false)}
                   className="lg:hidden p-1 text-zinc-400 hover:text-zinc-600 rounded flex-shrink-0"
@@ -414,9 +595,9 @@ export default function Layout() {
 
           {/* Navigation */}
           <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-4 ${collapsed ? 'px-2' : 'px-3'}`}>
-            {navigation.map((section) => (
-              <div key={section.name} className="mb-6">
-                {!collapsed && section.name && (
+            {navigationSections.map((section) => (
+              <div key={section.id} className="mb-6">
+                {!collapsed && (
                   <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap">
                     {section.name}
                   </h3>
@@ -424,8 +605,8 @@ export default function Layout() {
                 {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none" />}
                 <div className="space-y-0.5">
                   {section.items.map((item) => {
-                    const isActive = location.pathname === item.href
-                      || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
+                    const isActive = isNavigationItemActive(item.href)
+                      || (item.href === '/soc' && location.pathname === '/soc');
                     return (
                       <Link
                         key={item.href}
@@ -444,9 +625,7 @@ export default function Layout() {
                         <item.icon
                           className={`flex-shrink-0 w-5 h-5 ${collapsed ? '' : 'mr-3'} ${isActive ? 'text-zinc-700' : 'text-zinc-400'}`}
                         />
-                        {!collapsed && (
-                          <span className="truncate">{item.name}</span>
-                        )}
+                        {!collapsed && <span className="truncate">{item.name}</span>}
                       </Link>
                     );
                   })}
@@ -467,16 +646,14 @@ export default function Layout() {
                   >
                     <div className="flex items-center gap-2 text-sm">
                       <span className="min-w-0 flex-1 truncate font-semibold text-amber-900">
-                        {t('newVersion')} {latestVersion ? `v${latestVersion}` : ''}
+                        {t('newVersion')} {formatUpdateVersion(latestVersion) || ''}
                       </span>
                       <span className="inline-flex flex-shrink-0 items-center rounded-full bg-amber-500 px-2 py-0.5 text-xs font-semibold text-white shadow-sm">
                         {t('updateNow')}
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-amber-700">
-                      {currentVersion
-                        ? t('currentVersionLabel', { version: currentVersion })
-                        : 'Flocks'}
+                      {currentVersionLabel}
                     </div>
                     <div className="mt-0.5 text-xs font-medium text-amber-900">
                       AI Native SecOps Platform
@@ -489,7 +666,7 @@ export default function Layout() {
                   >
                     <div className="flex items-center gap-1.5">
                       <span className="text-xs font-medium text-zinc-500 group-hover:text-zinc-800 transition-colors">
-                        Flocks {currentVersion ? `v${currentVersion}` : '...'}
+                        {productName} {displayVersion || '...'}
                       </span>
                     </div>
                     <div className="mt-0.5 text-xs text-zinc-400">AI Native SecOps Platform</div>
@@ -500,7 +677,7 @@ export default function Layout() {
             {collapsed && (
               <button
                 onClick={() => setShowUpdate(true)}
-                title={hasUpdate ? t('hasNewVersion', { version: latestVersion ? `v${latestVersion}` : '' }) : t('versionInfo')}
+                title={hasUpdate ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' }) : t('versionInfo')}
                 className={`relative rounded-xl p-2 transition-colors ${
                   hasUpdate
                     ? 'bg-amber-50 text-amber-600 hover:bg-amber-100'
@@ -549,6 +726,27 @@ export default function Layout() {
       <div
         className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
       >
+        <header className="border-b border-gray-200 bg-white px-6 py-3">
+          <nav className="flex items-center gap-2 overflow-x-auto">
+            {workspaceTabs.map((tab) => {
+              const isActive = tab.id === currentWorkspace;
+              return (
+                <Link
+                  key={tab.id}
+                  to={tab.href}
+                  className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors ${
+                    isActive
+                      ? 'bg-slate-900 text-white'
+                      : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                  }`}
+                >
+                  <tab.icon className="h-4 w-4" />
+                  {tab.name}
+                </Link>
+              );
+            })}
+          </nav>
+        </header>
         <main className="flex-1 overflow-hidden bg-gray-50">
           {isFullScreenPage ? (
             <Outlet />

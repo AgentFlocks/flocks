@@ -912,6 +912,7 @@ from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
+from flocks.server.routes.console_upgrade import router as console_upgrade_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -969,6 +970,7 @@ app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
+app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -1031,6 +1033,20 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
+
+
+def _load_installed_package_plugins() -> None:
+    """Load package entry-point plugins before the app starts serving requests."""
+    try:
+        from flocks.plugin import PluginLoader
+
+        PluginLoader.load_all(project_dir=Path.cwd())
+        log.info("plugins.installed.loaded")
+    except Exception as e:
+        log.warning("plugins.installed.load_failed", {"error": str(e)})
+
+
+_load_installed_package_plugins()
 
 
 @app.get("/", tags=["Root"])

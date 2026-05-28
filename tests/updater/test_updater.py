@@ -99,6 +99,39 @@ def test_get_current_version_returns_empty_when_no_marker_or_pyproject(
     assert updater.get_current_version() == ""
 
 
+def test_console_manifest_version_prefers_bundle_compare_version() -> None:
+    version = updater._console_manifest_display_version(
+        {
+            "display_version": "v2026.5.24.1",
+            "compare_version": "2026.5.24.1",
+            "flockspro_component_version": "v2026.5.24",
+        }
+    )
+
+    assert version == "2026.5.24.1"
+    assert updater._parse_version(version) > updater._parse_version("2026.5.24")
+
+
+def test_pro_bundle_installed_version_uses_bundle_version(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(updater, "_flocks_root", lambda: tmp_path)
+
+    updater._write_pro_bundle_install_marker(
+        {
+            "display_version": "v2026.5.24.1",
+            "compare_version": "2026.5.24.1",
+            "oss_version": "v2026.5.24",
+            "flockspro_component_version": "v2026.5.24",
+            "build_id": "job_patch",
+        },
+        bundle_sha256="abc123",
+    )
+
+    assert updater._read_pro_bundle_installed_version() == "2026.5.24.1"
+
+
 @pytest.mark.asyncio
 async def test_run_async_handles_none_process_output(
     monkeypatch: pytest.MonkeyPatch,

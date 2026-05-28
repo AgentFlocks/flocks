@@ -1,0 +1,185 @@
+{
+  "title": "Flocks Pro",
+  "description": "Complete console account login, upgrade application, and upgrade execution locally.",
+  "actions": {
+    "refresh": "Refresh",
+    "cancel": "Cancel",
+    "confirm": "OK",
+    "submit": "Submit Request",
+    "submitting": "Submitting..."
+  },
+  "errors": {
+    "fetchConsoleLoginStatus": "Failed to load login status",
+    "startConsoleLogin": "Failed to start console account login",
+    "finishConsoleLogin": "Failed to complete console login callback",
+    "logoutConsoleLogin": "Failed to log out console account",
+    "fetchRequests": "Failed to load upgrade requests",
+    "createRequest": "Failed to create upgrade request",
+    "refreshRequest": "Failed to refresh request status",
+    "cancelRequest": "Failed to cancel request",
+    "startUpgrade": "Failed to start upgrade"
+  },
+  "consoleLogin": {
+    "title": "Console Account Login",
+    "description": "Start login locally, sign in on console, and return to local confirmation.",
+    "accountLabel": "Console account: ",
+    "loading": "Loading...",
+    "bound": "Console account logged in",
+    "unbound": "Not logged in",
+    "unknownAccount": "Unknown account",
+    "missingAccountHint": "Current session does not include account name, please log out and log in again.",
+    "loginAction": "Console Login",
+    "logoutAction": "Log Out"
+  },
+  "upgrade": {
+    "title": "Upgrade to Flocks Pro",
+    "description": "Review the current license information, submit applications, and track approval status.",
+    "installedTitle": "Flocks Pro",
+    "installedDescription": "Flocks Pro is installed and the license is activated.",
+    "installedVersion": "Flocks Pro Version",
+    "licenseStatus": "License Status",
+    "licenseId": "License ID",
+    "expiresAt": "License Expires At",
+    "remainingDays": "License Remaining",
+    "remainingDaysValue": "{{count}} days",
+    "daysUnit": "days",
+    "quota": "Quota",
+    "adminQuotaValue": "{{count}} admin",
+    "memberQuotaValue": "{{count}} members",
+    "lastSyncedAt": "License Synced At",
+    "licenseDetails": "License Details",
+    "showLicenseDetails": "Show License Details",
+    "hideLicenseDetails": "Hide License Details",
+    "licenseFieldLabels": {
+      "license_id": "License ID",
+      "install_id": "Install ID",
+      "fingerprint": "Machine Fingerprint"
+    },
+    "refreshing": "Refreshing...",
+    "syncLicenseAction": "Sync License Info",
+    "syncingLicense": "Syncing...",
+    "applyAction": "Apply for Upgrade",
+    "applyNewLicenseAction": "Apply for New License",
+    "revokedOrExpiredHint": "The current license is no longer valid. You can submit a new Flocks Pro application.",
+    "loginFirst": "Log in console account before applying for upgrade.",
+    "pendingRequestExists": "An upgrade request is already active. Refresh status or cancel it before creating a new one.",
+    "currentRequest": "Current Request",
+    "status": "Status",
+    "statusLabels": {
+      "pending": "Pending Review",
+      "reviewing": "In Review",
+      "approved": "Approved",
+      "activated": "Activated",
+      "rejected": "Rejected",
+      "cancelled": "Withdrawn",
+      "expired_unactivated": "Activation Expired"
+    },
+    "licenseStatusLabels": {
+      "trial": "Trial",
+      "test": "Test",
+      "commercial": "Commercial",
+      "revoked": "Revoked",
+      "expired": "Expired",
+      "superseded": "Superseded",
+      "active": "Active"
+    },
+    "licenseTypeLabels": {
+      "trial": "Trial",
+      "test": "Test",
+      "commercial": "Commercial"
+    },
+    "updatedAt": "Approval Status Updated At",
+    "manualRefresh": "Refresh Approval Status",
+    "cancel": "Cancel Request",
+    "rejectedTitle": "Request rejected",
+    "dismissRejected": "Dismiss rejection feedback",
+    "startUpgrade": "Start Upgrade",
+    "inDevelopment": "Flocks Pro upgrade is under development",
+    "installingHint": "Downloading and installing the Flocks Pro component. OSS core will not be upgraded.",
+    "waitingRestart": "Upgrade is installed. Waiting for service restart...",
+    "restartTimeout": "Service restart timed out. Refresh later to confirm status.",
+    "afterUpgradeHint": "Starting upgrade will download the Pro bundle, install only the flockspro wheel, and restart automatically.",
+    "bundleFilename": "Bundle File",
+    "proComponentFilename": "Pro Component File",
+    "stageLabels": {
+      "fetching": "Download Pro bundle",
+      "backing_up": "Backup",
+      "applying": "Apply",
+      "syncing": "Install Flocks Pro",
+      "building": "Build",
+      "restarting": "Restart service",
+      "done": "Done",
+      "error": "Failed"
+    },
+    "noRequest": "No upgrade request yet.",
+    "history": "Request History",
+    "licenseHistory": "License History",
+    "historyColumns": {
+      "licenseId": "lic-id",
+      "licenseType": "License Type",
+      "status": "Status",
+      "appliedAt": "Applied At",
+      "expiresAt": "Expires At",
+      "durationDays": "Duration Days",
+      "account": "Cloud Account"
+    },
+    "applyDialogTitle": "Flocks Pro Upgrade Application",
+    "productLabel": "Requested Version",
+    "licenseTypeLabel": "Requested License Type",
+    "licenseTypeTrial": "30-day Usage",
+    "licenseTypePoc": "POC License",
+    "licenseTypeCommercial": "Formal License",
+    "companyPlaceholderRequired": "Company (required)",
+    "applicantNamePlaceholderRequired": "Applicant Name (required)",
+    "applicantEmailPlaceholder": "Applicant Email (optional)",
+    "applicantPhonePlaceholder": "Applicant Phone (optional)",
+    "notesPlaceholder": "Notes (optional)",
+    "formRequiredError": "Company and applicant name are required"
+  },
+  "callback": {
+    "processing": "Completing console login, please wait...",
+    "missingConsoleLoginId": "Missing console_login_id in callback URL.",
+    "exchangeFailed": "Failed to complete login exchange",
+    "failedTitle": "Login Failed"
+  },
+  "audit": {
+    "title": "Audit Logs",
+    "description": "Review Pro audit events with filters for event type, actor, and time range.",
+    "loading": "Loading...",
+    "empty": "No audit events",
+    "total": "Total {{total}}",
+    "page": "Page {{page}} / {{pageCount}}",
+    "actions": {
+      "search": "Search",
+      "exportExcel": "Download Excel",
+      "exporting": "Downloading...",
+      "reset": "Reset",
+      "prev": "Prev",
+      "next": "Next"
+    },
+    "filters": {
+      "eventType": "Event type (event_type)",
+      "allEventTypes": "All event types",
+      "actor": "Actor username (username)",
+      "allResults": "All results"
+    },
+    "result": {
+      "success": "Success",
+      "failed": "Failed"
+    },
+    "table": {
+      "time": "Time",
+      "eventType": "Event",
+      "actor": "Actor",
+      "resource": "Resource",
+      "result": "Result",
+      "payload": "Details"
+    },
+    "errors": {
+      "fetch": "Failed to fetch audit logs",
+      "export": "Failed to export audit logs",
+      "forbidden": "Only admins can view audit logs",
+      "unavailable": "Audit logs are not available in this edition"
+    }
+  }
+}
