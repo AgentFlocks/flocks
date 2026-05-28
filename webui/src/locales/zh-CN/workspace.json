@@ -26,7 +26,14 @@
     "close": "关闭",
     "uploading": "上传中...",
     "binaryPreview": "二进制文件无法预览",
+    "unsupportedPreview": "当前文件类型暂不支持预览，请下载查看",
     "downloadFile": "下载文件",
+    "readFailed": "文件内容加载失败",
+    "retry": "重试",
+    "previewTabs": {
+      "review": "预览",
+      "raw": "源码"
+    },
     "toast": {
       "loadDirFailed": "加载目录失败",
       "readFileFailed": "读取文件失败",
