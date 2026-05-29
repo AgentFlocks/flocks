@@ -42,6 +42,7 @@ from flocks.workflow.fs_store import (
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
 )
+from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
@@ -783,6 +784,17 @@ async def delete_workflow(workflow_id: str):
         except Storage.NotFoundError:
             pass
 
+        try:
+            from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+            await _kafka_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(_kafka_config_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+
         log.info("workflow.deleted", {"id": workflow_id})
         await publish_event("workflow.deleted", {"id": workflow_id})
         return None
@@ -1348,7 +1360,7 @@ async def export_workflow(workflow_id: str):
 # =============================================================================
 
 _API_SERVICE_PREFIX = "workflow_api_service/"
-_KAFKA_CONFIG_PREFIX = "workflow_kafka_config/"
+_KAFKA_CONFIG_PREFIX = WORKFLOW_KAFKA_CONFIG_PREFIX
 _REGISTRY_PREFIX_MAIN = "workflow_registry/"
 
 
@@ -1373,9 +1385,14 @@ class WorkflowServiceResponse(BaseModel):
 
 
 class KafkaConfigRequest(BaseModel):
+    """Per-workflow Kafka consumer/producer configuration (experimental)."""
+
+    enabled: bool = False
     inputBroker: Optional[str] = None
     inputTopic: Optional[str] = None
     inputGroupId: Optional[str] = None
+    inputKey: str = "kafka_message"
+    autoOffsetReset: str = "latest"
     outputBroker: Optional[str] = None
     outputTopic: Optional[str] = None
 
@@ -1548,7 +1565,11 @@ async def list_workflow_services():
 async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
     """
     Save Kafka input/output configuration for a workflow.
-    (Kafka integration is experimental; this stores config for future use.)
+
+    When ``enabled`` is true this also (re)starts the Kafka consumer and blocks
+    until it has either connected to the broker or failed.  Connection failures
+    are surfaced as ``409 Conflict`` so the UI can show an actionable error
+    instead of falsely claiming the consumer is running.
     """
     try:
         if not _read_workflow_from_fs(workflow_id):
@@ -1556,15 +1577,29 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
 
         config = {
             "workflowId": workflow_id,
+            "enabled": req.enabled,
             "inputBroker": req.inputBroker,
             "inputTopic": req.inputTopic,
             "inputGroupId": req.inputGroupId,
+            "inputKey": req.inputKey,
+            "autoOffsetReset": req.autoOffsetReset,
             "outputBroker": req.outputBroker,
             "outputTopic": req.outputTopic,
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(_kafka_config_key(workflow_id), config)
-        return {"ok": True}
+
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        status = await _kafka_default_manager.restart_workflow(workflow_id)
+        state = (status or {}).get("state")
+        if req.enabled and state == "failed":
+            err = (status or {}).get("error") or "consumer_connect_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Kafka consumer failed to start: {err}",
+            )
+        return {"ok": True, "consumer": status}
     except HTTPException:
         raise
     except Exception as e:
@@ -1583,6 +1618,23 @@ async def get_kafka_config(workflow_id: str):
     except Exception as e:
         log.error("workflow.kafka_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get Kafka config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/kafka-status")
+async def get_kafka_status(workflow_id: str):
+    """Return the *runtime* status of the Kafka consumer for a workflow.
+
+    Reflects the actual connection state (connecting/running/failed/stopped) and
+    queue depth so the UI can show whether a saved-but-not-yet-connected
+    consumer is actually running.  The persisted config only captures *intent*.
+    """
+    try:
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        return _kafka_default_manager.get_consumer_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.kafka_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get Kafka status: {str(e)}")
 
 
 @router.post("/workflow/{workflow_id}/syslog-config")

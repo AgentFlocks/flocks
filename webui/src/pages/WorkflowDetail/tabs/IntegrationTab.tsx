@@ -10,6 +10,7 @@ import {
   WorkflowService,
   WorkflowServiceDriver,
   SyslogListenerStatus,
+  KafkaConsumerStatus,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
 import WorkflowStatusBadge from '@/components/common/WorkflowStatusBadge';
@@ -262,35 +263,99 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [enabled, setEnabled] = useState(false);
   const [inputBroker, setInputBroker] = useState('');
   const [inputTopic, setInputTopic] = useState('');
   const [inputGroupId, setInputGroupId] = useState('');
+  const [inputKey, setInputKey] = useState('kafka_message');
   const [outputBroker, setOutputBroker] = useState('');
   const [outputTopic, setOutputTopic] = useState('');
+  // Runtime consumer state (independent from saved config) — only this should
+  // drive the "Running" indicator, otherwise a connection failure leaves the UI
+  // falsely showing the consumer as active.
+  const [consumer, setConsumer] = useState<KafkaConsumerStatus | null>(null);
+  const [saveError, setSaveError] = useState('');
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const res = await workflowAPI.getKafkaStatus(workflowId);
+      setConsumer(res.data);
+    } catch {
+      // ignore — older backend / transient failure
+    }
+  }, [workflowId]);
+
+  const isRunning = consumer?.state === 'running';
+  const isConnecting = consumer?.state === 'connecting';
+  const isFailed = consumer?.state === 'failed';
+
+  let summaryBadge: React.ReactNode;
+  if (isRunning) {
+    summaryBadge = (
+      <span className="text-xs text-green-600 font-normal">
+        {consumer?.topic || inputTopic}{' · '}{t('detail.run.kafkaActive')}
+      </span>
+    );
+  } else if (enabled && isConnecting) {
+    summaryBadge = (
+      <span className="text-xs text-amber-600 font-normal">
+        {inputTopic} · {t('detail.run.kafkaConnecting')}
+      </span>
+    );
+  } else if (enabled && isFailed) {
+    summaryBadge = (
+      <span className="text-xs text-red-600 font-normal">
+        {inputTopic} · {consumer?.error || 'failed'}
+      </span>
+    );
+  } else {
+    summaryBadge = (
+      <span className="text-xs text-gray-400 font-normal">{t('detail.run.kafkaExperimental')}</span>
+    );
+  }
 
   useEffect(() => {
     workflowAPI.getKafkaConfig(workflowId).then(res => {
       if (res.data) {
+        setEnabled(!!res.data.enabled);
         setInputBroker(res.data.inputBroker || '');
         setInputTopic(res.data.inputTopic || '');
         setInputGroupId(res.data.inputGroupId || '');
+        setInputKey(res.data.inputKey || 'kafka_message');
         setOutputBroker(res.data.outputBroker || '');
         setOutputTopic(res.data.outputTopic || '');
       }
     }).catch(() => {});
-  }, [workflowId]);
+    refreshStatus();
+  }, [workflowId, refreshStatus]);
+
+  // While connecting, poll briefly so the UI converges on the real state.
+  useEffect(() => {
+    if (!isConnecting) return;
+    const handle = window.setInterval(() => {
+      refreshStatus();
+    }, 1500);
+    return () => window.clearInterval(handle);
+  }, [isConnecting, refreshStatus]);
 
   const handleSave = async () => {
     setSaving(true);
     setSaved(false);
+    setSaveError('');
     try {
-      await workflowAPI.saveKafkaConfig(workflowId, {
-        inputBroker, inputTopic, inputGroupId, outputBroker, outputTopic,
+      const res = await workflowAPI.saveKafkaConfig(workflowId, {
+        enabled, inputBroker, inputTopic, inputGroupId, inputKey, outputBroker, outputTopic,
       });
+      if (res.data?.consumer) {
+        setConsumer(res.data.consumer);
+      } else {
+        refreshStatus();
+      }
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // ignore - stub endpoint may return 501
+    } catch (err: unknown) {
+      setSaveError(extractErrorMessage(err, t('detail.run.savingConfig')));
+      refreshStatus();
     } finally {
       setSaving(false);
     }
@@ -315,10 +380,22 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
         title={t('detail.run.kafkaSection')}
         expanded={expanded}
         onToggle={() => setExpanded(v => !v)}
-        badge={<span className="text-xs text-gray-400 font-normal">{t('detail.run.kafkaExperimental')}</span>}
+        badge={summaryBadge}
       />
       {expanded && (
         <div className="p-4 space-y-4">
+          <div className="flex items-center gap-2">
+            <input
+              id={`kafka-enabled-${workflowId}`}
+              type="checkbox"
+              checked={enabled}
+              onChange={e => setEnabled(e.target.checked)}
+              className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+            />
+            <label htmlFor={`kafka-enabled-${workflowId}`} className="text-xs text-gray-600">
+              {t('detail.run.kafkaEnabled')}
+            </label>
+          </div>
           <div className="space-y-2">
             <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
               <Wifi className="w-3.5 h-3.5" /> {t('detail.run.inputConfig')}
@@ -326,6 +403,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             {inputField('Broker', inputBroker, setInputBroker, 'localhost:9092')}
             {inputField('Topic', inputTopic, setInputTopic, 'workflow-input')}
             {inputField('Consumer Group', inputGroupId, setInputGroupId, 'flocks-consumer')}
+            {inputField(t('detail.run.kafkaInputKey'), inputKey, setInputKey, 'kafka_message')}
           </div>
           <div className="space-y-2">
             <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
@@ -347,6 +425,25 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             ) : null}
             {saving ? t('detail.run.savingConfig') : saved ? t('detail.run.savedConfig') : t('detail.run.saveConfig')}
           </button>
+          {saveError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span className="flex-1">{saveError}</span>
+            </div>
+          )}
+          {enabled && isFailed && !saveError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span className="flex-1">
+                {t('detail.run.kafkaFailed')}: {consumer?.error || 'unknown error'}
+              </span>
+            </div>
+          )}
+          {enabled && isRunning && typeof consumer?.queueSize === 'number' && (
+            <p className="text-xs text-gray-500 text-center">
+              queue {consumer.queueSize}/{consumer.queueCapacity ?? '?'} · workers {consumer.workerCount ?? '?'}
+            </p>
+          )}
           <p className="text-xs text-gray-400 text-center">{t('detail.run.kafkaHint')}</p>
         </div>
       )}
