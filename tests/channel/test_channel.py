@@ -570,6 +570,8 @@ class TestFeishuNativeCommands:
             )
         )
         monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
+        update_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
 
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
@@ -587,6 +589,11 @@ class TestFeishuNativeCommands:
         assert create_kwargs["title"] == "[Feishu] oc_group"
         assert "session_new" in delivered[0]
         assert "已开始全新对话。" in delivered[0]
+        # The previous session must be archived so it no longer appears in the
+        # active IM session list used for scheduled-task target resolution.
+        update_mock.assert_awaited_once()
+        assert update_mock.await_args.args == ("channel", "session_old")
+        assert update_mock.await_args.kwargs["status"] == "archived"
 
     @pytest.mark.asyncio
     async def test_reset_alias_matches_new_semantics(self, monkeypatch):

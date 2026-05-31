@@ -848,6 +848,26 @@ class InboundDispatcher:
             agent_id=new_session.agent,
             scope_override=scope_override,
         )
+        # Archive the previous session so it no longer shows up as an *active*
+        # IM session. The binding has already moved to ``new_session`` via
+        # ``rebind`` above, but the old session retains ``status="active"`` and
+        # the same ``[Feishu]/[Wecom]/[Dingtalk]`` title prefix. Without this,
+        # repeated ``/new`` leaves multiple active sessions for the same
+        # conversation, and unattended scheduled tasks (which resolve the IM
+        # target via ``session_list(status="active")`` + title prefix) can no
+        # longer tell which one is current — sending to the wrong session or
+        # failing outright. Best-effort: archiving failure must not abort /new.
+        try:
+            await Session.update(
+                session.project_id,
+                session.id,
+                status="archived",
+            )
+        except Exception as exc:
+            log.warning("dispatcher.archive_previous_session_failed", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
         await self._trigger_command_hook(
             "new",
             session.id,
