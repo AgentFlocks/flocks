@@ -10,6 +10,7 @@ for file output and is done by CLI or by server lifespan when run standalone.
 import os
 import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 from datetime import datetime
@@ -20,6 +21,8 @@ import glob as file_glob
 _DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
 _DEFAULT_LOG_BACKUP_COUNT = 3
 _DEFAULT_LOG_VALUE_MAX_CHARS = 8 * 1024
+_MAX_STRUCTURED_ITEMS = 50
+_MAX_STRUCTURED_DEPTH = 4
 
 
 def _log_dir() -> Path:
@@ -52,7 +55,8 @@ def get_log_max_bytes(default: int = _DEFAULT_LOG_MAX_BYTES) -> int:
     """Return the per-file log size limit in bytes.
 
     ``FLOCKS_LOG_MAX_BYTES`` is exact; ``FLOCKS_LOG_MAX_MB`` is a convenient
-    human-facing override. Values <= 0 disable rotation.
+    human-facing override. When both are set, bytes wins. Values <= 0 disable
+    rotation.
     """
     if os.getenv("FLOCKS_LOG_MAX_BYTES") is not None:
         return _env_int("FLOCKS_LOG_MAX_BYTES", default)
@@ -75,6 +79,7 @@ def rotate_log_file(
     *,
     max_bytes: Optional[int] = None,
     backup_count: Optional[int] = None,
+    force: bool = False,
 ) -> None:
     """Rotate ``path`` if it is already over the configured size limit."""
     limit = get_log_max_bytes() if max_bytes is None else max_bytes
@@ -82,7 +87,7 @@ def rotate_log_file(
     if limit <= 0 or not path.exists():
         return
     try:
-        if path.stat().st_size < limit:
+        if not force and path.stat().st_size < limit:
             return
         if backups <= 0:
             path.unlink(missing_ok=True)
@@ -105,41 +110,54 @@ class _RotatingTextWriter:
         self.max_bytes = max_bytes
         self.backup_count = backup_count
         self._handle: Optional[TextIO] = None
+        self._bytes_written = 0
+        self._lock = threading.RLock()
         self._open()
 
     def _open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = open(self.path, "a", buffering=1, encoding="utf-8")
+        try:
+            self._bytes_written = self.path.stat().st_size
+        except OSError:
+            self._bytes_written = 0
 
     def _should_rotate(self, message: str) -> bool:
         if self.max_bytes <= 0:
             return False
-        current_size = self.path.stat().st_size if self.path.exists() else 0
-        return current_size + len(message.encode("utf-8")) > self.max_bytes
+        return self._bytes_written + len(message.encode("utf-8")) > self.max_bytes
 
     def write(self, message: str) -> int:
-        if self._should_rotate(message):
-            self.close()
-            rotate_log_file(
-                self.path,
-                max_bytes=self.max_bytes,
-                backup_count=self.backup_count,
-            )
-            self._open()
-        assert self._handle is not None
-        return self._handle.write(message)
+        encoded_len = len(message.encode("utf-8"))
+        with self._lock:
+            if self._should_rotate(message):
+                self.close()
+                rotate_log_file(
+                    self.path,
+                    max_bytes=self.max_bytes,
+                    backup_count=self.backup_count,
+                    force=True,
+                )
+                self._open()
+            if self._handle is None:
+                self._open()
+            written = self._handle.write(message)
+            self._bytes_written += encoded_len
+            return written
 
     def flush(self) -> None:
-        if self._handle is not None:
-            self._handle.flush()
+        with self._lock:
+            if self._handle is not None:
+                self._handle.flush()
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
+        with self._lock:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
 
 
-def _truncate_text(value: str, max_chars: Optional[int] = None) -> str:
+def _truncate_for_log(value: str, max_chars: Optional[int] = None) -> str:
     limit = _env_int("FLOCKS_LOG_VALUE_MAX_CHARS", _DEFAULT_LOG_VALUE_MAX_CHARS) if max_chars is None else max_chars
     if limit <= 0 or len(value) <= limit:
         return value
@@ -147,15 +165,51 @@ def _truncate_text(value: str, max_chars: Optional[int] = None) -> str:
     return f"{value[:limit]}...<truncated {omitted} chars>"
 
 
+def _prepare_json_value(value: Any, *, depth: int = 0, seen: Optional[set[int]] = None) -> Any:
+    if isinstance(value, str):
+        return _truncate_for_log(value)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if seen is None:
+        seen = set()
+    value_id = id(value)
+    if value_id in seen:
+        return "<cycle>"
+    if depth >= _MAX_STRUCTURED_DEPTH:
+        return f"<{type(value).__name__}>"
+    if isinstance(value, dict):
+        seen.add(value_id)
+        prepared = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _MAX_STRUCTURED_ITEMS:
+                prepared["__truncated__"] = f"{len(value) - _MAX_STRUCTURED_ITEMS} more keys"
+                break
+            prepared_key = key if key is None or isinstance(key, (str, int, float, bool)) else _truncate_for_log(str(key))
+            prepared[prepared_key] = _prepare_json_value(item, depth=depth + 1, seen=seen)
+        seen.remove(value_id)
+        return prepared
+    if isinstance(value, list):
+        seen.add(value_id)
+        prepared = [
+            _prepare_json_value(item, depth=depth + 1, seen=seen)
+            for item in value[:_MAX_STRUCTURED_ITEMS]
+        ]
+        if len(value) > _MAX_STRUCTURED_ITEMS:
+            prepared.append(f"<truncated {len(value) - _MAX_STRUCTURED_ITEMS} more items>")
+        seen.remove(value_id)
+        return prepared
+    return _truncate_for_log(str(value))
+
+
 def _format_log_value(value: Any) -> str:
     if isinstance(value, Exception):
-        return _truncate_text(Log._format_error(value))
+        return _truncate_for_log(Log._format_error(value))
     if isinstance(value, (dict, list)):
         try:
-            return _truncate_text(json.dumps(value))
+            return _truncate_for_log(json.dumps(_prepare_json_value(value)))
         except (TypeError, ValueError):
-            return _truncate_text(str(value))
-    return _truncate_text(str(value))
+            return _truncate_for_log(str(value))
+    return _truncate_for_log(str(value))
 
 
 def append_upgrade_text_log(message: str) -> None:
@@ -240,7 +294,7 @@ class Logger:
         Log._last_time = current_time_ms
         
         # Build full message
-        parts = [timestamp, f"+{diff_ms}ms", prefix, _truncate_text(str(message)) if message else ""]
+        parts = [timestamp, f"+{diff_ms}ms", prefix, _truncate_for_log(str(message)) if message else ""]
         return " ".join([p for p in parts if p]) + "\n"
     
     def debug(self, message: Any = None, extra: Optional[Dict[str, Any]] = None) -> None:
@@ -452,18 +506,33 @@ class Log:
             log_dir: Directory containing log files
         """
         try:
-            # Find all log files matching pattern YYYY-MM-DDTHHMMSS.log
+            # Find base log files matching pattern YYYY-MM-DDTHHMMSS.log.
+            # Rotated siblings are deleted together with their base file so
+            # old ``.log.1``/``.log.2`` files do not leak forever.
             pattern = str(log_dir / "????-??-??T??????.log")
-            files = sorted(file_glob.glob(pattern))
+            files = [Path(path) for path in sorted(file_glob.glob(pattern))]
             
             # Keep only the 10 most recent
             if len(files) > 10:
                 files_to_delete = files[:-10]
-                for file_path in files_to_delete:
+                for path in files_to_delete:
                     try:
-                        Path(file_path).unlink()
+                        path.unlink(missing_ok=True)
+                        for rotated in path.parent.glob(f"{path.name}.*"):
+                            rotated.unlink(missing_ok=True)
                     except Exception:
                         pass  # Silently ignore deletion errors
+
+            kept_files = set(files[-10:])
+            rotated_pattern = str(log_dir / "????-??-??T??????.log.*")
+            for rotated_path in (Path(path) for path in file_glob.glob(rotated_pattern)):
+                base_name = rotated_path.name.split(".log.", 1)[0] + ".log"
+                base_path = rotated_path.with_name(base_name)
+                if base_path not in kept_files and not base_path.exists():
+                    try:
+                        rotated_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         except Exception:
             pass  # Silently ignore cleanup errors
     
