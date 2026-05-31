@@ -268,6 +268,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   const [inputTopic, setInputTopic] = useState('');
   const [inputGroupId, setInputGroupId] = useState('');
   const [inputKey, setInputKey] = useState('kafka_message');
+  const [outputEnabled, setOutputEnabled] = useState(false);
   const [outputBroker, setOutputBroker] = useState('');
   const [outputTopic, setOutputTopic] = useState('');
   // Runtime consumer state (independent from saved config) — only this should
@@ -324,6 +325,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
         setInputKey(res.data.inputKey || 'kafka_message');
         setOutputBroker(res.data.outputBroker || '');
         setOutputTopic(res.data.outputTopic || '');
+        setOutputEnabled(!!res.data.outputEnabled);
       }
     }).catch(() => {});
     refreshStatus();
@@ -344,7 +346,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
     setSaveError('');
     try {
       const res = await workflowAPI.saveKafkaConfig(workflowId, {
-        enabled, inputBroker, inputTopic, inputGroupId, inputKey, outputBroker, outputTopic,
+        enabled, inputBroker, inputTopic, inputGroupId, inputKey, outputEnabled, outputBroker, outputTopic,
       });
       if (res.data?.consumer) {
         setConsumer(res.data.consumer);
@@ -374,6 +376,26 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
     </div>
   );
 
+  const toggleOption = (
+    id: string,
+    label: string,
+    checked: boolean,
+    onChange: (checked: boolean) => void,
+  ) => (
+    <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+      <label htmlFor={id} className="block min-w-0 text-xs font-medium text-gray-600">
+        {label}
+      </label>
+      <input
+        id={id}
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+      />
+    </div>
+  );
+
   return (
     <div className="border-b border-gray-100">
       <SectionHeader
@@ -384,18 +406,6 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
       />
       {expanded && (
         <div className="p-4 space-y-4">
-          <div className="flex items-center gap-2">
-            <input
-              id={`kafka-enabled-${workflowId}`}
-              type="checkbox"
-              checked={enabled}
-              onChange={e => setEnabled(e.target.checked)}
-              className="rounded border-gray-300 text-red-600 focus:ring-red-500"
-            />
-            <label htmlFor={`kafka-enabled-${workflowId}`} className="text-xs text-gray-600">
-              {t('detail.run.kafkaEnabled')}
-            </label>
-          </div>
           <div className="space-y-2">
             <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
               <Wifi className="w-3.5 h-3.5" /> {t('detail.run.inputConfig')}
@@ -411,6 +421,20 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             </p>
             {inputField('Broker', outputBroker, setOutputBroker, 'localhost:9092')}
             {inputField('Topic', outputTopic, setOutputTopic, 'workflow-output')}
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {toggleOption(
+              `kafka-enabled-${workflowId}`,
+              t('detail.run.kafkaEnabled'),
+              enabled,
+              setEnabled,
+            )}
+            {toggleOption(
+              `kafka-output-enabled-${workflowId}`,
+              t('detail.run.kafkaOutputEnabled'),
+              outputEnabled,
+              setOutputEnabled,
+            )}
           </div>
           <button
             type="button"
@@ -612,18 +636,6 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
       />
       {expanded && (
         <div className="p-4 space-y-4">
-          <div className="flex items-center gap-2">
-            <input
-              id={`syslog-enabled-${workflowId}`}
-              type="checkbox"
-              checked={enabled}
-              onChange={e => setEnabled(e.target.checked)}
-              className="rounded border-gray-300 text-red-600 focus:ring-red-500"
-            />
-            <label htmlFor={`syslog-enabled-${workflowId}`} className="text-xs text-gray-600">
-              {t('detail.run.syslogEnabled')}
-            </label>
-          </div>
           <div className="space-y-2">
             <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
               <Server className="w-3.5 h-3.5" /> {t('detail.run.inputConfig')}
@@ -666,6 +678,18 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
               </select>
             </div>
             {inputField(t('detail.run.syslogInputKey'), inputKey, setInputKey, 'syslog_message')}
+          </div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-50 px-3 py-2">
+            <label htmlFor={`syslog-enabled-${workflowId}`} className="text-xs font-medium text-gray-600">
+              {t('detail.run.syslogEnabled')}
+            </label>
+            <input
+              id={`syslog-enabled-${workflowId}`}
+              type="checkbox"
+              checked={enabled}
+              onChange={e => setEnabled(e.target.checked)}
+              className="rounded border-gray-300 text-red-600 focus:ring-red-500"
+            />
           </div>
           <button
             type="button"

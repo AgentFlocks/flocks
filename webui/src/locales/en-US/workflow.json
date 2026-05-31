@@ -219,6 +219,7 @@
       "kafkaSection": "Kafka Configuration",
       "kafkaExperimental": "(Experimental)",
       "kafkaEnabled": "Enable consumer",
+      "kafkaOutputEnabled": "Enable output",
       "kafkaInputKey": "Inputs key",
       "kafkaActive": "Consuming",
       "kafkaConnecting": "Connecting…",

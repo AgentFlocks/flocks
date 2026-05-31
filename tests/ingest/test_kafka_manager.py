@@ -14,6 +14,7 @@ the syslog manager:
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -145,6 +146,84 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
     status = await manager.restart_workflow("wf-no-broker")
     assert status["state"] == "failed"
     assert status["error"] == "missing_input_broker_or_topic"
+
+
+@pytest.mark.asyncio
+async def test_publish_execution_result_allows_output_only_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kafka output publishing must not require consumer input configuration."""
+
+    manager = kafka_manager.KafkaManager()
+
+    class _Producer:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, bytes]] = []
+            self.stopped = False
+
+        async def send_and_wait(self, topic: str, value: bytes) -> None:
+            self.sent.append((topic, value))
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    producer = _Producer()
+
+    async def _fake_read(key):  # noqa: ANN001
+        return {
+            "enabled": False,
+            "inputBroker": "",
+            "inputTopic": "",
+            "outputEnabled": True,
+            "outputBroker": "localhost:9092",
+            "outputTopic": "workflow-output",
+        }
+
+    async def _fake_create_producer(broker: str):  # noqa: ANN001
+        assert broker == "localhost:9092"
+        return producer
+
+    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
+
+    published = await manager.publish_execution_result("wf-output", "exec-1", {"ok": True})
+
+    assert published is True
+    assert len(producer.sent) == 1
+    topic, value = producer.sent[0]
+    assert topic == "workflow-output"
+    assert json.loads(value.decode("utf-8")) == {
+        "workflowId": "wf-output",
+        "executionId": "exec-1",
+        "outputs": {"ok": True},
+    }
+    assert producer.stopped is True
+
+
+@pytest.mark.asyncio
+async def test_publish_execution_result_skips_when_output_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configured output broker/topic should not publish when the output toggle is off."""
+
+    manager = kafka_manager.KafkaManager()
+    create_producer_called = False
+
+    async def _fake_read(key):  # noqa: ANN001
+        return {
+            "enabled": False,
+            "outputEnabled": False,
+            "outputBroker": "localhost:9092",
+            "outputTopic": "workflow-output",
+        }
+
+    async def _fake_create_producer(broker: str):  # noqa: ANN001
+        nonlocal create_producer_called
+        create_producer_called = True
+
+    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
+
+    published = await manager.publish_execution_result("wf-output", "exec-1", {"ok": True})
+
+    assert published is False
+    assert create_producer_called is False
 
 
 def test_decode_message_variants() -> None:

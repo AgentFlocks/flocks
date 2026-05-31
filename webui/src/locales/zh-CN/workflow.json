@@ -219,6 +219,7 @@
       "kafkaSection": "Kafka 配置",
       "kafkaExperimental": "（实验性）",
       "kafkaEnabled": "启用消费",
+      "kafkaOutputEnabled": "启用输出",
       "kafkaInputKey": "Inputs 键名",
       "kafkaActive": "消费中",
       "kafkaConnecting": "连接中…",

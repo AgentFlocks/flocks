@@ -225,6 +225,7 @@ class KafkaManager:
         input_key = str(data.get("inputKey") or "kafka_message")
         output_broker = str(data.get("outputBroker") or "").strip()
         output_topic = str(data.get("outputTopic") or "").strip()
+        output_enabled = bool(data.get("outputEnabled"))
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
@@ -245,7 +246,7 @@ class KafkaManager:
 
         # Optionally start an output producer up-front so failures are visible.
         producer = None
-        if output_broker and output_topic:
+        if output_enabled and output_broker and output_topic:
             try:
                 producer = await self._create_producer(output_broker)
                 self._producers[workflow_id] = producer
@@ -304,6 +305,50 @@ class KafkaManager:
         )
         await producer.start()
         return producer
+
+    async def publish_execution_result(self, workflow_id: str, exec_id: str, outputs: Any) -> bool:
+        """Publish a successful workflow execution to the configured output topic.
+
+        This intentionally does not require the Kafka consumer to be enabled, so
+        workflows can be configured as output-only producers.
+        """
+        try:
+            data = await Storage.read(self._config_key(workflow_id))
+        except Exception as exc:
+            log.warning(
+                "kafka.output_config_read_failed",
+                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+            )
+            return False
+        if not isinstance(data, dict):
+            return False
+
+        output_broker = str(data.get("outputBroker") or "").strip()
+        output_topic = str(data.get("outputTopic") or "").strip()
+        if not data.get("outputEnabled") or not output_broker or not output_topic:
+            return False
+
+        producer = None
+        try:
+            producer = await self._create_producer(output_broker)
+            value = json.dumps(
+                {"workflowId": workflow_id, "executionId": exec_id, "outputs": outputs},
+                default=str,
+            ).encode("utf-8")
+            await producer.send_and_wait(output_topic, value)
+            return True
+        except Exception as exc:
+            log.warning(
+                "kafka.produce_failed",
+                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+            )
+            return False
+        finally:
+            if producer is not None:
+                try:
+                    await producer.stop()
+                except Exception:
+                    pass
 
     async def _consumer_loop(
         self,

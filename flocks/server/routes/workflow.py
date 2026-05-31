@@ -79,6 +79,19 @@ class ActiveWorkflowExecution:
 _active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
 
 
+async def _publish_kafka_execution_result(workflow_id: str, exec_id: str, outputs: Any) -> None:
+    """Best-effort Kafka output publishing for successful workflow executions."""
+    try:
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        await _kafka_default_manager.publish_execution_result(workflow_id, exec_id, outputs)
+    except Exception as exc:
+        log.warning(
+            "workflow.kafka_output.publish_failed",
+            {"id": workflow_id, "exec_id": exec_id, "error": str(exc)},
+        )
+
+
 # =============================================================================
 # Request/Response Models
 # =============================================================================
@@ -502,6 +515,8 @@ async def _run_workflow_execution_task(
         })
 
         await _record_execution_result(workflow_id, exec_id, current_data)
+        if status_value == "success":
+            await _publish_kafka_execution_result(workflow_id, exec_id, result.outputs)
         log.info("workflow.executed", {
             "id": workflow_id,
             "exec_id": exec_id,
@@ -1065,6 +1080,9 @@ async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequ
             "currentPhase": status_value,
         })
         await _record_execution_result(workflow_id, exec_id, exec_data)
+        if success:
+            outputs = result.get("outputs", {}) if isinstance(result, dict) else {}
+            await _publish_kafka_execution_result(workflow_id, exec_id, outputs)
         return result
     except (WorkflowNotFoundError, WorkflowNotPublishedError) as e:
         duration = time.time() - started
@@ -1393,6 +1411,7 @@ class KafkaConfigRequest(BaseModel):
     inputGroupId: Optional[str] = None
     inputKey: str = "kafka_message"
     autoOffsetReset: str = "latest"
+    outputEnabled: bool = False
     outputBroker: Optional[str] = None
     outputTopic: Optional[str] = None
 
@@ -1583,6 +1602,7 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "inputGroupId": req.inputGroupId,
             "inputKey": req.inputKey,
             "autoOffsetReset": req.autoOffsetReset,
+            "outputEnabled": req.outputEnabled,
             "outputBroker": req.outputBroker,
             "outputTopic": req.outputTopic,
             "updatedAt": int(time.time() * 1000),
