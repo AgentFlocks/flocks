@@ -600,7 +600,6 @@ export interface CatalogProvider {
   id: string;
   name: string;
   description: string | null;
-  description_cn?: string | null;
   credential_schemas: CatalogCredentialSchema[];
   env_vars: string[];
   default_base_url: string | null;

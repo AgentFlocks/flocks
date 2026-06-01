@@ -60,17 +60,6 @@ function isCatalogBaseUrlRequired(providerId: string): boolean {
   return providerId === 'openai-compatible';
 }
 
-function getCatalogProviderDescription(
-  provider: Pick<CatalogProvider, 'description' | 'description_cn'>,
-  language: string,
-): string {
-  const chineseDescription = provider.description_cn?.trim() || '';
-  if (language.toLowerCase().startsWith('zh') && chineseDescription) {
-    return chineseDescription;
-  }
-  return provider.description?.trim() || chineseDescription;
-}
-
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
 
 function isAzureProviderId(providerId: string): boolean {
@@ -1092,7 +1081,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   onAdded: (addedProviderId?: string) => void;
 }) {
   const toast = useToast();
-  const { t, i18n } = useTranslation('model');
+  const { t } = useTranslation('model');
 
   // Catalog data
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
@@ -1164,8 +1153,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     const q = dropdownSearch.toLowerCase();
     return availableProviders.filter(p =>
       p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) ||
-      (p.description || '').toLowerCase().includes(q) ||
-      (p.description_cn || '').toLowerCase().includes(q)
+      (p.description || '').toLowerCase().includes(q)
     );
   }, [availableProviders, dropdownSearch]);
 
@@ -1194,7 +1182,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setDisplayName(provider.name);
       setBaseUrl(provider.default_base_url || '');
       setApiKey('');
-      setDescription(getCatalogProviderDescription(provider, i18n.language));
+      setDescription(provider.description || '');
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
       setProviderName('');
       setAzureDeploymentName('');
@@ -1541,7 +1529,6 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             ) : (
                               filteredDropdownItems.map(p => {
                                 const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
-                                const providerDescription = getCatalogProviderDescription(p, i18n.language);
                                 return (
                                   <button
                                     key={p.id}
@@ -1561,7 +1548,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                           </span>
                                         )}
                                       </div>
-                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{providerDescription}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
                                     </div>
                                     <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
                                     {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}

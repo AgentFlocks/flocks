@@ -480,7 +480,6 @@ async def get_provider_catalog():
             "id": provider_id,
             "name": raw["name"],
             "description": raw.get("description"),
-            "description_cn": raw.get("description_cn"),
             "credential_schemas": [s.model_dump() for s in meta.credential_schemas],
             "env_vars": raw.get("env_vars", []),
             "default_base_url": raw.get("default_base_url"),
