@@ -55,7 +55,12 @@ describe('customDevice helpers', () => {
     expect(prompt).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
     expect(prompt).toContain('`service_id` 建议使用：`acme_portal_device`');
     expect(prompt).toContain('`auth_state_path`');
+    expect(prompt).toContain('`cookie/auth-state`');
+    expect(prompt).toContain('`username` / `password`');
+    expect(prompt).toContain('`flocks browser`');
+    expect(prompt).toContain('`flocks browser state save <auth_state_path>`');
     expect(prompt).toContain('`api`、`webcli_api`、`process`、`composed`');
+    expect(prompt).toContain('不要生成 `auth_state_json`');
     expect(prompt).toContain('返回设备页查看是否已经出现对应 WebCLI device 插件');
   });
 

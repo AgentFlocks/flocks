@@ -47,6 +47,7 @@ $HOME/.flocks/plugins/tools/device/<plugin_id>/
 - 自定义 CLI / WebCLI 默认认证方式为 `cookie/auth-state`：优先复用浏览器保存的 `auth-state.json`，从中按请求域名/path/secure 规则选择 Cookie，并在需要时读取 localStorage
 - 默认认证状态文件：`~/.flocks/browser/<name>/auth-state.json`
 - 优先使用 `auth_state_path` 指向 `~/.flocks/browser/<name>/auth-state.json`
+- 可以额外暴露可选 `username` / `password`，但它们只用于 cookie 失效后的认证恢复，不替代默认的 `auth_state_path`
 - 不要生成或使用 `auth_state_json` / `Legacy Auth State JSON` 这类内联 JSON 字段；设备配置只保存 state 文件路径，不粘贴 state 文件内容
 - 只有在目标站点确实还依赖额外字段时，才补充 `cookie`、`csrf_token`、`access_token` 或特定认证头；这些字段是 `auth_state_path` 之外的补充，不替代默认的 cookie/auth-state
 - 不要把 `cookie` 或 `token` 设计成和 `auth-state` 并列的多个默认入口；如果用户提供的是 state 文件路径，必须写入 `auth_state_path`
@@ -95,6 +96,21 @@ credential_fields:
     config_key: auth_state_path
     input_type: text
     default: "~/.flocks/browser/acme-portal/auth-state.json"
+  - key: username
+    label: Username
+    storage: config
+    config_key: username
+    input_type: text
+    required: false
+    description: 仅在 cookie 失效后需要 Agent 辅助登录刷新 state 时填写
+  - key: password
+    label: Password
+    storage: secret
+    config_key: password
+    secret_id: acme_portal_password
+    input_type: password
+    required: false
+    description: 仅在 cookie 失效后需要 Agent 辅助登录刷新 state 时填写
   - key: cookie
     label: Cookie
     storage: secret
@@ -122,6 +138,7 @@ notes: |
 - 只把运行时真正需要用户填写的字段放进 `credential_fields`
 - 不要把真实 cookie、token、密码、auth state JSON 写进插件文件
 - 默认先放 `auth_state_path`，并指向 `~/.flocks/browser/<name>/auth-state.json`；不要添加 `auth_state_json` / `Legacy Auth State JSON`
+- 可以补充可选 `username` / `password`，但必须标注它们仅用于认证恢复或浏览器辅助登录，不得作为默认运行时认证入口
 - `cookie`、`csrf_token`、`access_token` 或特定认证头只有在实际站点需要时再补，并在 handler 中明确说明来源与刷新方式
 
 ## 最小工具 YAML
@@ -197,6 +214,7 @@ async def handle(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
 - handler 内部负责认证头构造、分页、超时、重试和响应归一化
 - handler 默认只读取 `auth_state_path` 指向的 `auth-state.json`；如果文件缺失、不是合法 JSON，或没有匹配当前 Base URL 的 Cookie，应返回明确错误并提示重新登录/保存 state
 - handler 不要 fallback 到内联 `auth_state_json`；这会把路径字符串、占位文本或过期内容误当 JSON 解析，导致设备测试报错不清晰
+- 如果模板提供了 `username` / `password`，handler 也不要在普通 tool 调用里静默自动登录；这些字段只用于后续由 Rex 进入浏览器认证恢复流程时辅助填表
 - CLI 可选保留，但不要让设备运行时通过 subprocess 调 CLI
 
 ## 组合 API / WebCLI / 处理逻辑
@@ -240,9 +258,12 @@ normalize_alert: process
 处理原则：
 
 1. 不要无限重试
-2. 提示用户重新登录并更新设备配置中的认证字段
-3. 如果保留了 CLI，可用 CLI 做一次最小验证
-4. 验证通过后，再让用户回到设备页点击“刷新设备模板”
+2. 优先返回明确话术，提示 Rex 使用 `flocks browser` 和对应 skill 的认证失败处理去恢复登录态
+3. 如果设备已配置可选 `username` / `password`，Rex 可以在浏览器恢复流程中读取它们辅助登录；如遇验证码、MFA、短信码或人工确认，立即停下并让用户接管
+4. 登录成功后执行 `flocks browser state save <auth_state_path>` 更新 cookie/state 文件
+5. 如仍失败，再提示用户重新登录或更新设备配置中的认证字段
+6. 如果保留了 CLI，可用 CLI 做一次最小验证
+7. 验证通过后，再让用户回到设备页点击“刷新设备模板”
 
 ## `_test.yaml` 建议
 

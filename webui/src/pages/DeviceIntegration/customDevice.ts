@@ -68,8 +68,10 @@ function buildWebCliDeviceRequirements(deviceName: string, vendorName: string): 
     '如果目标是安全设备接入，还必须在 skill 集成完成后，再额外生成可在设备页识别、配置和调用的标准 device 插件。',
     '请优先遵循 `web2cli` skill 中的捕获、导出、生成 CLI 的完整流程，再把沉淀出的能力包装为长期资产。',
     ...buildBaseDevicePluginRequirements(deviceName, vendorName),
-    '- 自定义 CLI / WebCLI 默认认证方式为 `auth-state`；默认保存位置为 `~/.flocks/browser/<name>/auth-state.json`，优先使用 `auth_state_path`',
-    '- `auth_state_json`、`cookie`、`csrf_token`、`access_token` 仅作为补充或兜底字段，不要和 `auth-state` 并列设计成多个默认认证入口',
+    '- 自定义 CLI / WebCLI 默认认证方式为 `cookie/auth-state`；默认保存位置为 `~/.flocks/browser/<name>/auth-state.json`，优先使用 `auth_state_path`',
+    '- 模板应允许可选填写 `username` / `password`：前者用 config text，后者用 secret password；它们仅用于 cookie 失效后的浏览器认证恢复，不替代 `auth_state_path`',
+    '- 不要生成 `auth_state_json` 或 `Legacy Auth State JSON` 这类内联 JSON 兜底字段',
+    '- `cookie`、`csrf_token`、`access_token` 或特定认证头仅作为补充字段，不要和 `auth_state_path` 并列设计成多个默认认证入口',
     '- skill 集成始终必选；CLI 主脚本默认放在 skill 的 `scripts/` 中，如设备运行时确有需要，可额外在 device 插件目录下保留适配层',
     '- MVP 阶段优先生成单文件 handler；CLI 可以作为调试入口保留，但不应作为设备运行时主路径',
     '运行时能力设计要求：',
@@ -77,6 +79,7 @@ function buildWebCliDeviceRequirements(deviceName: string, vendorName: string): 
     '- handler 内部允许按 `api`、`webcli_api`、`process`、`composed` 四类来源编排，但对外返回统一结构',
     '- 如果正式 API 稳定可用，优先正式 API；正式 API 缺能力时，再使用 WebCLI 抓到的隐藏接口',
     '- 只有必须页面交互、验证码或强动态状态时，才记录为 browser fallback，不要作为默认设备运行时主路径',
+    '- cookie 失效时，返回明确认证失败话术，让 Rex 使用 `flocks browser` 和对应 skill 的认证失败处理刷新登录态；如已配置 `username` / `password`，Rex 可读取后辅助登录，再执行 `flocks browser state save <auth_state_path>`',
     '- 高风险写操作必须设置 `requires_confirmation: true`',
     '完成后请提醒用户返回设备页查看是否已经出现对应 WebCLI device 插件，并继续后续配置。',
   ].join('\n');
@@ -100,7 +103,7 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
       '本次接入方式是 WebCLI 接入。',
       '你必须先读取并使用 web2cli skill，再开始捕获与转换流程。',
       '用户会提供产品 URL 和需要获取的接口/页面行为。你可以使用 web2cli 思路抓取接口，但必须先完成 skill 集成；如果目标是安全设备接入，再额外生成 device 插件。',
-      '自定义 CLI 默认复用 `auth-state`；只有在站点确实需要补充 header、cookie 或 token 时，才额外暴露对应字段。',
+      '自定义 CLI 默认复用 `cookie/auth-state`；可选暴露 `username` / `password` 仅用于 cookie 失效后的浏览器认证恢复。只有在站点确实需要补充 header、cookie 或 token 时，才额外暴露对应字段。',
       'MVP 阶段优先生成单文件 script handler；可复用 CLI 只作为调试/回归入口，不作为设备运行时主路径。',
     ].join('\n');
   }
@@ -114,7 +117,7 @@ export function buildCustomDeviceWelcomeMessage(mode: CustomDeviceAccessMode): s
     return '请补充 API 文档链接或直接上传文档文件，并说明目标能力，我会用 tool-builder skill 帮你生成可在设备页使用的 device 插件。';
   }
   if (mode === 'webcli') {
-    return '请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果是安全设备接入，再额外生成 device 插件。默认使用 auth-state。';
+    return '请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果是安全设备接入，再额外生成 device 插件。默认使用 cookie/auth-state，并可选配置 username/password 供认证恢复使用。';
   }
   return 'Syslog 方式不在这里创建插件，请前往工作流集成页面配置。';
 }
