@@ -119,14 +119,6 @@ export default function WorkflowDetail() {
     void loadWorkflow();
   }, [id, loadWorkflow]);
 
-  useEffect(() => {
-    if (!workflow?.id) {
-      setChatSessionId(null);
-      return;
-    }
-    setChatSessionId(getLatestStoredSessionId(workflow.id));
-  }, [workflow?.id]);
-
   const refreshWorkflowStats = useCallback(() => {
     void loadWorkflow({ preserveExecution: true, silent: true });
   }, [loadWorkflow]);
