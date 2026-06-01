@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 import pytest
@@ -72,6 +73,25 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         "read_workflow_from_fs",
         lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
     )
+    monkeypatch.setattr(
+        poller_manager,
+        "create_execution_record",
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(0, result={
+            "id": exec_id or f"exec-{workflow_id}",
+            "workflowId": workflow_id,
+            "inputParams": input_params or {},
+            "status": "running",
+            "startedAt": 111,
+            "executionLog": [],
+            "currentPhase": "queued",
+            "currentStepIndex": 0,
+        }),
+    )
+    monkeypatch.setattr(
+        poller_manager,
+        "record_execution_result",
+        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
+    )
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
 
     status = await manager.run_once("wf-run-once")
@@ -85,6 +105,88 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+
+
+@pytest.mark.asyncio
+async def test_run_once_records_execution_and_normalizes_business_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = poller_manager.WorkflowPollerManager()
+    created_records: list[dict[str, Any]] = []
+    recorded_results: list[dict[str, Any]] = []
+
+    async def _fake_read(_key: str) -> dict[str, Any]:
+        return {
+            "enabled": False,
+            "timeoutSeconds": 9,
+            "inputs": {"dedup_source_workflow_name": "stream_alert_denoise_gt_fast"},
+        }
+
+    async def _fake_create_execution_record(
+        workflow_id: str,
+        *,
+        input_params: dict[str, Any] | None = None,
+        exec_id: str | None = None,
+    ) -> dict[str, Any]:
+        record = {
+            "id": exec_id or "exec-1",
+            "workflowId": workflow_id,
+            "inputParams": input_params or {},
+            "status": "running",
+            "startedAt": 111,
+            "executionLog": [],
+            "currentPhase": "queued",
+            "currentStepIndex": 0,
+        }
+        created_records.append(record)
+        return dict(record)
+
+    async def _fake_record_execution_result(
+        workflow_id: str,
+        exec_id: str,
+        exec_data: dict[str, Any],
+    ) -> None:
+        _ = workflow_id, exec_id
+        recorded_results.append(dict(exec_data))
+
+    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+        assert workflow == {"start": "n1", "nodes": [], "edges": []}
+        assert timeout_s == 9
+        assert trace is False
+        assert cancel() is False
+        assert inputs["dedup_source_workflow_name"] == "stream_alert_denoise_gt_fast"
+        return RunWorkflowResult(
+            status="SUCCEEDED",
+            run_id="run-1",
+            steps=2,
+            last_node_id="finish",
+            outputs={
+                "workflow_success": False,
+                "reason": "business rule blocked",
+                "load_stats": {"record_count": 9},
+            },
+        )
+
+    monkeypatch.setattr(poller_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(
+        poller_manager,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
+    )
+    monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+
+    status = await manager.run_once("wf-business-failure")
+
+    assert created_records[0]["inputParams"]["_trigger"] == "poller"
+    assert created_records[0]["inputParams"]["_poller_run_id"].startswith("poller-")
+    assert recorded_results[0]["status"] == "error"
+    assert recorded_results[0]["errorMessage"] == "business rule blocked"
+    assert recorded_results[0]["currentPhase"] == "error"
+    assert status["lastStatus"] == "error"
+    assert status["lastError"] == "business rule blocked"
+    assert status["selectedCount"] == 9
 
 
 @pytest.mark.asyncio
@@ -111,6 +213,25 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
     monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
     monkeypatch.setattr(
         poller_manager,
+        "create_execution_record",
+        lambda workflow_id, *, input_params=None, exec_id=None: asyncio.sleep(0, result={
+            "id": exec_id or f"exec-{workflow_id}",
+            "workflowId": workflow_id,
+            "inputParams": input_params or {},
+            "status": "running",
+            "startedAt": 111,
+            "executionLog": [],
+            "currentPhase": "queued",
+            "currentStepIndex": 0,
+        }),
+    )
+    monkeypatch.setattr(
+        poller_manager,
+        "record_execution_result",
+        lambda workflow_id, exec_id, exec_data: asyncio.sleep(0),
+    )
+    monkeypatch.setattr(
+        poller_manager,
         "read_workflow_from_fs",
         lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
     )
@@ -125,6 +246,62 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
 
     assert status["lastStatus"] == "skipped"
     assert status["lastError"] == "previous_run_still_active"
+
+
+@pytest.mark.asyncio
+async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = poller_manager.WorkflowPollerManager()
+    release_run = threading.Event()
+
+    async def _fake_create_execution_record(
+        workflow_id: str,
+        *,
+        input_params: dict[str, Any] | None = None,
+        exec_id: str | None = None,
+    ) -> dict[str, Any]:
+        _ = input_params
+        return {
+            "id": exec_id or f"exec-{workflow_id}",
+            "workflowId": workflow_id,
+            "status": "running",
+            "startedAt": 111,
+            "executionLog": [],
+            "currentPhase": "queued",
+            "currentStepIndex": 0,
+        }
+
+    async def _fake_record_execution_result(
+        workflow_id: str,
+        exec_id: str,
+        exec_data: dict[str, Any],
+    ) -> None:
+        _ = workflow_id, exec_id, exec_data
+
+    def _fake_run_workflow(*, workflow: Any, inputs: dict[str, Any], timeout_s: int, trace: bool, cancel):  # noqa: ANN001
+        _ = workflow, inputs, timeout_s, trace, cancel
+        release_run.wait(timeout=0.2)
+        return RunWorkflowResult(status="SUCCEEDED", run_id="run-stop")
+
+    monkeypatch.setattr(poller_manager, "RUN_SHUTDOWN_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(poller_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(poller_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(poller_manager, "run_workflow", _fake_run_workflow)
+
+    await manager._schedule_run(
+        "wf-stop",
+        {"start": "n1", "nodes": [], "edges": []},
+        {"enabled": True, "intervalSeconds": 1, "timeoutSeconds": 5, "noOverlap": True, "inputs": {}},
+    )
+    await asyncio.sleep(0.02)
+
+    await manager.stop_workflow("wf-stop")
+    assert manager.get_status("wf-stop")["activeRuns"] == 1
+
+    release_run.set()
+    await asyncio.sleep(0.05)
+    assert manager.get_status("wf-stop")["activeRuns"] == 0
 
 
 @pytest.mark.asyncio
