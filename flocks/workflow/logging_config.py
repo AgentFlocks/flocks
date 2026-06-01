@@ -6,10 +6,10 @@ Workflow logs go to stderr and, when file logging is enabled, to
 
 import logging
 import sys
-from pathlib import Path
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
-from flocks.utils.log import get_log_dir
+from flocks.utils.log import get_log_backup_count, get_log_dir, get_log_max_bytes
 
 
 def setup_workflow_logging(
@@ -54,8 +54,11 @@ def setup_workflow_logging(
         try:
             log_dir = get_log_dir()
             log_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.FileHandler(
-                log_dir / "workflow.log", mode="a", encoding="utf-8"
+            file_handler = RotatingFileHandler(
+                log_dir / "workflow.log",
+                maxBytes=get_log_max_bytes(),
+                backupCount=get_log_backup_count(),
+                encoding="utf-8",
             )
             file_handler.setLevel(level)
             file_handler.setFormatter(formatter)

@@ -17,6 +17,7 @@ import ast
 import importlib.util
 import inspect
 import re
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -308,6 +309,33 @@ def _build_handler(raw_handler: dict, yaml_path: Path) -> ToolHandler:
         raise ValueError(f"Unknown handler type: {handler_type}")
 
 
+def _build_tcp_connector(verify_ssl: bool) -> "Any":
+    """Create a per-request aiohttp TCPConnector that tears down sockets promptly.
+
+    Declarative HTTP tools (skyeye / tdp / onesec / qingteng / threatbook 等) build a
+    fresh ``ClientSession`` + connector for every call, so connection pooling brings no
+    benefit. Leaving keep-alive enabled lets the remote (often a self-signed HTTPS
+    appliance) send FIN while our socket lingers in ``CLOSE_WAIT``; under rapid back-to-back
+    tool calls — e.g. ``run_workflow`` / ``run_workflow_node`` driving dozens of nodes —
+    these half-closed sockets accumulate (60+ observed) and eventually starve the event loop.
+
+    Mitigations:
+    - ``force_close=True``: close the underlying connection right after each request
+      instead of returning it to the pool, so no idle keep-alive socket can rot into
+      ``CLOSE_WAIT``.
+    - ``enable_cleanup_closed=True``: on CPython < 3.12.7 the asyncio SSL transport leak
+      means TLS sockets are not fully torn down; this aborts them after a short grace
+      period. The flag was made a no-op (with a DeprecationWarning) once the CPython bug
+      was fixed, so we only pass it on the affected interpreters.
+    """
+    import aiohttp
+
+    kwargs: Dict[str, Any] = {"ssl": verify_ssl, "force_close": True}
+    if sys.version_info < (3, 12, 7):
+        kwargs["enable_cleanup_closed"] = True
+    return aiohttp.TCPConnector(**kwargs)
+
+
 def _build_http_handler(cfg: dict) -> ToolHandler:
     """Build an async HTTP request handler from declarative config."""
     method = cfg.get("method", "GET").upper()
@@ -363,7 +391,7 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
 
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            connector = aiohttp.TCPConnector(ssl=verify_ssl)
+            connector = _build_tcp_connector(verify_ssl)
             async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:

@@ -22,6 +22,7 @@ from .utils import load_env_file
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
 NAME = os.environ.get("BU_NAME", "default")
 INTERNAL = INTERNAL_URL_PREFIXES
+# Legacy compatibility for external imports; cookie export no longer uses site-root guessing.
 _COMMON_SECOND_LEVEL_SUFFIXES = {"ac", "co", "com", "edu", "gov", "mil", "net", "org"}
 _COOKIE_IMPORT_FIELDS = {
     "name",
@@ -257,6 +258,41 @@ def _domain_matches_site(domain: str | None, site_root: str) -> bool:
     return bool(normalized) and (normalized == site_root or normalized.endswith(f".{site_root}"))
 
 
+def _domain_matches_host(domain: str | None, hostname: str) -> bool:
+    normalized_domain = str(domain or "").lower().lstrip(".")
+    normalized_host = str(hostname or "").lower().strip(".")
+    return bool(normalized_domain and normalized_host) and (
+        normalized_host == normalized_domain or normalized_host.endswith(f".{normalized_domain}")
+    )
+
+
+def _path_matches_url(cookie_path: str | None, request_path: str) -> bool:
+    normalized_cookie_path = str(cookie_path or "/") or "/"
+    normalized_request_path = request_path or "/"
+    if normalized_cookie_path == "/":
+        return True
+    prefix = normalized_cookie_path.rstrip("/") or "/"
+    return normalized_request_path == prefix or normalized_request_path.startswith(prefix + "/")
+
+
+def _cookie_matches_url(cookie: dict[str, Any], target_url: str) -> bool:
+    parsed = urlparse(target_url)
+    hostname = parsed.hostname or ""
+    request_path = parsed.path or "/"
+    is_https = parsed.scheme == "https"
+    if not isinstance(cookie, dict):
+        return False
+    if not cookie.get("name") or cookie.get("value") in (None, ""):
+        return False
+    if not _domain_matches_host(cookie.get("domain"), hostname):
+        return False
+    if not _path_matches_url(cookie.get("path"), request_path):
+        return False
+    if cookie.get("secure") and not is_https:
+        return False
+    return True
+
+
 def _current_page_state() -> tuple[dict[str, Any], str]:
     info = page_info()
     if info.get("dialog"):
@@ -290,24 +326,24 @@ def _collect_site_cookies(target_url: str) -> list[dict[str, Any]]:
     hostname = urlparse(target_url).hostname
     if not hostname:
         raise RuntimeError(f"could not determine hostname for {target_url!r}")
-    site_root = _site_root_from_hostname(hostname)
+
+    try:
+        cookies = cdp("Network.getCookies", urls=[target_url]).get("cookies", [])
+    except Exception:
+        cookies = []
+    if isinstance(cookies, list):
+        filtered = [cookie for cookie in cookies if _cookie_matches_url(cookie, target_url)]
+        if filtered:
+            return filtered
+
     try:
         cookies = cdp("Storage.getCookies").get("cookies", [])
     except Exception:
         cookies = []
     if not isinstance(cookies, list):
         cookies = []
-    filtered = [
-        cookie
-        for cookie in cookies
-        if isinstance(cookie, dict) and _domain_matches_site(cookie.get("domain"), site_root)
-    ]
-    if filtered:
-        return filtered
-    fallback = cdp("Network.getCookies", urls=[target_url]).get("cookies", [])
-    if not isinstance(fallback, list):
-        raise RuntimeError("cookie export did not return a list")
-    return fallback
+    filtered = [cookie for cookie in cookies if _cookie_matches_url(cookie, target_url)]
+    return filtered
 
 
 def _set_storage_entries(storage_name: str, entries: list[dict[str, Any]]) -> int:

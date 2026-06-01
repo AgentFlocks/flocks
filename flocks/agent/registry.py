@@ -39,6 +39,7 @@ from flocks.agent.agent import (
     AvailableWorkflow,
     DelegationTrigger,
 )
+import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.toolset import agent_declares_tool
 from flocks.agent.prompt_utils import categorize_tools
 from flocks.agent.agent_factory import (
@@ -168,6 +169,7 @@ def _storage_custom_agent_to_info(agent_data: Dict[str, Any]) -> Optional[AgentI
         model=model,
         native=False,
         hidden=agent_data.get("hidden", False),
+        delegatable=agent_data.get("delegatable"),
         tools=agent_data.get("tools", []),
         tags=agent_data.get("tags", []),
     )
@@ -197,6 +199,14 @@ async def _load_storage_custom_agents(existing_names: Set[str]) -> Dict[str, Age
             continue
         loaded[agent.name] = agent
     return loaded
+
+
+def _apply_delegatable_overrides(agents: Dict[str, AgentInfo]) -> None:
+    overrides = delegatable_settings.load_overrides()
+    for name, delegatable in overrides.items():
+        agent = agents.get(name)
+        if agent is not None:
+            agent.delegatable = delegatable
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +413,7 @@ class Agent:
 
         storage_custom_agents = await _load_storage_custom_agents(set(result.keys()))
         result.update(storage_custom_agents)
+        _apply_delegatable_overrides(result)
 
         # enabled_agents whitelist filter
         if cfg.enabled_agents is not None:
@@ -439,6 +450,7 @@ class Agent:
     # to detect changes made by other workers.  Stored as a class variable so it
     # persists across async calls in the same process.
     _skill_settings_mtime: float = 0.0
+    _delegatable_settings_mtime: float = 0.0
 
     @classmethod
     def _sync_skill_settings_cache(cls) -> None:
@@ -468,10 +480,25 @@ class Agent:
         except Exception:
             pass
 
+    @classmethod
+    def _sync_delegatable_settings_cache(cls) -> None:
+        """Invalidate in-process agent cache when delegatable overrides change on disk."""
+        try:
+            sentinel = delegatable_settings.settings_path()
+            if not sentinel.exists():
+                return
+            current_mtime = sentinel.stat().st_mtime
+            if current_mtime > cls._delegatable_settings_mtime:
+                cls._delegatable_settings_mtime = current_mtime
+                cls._state_accessor.invalidate()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     @staticmethod
     async def state() -> Dict[str, AgentInfo]:
         # Detect cross-worker skill-settings changes before serving cached state.
         Agent._sync_skill_settings_cache()
+        Agent._sync_delegatable_settings_cache()
         return await Agent._state_accessor()
 
     @classmethod

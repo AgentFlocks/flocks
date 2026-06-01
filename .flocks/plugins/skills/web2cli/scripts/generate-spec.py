@@ -13,8 +13,15 @@ from typing import Any
 from urllib.parse import parse_qsl, urlparse
 
 
-PAGE_PARAM_NAMES = {"page", "pageNo", "pageNum", "current", "pageIndex", "curPage"}
+PAGE_PARAM_NAMES = {"page", "pageNo", "pageNum", "current", "pageIndex", "curPage", "cur_page"}
 LIMIT_PARAM_NAMES = {"limit", "size", "pageSize", "page_size", "page_limit", "rows"}
+TIME_PARAM_NAMES = {
+    "time_from", "time_to", "start_time", "end_time",
+    "create_time_from", "create_time_to", "update_time_from", "update_time_to",
+    "last_update_time_from", "last_update_time_to", "begin_time", "endtime",
+    "timeRange", "startTime", "endTime",
+}
+MIN_OPERATION_SCORE = 40
 
 
 def sanitize_name(name: str) -> str:
@@ -53,6 +60,19 @@ def parse_json_text(text: str) -> Any:
         return json.loads(value)
     except json.JSONDecodeError:
         return {"raw": text}
+
+
+def get_request_content_type(request: dict[str, Any]) -> str:
+    """Return the normalized request content type."""
+    direct = request.get("requestContentType")
+    if direct:
+        return str(direct).lower()
+
+    headers = request.get("requestHeaders", {}) or request.get("request_headers", {})
+    for key, value in headers.items():
+        if str(key).lower() == "content-type" and value:
+            return str(value).lower()
+    return ""
 
 
 def infer_type(value: Any) -> str:
@@ -237,10 +257,13 @@ def collect_columns(item: Any) -> list[dict[str, Any]]:
     return columns
 
 
-def build_templates(request: dict[str, Any], url_info: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
-    """Build query/body templates and CLI arg definitions."""
+def build_templates(
+    request: dict[str, Any], url_info: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], str, str, list[str]]:
+    """Build query/body templates, payload mode, and CLI arg definitions."""
     args: list[dict[str, Any]] = []
     seen_args: set[str] = set()
+    multipart_file_fields: list[str] = []
 
     def add_arg(name: str, default: Any, help_text: str) -> None:
         if name in seen_args:
@@ -249,30 +272,101 @@ def build_templates(request: dict[str, Any], url_info: dict[str, Any]) -> tuple[
         arg_type = "int" if isinstance(default, int) else "string"
         args.append({"name": name, "type": arg_type, "default": default, "help": help_text})
 
-    def transform_mapping(data: dict[str, Any]) -> dict[str, Any]:
+    def _is_special_param_key(key: str) -> bool:
+        return key in PAGE_PARAM_NAMES or key in LIMIT_PARAM_NAMES or key in TIME_PARAM_NAMES
+
+    def _template_scalar(key: str, value: Any) -> tuple[str, Any] | None:
+        if key in PAGE_PARAM_NAMES:
+            default = int(value) if str(value).isdigit() else 1
+            add_arg("page", default, "Page number")
+            return "${page}", default
+        if key in LIMIT_PARAM_NAMES:
+            default = int(value) if str(value).isdigit() else 20
+            add_arg("limit", default, "Page size")
+            return "${limit}", default
+        if key in TIME_PARAM_NAMES:
+            default = int(value) if str(value).isdigit() else value
+            add_arg(key, default, "Time parameter (Unix timestamp)")
+            return "${" + key + "}", default
+        return None
+
+    def _multipart_file_template(path_tokens: tuple[str, ...], value: Any) -> str | None:
+        if payload_mode != "multipart" or value != "[file]":
+            return None
+        field_name = ".".join(path_tokens)
+        arg_name = sanitize_name("_".join(path_tokens) + "_file")
+        add_arg(arg_name, "", f"File path for multipart field {field_name}")
+        if field_name not in multipart_file_fields:
+            multipart_file_fields.append(field_name)
+        return "${" + arg_name + "}"
+
+    def transform_mapping(data: dict[str, Any], path_tokens: tuple[str, ...] = ()) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in data.items():
-            if key in PAGE_PARAM_NAMES:
-                default = int(value) if str(value).isdigit() else 1
-                result[key] = "${page}"
-                add_arg("page", default, "Page number")
-            elif key in LIMIT_PARAM_NAMES:
-                default = int(value) if str(value).isdigit() else 20
-                result[key] = "${limit}"
-                add_arg("limit", default, "Page size")
+            field_path = path_tokens + (str(key),)
+            multipart_template = _multipart_file_template(field_path, value)
+            if multipart_template is not None:
+                result[key] = multipart_template
+                continue
+            if _is_special_param_key(key):
+                if isinstance(value, dict):
+                    result[key] = transform_mapping(value, field_path)
+                elif isinstance(value, list):
+                    result[key] = [
+                        transform_mapping(item, field_path) if isinstance(item, dict) else item
+                        for item in value
+                    ]
+                else:
+                    template_result = _template_scalar(key, value)
+                    result[key] = template_result[0] if template_result else value
+            elif isinstance(value, dict):
+                result[key] = transform_mapping(value, field_path)
+            elif isinstance(value, list):
+                result[key] = [
+                    transform_mapping(item, field_path) if isinstance(item, dict) else item
+                    for item in value
+                ]
             else:
                 result[key] = value
         return result
 
-    body = parse_json_text(str(request.get("requestBody", "")))
-    if not isinstance(body, dict) or "raw" in body:
-        body = {}
+    body_text = str(request.get("requestBody", ""))
+    body_kind = str(request.get("requestBodyKind", "")).lower()
+    content_type = get_request_content_type(request)
+    parsed_body = parse_json_text(body_text)
+    body: dict[str, Any] = {}
+    payload_mode = "none"
+    raw_body_template = ""
+
+    if isinstance(parsed_body, dict) and "raw" not in parsed_body:
+        body = parsed_body
+        if body:
+            if body_kind == "formdata" or "multipart/form-data" in content_type:
+                payload_mode = "multipart"
+            elif body_kind == "urlencoded":
+                payload_mode = "form"
+            elif "application/x-www-form-urlencoded" in content_type:
+                payload_mode = "form"
+            else:
+                payload_mode = "json"
+    elif body_text:
+        if "application/x-www-form-urlencoded" in content_type:
+            body = dict(parse_qsl(body_text, keep_blank_values=True))
+            payload_mode = "form" if body else "raw"
+        else:
+            payload_mode = "raw"
+            raw_body_template = body_text
 
     query_template = transform_mapping(url_info["query"])
     body_template = transform_mapping(body)
 
-    args.sort(key=lambda item: (0 if item["name"] == "page" else 1 if item["name"] == "limit" else 2, item["name"]))
-    return query_template, body_template, args
+    args.sort(key=lambda item: (
+        0 if item["name"] == "page" else
+        1 if item["name"] == "limit" else
+        2 if item["name"] in TIME_PARAM_NAMES else 3,
+        item["name"],
+    ))
+    return query_template, body_template, args, payload_mode, raw_body_template, multipart_file_fields
 
 
 def build_strategy(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -296,12 +390,15 @@ def build_strategy(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return strategy, {"stateFile": "auth-state.json", "requiredCookies": [], "requiredHeaders": required_headers}
 
 
-def safe_headers(request: dict[str, Any]) -> dict[str, Any]:
+def safe_headers(request: dict[str, Any], payload_mode: str = "") -> dict[str, Any]:
     """Return non-sensitive request headers that can be replayed safely."""
     headers = request.get("requestHeaders", {}) or request.get("request_headers", {})
     result = {}
     for key, value in headers.items():
-        if str(key).lower() in {"cookie", "authorization", "x-csrf-token", "x-xsrf-token", "x-auth-token"}:
+        key_name = str(key).lower()
+        if key_name in {"cookie", "authorization", "x-csrf-token", "x-xsrf-token", "x-auth-token"}:
+            continue
+        if payload_mode == "multipart" and key_name == "content-type":
             continue
         result[key] = value
     return result
@@ -344,7 +441,7 @@ def select_operation_requests(requests: list[dict[str, Any]]) -> list[dict[str, 
             selected[key] = {"index": index, "score": score, "request": request}
 
     candidates = sorted(selected.values(), key=lambda item: item["index"])
-    filtered = [item for item in candidates if item["score"] >= 60]
+    filtered = [item for item in candidates if item["score"] >= MIN_OPERATION_SCORE]
     return [item["request"] for item in (filtered or candidates[:1])]
 
 
@@ -364,7 +461,10 @@ def build_operation_entry(request: dict[str, Any]) -> dict[str, Any]:
     response = parse_json_text(str(request.get("response", "")))
     collection = find_best_collection(response)
     row_item = collection["item"] if collection is not None else response
-    query_template, body_template, args = build_templates(request, url_info)
+    query_template, body_template, args, payload_mode, raw_body_template, multipart_file_fields = build_templates(
+        request,
+        url_info,
+    )
     columns = collect_columns(row_item)
 
     defaults = {item["name"]: item["default"] for item in args}
@@ -386,7 +486,10 @@ def build_operation_entry(request: dict[str, Any]) -> dict[str, Any]:
             "endpoint": pathname,
             "queryTemplate": query_template,
             "bodyTemplate": body_template,
-            "headers": safe_headers(request),
+            "payloadMode": payload_mode,
+            "rawBodyTemplate": raw_body_template,
+            "multipartFileFields": multipart_file_fields,
+            "headers": safe_headers(request, payload_mode),
             "captureSource": request.get("captureSource", "pageHook"),
             "captureReason": request.get("captureReason", ""),
             "sourceRequestId": request.get("timestamp", ""),

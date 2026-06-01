@@ -6,7 +6,7 @@ import pytest
 import time
 import tempfile
 from pathlib import Path
-from flocks.utils.log import Log, Logger, LogLevel
+from flocks.utils.log import Log, Logger, LogLevel, _RotatingTextWriter, rotate_log_file
 
 
 class TestLoggerCompatibility:
@@ -225,6 +225,57 @@ class TestLoggerCompatibility:
             assert 'data={"nested": "value"}' in output or 'data={"nested":"value"}' in output
         finally:
             Log._writer = old_stderr
+
+    def test_large_object_values_are_truncated(self, monkeypatch):
+        """Test large objects are bounded before being written to logs."""
+        logger = Log.create(service="test")
+
+        import io
+        old_stderr = Log._writer
+        Log._writer = io.StringIO()
+        monkeypatch.setenv("FLOCKS_LOG_VALUE_MAX_CHARS", "20")
+
+        try:
+            logger.info("message", {"data": {"payload": "x" * 100}})
+            output = Log._writer.getvalue()
+
+            assert "data=" in output
+            assert "<truncated" in output
+            assert len(output) < 200
+        finally:
+            Log._writer = old_stderr
+
+    def test_rotate_log_file_keeps_bounded_backups(self, tmp_path: Path):
+        """Test oversized runtime logs rotate before another process appends."""
+        log_path = tmp_path / "backend.log"
+        log_path.write_text("x" * 20, encoding="utf-8")
+
+        rotate_log_file(log_path, max_bytes=10, backup_count=2)
+
+        assert not log_path.exists()
+        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "x" * 20
+
+        log_path.write_text("y" * 20, encoding="utf-8")
+        rotate_log_file(log_path, max_bytes=10, backup_count=2)
+
+        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "y" * 20
+        assert (tmp_path / "backend.log.2").read_text(encoding="utf-8") == "x" * 20
+
+    def test_rotating_text_writer_rotates_during_log_writes(self, tmp_path: Path):
+        """Test Log's writer rotates when the next line would exceed the limit."""
+        log_path = tmp_path / "session.log"
+        writer = _RotatingTextWriter(log_path, max_bytes=12, backup_count=1)
+
+        try:
+            writer.write("first\n")
+            writer.flush()
+            writer.write("second\n")
+            writer.flush()
+        finally:
+            writer.close()
+
+        assert log_path.read_text(encoding="utf-8") == "second\n"
+        assert (tmp_path / "session.log.1").read_text(encoding="utf-8") == "first\n"
     
     def test_time_diff_calculation(self):
         """Test time difference calculation between logs"""
@@ -233,6 +284,7 @@ class TestLoggerCompatibility:
         import io
         old_stderr = Log._writer
         Log._writer = io.StringIO()
+        Log._last_time = int(time.time() * 1000)
         
         try:
             logger.info("first")
@@ -310,6 +362,20 @@ class TestLogInitialization:
         """Test log file path method"""
         file_path = Log.file()
         assert file_path.endswith("flocks.log") or "flocks" in file_path
+
+    async def test_cleanup_removes_rotated_siblings_for_old_timestamp_logs(self, tmp_path: Path):
+        """Test cleanup deletes rotated backups for base files outside retention."""
+        for day in range(11):
+            base = tmp_path / f"2026-05-{day + 1:02d}T010203.log"
+            base.write_text("base", encoding="utf-8")
+            (tmp_path / f"{base.name}.1").write_text("rotated", encoding="utf-8")
+
+        await Log._cleanup(tmp_path)
+
+        assert not (tmp_path / "2026-05-01T010203.log").exists()
+        assert not (tmp_path / "2026-05-01T010203.log.1").exists()
+        assert (tmp_path / "2026-05-02T010203.log").exists()
+        assert (tmp_path / "2026-05-02T010203.log.1").exists()
 
 
 if __name__ == "__main__":

@@ -1282,6 +1282,27 @@ def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Pa
     assert "startupinfo" not in captured["kwargs"]
 
 
+def test_spawn_process_rotates_large_log_before_append(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("x" * 20, encoding="utf-8")
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write("new\n")
+        kwargs["stdout"].flush()
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setenv("FLOCKS_LOG_MAX_BYTES", "10")
+    monkeypatch.setenv("FLOCKS_LOG_BACKUP_COUNT", "1")
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "new\n"
+    assert (tmp_path / "logs" / "backend.log.1").read_text(encoding="utf-8") == "x" * 20
+
+
 def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:
     captured = {}
     log_path = tmp_path / "logs" / "backend.log"

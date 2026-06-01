@@ -11,8 +11,7 @@ from .policy import CompactionPolicy
 from .models import (
     PRUNE_PROTECT,
     PRUNE_MINIMUM,
-    PRUNE_PROTECTED_TOOLS,
-    PRESERVE_LAST_STEPS,
+    resolve_tool_preserve_turns,
 )
 
 log = Log.create(service="session.compaction.pruning")
@@ -51,10 +50,24 @@ async def prune(
     if not messages:
         return
 
+    # ------------------------------------------------------------------
+    # Retention model (T1 + T2)
+    # ------------------------------------------------------------------
+    # ``user_turns_seen`` counts user prompts (during reverse walk), and
+    # ``resolve_tool_preserve_turns`` gives each tool an individual
+    # retention window.  ``-1`` keeps a tool forever; ``0`` drops on the
+    # same turn; ``1`` keeps just the in-progress turn.
+    #
+    # The per-tool policy does the heavy lifting, so we no longer apply
+    # the global ``prune_protect`` token gate (it would otherwise spare
+    # many small tool outputs that individually expired ages ago — e.g.
+    # 20 × bash @ 1K each never trips a 40K threshold).
+    # ------------------------------------------------------------------
+
     total = 0
     pruned = 0
     to_prune = []
-    steps = 0
+    user_turns_seen = 0
     hit_compacted = False
 
     for msg in reversed(messages):
@@ -62,13 +75,9 @@ async def prune(
             break
 
         role = msg.role.value if hasattr(msg.role, 'value') else msg.role
-        if role == "assistant":
-            finish = getattr(msg, 'finish', None)
-            if finish != "summary":
-                steps += 1
 
-        if steps <= PRESERVE_LAST_STEPS:
-            continue
+        if role == "user":
+            user_turns_seen += 1
 
         if hasattr(msg, "metadata") and msg.metadata.get("summary"):
             break
@@ -82,8 +91,15 @@ async def prune(
                 status = getattr(state, 'status', None)
                 if status == "completed":
                     tool_name = getattr(part, 'tool', "")
-
-                    if tool_name in PRUNE_PROTECTED_TOOLS:
+                    tool_keep_turns = resolve_tool_preserve_turns(tool_name)
+                    if tool_keep_turns == -1:
+                        continue   # never prune
+                    # ``user_turns_seen`` counts how many ``user`` messages
+                    # we have walked past during the reverse iteration.
+                    # ``< keep`` keeps exactly the last ``keep`` user-turn
+                    # windows (keep=1 → only the in-progress turn; keep=2
+                    # → current + previous turn).
+                    if user_turns_seen < tool_keep_turns:
                         continue
 
                     time_info = getattr(state, 'time', None) or {}
@@ -98,11 +114,16 @@ async def prune(
                     estimate = SessionPrompt.estimate_tokens(output)
                     total += estimate
 
-                    if total > effective_prune_protect:
-                        pruned += estimate
-                        to_prune.append(part)
+                    # The per-tool retention window already screened out
+                    # "still useful" outputs above, so prune unconditionally.
+                    pruned += estimate
+                    to_prune.append(part)
 
-    log.info("compaction.prune.found", {"pruned": pruned, "total": total})
+    log.info("compaction.prune.found", {
+        "pruned": pruned,
+        "total": total,
+        "user_turns_seen": user_turns_seen,
+    })
 
     if pruned > effective_prune_minimum:
         current_time = int(time.time() * 1000)
@@ -126,6 +147,16 @@ async def prune(
                 await Message._persist_parts(session_id)
         except Exception as persist_err:
             log.warn("compaction.prune.persist_error", {"error": str(persist_err)})
+
+        # E6: per-message token cache is no longer valid for any message
+        # whose tool parts we just compacted — drop those entries so the
+        # next ``estimate_full_context_tokens`` re-counts them with the
+        # ~10 token placeholder instead of the original output.
+        if affected_msg_ids:
+            try:
+                SessionPrompt.invalidate_message_cache(affected_msg_ids)
+            except Exception:  # noqa: BLE001 — cache invalidation never blocks
+                pass
 
         log.info("compaction.pruned", {"count": len(to_prune)})
 
@@ -323,8 +354,13 @@ async def truncate_oversized_tool_outputs(
     from flocks.session.message import Message
     from flocks.tool.truncation import (
         calculate_max_tool_result_chars,
-        truncate_tool_result_text,
+        truncate_tool_result_text_safe,
     )
+
+    # T3: JSON-safe truncation is the default — tool results that happen
+    # to be JSON survive as valid JSON; non-JSON inputs fall back to
+    # character-level truncation inside ``truncate_tool_result_text_safe``.
+    _truncate = truncate_tool_result_text_safe
 
     max_chars = calculate_max_tool_result_chars(context_window_tokens)
     messages = await Message.list(session_id)
@@ -359,7 +395,7 @@ async def truncate_oversized_tool_outputs(
                 state.output = output
 
             if len(output) > max_chars:
-                state.output = truncate_tool_result_text(output, max_chars)
+                state.output = _truncate(output, max_chars)
                 truncated_count += 1
                 affected_msg_ids.add(msg.id)
 
@@ -402,6 +438,12 @@ async def truncate_oversized_tool_outputs(
                 await Message._persist_parts(session_id, message_id=mid)
         except Exception as persist_err:
             log.warn("compaction.oversized_persist_error", {"error": str(persist_err)})
+
+        # E6: drop cached token totals for any message we just mutated.
+        try:
+            SessionPrompt.invalidate_message_cache(affected_msg_ids)
+        except Exception:  # noqa: BLE001 — cache invalidation never blocks
+            pass
 
         log.info("compaction.oversized_truncated", {
             "session_id": session_id,

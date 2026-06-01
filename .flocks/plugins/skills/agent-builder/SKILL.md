@@ -127,7 +127,7 @@ prompt_metadata:
 
 | Strategy | Use Case | Tool Scope | Example Agents |
 |----------|----------|------------|----------------|
-| `read_only` | Analysis/consultation only, no file mutations | Read-only tools | oracle, librarian, momus |
+| `read_only` | Analysis/consultation only, no file mutations | Read-only tools | oracle, librarian |
 | `react` | General execution, observe-think-act loop | All tools | general |
 | `plan_and_execute` | Complex tasks requiring planning before execution | All tools | rex, hephaestus |
 | `explore` | Codebase exploration and search | Search/read tools | explore |
@@ -178,7 +178,7 @@ After generating files, verify:
 1. **YAML syntax**: run `python3 -c "import yaml; from pathlib import Path; yaml.safe_load(Path('~/.flocks/plugins/agents/{name}/agent.yaml').expanduser().read_text(encoding='utf-8'))"`
 2. **Prompt file exists**: confirm `~/.flocks/plugins/agents/{name}/prompt.md` has been created
 3. **Directory structure**: ensure files are inside `~/.flocks/plugins/agents/{name}/`, NOT as flat files like `agents/{name}.yaml`
-4. **Name uniqueness**: ensure no collision with built-in agents (reserved names: rex, hephaestus, oracle, librarian, explore, general, metis, momus, multimodal-looker, rex-junior, build, plan, compaction, title, summary)
+4. **Name uniqueness**: ensure no collision with built-in agents (reserved names: rex, hephaestus, oracle, librarian, explore, prometheus, multimodal-looker, rex-junior, build, plan, compaction, title, summary)
 5. **Tool names**: verify every listed tool exists in the current registry; if the repo exposes a `/tools` or tool listing command, check against that instead of relying on memory
 
 ### 7. Output

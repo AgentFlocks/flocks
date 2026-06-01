@@ -283,7 +283,7 @@ class TestRexPromptAwareness:
         assert rex is not None
         # Rex should know about at least one of its common subagents
         prompt = rex.prompt or ""
-        assert any(name in prompt for name in ["explore", "oracle", "metis", "momus"]), (
+        assert any(name in prompt for name in ["explore", "oracle", "prometheus"]), (
             "Rex prompt does not reference any known subagents"
         )
 

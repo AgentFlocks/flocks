@@ -47,9 +47,14 @@ async def test_storage_connect_applies_runtime_sqlite_pragmas() -> None:
             busy_timeout = (await cursor.fetchone())[0]
         async with db.execute("PRAGMA foreign_keys") as cursor:
             foreign_keys = (await cursor.fetchone())[0]
+        async with db.execute("PRAGMA synchronous") as cursor:
+            synchronous = (await cursor.fetchone())[0]
 
     assert busy_timeout == Storage._sqlite_busy_timeout_ms
     assert foreign_keys == 1
+    # ``synchronous=NORMAL`` resolves to integer 1; we assert the explicit
+    # mode so the durability contract for WAL mode does not silently weaken.
+    assert synchronous == 1
 
 
 def test_storage_connect_sync_applies_runtime_sqlite_pragmas() -> None:
@@ -60,9 +65,11 @@ def test_storage_connect_sync_applies_runtime_sqlite_pragmas() -> None:
     with Storage.connect_sync() as db:
         busy_timeout = db.execute("PRAGMA busy_timeout").fetchone()[0]
         foreign_keys = db.execute("PRAGMA foreign_keys").fetchone()[0]
+        synchronous = db.execute("PRAGMA synchronous").fetchone()[0]
 
     assert busy_timeout == Storage._sqlite_busy_timeout_ms
     assert foreign_keys == 1
+    assert synchronous == 1
 
 
 @pytest.mark.asyncio

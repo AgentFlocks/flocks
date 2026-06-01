@@ -270,12 +270,12 @@ def _count_occurrences(
 def _get_not_found_error(filepath: str, edit_index: int, total_edits: int) -> str:
     if total_edits == 1:
         return (
-            f"Could not find the exact text in {filepath}. "
-            "The oldString must match exactly including all whitespace and newlines."
+            f"Could not find oldString in {filepath}. "
+            "Re-read the file and provide a slightly larger unique snippet from the current file contents."
         )
     return (
         f"Could not find edits[{edit_index}] in {filepath}. "
-        "The oldString must match exactly including all whitespace and newlines."
+        "Re-read the file and provide a slightly larger unique snippet from the current file contents."
     )
 
 

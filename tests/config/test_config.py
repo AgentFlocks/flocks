@@ -47,6 +47,29 @@ async def test_config_loading():
     assert config.keybinds is not None
 
 
+def test_local_mcp_config_accepts_legacy_env_alias():
+    """Legacy ``env`` should hydrate the canonical ``environment`` field."""
+    config = ConfigInfo.model_validate(
+        {
+            "mcp": {
+                "demo": {
+                    "type": "local",
+                    "command": ["python", "-m", "demo"],
+                    "env": {"DEMO_TOKEN": "secret"},
+                }
+            }
+        }
+    )
+
+    server = config.mcp["demo"]
+    assert server.environment == {"DEMO_TOKEN": "secret"}
+    assert server.model_dump(exclude_none=True) == {
+        "type": "local",
+        "command": ["python", "-m", "demo"],
+        "environment": {"DEMO_TOKEN": "secret"},
+    }
+
+
 @pytest.mark.asyncio
 async def test_config_file_loading(tmp_path):
     """Test loading configuration from file"""

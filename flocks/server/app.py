@@ -517,11 +517,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("instances.dispose.failed", {"error": str(e)})
 
+    # Final WAL checkpoint — *after* every other subsystem has stopped
+    # writing.  This drains any residual frames into the main DB and
+    # truncates the ``-wal`` file to zero length, so the next process
+    # start does not need a WAL recovery step (which is where a poorly
+    # timed power loss can corrupt the main-DB header page).
+    try:
+        await Storage.shutdown()
+    except Exception as e:
+        log.warning("storage.shutdown_failed", {"error": str(e)})
+
     try:
         shutdown_observability()
     except Exception as e:
         log.warning("observability.shutdown_failed", {"error": str(e)})
-    
+
     log.info("server.shutdown")
 
 

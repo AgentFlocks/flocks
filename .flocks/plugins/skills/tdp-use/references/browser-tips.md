@@ -7,109 +7,171 @@
 TDP 是 SPA 应用，直接跳转 URL 比点击菜单更稳定：
 
 ```bash
-agent-browser open "https://<tdp-domain>/dashboard"
-agent-browser wait --load networkidle
-agent-browser snapshot -i
+flocks browser -c '
+tid = new_tab("https://<tdp-domain>/dashboard", activate=True)
+wait_for_load()
+print(tid)
+print(page_info())
+print(js("document.body.innerText.slice(0, 1200)"))
+'
 ```
 
-### 菜单点击（需要先获取 refs）
-
-> ⚠️ refs 是动态生成的，每次页面加载后编号都会变化，必须先 `snapshot -i` 获取当前实际 ref。
+### 继续使用已有 tab
 
 ```bash
-# 先获取当前页面 refs
-agent-browser snapshot -i
-
-# 点击目标菜单（ref 以实际 snapshot 结果为准，示例仅为示意）
-agent-browser click @e1
-agent-browser wait --load networkidle
-
-# 每次操作后需重新获取 refs
-agent-browser snapshot -i
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(page_info())
+'
 ```
 
 ---
 
 ## 2. 页面滚动
 
-> ⚠️ **必须使用 JavaScript 滚动**，`agent-browser scroll` 命令无法触发 TDP 动态加载的内容。
+> ⚠️ 必须使用 JavaScript 滚动；滚动后再重新读取页面状态。
 
 ```bash
-# 获取页面总高度（判断是否还有更多内容）
-agent-browser eval "document.body.scrollHeight"
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(js("document.body.scrollHeight"))
+js("window.scrollTo(0, document.body.scrollHeight)")
+wait(1.0)
+print(page_info())
+print(js("document.body.innerText.slice(0, 1600)"))
+'
+```
 
-# 滚动到底部（推荐，可触发动态加载）
-agent-browser eval "window.scrollTo(0, document.body.scrollHeight)"
+分步滚动：
 
-# 分步滚动（每次滚动后截图确认内容）
-agent-browser eval "window.scrollBy(0, 1000)"
-agent-browser snapshot -i
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("window.scrollBy(0, 1000)")
+wait(0.8)
+print(js("document.body.innerText.slice(0, 1600)"))
+'
+```
 
-# 滚动到指定元素
-agent-browser eval "const el = document.evaluate('//*[contains(text(),\"目标文字\")]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; if(el) el.scrollIntoView();"
+滚动到指定元素：
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("""
+const el = document.evaluate(
+  '//*[contains(text(),"目标文字")]',
+  document,
+  null,
+  XPathResult.FIRST_ORDERED_NODE_TYPE,
+  null
+).singleNodeValue;
+if (el) el.scrollIntoView({block: "center"});
+""")
+wait(0.5)
+print(page_info())
+'
 ```
 
 **判断是否需要继续滚动的依据**：
-- 快照中显示的内容较少，页面有大量空白
-- 看到"查看更多"、"加载更多"等链接
+- 页面有大量空白
+- 看到“查看更多”“加载更多”等链接
 - 页面布局明显不完整（如被截断的表格）
-- 没有看到预期的数据列表
+- 还没有看到预期的数据列表
 
 ---
 
 ## 3. 动态元素点击
 
-TDP 使用 React/Vue 构建，大量元素是 `<div>/<span>` + onClick，`snapshot -i` 无法捕获。
+TDP 使用 React/Vue 构建，大量元素是 `<div>/<span>` + onClick。推荐顺序是：先 `page_info()`，再 `js(...)` 观察和点击；不要再依赖旧的 ref 编号。
 
 ### 方法一：XPath 文本定位（适合文本唯一的元素）
 
 ```bash
-# 通过文本精确定位并点击
-agent-browser eval "const el = document.evaluate('//*[contains(text(),\"Redis\")]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; if(el) el.click();"
-
-# 在特定容器内查找
-agent-browser eval "const el = document.evaluate('//div[@class=\"menu\"]//span[contains(text(),\"日志分析\")]', document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue; if(el) el.click();"
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("""
+const el = document.evaluate(
+  '//*[contains(text(),"Redis")]',
+  document,
+  null,
+  XPathResult.FIRST_ORDERED_NODE_TYPE,
+  null
+).singleNodeValue;
+if (el) el.click();
+""")
+wait(0.8)
+print(page_info())
+'
 ```
 
 ### 方法二：表格行点击（告警列表、事件列表）
 
 ```bash
-# 点击第一条数据行（如果用 `tr` 选择器，index 1 通常跳过表头）
-agent-browser eval "document.querySelectorAll('tr')[1].click()"
-
-# 点击 tbody 中的第一条数据行（更精确，避免选中表头）
-agent-browser eval "document.querySelectorAll('tbody tr')[0]?.click()"
-
-# 点击第 N 条数据行（从 0 开始）
-agent-browser eval "document.querySelectorAll('tbody tr')[N]?.click()"
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("document.querySelectorAll(\"tbody tr\")[0]?.click()")
+wait(1.0)
+print(js("document.body.innerText.slice(0, 2000)"))
+'
 ```
 
-### 方法三：遍历所有元素（适合折叠面板、Tab切换、动态按钮）
-
-当 XPath 无法定位，或目标元素有可点击的子元素时使用：
+点击第 N 条数据行：
 
 ```bash
-# 等待页面渲染完成
-agent-browser wait 2000
-
-# 遍历所有元素，按文本内容定位并点击子按钮
-agent-browser eval "for(const el of document.querySelectorAll('*')) { const txt = el.textContent?.trim(); if(txt?.includes('目标文本')) { const btn = el.querySelector('button, svg, [role=button]'); if(btn) { btn.click(); break; } } }"
-
-# 等待展开/跳转完成
-agent-browser wait 1000
-
-# 获取结果
-agent-browser get text body
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+row_idx = 2
+print(js(f"document.querySelectorAll(\"tbody tr\")[{row_idx}]?.click(); true"))
+wait(1.0)
+print(page_info())
+'
 ```
 
-### 方法四：查找链接（"查看详情"等文字链接）
+### 方法三：遍历所有元素（适合折叠面板、Tab 切换、动态按钮）
 
 ```bash
-# 查找并点击第一个包含特定文字的链接
-agent-browser eval "Array.from(document.querySelectorAll('a')).find(a => a.textContent.includes('查看详情'))?.click()"
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("""
+for (const el of document.querySelectorAll("*")) {
+  const txt = el.textContent?.trim();
+  if (txt?.includes("目标文本")) {
+    const btn = el.querySelector("button, svg, [role=button]") || el;
+    btn.click();
+    break;
+  }
+}
+""")
+wait(1.0)
+print(js("document.body.innerText.slice(0, 2000)"))
+'
+```
 
-# 关闭弹窗（Ant Design Modal）
-agent-browser eval "document.querySelector('.ant-modal-close')?.click()"
+### 方法四：查找链接（“查看详情”等文字链接）
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("""
+Array.from(document.querySelectorAll("a"))
+  .find(a => a.textContent?.includes("查看详情"))
+  ?.click()
+""")
+wait(1.0)
+print(page_info())
+'
+```
+
+关闭弹窗：
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+js("document.querySelector(\".ant-modal-close\")?.click()")
+wait(0.5)
+print(page_info())
+'
 ```
 
 ### 定位策略选择表
@@ -117,9 +179,9 @@ agent-browser eval "document.querySelector('.ant-modal-close')?.click()"
 | 场景 | 推荐方式 |
 |------|----------|
 | 文本唯一的元素 | XPath `contains(text(),'关键词')` |
-| 多个相似元素，需精确匹配 | `textContent.match(/正则/)` |
+| 多个相似元素，需精确匹配 | `textContent` + 过滤逻辑 |
 | 父元素含多个子按钮 | 先定位父，再 `querySelector('button, svg, [role=button]')` |
-| class 名动态变化 | 用标签名 `button, svg, [role=button]` 而非 class |
+| class 名动态变化 | 用标签名、文本、DOM 结构，不依赖 class |
 | 表格数据行 | `querySelectorAll('tbody tr')[index].click()` |
 | 文字链接 | `Array.from(querySelectorAll('a')).find(...)` |
 
@@ -128,14 +190,57 @@ agent-browser eval "document.querySelector('.ant-modal-close')?.click()"
 ## 4. 调试技巧（定位不到元素时）
 
 ```bash
-# 打印页面内所有包含目标文字的元素信息
-agent-browser eval "for(const el of document.querySelectorAll('*')) { const txt = el.textContent?.trim(); if(txt && txt.includes('目标文本') && txt.length < 50) { console.log(el.tagName, el.className, el.outerHTML.substring(0, 300)); } }"
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(js("""
+Array.from(document.querySelectorAll("*"))
+  .filter(el => {
+    const txt = el.textContent?.trim();
+    return txt && txt.includes("目标文本") && txt.length < 50;
+  })
+  .slice(0, 20)
+  .map(el => ({
+    tag: el.tagName,
+    className: el.className,
+    text: el.textContent?.trim(),
+    html: el.outerHTML.slice(0, 200),
+  }))
+"""))
+'
+```
 
-# 查看页面所有可点击元素（a/button）
-agent-browser eval "Array.from(document.querySelectorAll('a, button')).forEach(el => console.log(el.tagName, el.textContent?.trim().substring(0,30), el.href || ''))"
+查看页面所有链接和按钮：
 
-# 检查元素是否存在
-agent-browser eval "console.log('found:', document.querySelectorAll('tr').length, 'rows')"
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(js("""
+Array.from(document.querySelectorAll("a, button"))
+  .slice(0, 100)
+  .map(el => ({
+    tag: el.tagName,
+    text: el.textContent?.trim()?.slice(0, 30),
+    href: el.href || "",
+  }))
+"""))
+'
+```
+
+检查表格行数：
+
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+print(js("""
+(() => {
+  const rows = document.querySelectorAll("tbody tr");
+  return {
+    rowCount: rows.length,
+    firstRowHtml: rows[0]?.outerHTML?.slice(0, 200) || "",
+  };
+})()
+"""))
+'
 ```
 
 ---
@@ -143,21 +248,28 @@ agent-browser eval "console.log('found:', document.querySelectorAll('tr').length
 ## 5. 截图保存
 
 ```bash
-# 截取当前视口
-agent-browser screenshot
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+capture_screenshot("/tmp/tdp-shot.png", max_dim=1800)
+print("/tmp/tdp-shot.png")
+'
+```
 
-# 截取完整页面（包含滚动内容）
-agent-browser screenshot --full
+完整页面截图：
 
-# 带标注的截图（显示元素编号，用于确认 ref）
-agent-browser screenshot --annotate
+```bash
+flocks browser -c '
+attach_tab("<TARGET_ID>")
+capture_screenshot("/tmp/tdp-shot-full.png", full=True, max_dim=2200)
+print("/tmp/tdp-shot-full.png")
+'
 ```
 
 ---
 
 ## 6. 注意事项
 
-- **等待时间**：执行 `eval` 前确保 DOM 渲染完成，页面交互后用 `wait --load networkidle` 或 `wait <ms>`
-- **文本匹配精度**：匹配词要足够精确，避免误触相似元素；`textContent` 包含子元素文本，注意嵌套层级
-- **refs 失效**：每次滚动、点击或页面变化后 `@eN` refs 都会失效，必须重新 `snapshot -i`
-- **获取页面内容**：`agent-browser get text body` 获取纯文本；`snapshot -i` 获取可交互元素列表
+- **等待时间**：页面交互后用 `wait(0.5 ~ 2.0)`，然后再读取 `page_info()` 或 `js(...)`。
+- **文本匹配精度**：匹配词要足够精确，避免误触相似元素；`textContent` 包含子元素文本，注意嵌套层级。
+- **获取页面内容**：优先用 `js("document.body.innerText.slice(...)")` 获取纯文本；需要结构化信息时，直接在页面内组装 JSON 返回。
+- **每次页面变化后都重新观察**：点击、滚动、切 tab、弹窗打开/关闭后，之前读取到的 DOM 状态都可能失效。

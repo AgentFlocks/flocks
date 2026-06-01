@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Literal
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # ==================== Permission System ====================
@@ -187,11 +187,14 @@ class McpOAuthConfig(BaseModel):
 
 class McpLocalConfig(BaseModel):
     """MCP local server configuration"""
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow", "populate_by_name": True}
     
     type: Literal["local"]
     command: List[str]
-    environment: Optional[Dict[str, str]] = None
+    environment: Optional[Dict[str, str]] = Field(
+        None,
+        validation_alias=AliasChoices("environment", "env"),
+    )
     enabled: Optional[bool] = None
     timeout: Optional[int] = Field(None, gt=0)
 
@@ -262,6 +265,51 @@ class CompactionConfig(BaseModel):
     """Compaction configuration"""
     auto: Optional[bool] = Field(None, description="Enable auto compaction")
     prune: Optional[bool] = Field(None, description="Enable pruning")
+
+
+class ToolOutputConfig(BaseModel):
+    """Tool output size limits.
+
+    Controls how much content individual tool calls may return before
+    being truncated.  All values are configurable so power users can
+    tune them without patching source code.
+
+    Defaults mirror the hard-coded constants that were previously spread
+    across ``flocks/tool/file/read.py`` and ``flocks/tool/truncation.py``.
+
+    Both camelCase (``readMaxLines``) and snake_case (``read_max_lines``)
+    keys are accepted in ``flocks.json``.
+    """
+
+    model_config = {"populate_by_name": True}
+
+    read_max_lines: Optional[int] = Field(
+        None,
+        alias="readMaxLines",
+        gt=0,
+        description=(
+            "Max lines returned by the read tool per call (default 2000). "
+            "For files longer than this, use offset + limit to page."
+        ),
+    )
+    read_max_bytes: Optional[int] = Field(
+        None,
+        alias="readMaxBytes",
+        gt=0,
+        description=(
+            "Byte cap for a single read tool call (default 51200 = 50 KB). "
+            "Truncation fires whichever limit is hit first."
+        ),
+    )
+    read_max_line_length: Optional[int] = Field(
+        None,
+        alias="readMaxLineLength",
+        gt=0,
+        description=(
+            "Characters per line before the remainder is replaced with '...' "
+            "(default 2000).  Keeps very wide log lines from bloating context."
+        ),
+    )
 
 
 class EnterpriseConfig(BaseModel):
@@ -531,6 +579,11 @@ class ConfigInfo(BaseModel):
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
     enterprise: Optional[EnterpriseConfig] = None
     compaction: Optional[CompactionConfig] = None
+    tool_output: Optional[ToolOutputConfig] = Field(
+        None,
+        alias="toolOutput",
+        description="Tool output size limits (read, truncation caps).",
+    )
     experimental: Optional[ExperimentalConfig] = None
     
     # Memory system configuration (added for memory system integration)

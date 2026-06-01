@@ -33,6 +33,39 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.delegate_task")
 
 
+async def _subagent_session_permissions(agent_name: str) -> list:
+    """Build session permission rules for a delegated subagent."""
+    from flocks.agent.registry import Agent
+    from flocks.session.session import PermissionRule as SessionPermissionRule
+
+    agent = await Agent.get(agent_name)
+    rules: list = []
+    if agent_name != "prometheus":
+        rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
+
+    if agent and agent.permission:
+        for rule in agent.permission:
+            level = rule.level.value if hasattr(rule.level, "value") else str(rule.level)
+            rules.append(
+                SessionPermissionRule(
+                    permission=rule.permission or "*",
+                    action=level,
+                    pattern=rule.pattern or "*",
+                )
+            )
+        return rules
+
+    if agent_name == "prometheus":
+        rules.extend([
+            SessionPermissionRule(permission="question", action="allow", pattern="*"),
+            SessionPermissionRule(permission="edit", action="deny", pattern="*"),
+            SessionPermissionRule(permission="edit", action="allow", pattern=".flocks/plans/*"),
+        ])
+    elif not rules:
+        rules.append(SessionPermissionRule(permission="question", action="deny", pattern="*"))
+    return rules
+
+
 def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     if not model:
         return None
@@ -204,14 +237,13 @@ Use this tool when:
 Usage notes:
 - Provide a clear description (3-5 words)
 - Provide detailed prompt with context
-- run_in_background=true: returns task_id immediately, collect results later with background_output
-- run_in_background=false: waits for completion and returns results inline
 - Pass session_id to continue a previous agent with full context
+- run_in_background=false: (default) waits for completion and returns results inline
 
 REQUIRED: prompt.
 LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
-RUN_IN_BACKGROUND defaults to false (sync).
+RUN_IN_BACKGROUND defaults to false (sync). if true, need: returns task_id immediately, collect results later with background_output
 USE EITHER subagent_type OR category — NEVER both simultaneously.
 """
 
@@ -448,7 +480,7 @@ async def delegate_task_tool(
         title=f"{description} (@{agent_to_use} subagent)",
         parent_id=parent_session.id,
         agent=agent_to_use,
-        permission=[{"permission": "question", "action": "deny", "pattern": "*"}],
+        permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
     await Message.create(

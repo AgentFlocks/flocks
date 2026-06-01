@@ -148,6 +148,8 @@ def _format_tool_catalog_match(tool_info: Any, matched_tags: List[str], score: i
         "category": getattr(tool_info.category, "value", str(tool_info.category)),
         "requires_confirmation": getattr(tool_info, "requires_confirmation", False),
         "source": getattr(tool_info, "source", None),
+        "provider": getattr(tool_info, "provider", None),
+        "vendor": getattr(tool_info, "vendor", None),
         "native": getattr(tool_info, "native", False),
         "always_load": metadata.always_load,
         "tags": metadata.tags,

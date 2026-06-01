@@ -16,6 +16,9 @@ NAME = os.environ.get("BU_NAME", "default")
 VERSION_CACHE = Path(tempfile.gettempdir()) / "flocks-browser-version-cache.json"
 VERSION_CACHE_TTL = 24 * 3600
 DOCTOR_TEXT_LIMIT = 140
+# run_setup: at most two daemon/CDP attach attempts to avoid repeated Allow prompts.
+_SETUP_ATTACH_WAIT = 20.0
+_SETUP_RETRY_WAIT = 30.0
 
 
 def _load_env() -> None:
@@ -420,7 +423,7 @@ def run_setup() -> int:
         print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
         return 1
     try:
-        ensure_daemon(wait=20.0, _open_inspect=False)
+        ensure_daemon(wait=_SETUP_ATTACH_WAIT, _open_inspect=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
@@ -435,18 +438,14 @@ def run_setup() -> int:
         _open_browser_inspect()
     else:
         print(f"attach failed: {first_err}")
-        print("retrying for up to 60s (the browser may still be starting up)...")
+        print("retrying once (the browser may still be starting up)...")
 
-    deadline = time.time() + 60
-    last = first_err
-    while time.time() < deadline:
-        try:
-            ensure_daemon(wait=5.0, _open_inspect=False)
-            print("daemon is up.")
-            return 0
-        except RuntimeError as error:
-            last = str(error)
-            time.sleep(2)
+    try:
+        ensure_daemon(wait=_SETUP_RETRY_WAIT, _open_inspect=False)
+        print("daemon is up.")
+        return 0
+    except RuntimeError as error:
+        last = str(error)
 
     print(f"setup failed: {last}", file=sys.stderr)
     print("run `flocks browser --doctor` for diagnostics.", file=sys.stderr)
@@ -488,7 +487,7 @@ def run_doctor() -> int:
             browser_running,
             "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
         )
-    row("daemon alive", daemon, "" if daemon else "run `flocks browser --setup` to attach")
+    row("daemon alive", daemon, "" if daemon else "not running; wait user open browser inspect page and run `flocks browser --setup` to attach")
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
         page = conn.get("page")

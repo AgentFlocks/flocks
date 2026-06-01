@@ -9,7 +9,7 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { providerAPI } from '@/api/provider';
-import { deviceAPI, type DeviceIntegration, type DeviceGroup } from '@/api/device';
+import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceToolInfo } from '@/api/device';
 import type { APIServiceSummary, APIServiceCredentialField, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
@@ -180,10 +180,17 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
   }, [templates, selectedVendor]);
 
   return (
-    <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
+    <div className="fixed inset-0 z-40 pointer-events-none">
+      <button
+        type="button"
+        aria-label="关闭添加设备面板"
+        onClick={onClose}
+        className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
+        style={{ top: 64, right: 440 }}
+      />
       <div
-        className="pointer-events-auto bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-        style={{ width: 440, marginTop: 64, height: 'calc(100vh - 64px)' }}
+        className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+        style={{ width: 440, top: 64 }}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -358,6 +365,9 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
   const [serviceTools, setServiceTools] = useState<Tool[]>([]);
   const [toolModal, setToolModal] = useState<Tool | null>(null);
   const [metadata, setMetadata] = useState<{ name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null>(null);
+  // per-device effective enabled state; keyed by tool name.
+  // When viewing an existing device we load this from the per-device API so
+  // the toggle reflects the device-specific override, not the global state.
   const [toolEnabled, setToolEnabled] = useState<Record<string, boolean>>({});
   const originalMasked = useRef<Record<string, string>>({});
 
@@ -399,22 +409,30 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       })
       .catch(() => {});
 
-    toolAPI.list()
-      .then((res) => {
-        // Match against the device's storage_key exactly. The tool
-        // listing endpoint sets ``source_name = tool.provider``, which
-        // in turn equals the plugin's storage_key (see
-        // ``flocks/tool/tool_loader.py``). An exact comparison keeps
-        // multi-version installs of the same product cleanly isolated.
-        const matched = (res.data || []).filter(
-          (t) => !!storageKey && t.source_name === storageKey,
-        );
-        setServiceTools(matched);
-        const initEnabled: Record<string, boolean> = {};
-        matched.forEach((t) => { initEnabled[t.name] = t.enabled; });
-        setToolEnabled(initEnabled);
-      })
-      .catch(() => {});
+    // Only existing devices have a "工具" tab (the wizard hides it because
+    // there's no device_id yet — see TABS comment).  So loading the tool list
+    // and per-device enabled overrides only matters when ``device`` exists.
+    if (device) {
+      Promise.all([
+        toolAPI.list(),
+        deviceAPI.listDeviceTools(device.id),
+      ])
+        .then(([toolsRes, deviceToolsRes]) => {
+          const matched = (toolsRes.data || []).filter(
+            (t) => !!storageKey && t.source_name === storageKey,
+          );
+          setServiceTools(matched);
+          // Effective enabled state = per-device override (if any) else global.
+          const perDevice: Record<string, DeviceToolInfo> = {};
+          (deviceToolsRes.data || []).forEach((dt) => { perDevice[dt.name] = dt; });
+          const initEnabled: Record<string, boolean> = {};
+          matched.forEach((t) => {
+            initEnabled[t.name] = perDevice[t.name]?.enabled_effective ?? t.enabled;
+          });
+          setToolEnabled(initEnabled);
+        })
+        .catch(() => {});
+    }
   }, [device, serviceId, storageKey]);
 
   const handleSave = async () => {
@@ -442,7 +460,20 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
       // Probe with the form's current SSL toggle / base_url so the user can
       // validate unsaved changes immediately. Empty base_url means "fall
       // back to whatever is already in the DB".
-      const candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
+      // For providers that use host + port (e.g. Sangfor SIP) instead of
+      // base_url, construct the URL from those fields when available.
+      // If the operator already typed a scheme into ``host``, respect it
+      // instead of double-prefixing.
+      let candidateBaseUrl = (fields.base_url ?? fields.baseUrl ?? '').trim();
+      if (!candidateBaseUrl) {
+        const host = (fields.host ?? '').trim();
+        const port = (fields.port ?? '').trim();
+        if (host) {
+          const hasScheme = host.includes('://');
+          const prefix = hasScheme ? host : `https://${host}`;
+          candidateBaseUrl = port ? `${prefix}:${port}` : prefix;
+        }
+      }
       setTestResult(await onTest({
         verify_ssl: verifySsl,
         base_url: candidateBaseUrl || undefined,
@@ -500,27 +531,45 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
   };
 
   const handleToggleTool = async (toolName: string, next: boolean) => {
+    // 仅在已存在设备时可触发（工具 tab 在 wizard 模式下被隐藏，见 TABS 注释）。
+    if (!device) return;
     try {
-      await toolAPI.setEnabled(toolName, next);
+      // Per-device toggle: only affects this specific device instance.
+      // Other devices sharing the same storage_key (same product version)
+      // are not affected.
+      await deviceAPI.updateDeviceTool(device.id, toolName, next);
       setToolEnabled((p) => ({ ...p, [toolName]: next }));
-      setServiceTools((prev) => prev.map((t) => t.name === toolName ? { ...t, enabled: next } : t));
     } catch {
       toast.error('操作失败');
     }
   };
 
+  // The "工具" tab is hidden during the add-device wizard because per-device
+  // toggles can only be persisted after the device row exists (we have no
+  // device_id to target).  Showing the tab here would force any toggle to
+  // mutate the GLOBAL tool_settings — re-introducing the original cross-device
+  // coupling bug this whole feature exists to fix.
   const TABS: { key: PanelTab; label: string; icon: React.ReactNode }[] = [
     { key: 'config', label: '配置', icon: <Settings className="w-3.5 h-3.5" /> },
-    { key: 'tools',  label: `工具${serviceTools.length ? ` (${serviceTools.length})` : ''}`, icon: <Wrench className="w-3.5 h-3.5" /> },
+    ...(device
+      ? [{ key: 'tools' as PanelTab, label: `工具${serviceTools.length ? ` (${serviceTools.length})` : ''}`, icon: <Wrench className="w-3.5 h-3.5" /> }]
+      : []),
     { key: 'overview', label: '概览', icon: <AlertTriangle className="w-3.5 h-3.5 opacity-60" /> },
   ];
 
   return (
     <>
-      <div className="fixed inset-y-0 right-0 flex items-start justify-end z-40 pointer-events-none">
+      <div className="fixed inset-0 z-40 pointer-events-none">
+        <button
+          type="button"
+          aria-label="关闭设备配置面板"
+          onClick={onClose}
+          className="pointer-events-auto absolute left-0 bottom-0 bg-transparent"
+          style={{ top: 64, right: 480 }}
+        />
         <div
-          className="pointer-events-auto bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ width: 480, marginTop: 64, height: 'calc(100vh - 64px)' }}
+          className="pointer-events-auto absolute right-0 bottom-0 bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          style={{ width: 480, top: 64 }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">

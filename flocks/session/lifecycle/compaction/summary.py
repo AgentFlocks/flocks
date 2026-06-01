@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Awaitable, Callable, Dict, Optional, Any
 
@@ -16,55 +15,26 @@ ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
+from .models import DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS
 
 log = Log.create(service="session.compaction.summarization")
 
+
+def build_iterative_prompt(prompt_text: str, previous_summary: Optional[str]) -> str:
+    """Compose the per-call prompt with optional previous summary.
+
+    When ``previous_summary`` is supplied, the iterative template wraps
+    the conversation as "delta on top of an authoritative prior summary".
+    Otherwise we return ``prompt_text`` unchanged.
+    """
+    if not previous_summary:
+        return prompt_text
+    return DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS.format(
+        previous_summary=previous_summary.strip(),
+    )
+
+
 COMPACTION_TIMEOUT_SECONDS = 300
-
-# The merge step in ``summarize_chunked`` is a SHORT prompt (just the N
-# chunk summaries) so it should normally complete well under the budget.
-# We give it a tighter cap than the per-chunk timeout because if the
-# upstream proxy (e.g. threatbook → minimax) is wedged, the
-# chunked-fallback is already a perfectly usable summary — there is no
-# point waiting the full 5-minute COMPACTION_TIMEOUT_SECONDS only to
-# discover the gateway returned 504.  Field data showed merge calls
-# hanging for 230s before the proxy gave up; a 120s ceiling still
-# accommodates slower models / longer summaries while bailing out well
-# before the typical gateway 504 window, and remains tunable per
-# deployment via FLOCKS_COMPACTION_MERGE_TIMEOUT.
-_DEFAULT_MERGE_TIMEOUT_SECONDS = 120
-
-
-def _merge_timeout_seconds() -> float:
-    raw = os.getenv("FLOCKS_COMPACTION_MERGE_TIMEOUT")
-    if raw is None or raw.strip() == "":
-        return float(_DEFAULT_MERGE_TIMEOUT_SECONDS)
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        log.warn("compaction.merge_timeout.parse_error", {
-            "raw": raw, "fallback": _DEFAULT_MERGE_TIMEOUT_SECONDS,
-        })
-        return float(_DEFAULT_MERGE_TIMEOUT_SECONDS)
-    if value <= 0:
-        log.warn("compaction.merge_timeout.non_positive", {
-            "raw": raw, "fallback": _DEFAULT_MERGE_TIMEOUT_SECONDS,
-        })
-        return float(_DEFAULT_MERGE_TIMEOUT_SECONDS)
-    return value
-
-
-# Maximum number of chunk-summary LLM calls to run concurrently in
-# ``summarize_chunked``.  Defaults to 4 which is a safe trade-off between
-# throughput and provider rate-limits; can be tuned per deployment via the
-# ``FLOCKS_COMPACTION_CHUNK_CONCURRENCY`` environment variable.
-def _chunk_concurrency_limit() -> int:
-    raw = os.getenv("FLOCKS_COMPACTION_CHUNK_CONCURRENCY", "4")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 4
-    return max(1, value)
 
 
 _REQUIRED_SECTIONS = [
@@ -93,6 +63,55 @@ def _build_focus_block(focus_instruction: Optional[str]) -> str:
         "\n\n## User Focus (user-supplied; emphasise these aspects in the summary)\n"
         f"{text}\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-message serialization (mirrors hermes-agent _serialize_for_summary)
+# ---------------------------------------------------------------------------
+#
+# Instead of truncating the *entire* conversation from the tail, we cap each
+# individual message at _MSG_CONTENT_MAX chars while keeping a head and tail
+# slice.  This preserves signal from every turn (user asks, early decisions,
+# old tool outputs) rather than silently discarding the beginning of the session.
+#
+# Constants intentionally match hermes-agent's defaults so behaviour is
+# comparable and easy to audit across projects:
+#   _MSG_CONTENT_MAX  = 6 000 chars  (~1 500 tokens)
+#   _MSG_CONTENT_HEAD = 4 000 chars  (leading context / file paths / commands)
+#   _MSG_CONTENT_TAIL = 1 500 chars  (outcome / last line / error message)
+
+_MSG_CONTENT_MAX  = 6_000
+_MSG_CONTENT_HEAD = 4_000
+_MSG_CONTENT_TAIL = 1_500
+
+
+def _serialize_messages_per_truncate(chat_messages: list) -> str:
+    """Serialize messages with per-message content truncation.
+
+    Each message is capped at ``_MSG_CONTENT_MAX`` characters; messages that
+    exceed the cap are split into a head slice + ``…[truncated]…`` + tail
+    slice so the most informative parts of every turn are always present.
+
+    This is the same strategy as hermes-agent ``_serialize_for_summary``
+    and is strictly better than the old ``conversation_text[-target_chars:]``
+    tail-cut when the session is long: the tail-cut silently discards
+    every earlier user request and decision, whereas per-message truncation
+    keeps at least a fragment from each turn.
+    """
+    parts: list[str] = []
+    for msg in chat_messages:
+        role = msg.role if hasattr(msg, "role") else "unknown"
+        content = msg.content if hasattr(msg, "content") else ""
+        if not isinstance(content, str):
+            content = str(content)
+        if len(content) > _MSG_CONTENT_MAX:
+            content = (
+                content[:_MSG_CONTENT_HEAD]
+                + "\n…[truncated]…\n"
+                + content[-_MSG_CONTENT_TAIL:]
+            )
+        parts.append(f"[{role.upper()}]: {content}")
+    return "\n\n".join(parts)
 
 
 def build_fallback_summary(chat_messages: list) -> str:
@@ -160,29 +179,57 @@ async def summarize_single_pass(
     model_id: str,
     max_tokens: int,
     focus_instruction: Optional[str] = None,
+    previous_summary: Optional[str] = None,
+    chat_messages: Optional[list] = None,
 ) -> Optional[str]:
-    """Generate summary in a single LLM call (for short conversations).
+    """Generate summary in a single LLM call.
 
-    ``focus_instruction`` is an optional free-form user-supplied string
-    (e.g. from ``/compact <focus>``) appended to the prompt as a
-    "User Focus" block so the model emphasises that aspect while still
-    producing the default structured sections.
+    When ``chat_messages`` is supplied the conversation is serialized using
+    per-message truncation (``_serialize_messages_per_truncate``) before the
+    LLM call.  Each message is capped at ``_MSG_CONTENT_MAX`` chars
+    (head + ``…[truncated]…`` + tail) so every turn contributes at least
+    a fragment to the summary input.  This mirrors hermes-agent's strategy
+    and is strictly better than the old tail-cut (``text[-target_chars:]``)
+    for long sessions where the old approach silently discarded all early
+    context.
+
+    When ``chat_messages`` is not supplied (backward compat / callers that
+    only have a pre-joined string) the old tail-cut behaviour is retained.
+
+    ``focus_instruction``: optional free-form focus string from ``/compact``.
+    ``previous_summary`` (E1): prior compaction summary; reframes the prompt
+    as "merge new turns into the prior summary" rather than compressing from
+    scratch.
     """
     from flocks.provider.provider import ChatMessage
 
-    text = conversation_text
-    if len(text) > target_chars:
-        text = "…(earlier conversation truncated)…\n\n" + text[-target_chars:]
+    if chat_messages:
+        # Per-message truncation path (hermes-style): every turn contributes
+        # a capped fragment (head + tail per message), so early decisions
+        # and user requests are preserved instead of being silently dropped
+        # by a whole-conversation tail-cut.
+        #
+        # We deliberately do NOT apply a secondary tail-cut to ``target_chars``
+        # here.  A whole-conversation ``text[-target_chars:]`` would undo the
+        # per-message head/tail preservation: the early head slices of every
+        # turn would be silently dropped, defeating the entire reason for
+        # per-message truncation.  The upstream
+        # ``_prune_chat_messages_for_summary`` (MD5 dedup + 1-line summaries
+        # for old middle messages) is the place where total budget gets
+        # enforced; if that pass already ran and content is still over
+        # ``target_chars``, the right action is to send it anyway and rely
+        # on the model's full input window — modern models accept well
+        # above ``usable_context × 0.5`` for a single user message.
+        text = _serialize_messages_per_truncate(chat_messages)
+    else:
+        # Legacy path retained for callers that only have a pre-joined string.
+        # Without per-message structure we have no choice but to tail-cut.
+        text = conversation_text
+        if len(text) > target_chars:
+            text = "…(earlier conversation truncated)…\n\n" + text[-target_chars:]
 
-    target_tokens = max(500, target_chars // 2)
-    for _ in range(5):
-        actual = SessionPrompt.count_tokens(text)
-        if actual <= target_tokens:
-            break
-        keep = int(len(text) * 0.8)
-        text = "…(earlier conversation truncated)…\n\n" + text[-keep:]
-
-    request = f"{text}\n\n---\n\n{prompt_text}{_build_focus_block(focus_instruction)}"
+    effective_prompt = build_iterative_prompt(prompt_text, previous_summary)
+    request = f"{text}\n\n---\n\n{effective_prompt}{_build_focus_block(focus_instruction)}"
     try:
         response = await _llm_chat_with_timeout(
             provider_client,
@@ -232,7 +279,107 @@ async def _safe_emit(
         })
 
 
-async def summarize_chunked(
+# ===========================================================================
+# LEGACY chunked-summarisation path — NOT on the production hot path
+# ===========================================================================
+#
+# The functions below (``_split_messages_into_text_chunks`` through
+# ``summarize_in_stages``) implement the older multi-call chunked +
+# three-stage degradation strategy.  ``compaction.process`` no longer
+# invokes them (``use_chunked`` is hard-coded to ``False``); they are
+# kept in the source tree solely because:
+#
+#   1. Several integration tests pin their behaviour
+#      (``test_compaction_iterative_summary.py``,
+#      ``test_compaction_stages_and_history.py``,
+#      ``test_compaction_flush_dispatch.py``).
+#   2. They remain a viable opt-in fallback if a future model with
+#      very small input window ever needs sub-conversation chunking.
+#
+# Do NOT add new call sites here.  All production summarisation must go
+# through ``summarize_single_pass`` above, which mirrors hermes-agent's
+# single-LLM-call approach (see ``docs/design/context-compaction-v2.md``).
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Internal: text-chunk splitter shared by parallel + iterative paths
+# ---------------------------------------------------------------------------
+def _split_messages_into_text_chunks(
+    chat_messages: list,
+    split_at: int,
+) -> list[str]:
+    """Group consecutive messages into text chunks ≤ ``split_at`` chars.
+
+    Single messages larger than the cap are still emitted as their own
+    chunk (the per-chunk truncation logic at call sites handles them).
+    """
+    chunks: list[str] = []
+    current_chunk: list[str] = []
+    current_len = 0
+    for msg in chat_messages:
+        role = msg.role if hasattr(msg, 'role') else 'unknown'
+        content = msg.content if hasattr(msg, 'content') else ''
+        line = f"[{role}]: {content}"
+        line_len = len(line)
+        if current_len + line_len > split_at and current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = []
+            current_len = 0
+        current_chunk.append(line)
+        current_len += line_len
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+    return chunks
+
+
+def _build_iterative_chunk_prompt(
+    chunk_text: str,
+    running_summary: str,
+    *,
+    is_first: bool,
+    is_last: bool,
+    final_prompt: str,
+    focus_instruction: Optional[str],
+) -> str:
+    """Render the per-chunk prompt for ``summarize_chunked_iterative``.
+
+    * First chunk with no running summary → ask the model to write a draft
+      summary in the standard structured format.
+    * Subsequent chunks → reuse the iterative prompt with ``running_summary``
+      as the authoritative prior context that must be updated.
+    * Last chunk → also append the *final* structural prompt + focus block
+      so the trailing call enforces the final-summary schema.
+    """
+    focus_block = _build_focus_block(focus_instruction)
+    if running_summary:
+        base = DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS.format(
+            previous_summary=running_summary.strip(),
+        )
+    else:
+        intro = (
+            "Summarize the following conversation segment into a structured "
+            "compaction summary. Further segments will be appended later, so "
+            "preserve all information needed to continue seamlessly."
+            if not is_last
+            else ""
+        )
+        # When there is no prior summary AND no further chunks, we want
+        # the standard structural prompt (which is what ``final_prompt``
+        # already carries).  Otherwise lead with the lightweight intro
+        # plus the same structural schema so we never lose section headings.
+        base = (intro + "\n\n" + final_prompt).strip() if intro else final_prompt
+
+    # The last chunk should always produce the *final* structured output,
+    # so we append the standard structural prompt at the tail when it
+    # isn't already there.
+    if is_last and final_prompt not in base:
+        base = base + "\n\n---\n\n" + final_prompt
+
+    return f"{chunk_text}\n\n---\n\n{base}{focus_block}"
+
+
+async def summarize_chunked_iterative(
     chat_messages: list,
     prompt_text: str,
     target_chars: int,
@@ -243,115 +390,89 @@ async def summarize_chunked(
     chunk_size: Optional[int] = None,
     focus_instruction: Optional[str] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    previous_summary: Optional[str] = None,
 ) -> Optional[str]:
-    """Generate summary by chunking a long conversation.
+    """Serial iterative summarisation (E2 — see design doc §E2).
 
-    Splits messages into chunks of at most *chunk_size* characters
-    (defaults to *target_chars* for backward compatibility), summarises
-    each chunk in parallel, then merges all chunk summaries into a
-    final combined summary.
+    Each chunk is summarised in sequence on top of the running summary;
+    every step's output supersedes the previous one.  Compared to the
+    parallel + merge baseline (``summarize_chunked``):
 
-    The split granularity (*chunk_size*) and the per-chunk truncation
-    cap (*target_chars*) are intentionally separate so callers can
-    request more / smaller chunks (better parallelism) without
-    enlarging the per-chunk truncation envelope.
+    * **N LLM calls instead of N+1** — no separate merge round-trip.
+    * Each call's input is bounded by ``target_chars`` (single chunk +
+      one prior summary) rather than ``N × per-chunk summary`` at merge
+      time, which on long sessions is the dominant cost.
+    * Rate-limit risk drops because calls are serialised — no thundering
+      herd against a 5-RPS provider.
+    * Quality regression on partial chunk failures is bounded: a failed
+      chunk is logged and SKIPPED, ``running_summary`` is not corrupted.
 
-    ``focus_instruction`` (e.g. from ``/compact <focus>``) is injected
-    into BOTH the per-chunk prompt and the merge prompt.  Injecting it
-    into the chunk stage matters: without it, the chunk-level summaries
-    discard details the user actually cares about and the merge step
-    cannot recover them — the focus must steer information selection,
-    not just the final phrasing.
+    ``previous_summary`` (E1) is the cross-compaction prior summary; when
+    supplied, it seeds ``running_summary`` so the very first chunk is
+    already framed as a delta on top of accumulated history.
     """
     from flocks.provider.provider import ChatMessage
 
     split_at = chunk_size if (chunk_size and chunk_size > 0) else target_chars
+    chunks = _split_messages_into_text_chunks(chat_messages, split_at)
 
-    chunks: list[str] = []
-    current_chunk: list[str] = []
-    current_len = 0
-
-    for msg in chat_messages:
-        role = msg.role if hasattr(msg, 'role') else 'unknown'
-        content = msg.content if hasattr(msg, 'content') else ''
-        line = f"[{role}]: {content}"
-        line_len = len(line)
-
-        if current_len + line_len > split_at and current_chunk:
-            chunks.append("\n\n".join(current_chunk))
-            current_chunk = []
-            current_len = 0
-
-        current_chunk.append(line)
-        current_len += line_len
-
-    if current_chunk:
-        chunks.append("\n\n".join(current_chunk))
-
-    concurrency = _chunk_concurrency_limit()
-
-    log.info("compaction.chunked_summarize.start", {
+    log.info("compaction.iterative.start", {
         "session_id": session_id,
         "num_chunks": len(chunks),
         "total_messages": len(chat_messages),
-        "concurrency": concurrency,
         "split_at": split_at,
+        "has_previous_summary": previous_summary is not None,
     })
 
-    chunk_prompt = (
-        "Summarize the following conversation segment concisely. "
-        "Focus on: actions taken, decisions made, files modified, "
-        "and key results. Keep the same language as the conversation."
-        f"{_build_focus_block(focus_instruction)}"
-    )
+    running_summary = (previous_summary or "").strip()
 
-    # Per-chunk timeout is now the full compaction timeout — chunks run in
-    # parallel and each has independent timing. Previous logic divided the
-    # budget across chunks because they ran serially; that gave very little
-    # time per chunk when N was large.
-    per_chunk_timeout = COMPACTION_TIMEOUT_SECONDS
-
-    semaphore = asyncio.Semaphore(concurrency)
-
-    async def _summarize_one(idx: int, chunk_text: str) -> str:
+    for idx, chunk_text in enumerate(chunks):
         if len(chunk_text) > target_chars:
             chunk_text = chunk_text[:target_chars] + "\n…(truncated)"
-        async with semaphore:
-            # Record per-chunk timing so we can attribute slow chunked
-            # summarisation to a specific provider call (vs. the merge
-            # step) without having to subtract clocks across log lines.
-            started = time.perf_counter()
-            try:
-                resp = await _llm_chat_with_timeout(
-                    provider_client,
-                    model_id=model_id,
-                    messages=[ChatMessage(
-                        role="user",
-                        content=f"{chunk_text}\n\n---\n\n{chunk_prompt}",
-                    )],
-                    max_tokens=max(1000, max_tokens // 2),
-                    timeout=per_chunk_timeout,
-                )
-                duration_ms = (time.perf_counter() - started) * 1000
-                if resp and resp.content:
-                    log.info("compaction.chunk_summary.completed", {
-                        "session_id": session_id,
-                        "chunk": idx,
-                        "duration_ms": round(duration_ms, 2),
-                        "chunk_chars": len(chunk_text),
-                        "summary_chars": len(resp.content),
-                    })
-                    # Chunks finish in non-deterministic order under
-                    # ``asyncio.gather``; the front-end MUST deduplicate
-                    # by ``chunk`` index, not by arrival count.
-                    await _safe_emit(progress_callback, "chunk_done", {
-                        "chunk": idx,
-                        "total": len(chunks),
-                        "duration_ms": round(duration_ms, 2),
-                        "ok": True,
-                    })
-                    return f"## Part {idx + 1}\n{resp.content}"
-                log.warn("compaction.chunk_summary.empty_response", {
+
+        is_last = idx == len(chunks) - 1
+        chunk_prompt = _build_iterative_chunk_prompt(
+            chunk_text=chunk_text,
+            running_summary=running_summary,
+            is_first=idx == 0,
+            is_last=is_last,
+            final_prompt=prompt_text,
+            focus_instruction=focus_instruction,
+        )
+
+        # Last chunk → full max_tokens (final structured summary).
+        # Intermediate chunks → half the budget (running summary, shorter).
+        chunk_max_tokens = max_tokens if is_last else max(1000, max_tokens // 2)
+
+        started = time.perf_counter()
+        try:
+            resp = await _llm_chat_with_timeout(
+                provider_client,
+                model_id=model_id,
+                messages=[ChatMessage(role="user", content=chunk_prompt)],
+                max_tokens=chunk_max_tokens,
+                timeout=COMPACTION_TIMEOUT_SECONDS,
+            )
+            duration_ms = (time.perf_counter() - started) * 1000
+            if resp and resp.content:
+                running_summary = resp.content
+                log.info("compaction.iterative.chunk_completed", {
+                    "session_id": session_id,
+                    "chunk": idx,
+                    "total": len(chunks),
+                    "duration_ms": round(duration_ms, 2),
+                    "chunk_chars": len(chunk_text),
+                    "summary_chars": len(running_summary),
+                    "is_last": is_last,
+                })
+                await _safe_emit(progress_callback, "chunk_done", {
+                    "chunk": idx,
+                    "total": len(chunks),
+                    "duration_ms": round(duration_ms, 2),
+                    "ok": True,
+                })
+            else:
+                log.warn("compaction.iterative.chunk_empty", {
                     "session_id": session_id,
                     "chunk": idx,
                     "duration_ms": round(duration_ms, 2),
@@ -363,125 +484,258 @@ async def summarize_chunked(
                     "ok": False,
                     "reason": "empty_response",
                 })
-                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
-            except asyncio.TimeoutError:
-                duration_ms = (time.perf_counter() - started) * 1000
-                log.warn("compaction.chunk_summary_timeout", {
-                    "session_id": session_id,
-                    "chunk": idx,
-                    "timeout": per_chunk_timeout,
-                    "duration_ms": round(duration_ms, 2),
-                })
-                await _safe_emit(progress_callback, "chunk_done", {
-                    "chunk": idx,
-                    "total": len(chunks),
-                    "duration_ms": round(duration_ms, 2),
-                    "ok": False,
-                    "reason": "timeout",
-                })
-                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
-            except Exception as e:
-                duration_ms = (time.perf_counter() - started) * 1000
-                log.warn("compaction.chunk_summary_error", {
-                    "session_id": session_id,
-                    "chunk": idx,
-                    "error": str(e),
-                    "duration_ms": round(duration_ms, 2),
-                })
-                await _safe_emit(progress_callback, "chunk_done", {
-                    "chunk": idx,
-                    "total": len(chunks),
-                    "duration_ms": round(duration_ms, 2),
-                    "ok": False,
-                    "reason": "error",
-                })
-                return f"## Part {idx + 1}\n{chunk_text[:500]}…"
-
-    parallel_started = time.perf_counter()
-    chunk_summaries = await asyncio.gather(
-        *(_summarize_one(i, c) for i, c in enumerate(chunks))
-    )
-    parallel_duration_ms = (time.perf_counter() - parallel_started) * 1000
-
-    if not chunk_summaries:
-        return None
-
-    merged = "\n\n".join(chunk_summaries)
-
-    log.info("compaction.chunked_summarize.parallel_done", {
-        "session_id": session_id,
-        "num_chunks": len(chunks),
-        "parallel_duration_ms": round(parallel_duration_ms, 2),
-        "merged_chars": len(merged),
-    })
-
-    if len(merged) <= target_chars:
-        merge_request = (
-            f"The following are summaries of different parts of a "
-            f"conversation. Combine them into a single coherent summary.\n\n"
-            f"{merged}\n\n---\n\n{prompt_text}"
-            f"{_build_focus_block(focus_instruction)}"
-        )
-        merge_timeout = _merge_timeout_seconds()
-        await _safe_emit(progress_callback, "merge_started", {
-            "chunks_merged": len(chunks),
-            "merged_chars": len(merged),
-        })
-        merge_started = time.perf_counter()
-        try:
-            resp = await _llm_chat_with_timeout(
-                provider_client,
-                model_id=model_id,
-                messages=[ChatMessage(role="user", content=merge_request)],
-                max_tokens=max_tokens,
-                timeout=merge_timeout,
-            )
-            merge_duration_ms = (time.perf_counter() - merge_started) * 1000
-            if resp and resp.content:
-                summary = resp.content
-                passed, missing = validate_summary_quality(summary)
-                if not passed:
-                    log.warn("compaction.chunked.quality_failed", {
-                        "session_id": session_id,
-                        "missing_sections": missing,
-                    })
-                log.info("compaction.merge_summary.completed", {
-                    "session_id": session_id,
-                    "duration_ms": round(merge_duration_ms, 2),
-                    "summary_chars": len(summary),
-                })
-                await _safe_emit(progress_callback, "merge_done", {
-                    "duration_ms": round(merge_duration_ms, 2),
-                    "summary_chars": len(summary),
-                    "ok": True,
-                })
-                return summary
+                # Keep running_summary intact and continue to next chunk.
         except asyncio.TimeoutError:
-            merge_duration_ms = (time.perf_counter() - merge_started) * 1000
-            log.warn("compaction.merge_summary_timeout", {
+            duration_ms = (time.perf_counter() - started) * 1000
+            log.warn("compaction.iterative.chunk_timeout", {
                 "session_id": session_id,
-                "timeout": merge_timeout,
-                "duration_ms": round(merge_duration_ms, 2),
+                "chunk": idx,
+                "timeout": COMPACTION_TIMEOUT_SECONDS,
+                "duration_ms": round(duration_ms, 2),
             })
-            await _safe_emit(progress_callback, "merge_done", {
-                "duration_ms": round(merge_duration_ms, 2),
+            await _safe_emit(progress_callback, "chunk_done", {
+                "chunk": idx,
+                "total": len(chunks),
+                "duration_ms": round(duration_ms, 2),
                 "ok": False,
                 "reason": "timeout",
             })
         except Exception as e:
-            merge_duration_ms = (time.perf_counter() - merge_started) * 1000
+            duration_ms = (time.perf_counter() - started) * 1000
             err_text = str(e)
             if len(err_text) > 200:
                 err_text = err_text[:200] + "…(truncated)"
-            log.warn("compaction.merge_summary_error", {
+            log.warn("compaction.iterative.chunk_error", {
                 "session_id": session_id,
-                "duration_ms": round(merge_duration_ms, 2),
+                "chunk": idx,
+                "duration_ms": round(duration_ms, 2),
                 "error": err_text,
             })
-            await _safe_emit(progress_callback, "merge_done", {
-                "duration_ms": round(merge_duration_ms, 2),
+            await _safe_emit(progress_callback, "chunk_done", {
+                "chunk": idx,
+                "total": len(chunks),
+                "duration_ms": round(duration_ms, 2),
                 "ok": False,
                 "reason": "error",
             })
 
-    return merged
+    if not running_summary:
+        log.warn("compaction.iterative.empty_result", {
+            "session_id": session_id,
+            "num_chunks": len(chunks),
+        })
+        return None
+
+    passed, missing = validate_summary_quality(running_summary)
+    if not passed:
+        log.warn("compaction.iterative.quality_failed", {
+            "session_id": session_id,
+            "missing_sections": missing,
+            "summary_chars": len(running_summary),
+        })
+
+    return running_summary
+
+
+async def summarize_chunked(
+    chat_messages: list,
+    prompt_text: str,
+    target_chars: int,
+    provider_client: Any,
+    model_id: str,
+    max_tokens: int,
+    session_id: str,
+    chunk_size: Optional[int] = None,
+    focus_instruction: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+    previous_summary: Optional[str] = None,
+) -> Optional[str]:
+    """Backwards-compatible alias for :func:`summarize_chunked_iterative`.
+
+    The legacy parallel-then-merge implementation has been retired in
+    favour of serial iterative summarisation (see ``E2`` in
+    ``docs/design/context-compaction-v2.md``).  This thin wrapper
+    forwards everything to the iterative routine so external callers
+    keep working without touching their imports.
+    """
+    return await summarize_chunked_iterative(
+        chat_messages,
+        prompt_text,
+        target_chars,
+        provider_client,
+        model_id,
+        max_tokens,
+        session_id,
+        chunk_size=chunk_size,
+        focus_instruction=focus_instruction,
+        progress_callback=progress_callback,
+        previous_summary=previous_summary,
+    )
+
+
+# ---------------------------------------------------------------------------
+# E3 — Three-stage degradation entrypoint
+# ---------------------------------------------------------------------------
+#
+# When a session contains a single tool result so large that it alone
+# exceeds the context window, the iterative path's per-chunk truncation
+# can still produce an invalid prompt (the single oversize message lives
+# inside one chunk and gets truncated mid-JSON).  ``summarize_in_stages``
+# wraps the iterative call with two recovery stages so the caller is
+# guaranteed a useful summary string regardless of provider weather:
+#
+#   Stage 1 — full iterative summarisation;
+#   Stage 2 — partition out OVERSIZED messages, summarise the rest, then
+#             append a placeholder describing what was skipped;
+#   Stage 3 — deterministic fallback assembled from the latest messages.
+# ---------------------------------------------------------------------------
+
+# Heuristic: a single message whose content exceeds this many chars is
+# considered "oversized" for Stage-2 purposes (≈ 40K tokens at 4 chars/token).
+# Tunable via ``FLOCKS_COMPACTION_OVERSIZE_CHARS`` env override.
+_DEFAULT_OVERSIZE_CHAR_THRESHOLD = 160_000
+
+
+def _oversize_char_threshold() -> int:
+    import os
+    raw = os.getenv("FLOCKS_COMPACTION_OVERSIZE_CHARS")
+    if not raw:
+        return _DEFAULT_OVERSIZE_CHAR_THRESHOLD
+    try:
+        value = int(raw)
+        return value if value > 0 else _DEFAULT_OVERSIZE_CHAR_THRESHOLD
+    except (TypeError, ValueError):
+        return _DEFAULT_OVERSIZE_CHAR_THRESHOLD
+
+
+def _partition_oversized(
+    chat_messages: list,
+    threshold_chars: int,
+) -> tuple[list, list]:
+    """Split ``chat_messages`` into (safe, oversized).
+
+    Oversized messages keep their relative order; safe messages also keep
+    their relative order so the iterative summariser still sees a coherent
+    chronology.
+    """
+    safe: list = []
+    oversized: list = []
+    for msg in chat_messages:
+        content = msg.content if hasattr(msg, 'content') else ''
+        if not isinstance(content, str):
+            content = str(content)
+        if len(content) >= threshold_chars:
+            oversized.append(msg)
+        else:
+            safe.append(msg)
+    return safe, oversized
+
+
+def _build_oversized_placeholder_section(oversized: list) -> str:
+    """Compose a stable, structured placeholder for messages we dropped."""
+    if not oversized:
+        return ""
+    bullets: list[str] = []
+    for msg in oversized:
+        role = msg.role if hasattr(msg, 'role') else 'unknown'
+        content = msg.content if hasattr(msg, 'content') else ''
+        if not isinstance(content, str):
+            content = str(content)
+        head = content[:200].replace("\n", " ")
+        bullets.append(f"- [{role}] {len(content):,} chars — preview: {head}…")
+    return (
+        "## Oversized Items Skipped\n"
+        "The following messages were too large to include in the summary "
+        "and were elided. The agent may need to re-issue the underlying "
+        "tool call(s) on demand:\n"
+        + "\n".join(bullets)
+    )
+
+
+async def summarize_in_stages(
+    chat_messages: list,
+    prompt_text: str,
+    target_chars: int,
+    provider_client: Any,
+    model_id: str,
+    max_tokens: int,
+    session_id: str,
+    *,
+    chunk_size: Optional[int] = None,
+    focus_instruction: Optional[str] = None,
+    previous_summary: Optional[str] = None,
+    progress_callback: Optional[ProgressCallback] = None,
+) -> str:
+    """Three-stage degradation: full → oversized-skip → deterministic.
+
+    Always returns a usable summary string — the caller never has to
+    handle ``None`` again.  Use this in place of direct
+    ``summarize_chunked_iterative`` invocations from the orchestrator.
+    """
+    # ----- Stage 1: full iterative path --------------------------------
+    try:
+        result = await summarize_chunked_iterative(
+            chat_messages, prompt_text, target_chars,
+            provider_client, model_id, max_tokens, session_id,
+            chunk_size=chunk_size,
+            focus_instruction=focus_instruction,
+            progress_callback=progress_callback,
+            previous_summary=previous_summary,
+        )
+        if result:
+            passed, missing = validate_summary_quality(result)
+            if passed:
+                return result
+            log.warn("compaction.stage1_failed_quality", {
+                "session_id": session_id,
+                "missing_sections": missing,
+                "summary_chars": len(result),
+            })
+            # Quality failed but we still have content — usable, but try
+            # Stage 2 if oversized items might be polluting structure.
+            stage1_fallback = result
+        else:
+            log.warn("compaction.stage1_empty", {"session_id": session_id})
+            stage1_fallback = None
+    except Exception as exc:
+        log.warn("compaction.stage1_failed_exception", {
+            "session_id": session_id, "error": str(exc),
+        })
+        stage1_fallback = None
+
+    # ----- Stage 2: skip oversize messages -----------------------------
+    safe_messages, oversized = _partition_oversized(
+        chat_messages, _oversize_char_threshold(),
+    )
+    if oversized and safe_messages:
+        log.info("compaction.stage2_oversized_partition", {
+            "session_id": session_id,
+            "oversized_count": len(oversized),
+            "safe_count": len(safe_messages),
+        })
+        try:
+            partial = await summarize_chunked_iterative(
+                safe_messages, prompt_text, target_chars,
+                provider_client, model_id, max_tokens, session_id,
+                chunk_size=chunk_size,
+                focus_instruction=focus_instruction,
+                progress_callback=progress_callback,
+                previous_summary=previous_summary,
+            )
+            if partial:
+                placeholder = _build_oversized_placeholder_section(oversized)
+                return partial + ("\n\n" + placeholder if placeholder else "")
+        except Exception as exc:
+            log.warn("compaction.stage2_failed_exception", {
+                "session_id": session_id, "error": str(exc),
+            })
+
+    # Stage 1 produced *something* (just not schema-valid) — prefer it
+    # over the deterministic fallback so we don't throw away an LLM
+    # round-trip's worth of context.
+    if stage1_fallback:
+        return stage1_fallback
+
+    # ----- Stage 3: deterministic fallback -----------------------------
+    log.error("compaction.all_stages_failed", {"session_id": session_id})
+    return build_fallback_summary(chat_messages)

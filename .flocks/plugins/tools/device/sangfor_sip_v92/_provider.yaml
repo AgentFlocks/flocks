@@ -72,6 +72,13 @@ notes: |
      - api_services.sangfor_sip.username = "your_username"
      - sangfor_sip_password = "your_password"（secret）
 
+  连通测试地址拼装规则：
+    - 仅填写 `host`（默认）→ 拼装为 `https://{host}:{port}`，
+      端口缺省为 7443（HTTPS）。
+    - 若需以非 HTTPS 方式探测（极少见，仅用于联调环境），
+      请在 `host` 字段中显式写入完整 scheme，例如
+      `http://10.1.2.3`，系统不会再为其加 `https://` 前缀。
+
   `verify_ssl` 由表单底部「SSL 验证」开关控制，下列字段都会被
   识别为 SSL 验证开关，按以下优先级取值：
     1. `verify_ssl`                  （主键）

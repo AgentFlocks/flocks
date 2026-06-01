@@ -70,8 +70,17 @@ async def run_compaction(
     status_after: StatusAfter = "idle",
     focus_instruction: Optional[str] = None,
     progress_callback: Optional[ProgressCallback] = None,
-) -> Literal["continue", "stop"]:
+) -> Literal["continue", "stop", "skipped"]:
     """Run compaction with shared status transitions and event publishing.
+
+    Return values:
+      ``"continue"`` — compaction completed; summary/archive were written.
+      ``"stop"``     — compaction failed in a way that should abort the
+                       caller's outer loop (provider unavailable, etc.).
+      ``"skipped"``  — anti-thrashing or summary-provider cooldown fired;
+                       no summary was written and the caller MUST NOT treat
+                       this as success (no cooldown-step update, no
+                       ``context.compacted`` event).
 
     ``focus_instruction`` is an optional free-form user directive (used
     by manual ``/compact <focus>`` invocations) forwarded verbatim to
@@ -104,7 +113,7 @@ async def run_compaction(
         })
 
     try:
-        return await SessionCompaction.process(
+        result = await SessionCompaction.process(
             session_id=session_id,
             parent_id=parent_message_id,
             messages=_serialize_messages(messages),
@@ -115,6 +124,27 @@ async def run_compaction(
             focus_instruction=focus_instruction,
             progress_callback=progress_callback,
         )
+
+        # E5: post-prune.  After the summary is written we still have the
+        # PRESERVE_LAST tail in the conversation; those messages may
+        # themselves carry stale tool outputs that the per-tool retention
+        # policy could now expire (e.g. a ``bash`` from the turn that
+        # just rolled out of its 1-turn window).  Running ``prune()``
+        # again here is cheap and meaningfully lowers the chance the
+        # very next turn re-triggers compaction.  Failures are swallowed
+        # — they cannot invalidate the summary we just wrote.
+        try:
+            await SessionCompaction.prune(
+                session_id,
+                policy=resolved_policy,
+            )
+        except Exception as exc:
+            log.warn("compaction.post_prune_failed", {
+                "session_id": session_id,
+                "error": str(exc),
+            })
+
+        return result
     finally:
         if status_after == "busy":
             SessionStatus.set(session_id, SessionStatusBusy())

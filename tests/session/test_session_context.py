@@ -172,6 +172,25 @@ class TestLoopContextSessionCtx:
         assert ctx.session_ctx is session_ctx
         assert ctx.session_ctx.session_id == "test"
 
+    def test_loop_context_tracks_observed_prompt_tokens(self):
+        # B3 — LoopContext must expose ``last_observed_prompt_tokens`` so
+        # the overflow decision can prefer the provider's reported usage
+        # over our synthetic estimate.
+        session = MagicMock()
+        session.id = "test"
+        session.directory = "/test"
+        session.project_id = "proj"
+
+        ctx = LoopContext(
+            session=session,
+            provider_id="anthropic",
+            model_id="claude-sonnet-4",
+            agent_name="rex",
+        )
+        assert ctx.last_observed_prompt_tokens == 0
+        ctx.last_observed_prompt_tokens = 123_456
+        assert ctx.last_observed_prompt_tokens == 123_456
+
 
 class TestRunnerSessionCtx:
     """SessionRunner should accept session_ctx."""

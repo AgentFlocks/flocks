@@ -21,20 +21,14 @@ class TextChunker:
     def __init__(self, config: MemoryChunkingConfig):
         """
         Initialize chunker
-        
+
         Args:
             config: Chunking configuration
         """
         self.config = config
-        try:
-            from flocks.utils.tiktoken_cache import ensure as _ensure_tiktoken
-            _ensure_tiktoken()
-            import tiktoken
-            self.encoding = tiktoken.get_encoding("cl100k_base")
-        except Exception as e:
-            log.warn("chunking.encoding.failed", {"error": str(e)})
-            # Fallback to approximate encoding
-            self.encoding = None
+        # Use a deterministic offline heuristic so memory sync never depends
+        # on tokenizer assets or outbound network access.
+        self.encoding = None
     
     def chunk_text(self, text: str, file_path: str = "") -> List[MemoryChunk]:
         """
@@ -102,10 +96,10 @@ class TextChunker:
     def _count_tokens(self, text: str) -> int:
         """
         Count tokens in text
-        
+
         Args:
             text: Text to count
-            
+
         Returns:
             Number of tokens
         """

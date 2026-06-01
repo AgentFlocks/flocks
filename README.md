@@ -142,7 +142,7 @@ docker run -d \
   --name flocks \
   -p 8000:8000 \
   -p 5173:5173 \
-  --shm-size 2gb \
+  --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
   ghcr.io/agentflocks/flocks:latest
 ```
@@ -153,7 +153,7 @@ docker run -d `
   --name flocks `
   -p 8000:8000 `
   -p 5173:5173 `
-  --shm-size 2gb `
+  --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```

@@ -34,15 +34,63 @@ class _GroupContextEntry:
 
 
 def _parse_slash_command(text: str) -> tuple[Optional[str], str]:
+    """Parse a slash command from inbound text.
+
+    Strict path: text begins with ``/cmd [args]``.
+
+    Channel fallback: group-mention IM messages often arrive with the bot's
+    display name still in the body (e.g. ``"- test /compact"`` on WeCom).
+    In that case we scan for the first ``/<word>`` token and treat it as a
+    command **only when** ``<word>`` resolves against the registry, so plain
+    chatter like ``"see /tmp/foo.log"`` does not get hijacked.
+    """
+    import re
+
+    from flocks.command.command import Command
+
     stripped = text.strip()
-    if not stripped.startswith("/"):
+    if stripped.startswith("/"):
+        parts = stripped[1:].split(None, 1)
+        if not parts:
+            return None, ""
+        name = parts[0].strip().lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+        return name or None, args
+
+    match = re.search(r"(?:^|\s)/([A-Za-z_][\w-]*)(?:\s+(.*))?$", stripped)
+    if not match:
         return None, ""
-    parts = stripped[1:].split(None, 1)
-    if not parts:
+    candidate = match.group(1).strip().lower()
+    if not candidate:
         return None, ""
-    name = parts[0].strip().lower()
-    args = parts[1].strip() if len(parts) > 1 else ""
-    return name or None, args
+    if Command.resolve(candidate) is None:
+        return None, ""
+
+    # Guard: the text BEFORE the slash must look like a bot-mention prefix,
+    # not natural-language content.  Group-IM platforms (WeCom, Feishu) inject
+    # a short "- BotName" or "@BotName" prefix before the command; anything
+    # else (e.g. "请解释一下 /help" or "prefix /new thanks") is a sentence
+    # that happens to contain a slash word and must NOT be hijacked.
+    #
+    # Accepted:  "- rex"  "@flocks_bot"  ""  (empty = leading slash already
+    #            handled by the strict path above)
+    # Rejected:  "请解释一下"  "prefix"  "I want to know about"
+    pre_slash = stripped[: match.start()].rstrip()
+    if pre_slash and not re.match(r"^[-@]\s*\w+\s*$", pre_slash):
+        log.debug("dispatcher.slash_command.fallback_rejected", {
+            "raw_text_preview": stripped[:80],
+            "pre_slash": pre_slash[:40],
+            "candidate": candidate,
+        })
+        return None, ""
+
+    args = (match.group(2) or "").strip()
+    log.info("dispatcher.slash_command.fallback_matched", {
+        "raw_text_preview": stripped[:80],
+        "command": candidate,
+        "has_args": bool(args),
+    })
+    return candidate, args
 
 
 # =====================================================================
@@ -605,6 +653,16 @@ class InboundDispatcher:
         if command_def is None:
             return False
 
+        # Normalise the event text into the canonical "/cmd args" form so the
+        # downstream ``dispatch_user_input`` (which re-parses ``event.text``
+        # with the strict slash parser) does not reject group-mention bodies
+        # like ``"- test /compact"``.
+        normalised_text = (
+            f"/{command_def.name} {command_args}".strip()
+            if command_args
+            else f"/{command_def.name}"
+        )
+
         callbacks = self._build_callbacks(binding, msg)
 
         async def _publish_direct_response(_event, text: str) -> None:
@@ -630,19 +688,27 @@ class InboundDispatcher:
                     scope_override=scope_override,
                 )
                 return True
+            if parsed.canonical_name == "compact":
+                await self._handle_compact_command(
+                    binding=binding,
+                    callbacks=callbacks,
+                    focus_instruction=command_args or None,
+                )
+                return True
             return False
 
         event = UserInputEvent(
             source_type=msg.channel_id if msg.channel_id in {"feishu", "wecom", "telegram"} else "channel",
             sessionID=binding.session_id,
-            text=user_text,
-            parts=[{"type": "text", "text": user_text}],
+            text=normalised_text,
+            parts=[{"type": "text", "text": normalised_text}],
             agent=binding.agent_id,
             display_text=user_text,
             working_directory=channel_config.workspace_dir,
             metadata={
                 "channel_id": msg.channel_id,
                 "chat_id": msg.chat_id or msg.sender_id,
+                "original_text": user_text,
             },
         )
         await dispatch_user_input(
@@ -782,6 +848,26 @@ class InboundDispatcher:
             agent_id=new_session.agent,
             scope_override=scope_override,
         )
+        # Archive the previous session so it no longer shows up as an *active*
+        # IM session. The binding has already moved to ``new_session`` via
+        # ``rebind`` above, but the old session retains ``status="active"`` and
+        # the same ``[Feishu]/[Wecom]/[Dingtalk]`` title prefix. Without this,
+        # repeated ``/new`` leaves multiple active sessions for the same
+        # conversation, and unattended scheduled tasks (which resolve the IM
+        # target via ``session_list(status="active")`` + title prefix) can no
+        # longer tell which one is current — sending to the wrong session or
+        # failing outright. Best-effort: archiving failure must not abort /new.
+        try:
+            await Session.update(
+                session.project_id,
+                session.id,
+                status="archived",
+            )
+        except Exception as exc:
+            log.warning("dispatcher.archive_previous_session_failed", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
         await self._trigger_command_hook(
             "new",
             session.id,
@@ -802,6 +888,76 @@ class InboundDispatcher:
                 ]
             )
         )
+
+    @staticmethod
+    async def _handle_compact_command(
+        *,
+        binding,
+        callbacks: "ChannelDeliveryCallbacks",
+        focus_instruction: Optional[str] = None,
+    ) -> None:
+        """Run manual compaction for a channel session and deliver a status reply."""
+        from flocks.session.lifecycle.compaction import run_compaction
+        from flocks.session.lifecycle.compaction.orchestrator import build_compaction_policy
+        from flocks.session.message import Message, MessageRole
+        from flocks.session.session import Session
+
+        session_id = binding.session_id
+        session = await Session.get_by_id(session_id)
+        if not session:
+            await callbacks.deliver_text("当前会话不存在，请重新发送消息后重试。")
+            return
+
+        messages = await Message.list(session_id)
+        parent_message_id: Optional[str] = None
+        for m in reversed(messages):
+            if m.role == MessageRole.USER:
+                parent_message_id = m.id
+                break
+
+        if not parent_message_id:
+            await callbacks.deliver_text("当前会话没有可压缩的消息。")
+            return
+
+        # Resolve provider/model from session (same as session loop)
+        from flocks.session.session_loop import SessionLoop
+        provider_id, model_id = await SessionLoop._resolve_model(session, None, None)
+        if not provider_id or not model_id:
+            await callbacks.deliver_text("无法解析当前会话的模型，请先切换模型后重试。")
+            return
+
+        policy = build_compaction_policy(provider_id, model_id)
+
+        await callbacks.deliver_text("正在压缩上下文，请稍候…")
+        try:
+            result = await run_compaction(
+                session_id,
+                parent_message_id=parent_message_id,
+                messages=messages,
+                provider_id=provider_id,
+                model_id=model_id,
+                auto=False,
+                event_publish_callback=callbacks._publish_sse_event,
+                status_after="idle",
+                policy=policy,
+                focus_instruction=focus_instruction,
+            )
+            if result == "stop":
+                await callbacks.deliver_text("上下文压缩失败，请稍后重试。")
+            elif result == "skipped":
+                await callbacks.deliver_text(
+                    "本轮上下文压缩已被跳过（系统处于冷却期或上一轮节省过小），"
+                    "稍后会自动重试。"
+                )
+            else:
+                focus_note = f"（聚焦：{focus_instruction}）" if focus_instruction else ""
+                await callbacks.deliver_text(f"上下文压缩完成{focus_note}，历史已归档为摘要。")
+        except Exception as e:
+            log.error("dispatcher.compact_command_failed", {
+                "session_id": session_id,
+                "error": str(e),
+            })
+            await callbacks.deliver_text(f"压缩时发生错误：{type(e).__name__}")
 
     @staticmethod
     async def _trigger_command_hook(action: str, session_id: str, context: dict[str, Any]) -> None:

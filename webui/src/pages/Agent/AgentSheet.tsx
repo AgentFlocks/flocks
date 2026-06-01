@@ -335,7 +335,7 @@ function AgentFormContent({
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
           <Lock className="w-3.5 h-3.5 shrink-0" />
-          {t('form.nativeReadOnlyPrefix')}<span className="font-semibold">{t('form.model')}</span>{t('form.nativeReadOnlyAnd')}<span className="font-semibold">{t('form.temperature')}</span>{t('form.nativeReadOnlySuffix')}
+          {t('form.nativeReadOnlyMessage')}
         </div>
       )}
 
@@ -472,6 +472,7 @@ function AgentFormContent({
             className="w-28 px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
           />
         </div>
+
       </div>
 
       {/* Tools */}

@@ -343,7 +343,10 @@ async def extract_and_save(
     usable = policy.usable_context if policy else 96_000
     reserve_tokens = 2000
     target_tokens = max(1000, usable - reserve_tokens)
-    max_chars = max(3000, target_tokens * 2)
+    # tokens × 4 matches the chars/4 estimate used elsewhere in the
+    # compaction stack.  Previously ``× 2`` silently halved the input
+    # budget, forcing tail-cuts on conversations that fit comfortably.
+    max_chars = max(3000, target_tokens * 4)
 
     conversation_parts: list[str] = []
     for msg in chat_messages:

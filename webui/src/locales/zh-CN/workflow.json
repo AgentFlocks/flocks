@@ -76,7 +76,8 @@
       "deleteConfirmDesc": "确定要删除工作流「{{name}}」吗？此操作不可撤销。",
       "deleteConfirmText": "确认删除",
       "deleteFailed": "删除失败",
-      "deleting": "删除中..."
+      "deleting": "删除中...",
+      "viewSessions": "前往会话列表查看"
     },
     "overview": {
       "configInfo": "配置信息",

@@ -430,8 +430,8 @@ def test_watcher_start_stop_no_crash(tmp_path):
     from flocks.skill.skill import SkillFileWatcher
 
     # Create a fake skill directory so the watcher has something to watch
-    skill_dir = tmp_path / ".flocks"
-    skill_dir.mkdir()
+    skill_dir = tmp_path / ".flocks" / "plugins" / "skills"
+    skill_dir.mkdir(parents=True)
 
     with (
         patch("flocks.skill.skill.Instance.get_directory", return_value=str(tmp_path)),
@@ -444,6 +444,96 @@ def test_watcher_start_stop_no_crash(tmp_path):
 
     # No exception → pass
     assert watcher._observer is None
+
+
+def test_watcher_collects_only_skill_discovery_roots(tmp_path):
+    """Skill watcher should not recursively watch the entire .flocks tree."""
+    from flocks.skill.skill import SkillFileWatcher
+
+    project_dir = tmp_path / "project"
+    current_dir = project_dir / "src"
+    current_dir.mkdir(parents=True)
+    project_flocks = project_dir / ".flocks"
+
+    expected_project_dirs = [
+        project_flocks / "skill",
+        project_flocks / "skills",
+        project_flocks / "plugins" / "skill",
+        project_flocks / "plugins" / "skills",
+    ]
+    for directory in expected_project_dirs:
+        directory.mkdir(parents=True)
+
+    # These trees can be large but are not part of Skill._discover().
+    (project_flocks / "flockshub" / "plugins" / "skills").mkdir(parents=True)
+    (project_flocks / "plugins" / "tools" / "api").mkdir(parents=True)
+
+    home_dir = tmp_path / "home"
+    user_skill_dir = home_dir / ".flocks" / "plugins" / "skills"
+    user_skill_dir.mkdir(parents=True)
+    user_claude_skill_dir = home_dir / ".claude" / "skills"
+    user_claude_skill_dir.mkdir(parents=True)
+
+    with (
+        patch("flocks.skill.skill.Instance.get_directory", return_value=str(current_dir)),
+        patch("flocks.skill.skill.Instance.get_worktree", return_value=str(project_dir)),
+        patch("os.path.expanduser", return_value=str(home_dir)),
+    ):
+        watch_dirs = SkillFileWatcher(Skill)._collect_watch_dirs()
+
+    expected = {
+        os.path.realpath(str(directory))
+        for directory in [*expected_project_dirs, user_skill_dir, user_claude_skill_dir]
+    }
+    assert watch_dirs == expected
+    assert os.path.realpath(str(project_flocks)) not in watch_dirs
+    assert os.path.realpath(str(project_flocks / "flockshub" / "plugins" / "skills")) not in watch_dirs
+    assert os.path.realpath(str(project_flocks / "plugins" / "tools" / "api")) not in watch_dirs
+
+
+def test_watcher_collects_project_claude_skills_only(tmp_path):
+    """Claude compatibility should watch .claude/skills, not the .claude root."""
+    from flocks.skill.skill import SkillFileWatcher
+
+    project_dir = tmp_path / "project"
+    project_claude = project_dir / ".claude"
+    project_claude_skill_dir = project_claude / "skills"
+    project_claude_skill_dir.mkdir(parents=True)
+    (project_claude / "commands").mkdir()
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+
+    with (
+        patch("flocks.skill.skill.Instance.get_directory", return_value=str(project_dir)),
+        patch("flocks.skill.skill.Instance.get_worktree", return_value=str(project_dir)),
+        patch("os.path.expanduser", return_value=str(home_dir)),
+    ):
+        watch_dirs = SkillFileWatcher(Skill)._collect_watch_dirs()
+
+    assert watch_dirs == {os.path.realpath(str(project_claude_skill_dir))}
+    assert os.path.realpath(str(project_claude)) not in watch_dirs
+
+
+def test_watcher_collect_dirs_empty_without_skill_roots(tmp_path):
+    """A .flocks directory without skill roots should not be watched wholesale."""
+    from flocks.skill.skill import SkillFileWatcher
+
+    project_dir = tmp_path / "project"
+    (project_dir / ".flocks").mkdir(parents=True)
+    (project_dir / ".claude").mkdir()
+
+    home_dir = tmp_path / "home"
+    (home_dir / ".flocks").mkdir(parents=True)
+
+    with (
+        patch("flocks.skill.skill.Instance.get_directory", return_value=str(project_dir)),
+        patch("flocks.skill.skill.Instance.get_worktree", return_value=str(project_dir)),
+        patch("os.path.expanduser", return_value=str(home_dir)),
+    ):
+        watch_dirs = SkillFileWatcher(Skill)._collect_watch_dirs()
+
+    assert watch_dirs == set()
 
 
 def test_watcher_debounce_clears_cache():

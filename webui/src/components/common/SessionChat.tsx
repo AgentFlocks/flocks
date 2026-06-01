@@ -355,6 +355,93 @@ export function getStandaloneThinkingBubbleClassName(compact: boolean): string {
   return getMessageBubbleClassName({ compact, isUser: false, isEditing: false });
 }
 
+export function getUserAvatarContainerClassName(compact: boolean): string {
+  return `pointer-events-none absolute left-full top-0 ml-2.5 translate-y-1/2 flex items-center justify-end ${
+    compact ? 'h-7' : 'h-8'
+  }`;
+}
+
+export function getUserAvatarSpacerClassName(compact: boolean): string {
+  return compact ? 'h-3.5' : 'h-4';
+}
+
+function areToolStatesRenderEqual(
+  prevState?: ToolState,
+  nextState?: ToolState,
+): boolean {
+  if (prevState === nextState) return true;
+  if (
+    prevState?.status !== nextState?.status ||
+    prevState?.title !== nextState?.title ||
+    prevState?.error !== nextState?.error ||
+    prevState?.time?.start !== nextState?.time?.start ||
+    prevState?.time?.end !== nextState?.time?.end
+  ) {
+    return false;
+  }
+
+  return (
+    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
+    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
+    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
+  );
+}
+
+function areLegacyToolPayloadsRenderEqual(
+  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+): boolean {
+  if (prevPayload === nextPayload) return true;
+  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
+}
+
+export function areChatMessagePartsRenderEqual(
+  prevParts?: MessagePart[],
+  nextParts?: MessagePart[],
+): boolean {
+  if (prevParts === nextParts) return true;
+  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
+
+  const total = prevParts?.length ?? 0;
+  for (let i = 0; i < total; i++) {
+    const prevPart = prevParts?.[i];
+    const nextPart = nextParts?.[i];
+
+    if (prevPart === nextPart) continue;
+    if (!prevPart || !nextPart) return false;
+
+    if (
+      prevPart.id !== nextPart.id ||
+      prevPart.type !== nextPart.type ||
+      prevPart.text !== nextPart.text ||
+      prevPart.thinking !== nextPart.thinking ||
+      prevPart.synthetic !== nextPart.synthetic ||
+      prevPart.ignored !== nextPart.ignored ||
+      prevPart.tool !== nextPart.tool ||
+      prevPart.callID !== nextPart.callID ||
+      prevPart.mime !== nextPart.mime ||
+      prevPart.filename !== nextPart.filename ||
+      prevPart.url !== nextPart.url ||
+      prevPart.image?.url !== nextPart.image?.url ||
+      prevPart.image?.alt !== nextPart.image?.alt
+    ) {
+      return false;
+    }
+
+    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 
 // ============================================================================
 // Main component
@@ -1024,10 +1111,7 @@ export default function SessionChat({
 
   const buildAttachmentBlock = useCallback((items: ComposerAttachment[]) => {
     if (items.length === 0) return '';
-    const lines = items
-      .map((attachment) => attachment.workspacePath)
-      .filter((path): path is string => Boolean(path))
-      .map((path) => `- ${path}`);
+    const lines = listUploadedDocumentPaths(items).map((path) => `- ${path}`);
     if (lines.length === 0) return '';
     return `Attached files:\n${lines.join('\n')}`;
   }, []);
@@ -1061,7 +1145,7 @@ export default function SessionChat({
         'chat',
       );
       const uploaded = response.data.uploaded ?? [];
-      setAttachments((prev) => prev.map((attachment) => {
+      setAttachments((prev) => dedupeUploadedDocumentAttachments(prev.map((attachment) => {
         const entryIndex = entries.findIndex((entry) => entry.id === attachment.id);
         if (entryIndex < 0) return attachment;
         const result = uploaded[entryIndex];
@@ -1079,7 +1163,7 @@ export default function SessionChat({
           workspacePath: result.abs_path ?? result.path,
           error: undefined,
         };
-      }));
+      })));
     } catch (err: any) {
       const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
       setAttachments((prev) => prev.map((attachment) => (
@@ -1856,42 +1940,58 @@ export default function SessionChat({
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
-              <div className={`flex justify-start ${!compact ? 'group w-full' : ''}`}>
-                <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-xl' : 'max-w-2xl w-full px-6 py-4 rounded-2xl'} shadow-sm bg-amber-50 border border-amber-200 text-sm`}>
-                  <div className="flex items-center gap-2 text-sm text-amber-700">
-                    <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
-                    <span>{compactingMessage || t('chat.compacting')}</span>
-                  </div>
-                  {compactionPercent !== null && (
-                    <div className="mt-2">
-                      <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
-                        <span>{t('chat.compactionStage.overallProgressLabel')}</span>
-                        <span>{compactionPercent}%</span>
-                      </div>
-                      <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
-                        <div
-                          className="h-full bg-amber-500 transition-all duration-300"
-                          style={{ width: `${compactionPercent}%` }}
-                        />
+              <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+                <div className={`flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}`}>
+                  <span
+                    className={`inline-flex items-center justify-center rounded-full bg-red-500 text-white font-bold shadow-sm ring-2 ring-white flex-shrink-0 ${
+                      compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
+                    }`}
+                  >
+                    R
+                  </span>
+                  <div className="flex flex-col items-start flex-1 min-w-0">
+                    <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
+                      <span className="text-xs font-semibold text-zinc-700">Rex</span>
+                    </div>
+                    <div className="flex flex-col min-w-0 w-full">
+                      <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
+                        <div className="flex items-center gap-2 text-sm text-amber-700">
+                          <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                          <span>{compactingMessage || t('chat.compacting')}</span>
+                        </div>
+                        {compactionPercent !== null && (
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                              <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                              <span>{compactionPercent}%</span>
+                            </div>
+                            <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-500 transition-all duration-300"
+                                style={{ width: `${compactionPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {compactionStages.length > 0 && (
+                          <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                            {compactionStages
+                              .map((entry, idx) => {
+                                const text = describeCompactionStage(entry, t);
+                                if (!text) return null;
+                                return (
+                                  <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                                    <span className="text-amber-400">·</span>
+                                    <span>{text}</span>
+                                  </li>
+                                );
+                              })
+                              .filter(Boolean)}
+                          </ul>
+                        )}
                       </div>
                     </div>
-                  )}
-                  {compactionStages.length > 0 && (
-                    <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
-                      {compactionStages
-                        .map((entry, idx) => {
-                          const text = describeCompactionStage(entry, t);
-                          if (!text) return null;
-                          return (
-                            <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
-                              <span className="text-amber-400">·</span>
-                              <span>{text}</span>
-                            </li>
-                          );
-                        })
-                        .filter(Boolean)}
-                    </ul>
-                  )}
+                  </div>
                 </div>
               </div>
             )}
@@ -2649,10 +2749,11 @@ function ChatMessageBubbleInner({
   if (isUser) {
     return (
       <div className={`group relative ${!compact ? 'w-full' : ''} flex justify-end`}>
-        <div className={`flex flex-col items-end gap-2 ${messageGroupClass}`}>
-          <div className={`flex items-center justify-end ${headerHeight}`}>
+        <div className={`relative flex flex-col items-end gap-2 ${messageGroupClass}`}>
+          <div className={getUserAvatarContainerClassName(compact)}>
             {avatar}
           </div>
+          <div aria-hidden="true" className={getUserAvatarSpacerClassName(compact)} />
           <div className={`flex flex-col min-w-0 ${isEditing ? 'w-full' : 'w-fit max-w-full'}`}>
             {bubble}
             {footer}
@@ -2701,7 +2802,6 @@ function ChatMessageBubbleInner({
 // ============================================================================
 
 const TOOL_DISPLAY_MAX_LEN = 120;
-
 /** Truncate long tool titles / param summaries shown in the card header. */
 export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
   if (text.length <= maxLen) return text;
@@ -2712,6 +2812,65 @@ function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
     .map(([k, v]) => `${k}=${String(v)}`)
     .join(', ');
+}
+
+type TodoSummaryEntry = {
+  id?: string;
+  content: string;
+  status?: string;
+  activeForm?: string;
+};
+
+function isTodoSummaryEntry(value: unknown): value is TodoSummaryEntry {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.content === 'string';
+}
+
+function readTodoEntries(value: unknown): TodoSummaryEntry[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(isTodoSummaryEntry)
+    .map((todo) => ({
+      id: typeof todo.id === 'string' ? todo.id : undefined,
+      content: todo.content.trim(),
+      status: typeof todo.status === 'string' ? todo.status : undefined,
+      activeForm: typeof todo.activeForm === 'string' ? todo.activeForm : undefined,
+    }))
+    .filter((todo) => todo.content.length > 0);
+}
+
+function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
+  for (const candidate of candidates) {
+    const todos = readTodoEntries(candidate);
+    if (todos.length > 0) return todos;
+  }
+  return [];
+}
+
+export function buildTodoWriteSummary(state: Partial<ToolState>): string {
+  const metadata = state.metadata ?? {};
+  const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
+  if (currentTodos.length === 0) return '';
+  const totalCount = currentTodos.length;
+  const terminalCount = currentTodos.filter(
+    (todo) => todo.status === 'completed' || todo.status === 'cancelled',
+  ).length;
+  const inProgressCount = currentTodos.filter((todo) => todo.status === 'in_progress').length;
+  const hasCancelled = currentTodos.some((todo) => todo.status === 'cancelled');
+
+  let summary =
+    terminalCount === totalCount
+      ? hasCancelled
+        ? `Done ${terminalCount}/${totalCount}`
+        : `Completed ${terminalCount}/${totalCount}`
+      : `Progress ${terminalCount}/${totalCount}`;
+
+  if (inProgressCount > 0 && terminalCount < totalCount) {
+    summary += ` · In progress ${inProgressCount}`;
+  }
+
+  return summary;
 }
 
 export interface ChatToolPartProps {
@@ -2783,7 +2942,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
-    ? truncateToolDisplayText(buildToolInputSummary(state.input))
+    ? truncateToolDisplayText(
+        toolName === 'todowrite'
+          ? (buildTodoWriteSummary(state) || buildToolInputSummary(state.input))
+          : buildToolInputSummary(state.input),
+      )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
 
@@ -2873,9 +3036,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 /**
  * Memoized export of ChatMessageBubble.
  *
- * Fast path (O(1) field checks, aligned with Open WebUI's approach):
+ * Fast path:
  * - structural props: isActive, role, finish, parts.length
- * - content probe: last part's text/thinking field
+ * - per-part render probe with early exits and ref equality reuse
  *
  * Only triggers a re-render when something actually visible has changed,
  * avoiding unnecessary reconciliation during high-frequency streaming.
@@ -2892,14 +3055,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
   if (prev.pendingQuestions !== next.pendingQuestions) return false;
-  // O(1) content probe on the last part — covers the streaming delta case
-  const prevLast = prevParts?.[prevParts.length - 1];
-  const nextLast = nextParts?.[nextParts.length - 1];
-  return (
-    prevLast?.text === nextLast?.text &&
-    prevLast?.thinking === nextLast?.thinking &&
-    prevLast?.state?.status === nextLast?.state?.status &&
-    JSON.stringify(prevLast?.state?.metadata) ===
-      JSON.stringify(nextLast?.state?.metadata)
-  );
+  // Text placeholders can now be created before later tool parts arrive.
+  // Compare each rendered part so mid-array text streaming still repaints.
+  return areChatMessagePartsRenderEqual(prev.message.parts, next.message.parts);
 });

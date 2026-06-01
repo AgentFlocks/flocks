@@ -1,6 +1,6 @@
 ---
 name: web2cli
-description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档。支持 `agent-browser` 与 `cdp-direct` 两种模式：前者适合独立浏览器会话，后者复用用户 Chromium 系浏览器登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
+description: 使用统一的 Web2CLI 流程捕获网站的 XHR/Fetch 请求，并生成可复用的 CLI、Markdown 文档。通过浏览器的 `cdp-direct` 模式复用用户 Chromium 系浏览器登录态与 CDP 能力。适用于复现登录后操作、沉淀接口调用样例，或基于页面操作生成自动化工具时。
 required: browser-use
 ---
 
@@ -8,13 +8,9 @@ required: browser-use
 
 > 正式开始前，先明确需要操作的网站或tab
 
-## 模式选择
+## 模式
 
-### `agent-browser`
-
-适用于需要独立浏览器会话、命令式浏览器自动化、和 `agent-browser --session-name` 工作流的场景。
-
-### `cdp-direct`（默认模式）
+### `cdp-direct`
 
 适用于需要复用用户 Chromium 系浏览器登录态、通过 `browser-use` 的 `flocks browser` 内核直连 CDP 的场景。
 
@@ -68,14 +64,6 @@ mkdir -p "$CAPTURE_ROOT/captures"
 
 ### 1. 打开浏览器或创建 Tab
 
-`agent-browser` 模式：
-
-```bash
-agent-browser --headed --session-name "$CAPTURE_NAME" open "<URL>"
-```
-
-`cdp-direct` 模式：
-
 ```bash
 TARGET_ID=$(
   flocks browser -c '
@@ -89,25 +77,13 @@ echo "Created tab: $TARGET_ID"
 
 ### 2. 等待用户手动登录
 
-要求用户在可见浏览器中完成登录、验证码、二次确认等人工步骤。
-
-- `agent-browser`：在当前会话窗口中完成登录。
-- `cdp-direct`：在刚创建的浏览器 tab 中完成登录，必要时让用户手动处理验证码、TOTP 或授权弹窗。
+要求用户在可见浏览器中完成登录、验证码、二次确认等人工步骤。在刚创建的浏览器 tab 中完成登录，必要时让用户手动处理验证码、TOTP 或授权弹窗。
 
 登录完成后告知 agent 继续。
 
 ### 3. 注入 Hook
 
 默认使用 `scripts/inject-hook-base.js`。这是通用基线脚本，负责捕获 XHR/Fetch、页面上下文、最近用户动作与导航信息，并提供更完整的调试输出。
-
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" wait --load networkidle
-agent-browser --session-name "$CAPTURE_NAME" eval --stdin < .flocks/plugins/skills/web2cli/scripts/inject-hook-base.js
-```
-
-`cdp-direct` 模式：
 
 ```bash
 WEB2CLI_HOOK="$(pwd)/$WEB2CLI_SKILL/scripts/inject-hook-base.js"
@@ -138,15 +114,7 @@ print(js("typeof window.__apiCapture !== \"undefined\" ? \"installed v\" + windo
 - 默认保留非 `GET` 请求
 - `GET` 请求只要路径不像静态文件，也会保留
 
-如果站点请求特别特殊，仍可在注入后切换为全抓模式。
-
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" eval "window.__apiCapture.config.captureMode = 'all'"
-```
-
-`cdp-direct` 模式：
+如果站点请求特别特殊，仍可在注入后切换为全抓模式：
 
 ```bash
 (
@@ -166,17 +134,9 @@ print(js("window.__apiCapture.config.captureMode"))
 ### 4. 明确需要捕获的功能/操作
 
 - 要求用户手动操作要捕获的页面动作，例如查询、翻页、筛选、提交表单、点击按钮、导出数据。
-- 或请求用户描述需要 hook 的操作，便于你直接去页面代替用户执行
+- 或者请求用户描述需要 hook 的操作或功能，便于你直接去页面代替用户执行
 
 需要确认捕获是否开始时：
-
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.length"
-```
-
-`cdp-direct` 模式：
 
 ```bash
 (
@@ -196,14 +156,6 @@ print(js("window.__capturedRequests.length"))
 
 先确认数量：
 
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" eval "window.__capturedRequests.length"
-```
-
-`cdp-direct` 模式：
-
 ```bash
 (
   TARGET_ID="$TARGET_ID" flocks browser -c '
@@ -219,14 +171,6 @@ print(js("window.__capturedRequests.length"))
 ```
 
 然后导出：
-
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" eval "JSON.stringify(window.__capturedRequests, null, 2)" > "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
-```
-
-`cdp-direct` 模式：
 
 ```bash
 CAPTURE_OUT="$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
@@ -280,14 +224,6 @@ print(f"Saved {len(data)} requests to {out}")
 
 ### 6. 保存认证状态
 
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" state save "$CAPTURE_ROOT/auth-state.json"
-```
-
-`cdp-direct` 模式：
-
 ```bash
 (
   TARGET_ID="$TARGET_ID" flocks browser -c '
@@ -334,7 +270,7 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-spec.py \
 
 - 目标站点与命令名
 - 鉴权策略（如 `PUBLIC` / `COOKIE` / `HEADER`）
-- 主请求的 method、endpoint、query/body 模板
+- 主请求的 method、endpoint、query/body/payload 模板
 - CLI 参数定义
 - 固定输出列定义
 - 验证材料初稿
@@ -378,26 +314,26 @@ uv run python .flocks/plugins/skills/web2cli/scripts/generate-cli.py \
   --output "$CAPTURE_ROOT/${CAPTURE_NAME}_api.md"
 ```
 
-### 10. CLI工具验证 和浏览器关闭
+### 10. CLI工具验证与修改
 
 根据生成的 CLI ，任意选择一个接口调用测试可用性
 - CLI 工具可用性
 - 认证状态可用性
 - `verify.json` 的输出约束是否满足
+- method、endpoint、query/body/payload 的一致性，必要时根据${CAPTURE_NAME}_api.json调整
 
 推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
 
-当验证完成，确保 CLI 可用后关闭浏览器或 Tab
+### 11. CLI 工具集成到skill
+
+将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
+
+### 12. summary并关闭浏览器 tab
+
+1. 总结当前生成的 CLI 工具有哪些接口/能力
+2. 确保 CLI 可用后关闭浏览器或 Tab
 
 #### 关闭浏览器或 Tab
-
-`agent-browser` 模式：
-
-```bash
-agent-browser --session-name "$CAPTURE_NAME" close
-```
-
-`cdp-direct` 模式：
 
 ```bash
 (
@@ -413,18 +349,7 @@ else:
 )
 ```
 
-`cdp-direct` 必须保留用户原有的 tab 不受影响。
-
-### 11.  skill 集成
-
-将 CLI 按 `references/cli-in-skill.md` 集成为 skill；
-
-### 12. summary
-
-总结当前生成的 CLI 工具有哪些能力，然后可提示用户下一步操作：
-
-- 精简或修正 CLI
-- 若仍需扩展能力或沉淀为 skill，回到步骤 11
+必须保留用户原有的 tab 不受影响。
 
 ## 故障处理
 

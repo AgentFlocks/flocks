@@ -7,7 +7,7 @@ to the current session's callable tool set.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from flocks.tool.catalog import normalize_tool_search_query, search_tool_catalog
 from flocks.tool.registry import (
@@ -30,6 +30,62 @@ If you already know the needed tool names, prefer one exact batch query such as
 `select:websearch,webfetch,skill` instead of multiple separate searches.
 IMPORTANT: search query must be in English.
 """
+
+
+async def _build_device_tool_hints(matches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Build per-tool device discovery hints for device-backed tools only."""
+    device_tools = [
+        match for match in matches
+        if (match.get("source") or "").lower() == "device" and match.get("name")
+    ]
+    if not device_tools:
+        return {}
+
+    try:
+        from flocks.tool.device.store import list_devices, list_groups
+
+        devices = await list_devices()
+        groups = await list_groups()
+    except Exception:
+        return {}
+
+    group_names = {group.id: group.name for group in groups}
+    tool_hints: Dict[str, Dict[str, Any]] = {}
+
+    for match in device_tools:
+        storage_key = str(match.get("provider") or "")
+        candidates = []
+        enabled_candidates = []
+
+        for device in devices:
+            if device.storage_key != storage_key:
+                continue
+            candidate = {
+                "device_id": device.id,
+                "name": device.name,
+                "group_id": device.group_id,
+                "group_name": group_names.get(device.group_id, device.group_id),
+                "enabled": bool(device.enabled),
+            }
+            candidates.append(candidate)
+            if device.enabled:
+                enabled_candidates.append(candidate)
+
+        if not enabled_candidates:
+            ambiguity = "none"
+        elif len(enabled_candidates) == 1:
+            ambiguity = "single"
+        else:
+            ambiguity = "multiple"
+
+        tool_hints[str(match["name"])] = {
+            "toolSetId": storage_key,
+            "requiresDeviceId": len(enabled_candidates) != 1,
+            "ambiguity": ambiguity,
+            "candidateDevices": enabled_candidates or candidates,
+        }
+
+    return tool_hints
 
 @ToolRegistry.register_function(
     name="tool_search",
@@ -68,8 +124,16 @@ async def tool_search(
 ) -> ToolResult:
     limit = max(1, min(limit or 8, 20))
     matches, matched_tags = search_tool_catalog(query, category=category, limit=limit)
+    device_hints = await _build_device_tool_hints(matches)
+    enriched_matches: List[Dict[str, Any]] = []
+    for match in matches:
+        enriched = dict(match)
+        hint = device_hints.get(str(match.get("name", "")))
+        if hint:
+            enriched.update(hint)
+        enriched_matches.append(enriched)
     normalized_query = normalize_tool_search_query(query or "")
-    callable_candidates = [match["name"] for match in matches]
+    callable_candidates = [match["name"] for match in enriched_matches]
     callable_tools = await add_session_callable_tools(ctx.session_id, callable_candidates)
     if ctx.event_publish_callback:
         await ctx.event_publish_callback("runtime.tool_discovery", {
@@ -81,6 +145,7 @@ async def tool_search(
             "callableToolCount": len(callable_tools),
             "callableToolNames": sorted(callable_candidates),
             "matchedTags": matched_tags,
+            "deviceAwareToolCount": len(device_hints),
         })
 
     return ToolResult(
@@ -93,9 +158,10 @@ async def tool_search(
             "matchedTags": matched_tags,
             "callableToolNames": sorted(callable_candidates),
             "callableToolCount": len(callable_tools),
+            "deviceAwareToolCount": len(device_hints),
             # Legacy compatibility keys.
             "discoveredToolNames": sorted(callable_candidates),
             "discoveredToolCount": len(callable_tools),
-            "matches": matches,
+            "matches": enriched_matches,
         },
     )

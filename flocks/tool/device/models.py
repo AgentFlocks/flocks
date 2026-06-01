@@ -64,6 +64,26 @@ Storage.register_ddl(
     "ALTER TABLE device_integrations ADD COLUMN group_id TEXT NOT NULL DEFAULT '';"
 )
 
+# Per-device tool enabled/disabled overrides.
+#
+# Each row disables (enabled=0) or re-enables (enabled=1) a specific tool
+# for a specific device instance, independent of the shared global
+# tool_settings overlay and other device instances that share the same
+# storage_key (same plugin version, different names).
+#
+# ON DELETE CASCADE removes all per-device settings automatically when the
+# parent device row is deleted, so no manual cleanup is needed.
+Storage.register_ddl("""
+CREATE TABLE IF NOT EXISTS device_tool_settings (
+    device_id  TEXT NOT NULL REFERENCES device_integrations(id) ON DELETE CASCADE,
+    tool_name  TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (device_id, tool_name)
+);
+CREATE INDEX IF NOT EXISTS idx_dts_device ON device_tool_settings(device_id);
+""")
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models

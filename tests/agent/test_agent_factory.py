@@ -24,6 +24,9 @@ from flocks.agent.agent_factory import (
     scan_and_load,
     inject_dynamic_prompts,
     yaml_to_agent_info,
+    find_yaml_agent,
+    read_yaml_agent,
+    update_yaml_agent,
     delete_yaml_agent,
     _parse_prompt_metadata,
 )
@@ -309,10 +312,10 @@ class TestLoadAgent:
 class TestScanAndLoad:
 
     def test_scans_builtin_agents(self):
-        """Built-in agents directory must yield at least 13 agents."""
+        """Built-in agents directory must yield at least 10 agents."""
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
-        assert len(result) >= 13
+        assert len(result) >= 10
 
     def test_all_builtin_agent_names_present(self):
         """Every agent shipped with the package must be discoverable and marked native.
@@ -324,8 +327,8 @@ class TestScanAndLoad:
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
         expected = [
-            "rex", "hephaestus", "plan", "explore",
-            "oracle", "librarian", "metis", "momus", "multimodal-looker",
+            "rex", "hephaestus", "explore",
+            "oracle", "librarian", "prometheus", "multimodal-looker",
             "self-enhance", "rex-junior",
         ]
         for name in expected:
@@ -473,7 +476,7 @@ class TestInjectDynamicPrompts:
         """Built-in agents with prompt.md should have non-empty prompts."""
         from flocks.agent.registry import Agent
         # Only built-in agents (native=True) — not dependent on local plugin installation
-        for name in ["explore", "oracle", "momus", "metis", "self-enhance", "multimodal-looker"]:
+        for name in ["explore", "oracle", "prometheus", "self-enhance", "multimodal-looker"]:
             agent = await Agent.get(name)
             assert agent is not None, f"Agent '{name}' not found"
             assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
@@ -624,7 +627,7 @@ class TestAgentConfigOverrides:
         from flocks.agent.agent_factory import scan_and_load
         result = scan_and_load()
         # All 13 built-ins should be present without a whitelist
-        assert len(result) >= 13
+        assert len(result) >= 10
 
 
 # ===========================================================================
@@ -776,6 +779,54 @@ class TestProjectLevelAgentScan:
 
         assert "custom-agent" in result
         assert result["custom-agent"].native is False
+
+
+# ===========================================================================
+# Project-level plugin agent CRUD
+# ===========================================================================
+
+class TestProjectLevelYamlCrud:
+    """Project-level plugin agents should be readable and updatable."""
+
+    def _write_project_agent(self, root: Path, name: str) -> Path:
+        agent_dir = root / ".flocks" / "plugins" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        yaml_path = agent_dir / "agent.yaml"
+        yaml_path.write_text(
+            textwrap.dedent(f"""\
+                name: {name}
+                description: Project agent {name}
+                mode: subagent
+                delegatable: true
+            """),
+            encoding="utf-8",
+        )
+        return yaml_path
+
+    def test_find_and_read_project_level_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-editable")
+        monkeypatch.chdir(tmp_path)
+
+        assert find_yaml_agent("proj-editable") == yaml_path
+        raw = read_yaml_agent("proj-editable")
+        assert raw is not None
+        assert raw["name"] == "proj-editable"
+        assert raw["delegatable"] is True
+
+    def test_update_project_level_agent_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-toggle")
+        monkeypatch.chdir(tmp_path)
+
+        result = update_yaml_agent("proj-toggle", {"delegatable": False, "temperature": 0.2})
+
+        assert result is True
+        updated = yaml_path.read_text(encoding="utf-8")
+        assert "delegatable: false" in updated
+        assert "temperature: 0.2" in updated
 
 
 # ===========================================================================
