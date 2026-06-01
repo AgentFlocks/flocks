@@ -310,9 +310,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
       </span>
     );
   } else {
-    summaryBadge = (
-      <span className="text-xs text-gray-400 font-normal">{t('detail.run.kafkaExperimental')}</span>
-    );
+    summaryBadge = null;
   }
 
   useEffect(() => {
@@ -531,9 +529,7 @@ function SyslogSection({ workflowId }: { workflowId: string }) {
       </span>
     );
   } else {
-    summaryBadge = (
-      <span className="text-xs text-gray-400 font-normal">{t('detail.run.syslogExperimental')}</span>
-    );
+    summaryBadge = null;
   }
 
   useEffect(() => {

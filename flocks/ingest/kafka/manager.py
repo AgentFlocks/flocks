@@ -11,8 +11,10 @@ Differences from the syslog manager:
   "connecting/running"; a connection failure (broker unreachable, auth error)
   is surfaced the same way a bind failure is.
 * Backpressure uses a *blocking* ``queue.put`` instead of ``put_nowait``+drop:
-  losing Kafka messages would desync committed offsets, so we let the consumer
-  pause naturally when the worker pool falls behind.
+  this avoids local drops while the worker pool falls behind and lets the
+  consumer pause naturally. Because ``aiokafka`` auto-commits fetched offsets,
+  the current crash semantics are still best-effort / at-most-once rather than
+  fully durable at-least-once delivery.
 * When an output broker/topic is configured, the successful run result is
   produced back to Kafka via a per-workflow ``AIOKafkaProducer``.
 """
@@ -92,6 +94,8 @@ class KafkaManager:
         self._ready: dict[str, asyncio.Event] = {}
         # Per-workflow output producer (only when output is configured)
         self._producers: dict[str, Any] = {}
+        self._producer_brokers: dict[str, str] = {}
+        self._producer_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -122,6 +126,59 @@ class KafkaManager:
         for workflow_id in list(self._tasks.keys()):
             await self.stop_workflow(workflow_id)
 
+    def _producer_lock(self, workflow_id: str) -> asyncio.Lock:
+        lock = self._producer_locks.get(workflow_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._producer_locks[workflow_id] = lock
+        return lock
+
+    async def _drop_output_producer(self, workflow_id: str) -> None:
+        producer = self._producers.pop(workflow_id, None)
+        self._producer_brokers.pop(workflow_id, None)
+        if producer is not None:
+            try:
+                await producer.stop()
+            except Exception:
+                pass
+
+    async def _ensure_output_producer(self, workflow_id: str, broker: str) -> Any:
+        broker = broker.strip()
+        if not broker:
+            return None
+
+        async with self._producer_lock(workflow_id):
+            current = self._producers.get(workflow_id)
+            if current is not None and self._producer_brokers.get(workflow_id) == broker:
+                return current
+
+            await self._drop_output_producer(workflow_id)
+            producer = await self._create_producer(broker)
+            self._producers[workflow_id] = producer
+            self._producer_brokers[workflow_id] = broker
+            return producer
+
+    async def _cleanup_runtime_resources(self, workflow_id: str) -> None:
+        # Cancel all worker pool tasks; pop first so callers observing a stopped
+        # consumer see an empty pool immediately.
+        pool = self._worker_pools.pop(workflow_id, None)
+        if pool:
+            for worker in pool:
+                if not worker.done():
+                    worker.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pool, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+
+        await self._drop_output_producer(workflow_id)
+        self._queues.pop(workflow_id, None)
+        self._abort_events.pop(workflow_id, None)
+        self._ready.pop(workflow_id, None)
+
     def get_consumer_status(self, workflow_id: str) -> Dict[str, Any]:
         """Return a snapshot of the consumer runtime state for ``workflow_id``.
 
@@ -143,7 +200,7 @@ class KafkaManager:
         return status
 
     async def stop_workflow(self, workflow_id: str) -> None:
-        ev = self._abort_events.pop(workflow_id, None)
+        ev = self._abort_events.get(workflow_id)
         if ev is not None:
             ev.set()
         task = self._tasks.pop(workflow_id, None)
@@ -155,29 +212,7 @@ class KafkaManager:
                 pass
             except Exception:
                 pass
-        # Cancel all worker pool tasks; pop first so callers observing a stopped
-        # consumer see an empty pool immediately.
-        pool = self._worker_pools.pop(workflow_id, None)
-        if pool:
-            for w in pool:
-                if not w.done():
-                    w.cancel()
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pool, return_exceptions=True),
-                    timeout=5.0,
-                )
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
-        # Stop the output producer if one was created.
-        producer = self._producers.pop(workflow_id, None)
-        if producer is not None:
-            try:
-                await producer.stop()
-            except Exception:
-                pass
-        self._queues.pop(workflow_id, None)
-        self._ready.pop(workflow_id, None)
+        await self._cleanup_runtime_resources(workflow_id)
         if workflow_id in self._status:
             self._status[workflow_id] = {"state": "stopped", "error": None}
 
@@ -248,13 +283,14 @@ class KafkaManager:
         producer = None
         if output_enabled and output_broker and output_topic:
             try:
-                producer = await self._create_producer(output_broker)
-                self._producers[workflow_id] = producer
+                producer = await self._ensure_output_producer(workflow_id, output_broker)
             except Exception as exc:
                 log.warning(
                     "kafka.producer_start_failed",
                     {"workflow_id": workflow_id, "error": str(exc)},
                 )
+        else:
+            await self._drop_output_producer(workflow_id)
 
         # Fixed worker pool drains the queue (at most _MAX_CONCURRENT_EXECUTIONS
         # concurrent runs).
@@ -293,6 +329,20 @@ class KafkaManager:
                 }
             log.warning("kafka.connect_pending_timeout", {"workflow_id": workflow_id})
 
+        current = self._status.get(workflow_id) or {}
+        if current.get("state") == "failed":
+            task = self._tasks.get(workflow_id)
+            if task is not None and not task.done():
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+            task = self._tasks.get(workflow_id)
+            if task is not None and task.done():
+                self._tasks.pop(workflow_id, None)
+
         log.info("kafka.consumer_scheduled", {"workflow_id": workflow_id})
         return self.get_consumer_status(workflow_id)
 
@@ -326,11 +376,11 @@ class KafkaManager:
         output_broker = str(data.get("outputBroker") or "").strip()
         output_topic = str(data.get("outputTopic") or "").strip()
         if not data.get("outputEnabled") or not output_broker or not output_topic:
+            await self._drop_output_producer(workflow_id)
             return False
 
-        producer = None
         try:
-            producer = await self._create_producer(output_broker)
+            producer = await self._ensure_output_producer(workflow_id, output_broker)
             value = json.dumps(
                 {"workflowId": workflow_id, "executionId": exec_id, "outputs": outputs},
                 default=str,
@@ -343,12 +393,6 @@ class KafkaManager:
                 {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
             )
             return False
-        finally:
-            if producer is not None:
-                try:
-                    await producer.stop()
-                except Exception:
-                    pass
 
     async def _consumer_loop(
         self,
@@ -373,12 +417,16 @@ class KafkaManager:
             }
             ready.set()
             log.error("kafka.import_failed", {"workflow_id": workflow_id, "error": str(exc)})
+            await self._cleanup_runtime_resources(workflow_id)
             return
 
         consumer = AIOKafkaConsumer(
             topic,
             bootstrap_servers=broker,
             group_id=group_id,
+            # Auto-commit advances based on fetched progress, not worker
+            # completion. Backpressure narrows the crash window but current
+            # semantics remain best-effort / at-most-once.
             enable_auto_commit=True,
             auto_offset_reset=auto_offset_reset if auto_offset_reset in ("latest", "earliest") else "latest",
             request_timeout_ms=_REQUEST_TIMEOUT_MS,
@@ -409,6 +457,7 @@ class KafkaManager:
                 await consumer.stop()
             except Exception:
                 pass
+            await self._cleanup_runtime_resources(workflow_id)
             return
 
         self._status[workflow_id] = {
@@ -439,11 +488,15 @@ class KafkaManager:
                 "groupId": group_id,
             }
             log.error("kafka.consumer_error", {"workflow_id": workflow_id, "error": str(exc)})
+            await self._cleanup_runtime_resources(workflow_id)
         finally:
             try:
                 await consumer.stop()
             except Exception:
                 pass
+            current = asyncio.current_task()
+            if self._tasks.get(workflow_id) is current:
+                self._tasks.pop(workflow_id, None)
 
     async def _worker_loop(
         self,

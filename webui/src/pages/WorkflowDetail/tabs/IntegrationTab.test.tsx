@@ -102,6 +102,12 @@ describe('IntegrationTab Kafka config', () => {
     workflowAPI.getSyslogStatus.mockResolvedValue({ data: { state: 'stopped', error: null } });
   });
 
+  it('does not show experimental badges for Kafka and Syslog sections', () => {
+    render(<IntegrationTab workflow={workflow} />);
+
+    expect(screen.queryByText('实验性')).not.toBeInTheDocument();
+  });
+
   it('saves output-only Kafka config without enabling consumer', async () => {
     const user = userEvent.setup();
     render(<IntegrationTab workflow={workflow} />);

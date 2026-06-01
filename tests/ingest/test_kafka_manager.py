@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -166,6 +168,7 @@ async def test_publish_execution_result_allows_output_only_config(monkeypatch: p
             self.stopped = True
 
     producer = _Producer()
+    create_calls: list[str] = []
 
     async def _fake_read(key):  # noqa: ANN001
         return {
@@ -178,6 +181,7 @@ async def test_publish_execution_result_allows_output_only_config(monkeypatch: p
         }
 
     async def _fake_create_producer(broker: str):  # noqa: ANN001
+        create_calls.append(broker)
         assert broker == "localhost:9092"
         return producer
 
@@ -185,9 +189,12 @@ async def test_publish_execution_result_allows_output_only_config(monkeypatch: p
     monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
 
     published = await manager.publish_execution_result("wf-output", "exec-1", {"ok": True})
+    published_again = await manager.publish_execution_result("wf-output", "exec-2", {"ok": "again"})
 
     assert published is True
-    assert len(producer.sent) == 1
+    assert published_again is True
+    assert create_calls == ["localhost:9092"]
+    assert len(producer.sent) == 2
     topic, value = producer.sent[0]
     assert topic == "workflow-output"
     assert json.loads(value.decode("utf-8")) == {
@@ -195,6 +202,9 @@ async def test_publish_execution_result_allows_output_only_config(monkeypatch: p
         "executionId": "exec-1",
         "outputs": {"ok": True},
     }
+    assert producer.stopped is False
+
+    await manager.stop_workflow("wf-output")
     assert producer.stopped is True
 
 
@@ -224,6 +234,71 @@ async def test_publish_execution_result_skips_when_output_disabled(monkeypatch: 
 
     assert published is False
     assert create_producer_called is False
+
+
+@pytest.mark.asyncio
+async def test_restart_workflow_cleans_resources_after_connect_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed consumer start must not leave workers or producers behind."""
+
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "wf-connect-failed"
+
+    async def _fake_read(key):  # noqa: ANN001
+        return {
+            "enabled": True,
+            "inputBroker": "localhost:9092",
+            "inputTopic": "workflow-input",
+            "inputGroupId": "wf-group",
+            "inputKey": "kafka_message",
+            "outputEnabled": True,
+            "outputBroker": "localhost:9092",
+            "outputTopic": "workflow-output",
+        }
+
+    class _Producer:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    class _Consumer:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            self.stopped = False
+
+        async def start(self) -> None:
+            raise RuntimeError("broker unreachable")
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    producer = _Producer()
+
+    async def _fake_create_producer(broker: str):  # noqa: ANN001
+        assert broker == "localhost:9092"
+        return producer
+
+    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
+    monkeypatch.setattr(
+        kafka_manager,
+        "read_workflow_from_fs",
+        lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
+    )
+    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
+    monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
+
+    status = await manager.restart_workflow(workflow_id)
+
+    assert status["state"] == "failed"
+    assert status["error"] == "broker unreachable"
+    assert workflow_id not in manager._tasks
+    assert workflow_id not in manager._worker_pools
+    assert workflow_id not in manager._queues
+    assert workflow_id not in manager._abort_events
+    assert workflow_id not in manager._producers
+    assert producer.stopped is True
 
 
 def test_decode_message_variants() -> None:
