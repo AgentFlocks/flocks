@@ -2,6 +2,7 @@
   "openai-compatible": {
     "name": "OpenAI Compatible",
     "description": "Any OpenAI-compatible API endpoint (private deployments, proxies, etc.)",
+    "description_cn": "任意兼容 OpenAI API 的服务端点（私有部署、代理网关、自建服务等）。",
     "npm": "@ai-sdk/openai-compatible",
     "default_base_url": null,
     "allow_multiple": true,

@@ -56,6 +56,21 @@ function providerAllowsEmptyApiKey(providerId: string): boolean {
   );
 }
 
+function isCatalogBaseUrlRequired(providerId: string): boolean {
+  return providerId === 'openai-compatible';
+}
+
+function getCatalogProviderDescription(
+  provider: Pick<CatalogProvider, 'description' | 'description_cn'>,
+  language: string,
+): string {
+  const chineseDescription = provider.description_cn?.trim() || '';
+  if (language.toLowerCase().startsWith('zh') && chineseDescription) {
+    return chineseDescription;
+  }
+  return provider.description?.trim() || chineseDescription;
+}
+
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
 
 function isAzureProviderId(providerId: string): boolean {
@@ -1077,7 +1092,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
   onAdded: (addedProviderId?: string) => void;
 }) {
   const toast = useToast();
-  const { t } = useTranslation('model');
+  const { t, i18n } = useTranslation('model');
 
   // Catalog data
   const [catalog, setCatalog] = useState<CatalogProvider[]>([]);
@@ -1149,7 +1164,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     const q = dropdownSearch.toLowerCase();
     return availableProviders.filter(p =>
       p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) ||
-      (p.description || '').toLowerCase().includes(q)
+      (p.description || '').toLowerCase().includes(q) ||
+      (p.description_cn || '').toLowerCase().includes(q)
     );
   }, [availableProviders, dropdownSearch]);
 
@@ -1178,7 +1194,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       setDisplayName(provider.name);
       setBaseUrl(provider.default_base_url || '');
       setApiKey('');
-      setDescription(provider.description || '');
+      setDescription(getCatalogProviderDescription(provider, i18n.language));
       setSelectedModelIds(new Set(provider.models.map(m => m.id)));
       setProviderName('');
       setAzureDeploymentName('');
@@ -1241,6 +1257,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     if (!selectedCatalogId) { toast.warning('Please select a Provider'); return; }
     if (selectedCatalogId === 'openai-compatible' && !providerName.trim()) {
       toast.warning('Please enter Provider Name');
+      return;
+    }
+    if (isCatalogBaseUrlRequired(selectedCatalogId) && !baseUrl.trim()) {
+      toast.warning(t('form.baseUrlRequired'));
       return;
     }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
@@ -1356,7 +1376,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setModelTesting(false);
   };
 
-  const canSave = !!selectedCatalogId && (selectedCatalogId !== 'openai-compatible' || !!providerName.trim());
+  const canSave = !!selectedCatalogId && (
+    selectedCatalogId !== 'openai-compatible' ||
+    (!!providerName.trim() && !!baseUrl.trim())
+  );
   const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible';
 
   // Dynamic EntitySheet props based on wizard step
@@ -1518,6 +1541,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                             ) : (
                               filteredDropdownItems.map(p => {
                                 const alreadyAdded = connectedSet.has(p.id) && !p.allow_multiple;
+                                const providerDescription = getCatalogProviderDescription(p, i18n.language);
                                 return (
                                   <button
                                     key={p.id}
@@ -1537,7 +1561,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                           </span>
                                         )}
                                       </div>
-                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{p.description}</p>
+                                      <p className="text-xs text-gray-500 mt-0.5 truncate">{providerDescription}</p>
                                     </div>
                                     <span className="text-xs text-gray-400 flex-shrink-0">{t('status.models', { count: p.model_count })}</span>
                                     {selectedCatalogId === p.id && <Check className="w-4 h-4 text-slate-700 flex-shrink-0" />}
@@ -1576,7 +1600,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       <div className="col-span-2">
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           Base URL
-                          <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          {isCatalogBaseUrlRequired(selectedCatalogId) ? (
+                            <span className="text-slate-500 ml-1">*</span>
+                          ) : (
+                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          )}
                         </label>
                         <input
                           type="text"
