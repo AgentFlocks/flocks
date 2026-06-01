@@ -92,11 +92,11 @@ print(page_info())
 '
 ```
 
-3. 执行动作并验证。能稳定定位 DOM 时，优先用 `js(...)`；必须操作可见但 DOM 难以稳定定位的控件时，再使用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
+3. 执行动作并验证。能稳定定位 DOM 时，**首选 `click(selector)`**（自动 scroll-into-view、`elementFromPoint` 遮挡检查、DPR 修正、pointer+mouse+click 完整事件链，React/Vue 组件库也能正确响应）；退路是 `js(...)` 自定义逻辑；最后才用 `click_at_xy(...)`、`type_text(...)`、`press_key(...)`：
 
 ```bash
 flocks browser -c '
-js("document.querySelector(\"button[type=submit]\")?.click()")
+click("button[type=submit]")
 wait(0.5)
 print(page_info())
 '
@@ -141,9 +141,22 @@ print(js("document.body.innerText.slice(0, 2000)"))
 
 1. 先用 `page_info()` 看 URL、标题、滚动位置、页面尺寸，以及是否被原生对话框阻塞
 2. 再用 `js(...)` 读取文本、DOM 结构、元素状态、业务字段
-3. 能稳定定位 DOM 时，优先直接在页面内执行 JS 或 raw CDP
-4. 只有 DOM 难以稳定定位，或需要操作 compositor 级控件时，才退到坐标点击
-5. iframe / 特殊 target 场景，再考虑 `iframe_target(...)` 配合 `js(..., target_id=...)`
+3. **稳定点击首选 `click(selector)`**：scroll-into-view + `elementFromPoint` 遮挡校验 + DPR 换算 + 完整 `pointer* + mouse* + click` 事件链
+4. 能稳定定位 DOM 时，优先直接在页面内执行 JS 或 raw CDP
+5. 只有 DOM 难以稳定定位，或需要操作 compositor 级控件时，才退到坐标点击
+6. iframe / 特殊 target 场景，再考虑 `iframe_target(...)` 配合 `js(..., target_id=...)`
+
+## 稳定点击（首选 `click(selector)`）
+
+`click(selector)` 是 CDP 直连模式下处理大多数点击场景的主路径：
+
+```python
+click("button.ant-btn-primary")                            # CSS selector
+click("nav#menu li:nth-child(3) a")                        # 复合选择器
+click("'#login-submit'", frame=iframe_target("login"))     # iframe 内点击
+```
+
+内部依次完成：定位元素 → `scrollIntoView` → `getBoundingClientRect` 读物理像素坐标 → `elementFromPoint` 校验未被遮挡 → `Input.dispatchMouseEvent type=mouseMoved` 预热 → 在元素上派发 `pointerover / pointerenter / pointermove / pointerdown / mousedown / pointerup / mouseup / click` 完整事件链。`click(selector)` 不可用或命中失败时会直接抛错，不会静默吞错。
 
 能稳定定位 DOM 时，优先通过页面内 JS 或 selector 相关能力操作；需要穿过 iframe、shadow DOM、cross-origin 或自定义控件时，再使用 compositor 级坐标点击：
 

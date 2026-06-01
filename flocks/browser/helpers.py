@@ -10,6 +10,7 @@ import math
 import os
 import time
 import urllib.request
+import warnings
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -502,7 +503,67 @@ def summarize_state(path: str | Path) -> dict[str, Any]:
 _debug_click_counter = 0
 
 
+def click(selector: str, *, frame: str | None = None) -> None:
+    """Click a DOM element resolved by ``selector``.
+
+    Scrolls the element into view, verifies the centre point is not occluded
+    via ``elementFromPoint``, applies devicePixelRatio, and dispatches the
+    full pointer + mouse + click event chain so React/Vue component
+    libraries (Ant Design, Material UI, Element Plus, ...) treat the click
+    as a real user gesture. Pass an iframe CDP targetId via ``frame``.
+    """
+    sel = json.dumps(selector)
+    rect = js(
+        f"(()=>{{const e=document.querySelector({sel});"
+        f"if(!e)return null;e.scrollIntoView({{block:'center',inline:'center'}});"
+        f"const r=e.getBoundingClientRect();return {{x:r.x,y:r.y,w:r.width,h:r.height}};}})()",
+        target_id=frame,
+    )
+    if not rect or not rect.get("w") or not rect.get("h"):
+        raise RuntimeError(f"click: element not visible or not found: {selector}")
+    cx_css = rect["x"] + rect["w"] / 2
+    cy_css = rect["y"] + rect["h"] / 2
+    dpr = js("window.devicePixelRatio") or 1
+    cx_px = cx_css * dpr
+    cy_px = cy_css * dpr
+    hit = js(
+        f"document.elementFromPoint({cx_css}, {cy_css})?.closest({sel}) !== null",
+        target_id=frame,
+    )
+    if not hit:
+        raise RuntimeError(
+            f"click: {selector} is occluded at viewport centre; elementFromPoint did not match"
+        )
+    cdp("Input.dispatchMouseEvent", type="mouseMoved", x=cx_px, y=cy_px)
+    js(
+        f"(()=>{{const e=document.querySelector({sel});"
+        f"const r=e.getBoundingClientRect();"
+        f"const base={{bubbles:true,cancelable:true,"
+        f"clientX:r.x+r.width/2,clientY:r.y+r.height/2,"
+        f"pointerType:'mouse',isPrimary:true,button:0,view:window}};"
+        f"e.dispatchEvent(new PointerEvent('pointerover',{{...base,buttons:0}}));"
+        f"e.dispatchEvent(new PointerEvent('pointerenter',{{...base,buttons:0}}));"
+        f"e.dispatchEvent(new PointerEvent('pointermove',{{...base,buttons:0}}));"
+        f"e.dispatchEvent(new PointerEvent('pointerdown',{{...base,buttons:1}}));"
+        f"e.dispatchEvent(new MouseEvent('mousedown',{{...base,buttons:1}}));"
+        f"e.dispatchEvent(new PointerEvent('pointerup',{{...base,buttons:0}}));"
+        f"e.dispatchEvent(new MouseEvent('mouseup',{{...base,buttons:0}}));"
+        f"e.dispatchEvent(new MouseEvent('click',{{...base,buttons:0}}));"
+        f"return true;}})()",
+        target_id=frame,
+    )
+
+
 def click_at_xy(x: int | float, y: int | float, button: str = "left", clicks: int = 1) -> None:
+    """Low-level coordinate click. Prefer :func:`click` for DOM elements."""
+    warnings.warn(
+        "click_at_xy is a low-level coordinate helper and only sends "
+        "mousePressed/mouseReleased. For React/Vue component libraries, "
+        "use click(selector) which handles DPR, scroll-into-view, occlusion "
+        "checks, and a full pointer event chain.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     if os.environ.get("BH_DEBUG_CLICKS"):
         global _debug_click_counter
         try:

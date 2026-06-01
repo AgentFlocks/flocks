@@ -344,17 +344,55 @@ class StreamProcessor:
         if event.id in self.reasoning_parts:
             part = self.reasoning_parts[event.id]
             part.text = part.text.rstrip()
-            
+
             if event.metadata:
                 self._merge_reasoning_metadata(part, event.metadata)
-            
+
+            # Some reasoning models (e.g. MiniMax-M3) embed `<tool_call>...</tool_call>`
+            # or `<minimax:tool_call>` XML inside their reasoning text instead of
+            # using the native API tool-call channel. Without intercepting these
+            # the model writes a "plan" in thinking, never actually calls the tool,
+            # and loops on the same plan next turn. We extract them here so the
+            # same dispatch path used for inline text tool-calls is reused, and we
+            # strip the XML from the stored reasoning so it does not get replayed
+            # back to the model on the next turn.
+            cleaned_reasoning, reasoning_xml_calls = self._parse_xml_text_tool_calls(part.text)
+            _, reasoning_json_calls = self._parse_json_text_tool_calls(cleaned_reasoning)
+            reasoning_text_tool_calls = reasoning_xml_calls + reasoning_json_calls
+            if reasoning_text_tool_calls:
+                cleaned_reasoning = cleaned_reasoning.rstrip()
+                if part.text != cleaned_reasoning:
+                    part.text = cleaned_reasoning
+                log.warn("stream.reasoning_text_tool_calls_detected", {
+                    "count": len(reasoning_text_tool_calls),
+                    "names": [tc["name"] for tc in reasoning_text_tool_calls],
+                    "session_id": self.session_id,
+                })
+                dispatched = 0
+                for tc in reasoning_text_tool_calls:
+                    if self._stop_tool_processing:
+                        # Doom-loop guard already tripped: do not re-execute the
+                        # same plan, and do not flip _text_tool_calls_executed,
+                        # otherwise the finish_reason override at process_event
+                        # would turn "stop" into "tool-calls" for an empty
+                        # execution plan and re-feed the loop next turn.
+                        continue
+                    await self._handle_tool_call(ToolCallEvent(
+                        tool_call_id=tc["id"],
+                        tool_name=tc["name"],
+                        input=tc["input"],
+                    ))
+                    dispatched += 1
+                if dispatched > 0:
+                    self._text_tool_calls_executed = True
+
             # Update time
             if part.time:
                 part.time.end = int(datetime.now().timestamp() * 1000)
-            
+
             # Store the completed reasoning part to database
             await Message.store_part(self.session_id, self.assistant_message.id, part)
-            
+
             # Publish final reasoning part (matches Flocks Session.updatePart)
             if self.event_publish_callback:
                 await self.event_publish_callback("message.part.updated", {
@@ -367,12 +405,12 @@ class StreamProcessor:
                         "time": {"start": part.time.start, "end": part.time.end},
                     }
                 })
-            
+
             log.info("stream.reasoning.end", {
                 "reasoning_id": event.id,
                 "length": len(part.text),
             })
-            
+
             # Remove from active tracking
             del self.reasoning_parts[event.id]
     
@@ -1268,11 +1306,18 @@ class StreamProcessor:
     
     def _parse_xml_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
         """
-        Detect and extract <tool_use> XML blocks from text content.
+        Detect and extract XML tool-call blocks from text or reasoning content.
 
-        Supports two body formats inside <tool_use>...</tool_use>:
-          - JSON:  {"name": "...", "input": {...}}  (various key aliases)
-          - XML:   <tool_name>...</tool_name> <parameters>...</parameters>
+        Recognized outer block tags (all may be embedded in reasoning or visible text):
+          - <tool_use>...</tool_use>                 (Anthropic-style, body = JSON or <tool_name>+<parameters>)
+          - <minimax:tool_call>...</minimax:tool_call>  (MiniMax prompt-taught format)
+          - <tool_call>...</tool_call>                  (MiniMax-M3 actual output, Hermes/Qwen style)
+
+        Inside `<minimax:tool_call>` and `<tool_call>` blocks, the body uses:
+          <invoke name="tool_name">
+            <parameter name="param_name">value</parameter>
+            ...
+          </invoke>
 
         Returns:
             (cleaned_text, tool_calls)
@@ -1282,6 +1327,10 @@ class StreamProcessor:
         tool_use_re = re.compile(r'<tool_use>(.*?)</tool_use>', re.DOTALL)
         minimax_tool_call_re = re.compile(
             r'<minimax:tool_call>(.*?)</minimax:tool_call>',
+            re.DOTALL,
+        )
+        tool_call_re = re.compile(
+            r'<tool_call>(.*?)</tool_call>',
             re.DOTALL,
         )
         tool_result_re = re.compile(r'<tool_result>.*?</tool_result>', re.DOTALL)
@@ -1333,12 +1382,42 @@ class StreamProcessor:
                     "input": parsed["input"],
                 })
 
+        # `<minimax:tool_call>` and `<tool_call>` share the same body schema
+        # (`<invoke name=...><parameter name=...>...</parameter></invoke>`),
+        # so we delegate to a single helper to keep the two parsers in lockstep.
         for match in minimax_tool_call_re.finditer(text):
-            body = match.group(1).strip()
-            invoke_match = re.search(r'<invoke\s+name="([^"]+)">(.*?)</invoke>', body, re.DOTALL)
-            if not invoke_match:
-                continue
+            tool_calls.extend(self._extract_invoke_parameter_calls(match.group(1).strip()))
+        for match in tool_call_re.finditer(text):
+            tool_calls.extend(self._extract_invoke_parameter_calls(match.group(1).strip()))
 
+        # Strip recognized XML tool-call blocks from text (including any trailing whitespace)
+        cleaned = tool_use_re.sub("", text)
+        cleaned = minimax_tool_call_re.sub("", cleaned)
+        cleaned = tool_call_re.sub("", cleaned)
+        cleaned = tool_result_re.sub("", cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        return cleaned, tool_calls
+
+    @staticmethod
+    def _extract_invoke_parameter_calls(body: str) -> list[dict]:
+        """
+        Parse the body of a `<minimax:tool_call>` or `<tool_call>` block.
+
+        Body schema (MiniMax prompt + Hermes/Qwen compatible):
+            <invoke name="tool_name">
+                <parameter name="param_name">value</parameter>
+                ...
+            </invoke>
+
+        Returns a list of `{id, name, input}` dicts (one per `<invoke>` match).
+        """
+        tool_calls: list[dict] = []
+        for invoke_match in re.finditer(
+            r'<invoke\s+name="([^"]+)">(.*?)</invoke>',
+            body,
+            re.DOTALL,
+        ):
             name = invoke_match.group(1).strip()
             invoke_body = invoke_match.group(2)
             raw_input: dict[str, object] = {}
@@ -1366,14 +1445,7 @@ class StreamProcessor:
                     "name": name,
                     "input": raw_input,
                 })
-
-        # Strip <tool_use> and <tool_result> blocks from visible text
-        cleaned = tool_use_re.sub("", text)
-        cleaned = minimax_tool_call_re.sub("", cleaned)
-        cleaned = tool_result_re.sub("", cleaned)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
-
-        return cleaned, tool_calls
+        return tool_calls
 
     def _parse_json_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
         """

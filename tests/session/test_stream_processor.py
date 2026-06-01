@@ -363,6 +363,206 @@ class TestReasoningAccumulation:
         await proc.process_event(ReasoningStartEvent(id="r5"))
         assert any(e[0] == "message.part.updated" for e in events_published)
 
+    @pytest.mark.asyncio
+    async def test_reasoning_end_extracts_tool_call_block(self):
+        """MiniMax-M3 emits <tool_call> XML inside its reasoning text instead of
+        using the native API tool-call channel. The stream processor must
+        extract these so they actually execute, otherwise the model loops on
+        the same plan in every turn (observed in trace ses_17c6e42a8… from
+        msg_e83b3fc62 onwards)."""
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r6"))
+            await proc.process_event(ReasoningDeltaEvent(id="r6", text=(
+                "\n让我重新检测 + 启动。\n"
+                "<tool_call>\n"
+                "<invoke name=\"bash\">\n"
+                "<parameter name=\"command\">pgrep -f \"Google Chrome\" 2>&1 | head -5; echo \"ports:\"; lsof -nP -iTCP:9222 -sTCP:LISTEN 2>&1 | head -3</parameter>\n"
+                "</invoke>\n"
+                "</tool_call>"
+            )))
+            await proc.process_event(ReasoningEndEvent(id="r6"))
+
+        mock_handle_tool_call.assert_awaited_once()
+        tool_event = mock_handle_tool_call.await_args.args[0]
+        assert tool_event.tool_name == "bash"
+        assert tool_event.input == {
+            "command": "pgrep -f \"Google Chrome\" 2>&1 | head -5; echo \"ports:\"; lsof -nP -iTCP:9222 -sTCP:LISTEN 2>&1 | head -3",
+        }
+        assert proc._text_tool_calls_executed is True
+        stored_part = proc.reasoning_parts  # already deleted; check via stored text below
+        # part is gone from active tracking after _handle_reasoning_end
+        assert "r6" not in proc.reasoning_parts
+
+    @pytest.mark.asyncio
+    async def test_reasoning_end_extracts_minimax_tool_call_block(self):
+        """The prompt-taught <minimax:tool_call> format must also be recognized
+        when it appears in reasoning (not just visible text)."""
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r7"))
+            await proc.process_event(ReasoningDeltaEvent(id="r7", text=(
+                "\n从 skill 文档中我看到 browser-use 这个 skill 提供了多种模式：\n"
+                "<minimax:tool_call>\n"
+                "<invoke name=\"onesec_ops\">\n"
+                "<parameter name=\"action\">ops_query_audit_log</parameter>\n"
+                "<parameter name=\"page_size\">5</parameter>\n"
+                "</invoke>\n"
+                "</minimax:tool_call>\n"
+            )))
+            await proc.process_event(ReasoningEndEvent(id="r7"))
+
+        mock_handle_tool_call.assert_awaited_once()
+        tool_event = mock_handle_tool_call.await_args.args[0]
+        assert tool_event.tool_name == "onesec_ops"
+        assert tool_event.input == {"action": "ops_query_audit_log", "page_size": 5}
+        assert proc._text_tool_calls_executed is True
+
+    @pytest.mark.asyncio
+    async def test_reasoning_end_strips_tool_call_xml_from_stored_text(self):
+        """The stored reasoning part must NOT contain the raw <tool_call> XML,
+        otherwise prepare_reasoning_for_replay will re-feed it to the model on
+        the next turn and the model will keep repeating the same plan."""
+        proc = _make_processor()
+        stored_parts: list = []
+
+        async def fake_store_part(_session_id, _message_id, part):
+            for idx, existing in enumerate(stored_parts):
+                if existing.id == part.id:
+                    stored_parts[idx] = part
+                    break
+            else:
+                stored_parts.append(part)
+            return part
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(side_effect=fake_store_part),
+            ),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()),
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r8"))
+            await proc.process_event(ReasoningDeltaEvent(id="r8", text=(
+                "\n让我重新检测 + 启动。\n"
+                "<tool_call>\n"
+                "<invoke name=\"bash\">\n"
+                "<parameter name=\"command\">echo hi</parameter>\n"
+                "</invoke>\n"
+                "</tool_call>\n"
+            )))
+            await proc.process_event(ReasoningEndEvent(id="r8"))
+
+        assert len(stored_parts) == 1
+        stored = stored_parts[0]
+        assert "<tool_call>" not in stored.text
+        assert "</invoke>" not in stored.text
+        assert "让我重新检测 + 启动" in stored.text
+        assert "echo hi" not in stored.text
+
+    @pytest.mark.asyncio
+    async def test_reasoning_end_no_tool_call_block_unchanged(self):
+        """Plain reasoning (no embedded tool call) must be stored verbatim."""
+        proc = _make_processor()
+        stored_parts: list = []
+
+        async def fake_store_part(_session_id, _message_id, part):
+            stored_parts.append(part)
+            return part
+
+        plain_reasoning = "\n让我看完 helpers.py 的剩余部分。\n"
+
+        with patch(
+            "flocks.session.streaming.stream_processor.Message.store_part",
+            new=AsyncMock(side_effect=fake_store_part),
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r9"))
+            await proc.process_event(ReasoningDeltaEvent(id="r9", text=plain_reasoning))
+            await proc.process_event(ReasoningEndEvent(id="r9"))
+
+        assert len(stored_parts) == 1
+        # The processor rstrip()s trailing whitespace before storage, so the
+        # stored text equals plain_reasoning without the trailing newline.
+        assert stored_parts[0].text == plain_reasoning.rstrip()
+        assert proc._text_tool_calls_executed is False
+
+    @pytest.mark.asyncio
+    async def test_reasoning_end_multiple_tool_call_blocks_all_extracted(self):
+        """When reasoning contains multiple <tool_call> blocks, all must be
+        extracted (one tool dispatch per call) and stripped from the stored
+        text."""
+        proc = _make_processor()
+        stored_parts: list = []
+
+        async def fake_store_part(_session_id, _message_id, part):
+            stored_parts.append(part)
+            return part
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(side_effect=fake_store_part),
+            ),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r10"))
+            await proc.process_event(ReasoningDeltaEvent(id="r10", text=(
+                "\n先检测端口再启动。\n"
+                "<tool_call>\n"
+                "<invoke name=\"bash\">\n"
+                "<parameter name=\"command\">lsof -nP -iTCP:9222 -sTCP:LISTEN 2>&1 | head -3</parameter>\n"
+                "</invoke>\n"
+                "</tool_call>\n"
+                "<tool_call>\n"
+                "<invoke name=\"read\">\n"
+                "<parameter name=\"filePath\">/tmp/x</parameter>\n"
+                "<parameter name=\"limit\">10</parameter>\n"
+                "</invoke>\n"
+                "</tool_call>\n"
+            )))
+            await proc.process_event(ReasoningEndEvent(id="r10"))
+
+        assert mock_handle_tool_call.await_count == 2
+        dispatched = [call.args[0] for call in mock_handle_tool_call.await_args_list]
+        assert [d.tool_name for d in dispatched] == ["bash", "read"]
+        assert stored_parts[0].text == "先检测端口再启动。"
+        assert proc._text_tool_calls_executed is True
+
+    @pytest.mark.asyncio
+    async def test_reasoning_end_respects_doom_loop_guard(self):
+        """If _stop_tool_processing is already True (doom loop from prior
+        turns), the extracted tool calls must NOT be dispatched — otherwise we
+        re-execute the same plan the model is already looping on."""
+        proc = _make_processor()
+        proc._stop_tool_processing = True
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(ReasoningStartEvent(id="r11"))
+            await proc.process_event(ReasoningDeltaEvent(id="r11", text=(
+                "\n<tool_call>\n"
+                "<invoke name=\"bash\">\n"
+                "<parameter name=\"command\">echo hi</parameter>\n"
+                "</invoke>\n"
+                "</tool_call>\n"
+            )))
+            await proc.process_event(ReasoningEndEvent(id="r11"))
+
+        mock_handle_tool_call.assert_not_awaited()
+        # _text_tool_calls_executed should NOT be set when dispatch was skipped,
+        # otherwise the finish_reason override at process_event will incorrectly
+        # turn "stop" into "tool-calls" for an empty execution plan.
+        assert proc._text_tool_calls_executed is False
 
 # ---------------------------------------------------------------------------
 # ToolInputStart
