@@ -412,6 +412,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("syslog.manager.start_failed", {"error": str(e)})
 
+    # Start Kafka consumers for workflows with kafka input enabled.
+    # Mirrors the syslog startup: a short delayed background task keeps the main
+    # startup path unblocked and avoids a crash-restart loop if a broker is down.
+    try:
+        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
+
+        async def _delayed_kafka_start() -> None:
+            await asyncio.sleep(3)
+            try:
+                await default_kafka_manager.start_all()
+                log.info("kafka.manager.started")
+            except Exception as exc:
+                log.warning("kafka.manager.start_failed", {"error": str(exc)})
+
+        _schedule_startup_phase(app, log, "kafka.manager.start", _delayed_kafka_start)
+    except Exception as e:
+        log.warning("kafka.manager.start_failed", {"error": str(e)})
+
     try:
         from flocks.updater.updater import recover_upgrade_state
 
@@ -483,6 +501,15 @@ async def lifespan(app: FastAPI):
         log.info("syslog.manager.stopped")
     except Exception as e:
         log.warning("syslog.manager.stop_failed", {"error": str(e)})
+
+    # Stop Kafka consumers
+    try:
+        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
+
+        await default_kafka_manager.stop_all()
+        log.info("kafka.manager.stopped")
+    except Exception as e:
+        log.warning("kafka.manager.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:

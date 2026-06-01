@@ -9,7 +9,6 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
 import RightPanel from './RightPanel';
-import { getLatestStoredSessionId } from './sessionStorage';
 import { extractErrorMessage } from '@/utils/error';
 import NodeInfoPanel from './NodeInfoPanel';
 
@@ -23,18 +22,6 @@ function getInitialPanelWidth() {
   const sidebarWidth = window.innerWidth >= 1024 ? 256 : 0;
   const available = window.innerWidth - sidebarWidth;
   return Math.max(PANEL_MIN, Math.round(available * PANEL_RATIO));
-}
-
-export function buildSessionsPath(sessionId: string | null) {
-  return sessionId
-    ? `/sessions?session=${encodeURIComponent(sessionId)}`
-    : '/sessions';
-}
-
-export function resolveWorkflowSessionId(chatSessionId: string | null, workflowId?: string) {
-  if (chatSessionId) return chatSessionId;
-  if (!workflowId) return null;
-  return getLatestStoredSessionId(workflowId);
 }
 
 export default function WorkflowDetail() {
@@ -56,7 +43,6 @@ export default function WorkflowDetail() {
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
-  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
   const [showMdHint, setShowMdHint] = useState(false);
@@ -194,11 +180,6 @@ export default function WorkflowDetail() {
     a.click();
     URL.revokeObjectURL(url);
   }, [workflow]);
-
-  const handleViewSessions = useCallback(() => {
-    const sessionId = resolveWorkflowSessionId(chatSessionId, workflow?.id);
-    navigate(buildSessionsPath(sessionId));
-  }, [chatSessionId, navigate, workflow]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {
@@ -424,10 +405,8 @@ export default function WorkflowDetail() {
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}
           onFirstMessageSent={handleFirstMessageSent}
-          onSessionChange={setChatSessionId}
           selectedNode={drawerNode}
           onDeselectNode={() => setDrawerNode(null)}
-          onViewSessions={handleViewSessions}
           onDelete={handleDelete}
         />
       </div>

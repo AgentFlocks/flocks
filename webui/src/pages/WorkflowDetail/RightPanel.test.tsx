@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import RightPanel from './RightPanel';
@@ -15,7 +15,6 @@ vi.mock('react-i18next', () => ({
         'detail.rightPanel.tabIntegration': '集成',
         'detail.rightPanel.deleteWorkflow': '删除工作流',
         'detail.rightPanel.deleting': '删除中...',
-        'detail.rightPanel.viewSessions': '前往会话列表查看',
         'detail.rightPanel.deleteConfirmTitle': '删除工作流',
         'detail.rightPanel.deleteConfirmDesc': '确认删除',
         'detail.rightPanel.deleteConfirmText': '确认删除',
@@ -71,20 +70,15 @@ function makeWorkflow() {
 }
 
 describe('RightPanel', () => {
-  it('渲染前往会话列表按钮并触发回调', () => {
-    const onViewSessions = vi.fn();
-
+  it('不再渲染前往会话列表按钮', () => {
     render(
       <RightPanel
         workflow={makeWorkflow()}
         open
-        onViewSessions={onViewSessions}
         onDelete={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: '前往会话列表查看' }));
-
-    expect(onViewSessions).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: '前往会话列表查看' })).not.toBeInTheDocument();
   });
 });
