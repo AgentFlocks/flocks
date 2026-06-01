@@ -56,6 +56,10 @@ function providerAllowsEmptyApiKey(providerId: string): boolean {
   );
 }
 
+function isCatalogBaseUrlRequired(providerId: string): boolean {
+  return providerId === 'openai-compatible';
+}
+
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
 
 function isAzureProviderId(providerId: string): boolean {
@@ -1243,6 +1247,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       toast.warning('Please enter Provider Name');
       return;
     }
+    if (isCatalogBaseUrlRequired(selectedCatalogId) && !baseUrl.trim()) {
+      toast.warning(t('form.baseUrlRequired'));
+      return;
+    }
     if (!apiKey.trim() && !providerAllowsEmptyApiKey(selectedCatalogId)) {
       toast.warning('Please enter API Key');
       return;
@@ -1356,7 +1364,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
     setModelTesting(false);
   };
 
-  const canSave = !!selectedCatalogId && (selectedCatalogId !== 'openai-compatible' || !!providerName.trim());
+  const canSave = !!selectedCatalogId && (
+    selectedCatalogId !== 'openai-compatible' ||
+    (!!providerName.trim() && !!baseUrl.trim())
+  );
   const canTest = !!selectedCatalogId && selectedCatalogId !== 'openai-compatible';
 
   // Dynamic EntitySheet props based on wizard step
@@ -1576,7 +1587,11 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                       <div className="col-span-2">
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                           Base URL
-                          <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          {isCatalogBaseUrlRequired(selectedCatalogId) ? (
+                            <span className="text-slate-500 ml-1">*</span>
+                          ) : (
+                            <span className="text-gray-400 font-normal ml-1">{t('form.baseUrlOptional')}</span>
+                          )}
                         </label>
                         <input
                           type="text"

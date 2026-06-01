@@ -75,6 +75,7 @@
     "providerType": "Provider Type",
     "baseUrl": "Base URL",
     "baseUrlOptional": "(optional, leave empty for default)",
+    "baseUrlRequired": "Please enter Base URL",
     "apiKey": "API Key",
     "ollamaNoKey": "(Ollama usually doesn't need this)",
     "apiKeyOptional": "(optional, leave empty for no-auth gateways)",
