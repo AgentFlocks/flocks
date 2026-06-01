@@ -430,6 +430,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("kafka.manager.start_failed", {"error": str(e)})
 
+    # Start workflow pollers for workflows with poller enabled.
+    # Mirrors Kafka/syslog startup so persistent slow-path workflows resume
+    # automatically without delaying server readiness.
+    try:
+        from flocks.workflow.poller_manager import default_manager as default_poller_manager
+
+        async def _delayed_poller_start() -> None:
+            await asyncio.sleep(3)
+            try:
+                await default_poller_manager.start_all()
+                log.info("workflow.poller.started")
+            except Exception as exc:
+                log.warning("workflow.poller.start_failed", {"error": str(exc)})
+
+        _schedule_startup_phase(app, log, "workflow.poller.start", _delayed_poller_start)
+    except Exception as e:
+        log.warning("workflow.poller.start_failed", {"error": str(e)})
+
     try:
         from flocks.updater.updater import recover_upgrade_state
 
