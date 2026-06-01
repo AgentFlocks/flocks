@@ -1,0 +1,45 @@
+name: 360_waf_file
+description: >
+  360 WAF v5.5 文件操作工具。用于调用已收录的上传、文件请求和下载接口；
+  上传和删除类操作需要 confirm=dangerous，升级、配置导入和临时文件删除相关接口会直接拒绝。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 文件操作名称。
+      enum:
+        - waf_file_upload
+        - waf_file_request
+        - waf_download_file
+        - test
+    method:
+      type: string
+      enum: [DELETE]
+      description: waf_file_request 使用的方法。
+    path:
+      type: string
+      description: /rest/file... 上传或删除路径，或 /download/... 下载路径。
+    file_path:
+      type: string
+      description: 需要上传的本地文件路径。
+    fields:
+      type: object
+      description: 上传时附加的 multipart 表单字段。
+    save_path:
+      type: string
+      description: 下载文件保存到本地的路径。
+    confirm:
+      type: string
+      enum: [dangerous]
+      description: 上传和删除类操作必填，固定传入 dangerous。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: file_ops

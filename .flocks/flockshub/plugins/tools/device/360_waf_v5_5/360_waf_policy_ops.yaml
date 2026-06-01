@@ -1,0 +1,137 @@
+name: 360_waf_policy_ops
+description: >
+  360 WAF v5.5 安全策略与访问控制操作工具。只读操作用于查询 WAF 策略，
+  变更操作需要显式传入 confirm=mutation。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 策略操作名称。
+      enum:
+        - waf_policy_list
+        - waf_ac_policy_list
+        - waf_ac_policy_create_deny_uri
+        - waf_site_bind_ac_policy
+        - waf_site_unbind_ac_policy
+        - waf_ac_policy_delete
+        - waf_blacklist_create
+        - waf_blacklist_delete
+        - waf_site_global_blacklist_create
+        - waf_site_global_blacklist_delete
+        - waf_whitelist_create
+        - waf_whitelist_delete
+        - waf_site_global_whitelist_create
+        - waf_site_global_whitelist_delete
+        - waf_exception_rule_create
+        - waf_exception_rule_update
+        - waf_exception_rule_delete
+        - waf_uri_block_on_site
+        - waf_uri_unblock_on_site
+        - test
+    name:
+      type: string
+      description: 创建 URI 拦截策略时使用的访问控制策略名称。
+    site_id:
+      type: string
+      description: 绑定、解绑、拦截和解除拦截操作使用的站点 ID。
+    id:
+      type: integer
+      description: 站点白名单操作使用的站点 ID。
+    siteId:
+      type: integer
+      description: 站点黑名单操作使用的站点 ID。
+    site_name:
+      type: string
+      description: 绑定、解绑、拦截和解除拦截操作使用的站点名称，默认 default。
+    policy_id:
+      type: string
+      description: 访问控制策略 ID。
+    position:
+      type: string
+      description: 绑定策略时插入策略 ID 的位置。
+      enum: [append, prepend]
+    uri_path:
+      type: string
+      description: 以斜杠开头的 URI 路径，用于 URI 拦截或解除拦截。
+    policy_name:
+      type: string
+      description: URI 拦截或解除拦截使用的已有或自动生成策略名称。
+    reuse_existing:
+      type: boolean
+      description: 拦截 URI 时是否复用已有匹配的拒绝策略。
+    delete_policy:
+      type: boolean
+      description: 解除拦截并解绑后是否删除访问控制策略。
+    type:
+      type: integer
+      description: 名单类型。黑名单中 1 单 IP、3 IP 范围、4 IP/掩码；白名单中 0 单 IP、1 IP/掩码、2 IP 范围。
+    content:
+      type: string
+      description: 黑名单内容，通常是客户端 IP、IP 范围或 IP/掩码。
+    is_permanent:
+      type: integer
+      enum: [0, 1]
+      description: 黑名单是否永久阻断，1 为永久，0 为临时。
+    block_time:
+      type: integer
+      description: 临时黑名单阻断时间，单位分钟，范围 1-1440。
+    ip_ver:
+      type: integer
+      enum: [0, 1]
+      description: 白名单 IP 版本，0 为 IPv4，1 为 IPv6。
+    ip_start:
+      type: string
+      description: 白名单起始 IP 或单个 IP。
+    ip_end:
+      type: string
+      description: 白名单 IP 范围结束 IP。
+    netmask:
+      type: integer
+      description: 白名单 IP/掩码的掩码长度。
+    desc:
+      type: string
+      description: 白名单描述。
+    status_code:
+      type: integer
+      enum: [400, 403, 404, 405, 500, 501, 505]
+      description: URI 拒绝策略返回的 HTTP 状态码。
+    description:
+      type: string
+      description: 策略描述。
+    operator:
+      type: string
+      enum: [location, rx]
+      description: URI 匹配方式。
+    no_case:
+      type: integer
+      enum: [0, 1]
+      description: URI 匹配是否忽略大小写。
+    http_method:
+      type: string
+      description: 可选的 HTTP 方法过滤条件。
+    capture_pkt:
+      type: integer
+      enum: [0, 1]
+      description: 是否抓包。
+    log:
+      type: integer
+      enum: [0, 1]
+      description: 是否记录拒绝规则日志。
+    body:
+      type: string
+      description: 规则例外 create/update/delete 使用的完整 JSON payload，传入对象或数组的 JSON 字符串。
+    confirm:
+      type: string
+      enum: [mutation]
+      description: 变更操作必填，固定传入 mutation。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: policy_ops

@@ -1,0 +1,47 @@
+name: 360_waf_system
+description: >
+  360 WAF v5.5 系统与状态工具。通过 action 检查登录状态，查询系统信息、
+  网络接口、区域、配置文件、授权信息、部署模式、规则库状态、磁盘与容量，
+  或执行退出登录。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 系统类操作名称。
+      enum:
+        - waf_check_login
+        - waf_system_info_get
+        - waf_interface_list
+        - waf_zone_list
+        - waf_configfile_list
+        - waf_signature_status
+        - waf_deploy_mode_get
+        - waf_license_get
+        - waf_custom_error_page_list
+        - waf_mgmt_image_get
+        - waf_disk_usage_get
+        - waf_capacity_get
+        - waf_logout
+        - test
+    queryStatus:
+      type: boolean
+      description: 查询规则库状态时是否包含查询状态。
+    version:
+      type: integer
+      description: 管理镜像版本，1 表示当前版本，0 表示备份版本。
+      enum: [0, 1]
+    confirm:
+      type: string
+      description: 仅 waf_logout 需要，固定传入 logout。
+      enum: [logout]
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: system
