@@ -156,6 +156,59 @@ interface ComposerAttachment {
   error?: string;
 }
 
+type UploadedDocumentAttachmentLike = {
+  id?: string;
+  status?: AttachmentStatus;
+  workspacePath?: string;
+  isImage?: boolean;
+};
+
+function isSuccessfulUploadedDocumentAttachment(
+  attachment: UploadedDocumentAttachmentLike,
+): attachment is UploadedDocumentAttachmentLike & { status: 'success'; workspacePath: string; isImage?: false } {
+  return (
+    attachment.status === 'success'
+    && !attachment.isImage
+    && typeof attachment.workspacePath === 'string'
+    && attachment.workspacePath.length > 0
+  );
+}
+
+export function dedupeUploadedDocumentAttachments<T extends UploadedDocumentAttachmentLike>(items: T[]): T[] {
+  const latestIndexByPath = new Map<string, number>();
+
+  items.forEach((attachment, index) => {
+    if (isSuccessfulUploadedDocumentAttachment(attachment)) {
+      latestIndexByPath.set(attachment.workspacePath, index);
+    }
+  });
+
+  return items.filter((attachment, index) => {
+    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
+      return true;
+    }
+    return latestIndexByPath.get(attachment.workspacePath) === index;
+  });
+}
+
+export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[]): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+
+  items.forEach((attachment) => {
+    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
+      return;
+    }
+    if (seen.has(attachment.workspacePath)) {
+      return;
+    }
+    seen.add(attachment.workspacePath);
+    paths.push(attachment.workspacePath);
+  });
+
+  return paths;
+}
+
 // Composer drafts are persisted to ``localStorage`` so navigating away from
 // the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
 // back doesn't lose the half-typed message. Keyed per session so two sessions
