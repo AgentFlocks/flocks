@@ -1,5 +1,5 @@
 import { useState, Component, type ReactNode, type ErrorInfo } from 'react';
-import { MessageSquare, Trash2 } from 'lucide-react';
+import { Trash2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
@@ -75,7 +75,6 @@ interface RightPanelProps {
   /** Currently selected node — passed to ChatTab to show reference chip in input */
   selectedNode?: WorkflowNode | null;
   onDeselectNode?: () => void;
-  onViewSessions?: () => void;
   onDelete?: () => Promise<void>;
 }
 
@@ -87,7 +86,6 @@ export default function RightPanel({
   onFirstMessageSent,
   onSessionChange,
   selectedNode, onDeselectNode,
-  onViewSessions,
   onDelete,
 }: RightPanelProps) {
   const { t } = useTranslation('workflow');
@@ -173,27 +171,16 @@ export default function RightPanel({
       </div>
 
       {/* 底部删除按钮 */}
-      {(onDelete || onViewSessions) && (
+      {onDelete && (
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-100 flex-shrink-0">
-          {onViewSessions && (
-            <button
-              onClick={onViewSessions}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-            >
-              <MessageSquare className="w-3.5 h-3.5" />
-              {t('detail.rightPanel.viewSessions')}
-            </button>
-          )}
-          {onDelete && (
-            <button
-              onClick={handleDelete}
-              disabled={deleting}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              {deleting ? t('detail.rightPanel.deleting') : t('detail.rightPanel.deleteWorkflow')}
-            </button>
-          )}
+          <button
+            onClick={handleDelete}
+            disabled={deleting}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            {deleting ? t('detail.rightPanel.deleting') : t('detail.rightPanel.deleteWorkflow')}
+          </button>
         </div>
       )}
     </div>
