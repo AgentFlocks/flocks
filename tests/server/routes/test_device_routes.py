@@ -196,3 +196,54 @@ class TestDeviceTestEndpoint:
         resp = await client.post("/api/devices/missing-id/test", json={})
 
         assert resp.status_code == 404
+
+
+class TestDeviceCredentialEndpoint:
+    @pytest.mark.asyncio
+    async def test_returns_resolved_fields_for_explicit_reveal(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+
+        async def fake_fetch_device(device_id: str):
+            captured["device_id"] = device_id
+            return _fake_row(
+                fields={
+                    "api_key": "{secret:device_dev-test_api_key}",
+                    "base_url": "https://console.onesec.net",
+                }
+            )
+
+        monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
+        monkeypatch.setattr(
+            device_routes,
+            "resolve_for_runtime",
+            lambda db_fields: {
+                **db_fields,
+                "api_key": "long-real-onesec-api-key-Cd4Y",
+            },
+        )
+
+        resp = await client.get("/api/devices/dev-test/credentials")
+
+        assert resp.status_code == 200, resp.text
+        assert captured["device_id"] == "dev-test"
+        assert resp.json() == {
+            "fields": {
+                "api_key": "long-real-onesec-api-key-Cd4Y",
+                "base_url": "https://console.onesec.net",
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_returns_404_for_unknown_device(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_fetch_device(device_id: str):
+            return None
+
+        monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
+
+        resp = await client.get("/api/devices/missing-id/credentials")
+
+        assert resp.status_code == 404

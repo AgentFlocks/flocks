@@ -424,6 +424,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [credFields, setCredFields] = useState<APIServiceCredentialField[]>([]);
   const [visibility, setVisibility] = useState<Record<string, boolean>>({});
+  const [revealingFields, setRevealingFields] = useState<Record<string, boolean>>({});
   const [serviceTools, setServiceTools] = useState<Tool[]>([]);
   const [toolModal, setToolModal] = useState<Tool | null>(null);
   const [metadata, setMetadata] = useState<{ name?: string; version?: string; description?: string; description_cn?: string; docs_url?: string } | null>(null);
@@ -568,6 +569,38 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
     }
   };
 
+  const handleToggleFieldVisibility = async (field: APIServiceCredentialField, hasExisting: boolean) => {
+    const key = field.key;
+    if (visibility[key]) {
+      setVisibility((p) => ({ ...p, [key]: false }));
+      return;
+    }
+
+    const currentValue = fields[key] ?? '';
+    const maskedValue = originalMasked.current[key] ?? '';
+    const shouldRevealPersisted = !!device && hasExisting && (!currentValue || currentValue === maskedValue);
+    if (!shouldRevealPersisted) {
+      setVisibility((p) => ({ ...p, [key]: true }));
+      return;
+    }
+
+    setRevealingFields((p) => ({ ...p, [key]: true }));
+    try {
+      const res = await deviceAPI.getCredentials(device.id);
+      const revealedValue = res.data.fields?.[key];
+      if (typeof revealedValue !== 'string') {
+        toast.error('读取密钥失败');
+        return;
+      }
+      setFields((p) => ({ ...p, [key]: revealedValue }));
+      setVisibility((p) => ({ ...p, [key]: true }));
+    } catch {
+      toast.error('读取密钥失败');
+    } finally {
+      setRevealingFields((p) => ({ ...p, [key]: false }));
+    }
+  };
+
   const handleDelete = async () => {
     if (!confirmDelete) {
       setConfirmDelete(true);
@@ -677,6 +710,7 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                     {credFields.map((f) => {
                       const isSecret = f.storage === 'secret' || f.input_type === 'password';
                       const show = !!visibility[f.key];
+                      const revealing = !!revealingFields[f.key];
                       const hasExisting = !!device?.fields_set?.[f.key];
                       return (
                         <div key={f.key}>
@@ -695,10 +729,13 @@ function DeviceConfigPanel({ device, template, vendorKey, onSave, onDelete, onCl
                             {isSecret && (
                               <button
                                 type="button"
-                                onClick={() => setVisibility((p) => ({ ...p, [f.key]: !p[f.key] }))}
-                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600"
+                                onClick={() => handleToggleFieldVisibility(f, hasExisting)}
+                                disabled={revealing}
+                                aria-label={show ? `隐藏${f.label}` : `显示${f.label}`}
+                                title={show ? '隐藏' : '显示'}
+                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 disabled:opacity-60"
                               >
-                                {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                                {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                               </button>
                             )}
                           </div>

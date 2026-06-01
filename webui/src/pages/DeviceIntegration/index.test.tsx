@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   updateDevice: vi.fn(),
   deleteDevice: vi.fn(),
   testDevice: vi.fn(),
+  getDeviceCredentials: vi.fn(),
   listApiServices: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
@@ -88,6 +89,7 @@ vi.mock('@/api/device', () => ({
   deviceAPI: {
     list: (...args: unknown[]) => mocks.listDevices(...args),
     get: (...args: unknown[]) => mocks.getDevice(...args),
+    getCredentials: (...args: unknown[]) => mocks.getDeviceCredentials(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
     updateGroup: (...args: unknown[]) => mocks.updateGroup(...args),
     create: (...args: unknown[]) => mocks.createDevice(...args),
@@ -151,6 +153,7 @@ describe('DeviceIntegrationPage', () => {
     });
     mocks.listApiServices.mockResolvedValue({ data: [buildTemplate()] });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
+    mocks.getDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
     mocks.setToolEnabled.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
@@ -376,6 +379,91 @@ describe('DeviceIntegrationPage', () => {
 
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: '关闭设备配置面板' })).not.toBeInTheDocument();
+    });
+  });
+
+  it('reveals the full persisted secret when clicking show', async () => {
+    const user = userEvent.setup();
+    mocks.listDevices.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'device-1',
+          group_id: 'group-1',
+          name: 'onesec-02',
+          storage_key: 'onesec_api_v2_8_2',
+          service_id: 'onesec',
+          enabled: true,
+          verify_ssl: false,
+          fields: {
+            api_key: 'l***Cd4Y',
+            secret: 's***7890',
+            base_url: 'https://console.onesec.net',
+          },
+          fields_set: { api_key: true, secret: true, base_url: true },
+          status: 'connected',
+          created_at: 0,
+          updated_at: 0,
+        },
+      ],
+    });
+    mocks.listApiServices.mockResolvedValueOnce({
+      data: [
+        {
+          id: 'onesec_api_v2_8_2',
+          name: 'OneSEC',
+          enabled: true,
+          status: 'ready',
+          tool_count: 5,
+          verify_ssl: false,
+          integration_type: 'device',
+          vendor: 'threatbook',
+        },
+      ],
+    });
+    mocks.getServiceMetadata.mockResolvedValueOnce({
+      data: {
+        name: 'OneSEC',
+        credential_schema: [
+          {
+            key: 'api_key',
+            label: 'API Key',
+            storage: 'secret',
+            sensitive: true,
+            required: true,
+            input_type: 'password',
+            config_key: 'api_key',
+          },
+          {
+            key: 'secret',
+            label: 'Secret',
+            storage: 'secret',
+            sensitive: true,
+            required: true,
+            input_type: 'password',
+            config_key: 'secret',
+          },
+        ],
+      },
+    });
+    mocks.getDeviceCredentials.mockResolvedValueOnce({
+      data: {
+        fields: {
+          api_key: 'long-real-onesec-api-key-Cd4Y',
+          secret: 'long-real-onesec-secret-7890',
+        },
+      },
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByText('onesec-02'));
+    expect(await screen.findByDisplayValue('l***Cd4Y')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '显示API Key' }));
+
+    await waitFor(() => {
+      expect(mocks.getDeviceCredentials).toHaveBeenCalledWith('device-1');
+      expect(screen.getByDisplayValue('long-real-onesec-api-key-Cd4Y')).toBeInTheDocument();
     });
   });
 });

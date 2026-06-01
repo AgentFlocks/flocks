@@ -44,11 +44,12 @@ $HOME/.flocks/plugins/tools/device/<plugin_id>/
 
 认证默认规则：
 
-- 自定义 CLI / WebCLI 默认认证方式为 `auth-state`
+- 自定义 CLI / WebCLI 默认认证方式为 `cookie/auth-state`：优先复用浏览器保存的 `auth-state.json`，从中按请求域名/path/secure 规则选择 Cookie，并在需要时读取 localStorage
 - 默认认证状态文件：`~/.flocks/browser/<name>/auth-state.json`
 - 优先使用 `auth_state_path` 指向 `~/.flocks/browser/<name>/auth-state.json`
-- 只有在目标站点确实还依赖额外字段时，才补充 `auth_state_json`、`cookie`、`csrf_token`、`access_token`
-- 不要把 `cookie` 或 `token` 设计成和 `auth-state` 并列的多个默认入口
+- 不要生成或使用 `auth_state_json` / `Legacy Auth State JSON` 这类内联 JSON 字段；设备配置只保存 state 文件路径，不粘贴 state 文件内容
+- 只有在目标站点确实还依赖额外字段时，才补充 `cookie`、`csrf_token`、`access_token` 或特定认证头；这些字段是 `auth_state_path` 之外的补充，不替代默认的 cookie/auth-state
+- 不要把 `cookie` 或 `token` 设计成和 `auth-state` 并列的多个默认入口；如果用户提供的是 state 文件路径，必须写入 `auth_state_path`
 
 ## 命名约定
 
@@ -120,7 +121,8 @@ notes: |
 - `description` 用英文，`description_cn` 用中文
 - 只把运行时真正需要用户填写的字段放进 `credential_fields`
 - 不要把真实 cookie、token、密码、auth state JSON 写进插件文件
-- 默认先放 `auth_state_path`，并指向 `~/.flocks/browser/<name>/auth-state.json`；`cookie`、`csrf_token`、`access_token` 只有在实际站点需要时再补
+- 默认先放 `auth_state_path`，并指向 `~/.flocks/browser/<name>/auth-state.json`；不要添加 `auth_state_json` / `Legacy Auth State JSON`
+- `cookie`、`csrf_token`、`access_token` 或特定认证头只有在实际站点需要时再补，并在 handler 中明确说明来源与刷新方式
 
 ## 最小工具 YAML
 
@@ -193,6 +195,8 @@ async def handle(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
 
 - 通过 `ConfigWriter.get_api_service_raw(SERVICE_ID)` 读取当前设备实例配置
 - handler 内部负责认证头构造、分页、超时、重试和响应归一化
+- handler 默认只读取 `auth_state_path` 指向的 `auth-state.json`；如果文件缺失、不是合法 JSON，或没有匹配当前 Base URL 的 Cookie，应返回明确错误并提示重新登录/保存 state
+- handler 不要 fallback 到内联 `auth_state_json`；这会把路径字符串、占位文本或过期内容误当 JSON 解析，导致设备测试报错不清晰
 - CLI 可选保留，但不要让设备运行时通过 subprocess 调 CLI
 
 ## 组合 API / WebCLI / 处理逻辑
@@ -211,6 +215,7 @@ async def handle(ctx: ToolContext, action: str, **params: Any) -> ToolResult:
 3. 需要字段清洗、补全、排序、聚合时，在 handler 内增加 `process`
 4. 需要多个来源补齐同一业务结果时，用 `composed`
 5. 必须验证码、强动态页面或人工交互时，只记录为 browser fallback，不放进默认设备运行时
+6. 如果某个隐藏接口依赖 `Authorization`、`Tdp-Authentication`、CSRF 等临时头，只有在 handler 已实现可靠的恢复/刷新逻辑时才暴露为默认 action；否则保留在 CLI 或文档中，不放进设备默认动作
 
 示例 action 映射：
 

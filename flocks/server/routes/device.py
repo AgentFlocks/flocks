@@ -21,6 +21,7 @@ from flocks.tool.device import (
     DeviceGroup,
     DeviceGroupCreate,
     DeviceGroupUpdate,
+    DeviceCredentialResponse,
     DeviceIntegration,
     DeviceIntegrationCreate,
     DeviceIntegrationUpdate,
@@ -126,6 +127,15 @@ async def route_get_device(device_id: str):
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
     return row_to_device(row)
+
+
+@router.get("/{device_id}/credentials", response_model=DeviceCredentialResponse)
+async def route_get_device_credentials(device_id: str):
+    row = await fetch_device(device_id)
+    if row is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db_fields: dict = json.loads(row["fields"] or "{}")
+    return DeviceCredentialResponse(fields=resolve_for_runtime(db_fields))
 
 
 @router.post("", response_model=DeviceIntegration, status_code=http_status.HTTP_201_CREATED)

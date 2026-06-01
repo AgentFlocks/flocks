@@ -53,6 +53,10 @@ export interface DeviceIntegration {
   updated_at: number;
 }
 
+export interface DeviceCredentialResponse {
+  fields: Record<string, string>;
+}
+
 export interface DeviceIntegrationCreate {
   name: string;
   storage_key: string;
@@ -109,6 +113,9 @@ export const deviceAPI = {
 
   get: (id: string) =>
     client.get<DeviceIntegration>(`/api/devices/${id}`),
+
+  getCredentials: (id: string) =>
+    client.get<DeviceCredentialResponse>(`/api/devices/${id}/credentials`),
 
   create: (data: DeviceIntegrationCreate) =>
     client.post<DeviceIntegration>('/api/devices', data),
