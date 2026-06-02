@@ -1,0 +1,48 @@
+name: "360_waf"
+vendor: "360"
+service_id: "360_waf"
+version: "5.5"
+integration_type: device
+description: >
+  360 WAF v5.5 设备接入。该插件将现有 waf-mcp v2 的 REST 能力适配为
+  Flocks 设备工具，支持登录检测、站点与策略查询、访问控制操作、日志检索、
+  官方 REST 接口调用、文件上传下载以及退出登录。
+description_cn: >
+  360 WAF v5.5 Web 应用防火墙设备接入。支持登录检测、系统状态查询、
+  站点与访问控制策略管理、黑白名单操作、日志检索、官方 REST 接口调用
+  以及文件上传下载。
+auth:
+  type: custom
+  flow: login_then_cookie
+  login_path: /rest/api/login
+credential_fields:
+  - key: base_url
+    label: 设备地址
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "https://YOUR_360_WAF_HOST"
+    required: true
+  - key: username
+    label: 用户名
+    storage: secret
+    config_key: username
+    secret_id: 360_waf_v5_5_username
+    input_type: text
+    required: true
+  - key: password
+    label: 密码
+    storage: secret
+    config_key: password
+    secret_id: 360_waf_v5_5_password
+    input_type: password
+    required: true
+defaults:
+  base_url: "https://YOUR_360_WAF_HOST"
+  timeout: 30
+  category: custom
+  product_version: "5.5"
+  verify_ssl: false
+notes: |
+  处理器通过 ConfigWriter 读取设备凭据，因此工具调用可以定位到具体的
+  device_id。变更类工具通过 Flocks 官方 requires_confirmation 机制触发确认。
