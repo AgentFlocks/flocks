@@ -296,6 +296,7 @@ def run_workflow(
     on_step_start: Optional[Any] = None,
     on_step_complete: Optional[Any] = None,
     max_parallel_workers: int = 4,
+    history_mode: Literal["full", "summary"] = "full",
     cancel: Optional[Callable[[], bool]] = None,
 ) -> RunWorkflowResult:
     # 确保日志已配置
@@ -417,11 +418,12 @@ def run_workflow(
         rt = PythonExecRuntime(tool_registry=registry)
     
     _logger.info(
-        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s)",
+        "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s)",
         effective_use_llm,
         trace,
         effective_node_timeout_s,
         max_parallel_workers,
+        history_mode,
     )
     engine = WorkflowEngine(
         wf,
@@ -431,6 +433,7 @@ def run_workflow(
         workflow_path=workflow_path_for_engine,
         node_timeout_s=effective_node_timeout_s,
         max_parallel_workers=max_parallel_workers,
+        history_mode=history_mode,
     )
     
     initial_inputs = _build_initial_inputs(inputs, workflow_path_for_engine)
@@ -469,7 +472,9 @@ def run_workflow(
         if history_from_error and hasattr(history_from_error[0], 'model_dump'):
             history_from_error = [s.model_dump(mode="json") for s in history_from_error]
         
-        last_outputs = history_from_error[-1].get('outputs', {}) if history_from_error else {}
+        last_outputs = exec_ctx.get('outputs') or (
+            history_from_error[-1].get('outputs', {}) if history_from_error else {}
+        )
         
         status = "FAILED"
         if isinstance(e, RunCancelledError):
@@ -488,7 +493,7 @@ def run_workflow(
         )
 
     history = [s.model_dump(mode="json") for s in result.history]
-    last_outputs = result.history[-1].outputs if result.history else {}
+    last_outputs = result.outputs if result.outputs else (result.history[-1].outputs if result.history else {})
 
     if cancel is not None and cancel():
         return RunWorkflowResult(

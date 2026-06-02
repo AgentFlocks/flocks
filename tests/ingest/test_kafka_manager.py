@@ -246,6 +246,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     manager = kafka_manager.KafkaManager()
     captured_input_params: dict = {}
     captured_exec_data: dict = {}
+    captured_run_kwargs: dict = {}
 
     async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
         captured_input_params.update(input_params or {})
@@ -255,6 +256,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
         captured_exec_data.update(exec_data)
 
     def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
         large_alert = {"raw_log_id": "alert-1", "req_body": "x" * 50_000}
         return SimpleNamespace(
             status="SUCCEEDED",
@@ -292,6 +294,7 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
 
     assert captured_input_params["kafka_message"]["alarmData"]["_type"] == "string"
     assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
+    assert captured_run_kwargs["history_mode"] == "summary"
     assert captured_exec_data["outputResults"] == {
         "_enriched_alerts_count": 1,
         "_kafka_messages_count": 1,

@@ -15,8 +15,6 @@ Differences from the syslog manager:
   consumer pause naturally. Because ``aiokafka`` auto-commits fetched offsets,
   the current crash semantics are still best-effort / at-most-once rather than
   fully durable at-least-once delivery.
-* When an output broker/topic is configured, the successful run result is
-  produced back to Kafka via a per-workflow ``AIOKafkaProducer``.
 """
 
 from __future__ import annotations
@@ -572,6 +570,7 @@ class KafkaManager:
                 workflow=workflow_json,
                 inputs=inputs,
                 trace=False,
+                history_mode="summary",
             )
             status, error_msg = resolve_execution_outcome(result)
             duration = time.time() - start_time
