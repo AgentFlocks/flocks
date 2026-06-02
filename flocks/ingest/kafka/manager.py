@@ -22,13 +22,16 @@ Differences from the syslog manager:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
+    DEFAULT_LARGE_LIST_KEYS,
     compact_history_for_storage,
     compact_outputs_for_storage,
     create_execution_record,
@@ -44,11 +47,13 @@ log = Log.create(service="kafka.manager")
 
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and
-# SQLite write contention (mirrors the syslog manager).
-_MAX_CONCURRENT_EXECUTIONS = 8
+# SQLite write contention. Kafka messages can carry large JSON payloads, so keep
+# this lower than syslog to avoid several full workflow histories being resident
+# at the same time.
+_MAX_CONCURRENT_EXECUTIONS = 2
 # Maximum number of buffered Kafka messages per workflow.  Unlike syslog we do
 # not drop on overflow; a full queue applies backpressure to the consumer loop.
-_MAX_QUEUE_SIZE = 1000
+_MAX_QUEUE_SIZE = 100
 # Maximum time we wait for the consumer to either connect successfully or fail
 # during ``restart_workflow`` so the HTTP save endpoint can surface connection
 # errors instead of pretending the consumer is running.
@@ -56,6 +61,31 @@ _CONNECT_WAIT_TIMEOUT_S = 8.0
 # Kafka client request timeout; kept short so an unreachable broker fails fast
 # within the connect-wait window above.
 _REQUEST_TIMEOUT_MS = 5000
+# Bound aiokafka's internal fetch buffers. The explicit queue below provides the
+# main backpressure; these caps stop the client from prefetching a large burst
+# before the workflow workers can drain it.
+_FETCH_MAX_BYTES = 8 * 1024 * 1024
+_MAX_PARTITION_FETCH_BYTES = 4 * 1024 * 1024
+_MAX_POLL_RECORDS = 16
+
+_KAFKA_STORAGE_LIST_KEYS = DEFAULT_LARGE_LIST_KEYS | frozenset(
+    {
+        "duplicate_alerts",
+        "triage_candidate_alerts",
+        "enriched_alerts_with_triage",
+        "kafka_messages",
+    }
+)
+_KAFKA_RAW_INPUT_KEYS = frozenset({"kafka_message", "kafka_value", "kafka_record"})
+_STORAGE_PREVIEW_CHARS = 512
+
+
+@dataclass(frozen=True)
+class _QueuedKafkaMessage:
+    """Raw Kafka value kept in the queue until a worker is ready to process it."""
+
+    raw_value: Optional[bytes]
+    size_bytes: int
 
 
 def _decode_message(raw: Optional[bytes]) -> Any:
@@ -76,6 +106,90 @@ def _decode_message(raw: Optional[bytes]) -> Any:
         return text
 
 
+def _summarize_large_value(value: Any) -> Any:
+    """Return a bounded representation suitable for execution history storage."""
+    if isinstance(value, bytes):
+        return {
+            "_type": "bytes",
+            "sizeBytes": len(value),
+            "sha256": hashlib.sha256(value).hexdigest(),
+        }
+    if isinstance(value, str):
+        if len(value) <= _STORAGE_PREVIEW_CHARS:
+            return value
+        return {
+            "_type": "string",
+            "chars": len(value),
+            "sha256": hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest(),
+            "preview": value[:_STORAGE_PREVIEW_CHARS],
+        }
+    if isinstance(value, (list, tuple)):
+        return {
+            "_type": "list",
+            "count": len(value),
+            "preview": [_summarize_large_value(item) for item in list(value)[:3]],
+        }
+    if isinstance(value, dict):
+        compacted: Dict[str, Any] = {
+            "_type": "dict",
+            "keys": list(value.keys())[:50],
+        }
+        for key in (
+            "id",
+            "_id",
+            "log_id",
+            "raw_log_id",
+            "event_id",
+            "message_id",
+            "source",
+            "product_type",
+            "hostname",
+        ):
+            if key in value:
+                compacted[key] = _summarize_large_value(value[key])
+        if "alarmData" in value:
+            compacted["alarmData"] = _summarize_large_value(value["alarmData"])
+        return compacted
+    return value
+
+
+def _compact_for_kafka_storage(outputs: Any) -> Dict[str, Any]:
+    """Compact all known large workflow lists for high-frequency Kafka runs."""
+    compacted = compact_outputs_for_storage(
+        outputs,
+        keys=_KAFKA_STORAGE_LIST_KEYS,
+        size_threshold=0,
+    )
+    for key, value in list(compacted.items()):
+        if key == "kafka_output" or (
+            isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS
+        ):
+            compacted[key] = _summarize_large_value(value)
+    return compacted
+
+
+def _compact_history_for_kafka_storage(history: Any, *, input_key: str) -> List[Any]:
+    compacted = compact_history_for_storage(
+        history,
+        keys=_KAFKA_STORAGE_LIST_KEYS,
+        size_threshold=0,
+    )
+    raw_input_keys = _KAFKA_RAW_INPUT_KEYS | frozenset({input_key})
+    for step in compacted:
+        if not isinstance(step, dict):
+            continue
+        for field in ("inputs", "outputs"):
+            payload = step.get(field)
+            if not isinstance(payload, dict):
+                continue
+            for key, value in list(payload.items()):
+                if key in raw_input_keys or key == "kafka_output" or (
+                    isinstance(value, str) and len(value) > _STORAGE_PREVIEW_CHARS
+                ):
+                    payload[key] = _summarize_large_value(value)
+    return compacted
+
+
 class KafkaManager:
     """One async consumer task per workflow id (when enabled)."""
 
@@ -92,10 +206,6 @@ class KafkaManager:
         # Per-workflow event signalled once the consumer has either connected
         # successfully or failed; used by ``restart_workflow``.
         self._ready: dict[str, asyncio.Event] = {}
-        # Per-workflow output producer (only when output is configured)
-        self._producers: dict[str, Any] = {}
-        self._producer_brokers: dict[str, str] = {}
-        self._producer_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _config_key(workflow_id: str) -> str:
@@ -126,38 +236,6 @@ class KafkaManager:
         for workflow_id in list(self._tasks.keys()):
             await self.stop_workflow(workflow_id)
 
-    def _producer_lock(self, workflow_id: str) -> asyncio.Lock:
-        lock = self._producer_locks.get(workflow_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._producer_locks[workflow_id] = lock
-        return lock
-
-    async def _drop_output_producer(self, workflow_id: str) -> None:
-        producer = self._producers.pop(workflow_id, None)
-        self._producer_brokers.pop(workflow_id, None)
-        if producer is not None:
-            try:
-                await producer.stop()
-            except Exception:
-                pass
-
-    async def _ensure_output_producer(self, workflow_id: str, broker: str) -> Any:
-        broker = broker.strip()
-        if not broker:
-            return None
-
-        async with self._producer_lock(workflow_id):
-            current = self._producers.get(workflow_id)
-            if current is not None and self._producer_brokers.get(workflow_id) == broker:
-                return current
-
-            await self._drop_output_producer(workflow_id)
-            producer = await self._create_producer(broker)
-            self._producers[workflow_id] = producer
-            self._producer_brokers[workflow_id] = broker
-            return producer
-
     async def _cleanup_runtime_resources(self, workflow_id: str) -> None:
         # Cancel all worker pool tasks; pop first so callers observing a stopped
         # consumer see an empty pool immediately.
@@ -174,7 +252,6 @@ class KafkaManager:
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 pass
 
-        await self._drop_output_producer(workflow_id)
         self._queues.pop(workflow_id, None)
         self._abort_events.pop(workflow_id, None)
         self._ready.pop(workflow_id, None)
@@ -258,9 +335,6 @@ class KafkaManager:
 
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         input_key = str(data.get("inputKey") or "kafka_message")
-        output_broker = str(data.get("outputBroker") or "").strip()
-        output_topic = str(data.get("outputTopic") or "").strip()
-        output_enabled = bool(data.get("outputEnabled"))
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
@@ -279,19 +353,6 @@ class KafkaManager:
             "groupId": group_id,
         }
 
-        # Optionally start an output producer up-front so failures are visible.
-        producer = None
-        if output_enabled and output_broker and output_topic:
-            try:
-                producer = await self._ensure_output_producer(workflow_id, output_broker)
-            except Exception as exc:
-                log.warning(
-                    "kafka.producer_start_failed",
-                    {"workflow_id": workflow_id, "error": str(exc)},
-                )
-        else:
-            await self._drop_output_producer(workflow_id)
-
         # Fixed worker pool drains the queue (at most _MAX_CONCURRENT_EXECUTIONS
         # concurrent runs).
         workers: List[asyncio.Task] = []
@@ -300,7 +361,6 @@ class KafkaManager:
                 asyncio.create_task(
                     self._worker_loop(
                         workflow_id, workflow_json, input_key, queue, abort,
-                        producer, output_topic,
                     ),
                     name=f"kafka-worker-{workflow_id}-{i}",
                 )
@@ -346,54 +406,6 @@ class KafkaManager:
         log.info("kafka.consumer_scheduled", {"workflow_id": workflow_id})
         return self.get_consumer_status(workflow_id)
 
-    async def _create_producer(self, broker: str) -> Any:
-        from aiokafka import AIOKafkaProducer
-
-        producer = AIOKafkaProducer(
-            bootstrap_servers=broker,
-            request_timeout_ms=_REQUEST_TIMEOUT_MS,
-        )
-        await producer.start()
-        return producer
-
-    async def publish_execution_result(self, workflow_id: str, exec_id: str, outputs: Any) -> bool:
-        """Publish a successful workflow execution to the configured output topic.
-
-        This intentionally does not require the Kafka consumer to be enabled, so
-        workflows can be configured as output-only producers.
-        """
-        try:
-            data = await Storage.read(self._config_key(workflow_id))
-        except Exception as exc:
-            log.warning(
-                "kafka.output_config_read_failed",
-                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-            )
-            return False
-        if not isinstance(data, dict):
-            return False
-
-        output_broker = str(data.get("outputBroker") or "").strip()
-        output_topic = str(data.get("outputTopic") or "").strip()
-        if not data.get("outputEnabled") or not output_broker or not output_topic:
-            await self._drop_output_producer(workflow_id)
-            return False
-
-        try:
-            producer = await self._ensure_output_producer(workflow_id, output_broker)
-            value = json.dumps(
-                {"workflowId": workflow_id, "executionId": exec_id, "outputs": outputs},
-                default=str,
-            ).encode("utf-8")
-            await producer.send_and_wait(output_topic, value)
-            return True
-        except Exception as exc:
-            log.warning(
-                "kafka.produce_failed",
-                {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-            )
-            return False
-
     async def _consumer_loop(
         self,
         workflow_id: str,
@@ -430,6 +442,9 @@ class KafkaManager:
             enable_auto_commit=True,
             auto_offset_reset=auto_offset_reset if auto_offset_reset in ("latest", "earliest") else "latest",
             request_timeout_ms=_REQUEST_TIMEOUT_MS,
+            fetch_max_bytes=_FETCH_MAX_BYTES,
+            max_partition_fetch_bytes=_MAX_PARTITION_FETCH_BYTES,
+            max_poll_records=_MAX_POLL_RECORDS,
         )
 
         try:
@@ -474,9 +489,13 @@ class KafkaManager:
             async for msg in consumer:
                 if abort.is_set():
                     break
-                payload = _decode_message(msg.value)
+                raw_value = msg.value
+                queued = _QueuedKafkaMessage(
+                    raw_value=raw_value,
+                    size_bytes=len(raw_value) if raw_value is not None else 0,
+                )
                 # Blocking put applies backpressure instead of dropping messages.
-                await queue.put(payload)
+                await queue.put(queued)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -505,8 +524,6 @@ class KafkaManager:
         input_key: str,
         queue: asyncio.Queue,
         abort: asyncio.Event,
-        producer: Any,
-        output_topic: str,
     ) -> None:
         while not abort.is_set():
             try:
@@ -516,8 +533,10 @@ class KafkaManager:
             except asyncio.CancelledError:
                 return
             try:
+                if isinstance(msg, _QueuedKafkaMessage):
+                    msg = _decode_message(msg.raw_value)
                 await self._trigger_workflow(
-                    workflow_id, workflow_json, msg, input_key, producer, output_topic,
+                    workflow_id, workflow_json, msg, input_key,
                 )
             except asyncio.CancelledError:
                 return
@@ -533,14 +552,15 @@ class KafkaManager:
         workflow_json: Any,
         message: Any,
         input_key: str,
-        producer: Any = None,
-        output_topic: str = "",
     ) -> None:
         inputs = {input_key: message}
 
         exec_data = await create_execution_record(
             workflow_id,
-            input_params={"_trigger": "kafka", **inputs},
+            input_params={
+                "_trigger": "kafka",
+                input_key: _summarize_large_value(message),
+            },
         )
         exec_id = exec_data["id"]
         start_time = time.time()
@@ -557,11 +577,14 @@ class KafkaManager:
             duration = time.time() - start_time
             exec_data.update({
                 "status": status,
-                "outputResults": compact_outputs_for_storage(result.outputs),
+                "outputResults": _compact_for_kafka_storage(result.outputs),
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "errorMessage": error_msg,
-                "executionLog": compact_history_for_storage(result.history),
+                "executionLog": _compact_history_for_kafka_storage(
+                    result.history,
+                    input_key=input_key,
+                ),
                 "currentNodeId": result.last_node_id,
                 "currentPhase": status,
                 "currentStepIndex": result.steps,
@@ -584,25 +607,6 @@ class KafkaManager:
                 await record_execution_result(workflow_id, exec_id, exec_data)
             except Exception as exc:
                 log.warning("kafka.exec_record_failed", {"exec_id": exec_id, "error": str(exc)})
-
-        # Produce the result back to Kafka on success when configured.
-        if (
-            producer is not None
-            and output_topic
-            and result is not None
-            and exec_data.get("status") == "success"
-        ):
-            try:
-                value = json.dumps(
-                    {"workflowId": workflow_id, "executionId": exec_id, "outputs": result.outputs},
-                    default=str,
-                ).encode("utf-8")
-                await producer.send_and_wait(output_topic, value)
-            except Exception as exc:
-                log.warning(
-                    "kafka.produce_failed",
-                    {"workflow_id": workflow_id, "exec_id": exec_id, "error": str(exc)},
-                )
 
 
 default_manager = KafkaManager()
