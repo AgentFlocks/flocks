@@ -1,7 +1,7 @@
 name: 360_waf_policy_ops
 description: >
   360 WAF v5.5 安全策略与访问控制操作工具。只读操作用于查询 WAF 策略，
-  变更操作需要显式传入 confirm=mutation。
+  变更操作通过 Flocks requires_confirmation 触发确认。
 category: custom
 enabled: true
 requires_confirmation: true
@@ -125,10 +125,6 @@ inputSchema:
     body:
       type: string
       description: 规则例外 create/update/delete 使用的完整 JSON payload，传入对象或数组的 JSON 字符串。
-    confirm:
-      type: string
-      enum: [mutation]
-      description: 变更操作必填，固定传入 mutation。
   required:
     - action
 handler:

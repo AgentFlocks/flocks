@@ -43,8 +43,6 @@ defaults:
   category: custom
   product_version: "5.5"
   verify_ssl: false
-  allow_mutation: false
-  allow_dangerous_ops: false
 notes: |
   处理器通过 ConfigWriter 读取设备凭据，因此工具调用可以定位到具体的
-  device_id。变更类和高风险操作仍然需要在工具参数中显式传入 confirm。
+  device_id。变更类工具通过 Flocks 官方 requires_confirmation 机制触发确认。

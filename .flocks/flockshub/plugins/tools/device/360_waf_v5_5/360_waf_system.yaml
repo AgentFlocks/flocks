@@ -35,10 +35,6 @@ inputSchema:
       type: integer
       description: 管理镜像版本，1 表示当前版本，0 表示备份版本。
       enum: [0, 1]
-    confirm:
-      type: string
-      description: 仅 waf_logout 需要，固定传入 logout。
-      enum: [logout]
   required:
     - action
 handler:

@@ -46,8 +46,8 @@ def test_provider_metadata_declares_360_waf_v5_5_device_plugin():
     assert raw["integration_type"] == "device"
     assert raw["description_cn"]
     assert derive_storage_key(raw["service_id"], raw["version"]) == "360_waf_v5_5"
-    assert raw["defaults"]["allow_mutation"] is False
-    assert raw["defaults"]["allow_dangerous_ops"] is False
+    assert "allow_mutation" not in raw["defaults"]
+    assert "allow_dangerous_ops" not in raw["defaults"]
 
     credential_keys = {field["key"] for field in raw["credential_fields"]}
     assert {"base_url", "username", "password"} <= credential_keys
@@ -79,8 +79,10 @@ def test_mutation_manifest_uses_json_string_body_without_framework_schema_extens
 
     body_schema = raw["inputSchema"]["properties"]["body"]
 
+    assert raw["requires_confirmation"] is True
     assert body_schema["type"] == "string"
     assert "oneOf" not in body_schema
+    assert "confirm" not in raw["inputSchema"]["properties"]
 
 
 def test_json_payload_strings_are_parsed_by_handler():
@@ -106,6 +108,7 @@ def test_policy_ops_manifest_exposes_business_mutation_actions():
     action_enum = set(raw["inputSchema"]["properties"]["action"]["enum"])
     body_schema = raw["inputSchema"]["properties"]["body"]
 
+    assert raw["requires_confirmation"] is True
     assert {
         "waf_blacklist_create",
         "waf_blacklist_delete",
@@ -119,9 +122,9 @@ def test_policy_ops_manifest_exposes_business_mutation_actions():
         "waf_exception_rule_update",
         "waf_exception_rule_delete",
     } <= action_enum
-    assert raw["inputSchema"]["properties"]["confirm"]["enum"] == ["mutation"]
     assert body_schema["type"] == "string"
     assert "oneOf" not in body_schema
+    assert "confirm" not in raw["inputSchema"]["properties"]
 
 
 def test_observability_manifest_exposes_log_query_filters():
@@ -167,6 +170,22 @@ def test_group_manifest_loads_as_device_tool(
     assert raw["inputSchema"]["properties"]["action"]["enum"]
 
 
+def test_group_manifests_use_official_confirmation_flags():
+    expected = {
+        "360_waf_system.yaml": False,
+        "360_waf_site.yaml": False,
+        "360_waf_policy_ops.yaml": True,
+        "360_waf_observability.yaml": False,
+        "360_waf_api_readonly.yaml": False,
+        "360_waf_api_mutation.yaml": True,
+        "360_waf_file.yaml": True,
+    }
+
+    for yaml_name, requires_confirmation in expected.items():
+        raw = yaml.safe_load((_PLUGIN_DIR / yaml_name).read_text(encoding="utf-8"))
+        assert raw["requires_confirmation"] is requires_confirmation
+
+
 def test_runtime_config_resolves_configwriter_and_secret_refs(monkeypatch):
     handler = _load_handler()
     raw_service = {
@@ -197,39 +216,6 @@ def test_runtime_config_resolves_configwriter_and_secret_refs(monkeypatch):
     assert config.verify_ssl is True
 
 
-def test_mutation_gates_honor_service_config(monkeypatch):
-    handler = _load_handler()
-
-    monkeypatch.setattr(handler.ConfigWriter, "get_api_service_raw", staticmethod(lambda service_id: {}))
-
-    with pytest.raises(handler.WafApiError, match="mutation tools are disabled"):
-        handler.require_mutation_allowed()
-
-    with pytest.raises(handler.WafApiError, match="dangerous operations are disabled"):
-        handler.require_dangerous_allowed()
-
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": False, "allow_dangerous_ops": False}),
-    )
-
-    with pytest.raises(handler.WafApiError, match="mutation tools are disabled"):
-        handler.require_mutation_allowed()
-
-    with pytest.raises(handler.WafApiError, match="dangerous operations are disabled"):
-        handler.require_dangerous_allowed()
-
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": True, "allow_dangerous_ops": True}),
-    )
-
-    handler.require_mutation_allowed()
-    handler.require_dangerous_allowed()
-
-
 def test_client_cache_key_does_not_store_plaintext_password():
     handler = _load_handler()
     config = handler.RuntimeConfig(
@@ -238,8 +224,6 @@ def test_client_cache_key_does_not_store_plaintext_password():
         password="secret-password",
         verify_ssl=False,
         timeout=30,
-        allow_mutation=False,
-        allow_dangerous_ops=False,
     )
 
     key = handler._client_cache_key(config)
@@ -268,8 +252,6 @@ def test_ssl_cipher_downgrade_only_for_unverified_connections(monkeypatch):
         "username": "admin",
         "password": "secret",
         "timeout": 30,
-        "allow_mutation": False,
-        "allow_dangerous_ops": False,
     }
 
     handler.WafClient(handler.RuntimeConfig(**base, verify_ssl=True))
@@ -345,11 +327,6 @@ async def test_policy_ops_builds_blacklist_and_whitelist_payloads(monkeypatch):
             calls.append((method, path, query, body))
             return {"success": True, "result": []}
 
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": True, "allow_dangerous_ops": True}),
-    )
     monkeypatch.setattr(handler, "get_client", lambda: _FakeClient())
 
     ctx = ToolContext(session_id="s", message_id="m")
@@ -358,14 +335,12 @@ async def test_policy_ops_builds_blacklist_and_whitelist_payloads(monkeypatch):
         action="waf_blacklist_create",
         siteId=2147483647,
         content="192.0.2.10",
-        confirm="mutation",
     )
     delete_blacklist = await handler.policy_ops(
         ctx,
         action="waf_blacklist_delete",
         siteId=2147483647,
         content="192.0.2.10",
-        confirm="mutation",
     )
     create_whitelist = await handler.policy_ops(
         ctx,
@@ -373,14 +348,12 @@ async def test_policy_ops_builds_blacklist_and_whitelist_payloads(monkeypatch):
         id=2147483647,
         ip_start="192.0.2.11",
         desc="allow scanner",
-        confirm="mutation",
     )
     delete_whitelist = await handler.policy_ops(
         ctx,
         action="waf_whitelist_delete",
         id=2147483647,
         ip_start="192.0.2.11",
-        confirm="mutation",
     )
 
     assert create_blacklist.success is True
@@ -448,11 +421,6 @@ async def test_policy_ops_builds_global_list_and_exception_payloads(monkeypatch)
             calls.append((method, path, query, body))
             return {"success": True, "result": []}
 
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": True, "allow_dangerous_ops": True}),
-    )
     monkeypatch.setattr(handler, "get_client", lambda: _FakeClient())
 
     ctx = ToolContext(session_id="s", message_id="m")
@@ -462,31 +430,27 @@ async def test_policy_ops_builds_global_list_and_exception_payloads(monkeypatch)
         content="192.0.2.12",
         is_permanent=0,
         block_time=120,
-        confirm="mutation",
     )
     await handler.policy_ops(
         ctx,
         action="waf_site_global_blacklist_delete",
         content="192.0.2.12",
         is_permanent=0,
-        confirm="mutation",
     )
     await handler.policy_ops(
         ctx,
         action="waf_site_global_whitelist_create",
         ip_start="192.0.2.13",
-        confirm="mutation",
     )
     await handler.policy_ops(
         ctx,
         action="waf_site_global_whitelist_delete",
         ip_start="192.0.2.13",
-        confirm="mutation",
     )
     payload = {"rule_id": "1000000015", "protection_sub_type": "10000"}
-    await handler.policy_ops(ctx, action="waf_exception_rule_create", body=payload, confirm="mutation")
-    await handler.policy_ops(ctx, action="waf_exception_rule_update", body=payload, confirm="mutation")
-    await handler.policy_ops(ctx, action="waf_exception_rule_delete", body=payload, confirm="mutation")
+    await handler.policy_ops(ctx, action="waf_exception_rule_create", body=payload)
+    await handler.policy_ops(ctx, action="waf_exception_rule_update", body=payload)
+    await handler.policy_ops(ctx, action="waf_exception_rule_delete", body=payload)
 
     assert calls == [
         (
@@ -599,15 +563,10 @@ async def test_observability_filters_security_and_configuration_logs(monkeypatch
 )
 def test_raw_mutation_rejects_waf_device_state_changes(monkeypatch, method: str, path: str):
     handler = _load_handler()
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": True, "allow_dangerous_ops": True}),
-    )
     monkeypatch.setattr(handler, "get_client", lambda: pytest.fail("blocked raw mutation must not call WAF"))
 
     with pytest.raises(handler.WafApiError, match="does not support modifying WAF device state"):
-        handler.waf_call_mutation({"method": method, "path": path, "confirm": "dangerous", "body": []})
+        handler.waf_call_mutation({"method": method, "path": path, "body": []})
 
 
 @pytest.mark.parametrize(
@@ -618,22 +577,16 @@ def test_raw_mutation_rejects_waf_device_state_changes(monkeypatch, method: str,
             {
                 "path": "/rest/file/signature_import",
                 "file_path": "signature.dat",
-                "confirm": "dangerous",
             },
         ),
         (
             "waf_file_request",
-            {"method": "DELETE", "path": "/rest/file?fileName=tmp", "confirm": "dangerous"},
+            {"method": "DELETE", "path": "/rest/file?fileName=tmp"},
         ),
     ],
 )
 def test_file_ops_reject_upgrade_and_import_helpers(monkeypatch, action: str, params: dict[str, Any]):
     handler = _load_handler()
-    monkeypatch.setattr(
-        handler.ConfigWriter,
-        "get_api_service_raw",
-        staticmethod(lambda service_id: {"allow_mutation": True, "allow_dangerous_ops": True}),
-    )
     monkeypatch.setattr(handler, "get_client", lambda: pytest.fail("blocked file helper must not call WAF"))
 
     with pytest.raises(handler.WafApiError, match="does not support WAF upgrade or import file operations"):

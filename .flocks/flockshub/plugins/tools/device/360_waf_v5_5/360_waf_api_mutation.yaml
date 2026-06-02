@@ -1,6 +1,6 @@
 name: 360_waf_api_mutation
 description: >
-  360 WAF v5.5 官方 REST 变更调用工具。普通非 GET 调用需要 confirm=mutation；
+  360 WAF v5.5 官方 REST 变更调用工具。该工具通过 Flocks requires_confirmation 触发确认；
   重启、升级、配置导入、部署模式、License、网络接口和安全域等 WAF 本体修改接口会直接拒绝。
 category: custom
 enabled: true
@@ -29,10 +29,6 @@ inputSchema:
     body:
       type: string
       description: POST、PUT 或 DELETE 调用使用的 JSON 请求体，传入对象或数组的 JSON 字符串。
-    confirm:
-      type: string
-      enum: [mutation, dangerous]
-      description: 非 GET 调用必填。普通变更传 mutation；仅保留的历史高风险动作可传 dangerous，WAF 本体修改仍会被拒绝。
   required:
     - action
 handler:

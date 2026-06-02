@@ -20,14 +20,6 @@ SERVICE_ID = "360_waf"
 STORAGE_KEY = "360_waf_v5_5"
 PRODUCT_VERSION = "5.5"
 
-DANGEROUS_PATHS = {
-    "/rest/api/reboot_system",
-    "/rest/api/mgmt_image",
-    "/rest/api/configfile",
-    "/rest/api/signature",
-    "/rest/api/waf_deploy_mode",
-}
-
 BLOCKED_DEVICE_STATE_MUTATIONS: dict[str, set[str]] = {
     "/rest/api/reboot_system": {"POST"},
     "/rest/api/mgmt_image": {"POST", "DELETE"},
@@ -101,16 +93,12 @@ class RuntimeConfig:
         password: str,
         verify_ssl: bool,
         timeout: int,
-        allow_mutation: bool,
-        allow_dangerous_ops: bool,
     ) -> None:
         self.base_url = base_url
         self.username = username
         self.password = password
         self.verify_ssl = verify_ssl
         self.timeout = timeout
-        self.allow_mutation = allow_mutation
-        self.allow_dangerous_ops = allow_dangerous_ops
 
 
 def _resolve_ref(value: Any) -> str:
@@ -165,13 +153,6 @@ def _resolve_verify_ssl(raw: dict[str, Any]) -> bool:
     return _as_bool(value, False)
 
 
-def _resolve_allowed(raw: dict[str, Any], key: str, env_key: str) -> bool:
-    value = _config_value(raw, key)
-    if value is None:
-        value = os.getenv(env_key)
-    return _as_bool(value, False)
-
-
 def _load_runtime_config() -> RuntimeConfig:
     raw = _raw_service_config()
     sm = get_secret_manager()
@@ -212,10 +193,6 @@ def _load_runtime_config() -> RuntimeConfig:
         password=password,
         verify_ssl=_resolve_verify_ssl(raw),
         timeout=timeout,
-        allow_mutation=_resolve_allowed(raw, "allow_mutation", "WAF_ALLOW_MUTATION"),
-        allow_dangerous_ops=_resolve_allowed(
-            raw, "allow_dangerous_ops", "WAF_ALLOW_DANGEROUS_OPS"
-        ),
     )
 
 
@@ -830,26 +807,7 @@ def waf_capacity_get(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_logout(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "logout")
     return ok(get_client().logout())
-
-
-def require_mutation_allowed() -> None:
-    raw = _raw_service_config()
-    if not _resolve_allowed(raw, "allow_mutation", "WAF_ALLOW_MUTATION"):
-        raise WafApiError("mutation tools are disabled because allow_mutation=false")
-
-
-def require_dangerous_allowed() -> None:
-    raw = _raw_service_config()
-    if not _resolve_allowed(raw, "allow_dangerous_ops", "WAF_ALLOW_DANGEROUS_OPS"):
-        raise WafApiError("dangerous operations are disabled because allow_dangerous_ops=false")
-
-
-def require_confirm(args: dict[str, Any], expected: str) -> None:
-    if args.get("confirm") != expected:
-        raise WafApiError(f"confirm must be {expected!r}")
 
 
 def require_text(value: Any, name: str) -> str:
@@ -1198,8 +1156,6 @@ def default_deny_policy_name(site_name: str, uri_path: str) -> str:
 
 
 def waf_ac_policy_create_deny_uri(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     policy_name = require_text(args.get("name"), "name")
     uri_path = require_uri_path(args.get("uri_path"))
@@ -1210,8 +1166,6 @@ def waf_ac_policy_create_deny_uri(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_bind_ac_policy(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     policy_id = require_policy_id(args.get("policy_id"), "policy_id")
     site = resolve_site(client_obj, args)
@@ -1220,8 +1174,6 @@ def waf_site_bind_ac_policy(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_unbind_ac_policy(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     policy_id = require_policy_id(args.get("policy_id"), "policy_id")
     site = resolve_site(client_obj, args)
@@ -1229,8 +1181,6 @@ def waf_site_unbind_ac_policy(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_ac_policy_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     policy_id = require_policy_id(args.get("policy_id"), "policy_id")
     if policy_id == "1":
@@ -1241,8 +1191,6 @@ def waf_ac_policy_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_blacklist_create(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = blacklist_body(args, include_site=True, include_is_permanent=True)
     data = get_client().request("POST", "/rest/api/blacklist", body=body)
     ensure_api_success("POST /rest/api/blacklist", data)
@@ -1250,8 +1198,6 @@ def waf_blacklist_create(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_blacklist_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = blacklist_body(args, include_site=True, include_is_permanent=False)
     data = get_client().request("DELETE", "/rest/api/blacklist", body=body)
     ensure_api_success("DELETE /rest/api/blacklist", data)
@@ -1259,8 +1205,6 @@ def waf_blacklist_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_global_blacklist_create(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = blacklist_body(args, include_site=False, include_is_permanent=True)
     data = get_client().request("POST", "/rest/api/site_global_blacklist", body=body)
     ensure_api_success("POST /rest/api/site_global_blacklist", data)
@@ -1268,8 +1212,6 @@ def waf_site_global_blacklist_create(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_global_blacklist_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = blacklist_body(args, include_site=False, include_is_permanent=False)
     data = get_client().request("DELETE", "/rest/api/site_global_blacklist", body=body)
     ensure_api_success("DELETE /rest/api/site_global_blacklist", data)
@@ -1277,8 +1219,6 @@ def waf_site_global_blacklist_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_whitelist_create(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = whitelist_body(args, for_delete=False)
     data = get_client().request("POST", "/rest/api/whitelist", body=body)
     ensure_api_success("POST /rest/api/whitelist", data)
@@ -1286,8 +1226,6 @@ def waf_whitelist_create(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_whitelist_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = whitelist_body(args, for_delete=True)
     data = get_client().request("DELETE", "/rest/api/whitelist", body=body)
     ensure_api_success("DELETE /rest/api/whitelist", data)
@@ -1295,8 +1233,6 @@ def waf_whitelist_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_global_whitelist_create(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = global_whitelist_body(args, for_delete=False)
     data = get_client().request("POST", "/rest/api/site_global_whitelist", body=body)
     ensure_api_success("POST /rest/api/site_global_whitelist", data)
@@ -1304,8 +1240,6 @@ def waf_site_global_whitelist_create(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_site_global_whitelist_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = global_whitelist_body(args, for_delete=True)
     data = get_client().request("DELETE", "/rest/api/site_global_whitelist", body=body)
     ensure_api_success("DELETE /rest/api/site_global_whitelist", data)
@@ -1313,8 +1247,6 @@ def waf_site_global_whitelist_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_exception_rule_create(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = require_payload(args.get("body"))
     data = get_client().request("POST", "/rest/api/exceptionlist", body=body)
     ensure_api_success("POST /rest/api/exceptionlist", data)
@@ -1322,8 +1254,6 @@ def waf_exception_rule_create(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_exception_rule_update(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = require_payload(args.get("body"))
     data = get_client().request("PUT", "/rest/api/exceptionlist", body=body)
     ensure_api_success("PUT /rest/api/exceptionlist", data)
@@ -1331,8 +1261,6 @@ def waf_exception_rule_update(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_exception_rule_delete(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     body = require_payload(args.get("body"))
     data = get_client().request("DELETE", "/rest/api/exceptionlist", body=body)
     ensure_api_success("DELETE /rest/api/exceptionlist", data)
@@ -1340,8 +1268,6 @@ def waf_exception_rule_delete(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_uri_block_on_site(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     uri_path = require_uri_path(args.get("uri_path"))
     site = resolve_site(client_obj, args)
@@ -1387,8 +1313,6 @@ def waf_uri_block_on_site(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_uri_unblock_on_site(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
-    require_confirm(args, "mutation")
     client_obj = get_client()
     site = resolve_site(client_obj, args)
     policy_id = args.get("policy_id")
@@ -1458,18 +1382,12 @@ def waf_call_raw_readonly(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_call_mutation(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
     method = str(args.get("method", "")).upper()
     path = normalize_api_path(str(args.get("path", "")))
     if method not in {"POST", "PUT", "DELETE"}:
         raise WafApiError("method must be POST, PUT, or DELETE")
     validate_documented_api(method, path)
     reject_blocked_device_state_mutation(method, path)
-    if is_dangerous_operation(method, path):
-        require_dangerous_allowed()
-        require_confirm(args, "dangerous")
-    else:
-        require_confirm(args, "mutation")
     query = args.get("query")
     if query is not None and not isinstance(query, dict):
         raise WafApiError("query must be an object")
@@ -1492,12 +1410,9 @@ def waf_call_api(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_file_upload(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
     path = normalize_file_path(str(args.get("path", "")))
     validate_documented_file_api("POST", path)
     reject_blocked_file_mutation("POST", path)
-    require_dangerous_allowed()
-    require_confirm(args, "dangerous")
     file_path = str(args.get("file_path", ""))
     fields = args.get("fields") or {}
     if not file_path:
@@ -1508,13 +1423,10 @@ def waf_file_upload(args: dict[str, Any]) -> ToolResult:
 
 
 def waf_file_request(args: dict[str, Any]) -> ToolResult:
-    require_mutation_allowed()
     method = str(args.get("method", "")).upper()
     path = normalize_file_path(str(args.get("path", "")))
     validate_documented_file_api(method, path)
     reject_blocked_file_mutation(method, path)
-    require_dangerous_allowed()
-    require_confirm(args, "dangerous")
     return ok(get_client().file_request(method, path))
 
 
@@ -1567,13 +1479,6 @@ def reject_blocked_file_mutation(method: str, path: str) -> None:
             "360 WAF integration does not support WAF upgrade or import file operations: "
             f"{method.upper()} {path}"
         )
-
-
-def is_dangerous_operation(method: str, path: str) -> bool:
-    resource = path.split("?", 1)[0]
-    if resource in DANGEROUS_PATHS:
-        return True
-    return method == "DELETE" and resource in {"/rest/api/login"}
 
 
 def validate_documented_api(method: str, path: str) -> None:
