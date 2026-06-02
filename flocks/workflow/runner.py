@@ -415,7 +415,10 @@ def run_workflow(
             _logger.info("workflow runtime: host forced by sandbox.mode=off or runtime override")
         if ensure_requirements and reqs:
             (requirements_installer or RequirementsInstaller(installer="auto")).ensure_installed(reqs)
-        rt = PythonExecRuntime(tool_registry=registry)
+        rt = PythonExecRuntime(
+            tool_registry=registry,
+            cleanup_globals_after_execute=(history_mode == "summary"),
+        )
     
     _logger.info(
         "创建执行引擎 (use_llm=%s, trace=%s, node_timeout=%ss, parallel_workers=%s, history_mode=%s)",

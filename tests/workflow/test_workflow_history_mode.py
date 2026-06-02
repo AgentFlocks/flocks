@@ -1,4 +1,5 @@
 from flocks.workflow.runner import run_workflow
+from flocks.workflow.repl_runtime import PythonExecRuntime
 
 
 def test_run_workflow_summary_history_does_not_retain_large_step_payloads() -> None:
@@ -71,4 +72,17 @@ def test_run_workflow_summary_outputs_do_not_retain_large_final_payloads() -> No
     assert result.status == "SUCCEEDED"
     assert result.outputs["items"]["_type"] == "list"
     assert result.outputs["items"]["count"] == 200
+
+
+def test_python_runtime_can_cleanup_node_globals_after_execute() -> None:
+    runtime = PythonExecRuntime(cleanup_globals_after_execute=True)
+
+    outputs, _stdout = runtime.execute(
+        "temporary_payload = 'x' * 1000\noutputs['ok'] = True",
+        {},
+    )
+
+    assert outputs == {"ok": True}
+    assert "temporary_payload" not in runtime.globals
+    assert runtime.globals["outputs"] == {"ok": True}
 
