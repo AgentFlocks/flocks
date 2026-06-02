@@ -459,7 +459,11 @@ class WorkflowEngine:
                     _nid, _nd, _inp, _src = ready[_eo.idx]
                     _sn = step_count + _eo.idx + 1
                     last_node_id = _nid
-                    last_outputs = _eo.outputs
+                    last_outputs = (
+                        _summarize_for_observability(_eo.outputs)
+                        if self.history_mode == "summary"
+                        else _eo.outputs
+                    )
 
                     def _build_step_result(
                         *,

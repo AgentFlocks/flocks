@@ -48,3 +48,27 @@ def test_run_workflow_summary_history_does_not_retain_large_step_payloads() -> N
     }
     assert result.history[1]["inputs"]["raw_alerts"]["count"] == 200
 
+
+def test_run_workflow_summary_outputs_do_not_retain_large_final_payloads() -> None:
+    workflow = {
+        "start": "final",
+        "nodes": [
+            {
+                "id": "final",
+                "type": "python",
+                "code": "outputs['items'] = [{'body': 'x' * 1000} for _ in range(200)]",
+            },
+        ],
+        "edges": [],
+    }
+
+    result = run_workflow(
+        workflow=workflow,
+        history_mode="summary",
+        ensure_requirements=False,
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert result.outputs["items"]["_type"] == "list"
+    assert result.outputs["items"]["count"] == 200
+
