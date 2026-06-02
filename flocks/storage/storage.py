@@ -977,7 +977,35 @@ class Storage:
                 value = json.loads(value_str)
             entries.append((key, value))
         return entries
-    
+
+    @classmethod
+    async def list_raw(
+        cls,
+        prefix: Optional[str] = None,
+    ) -> List[Tuple[str, str]]:
+        """List ``(key, raw_value_str)`` pairs without Python-side JSON parsing.
+
+        Unlike :meth:`list_entries`, the value is returned as a plain string
+        so callers can apply lightweight extraction (e.g. regex) instead of
+        full ``json.loads``.  This is critical for hot trim paths that only
+        need a couple of scalar fields from otherwise large JSON blobs.
+        Compatible with all SQLite versions (no ``json_extract`` required).
+        """
+        await cls._ensure_init()
+
+        if prefix:
+            query = "SELECT key, value FROM storage WHERE key LIKE ?"
+            params: tuple = (f"{prefix}%",)
+        else:
+            query = "SELECT key, value FROM storage"
+            params = ()
+
+        async with cls.connect(cls._db_path) as db:
+            async with db.execute(query, params) as cursor:
+                rows = await cursor.fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
     @classmethod
     async def exists(cls, key: str) -> bool:
         """
