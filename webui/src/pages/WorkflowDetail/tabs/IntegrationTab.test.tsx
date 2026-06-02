@@ -54,10 +54,8 @@ vi.mock('react-i18next', () => ({
         'detail.run.kafkaSection': 'Kafka 配置',
         'detail.run.kafkaExperimental': '实验性',
         'detail.run.kafkaEnabled': '启用消费',
-        'detail.run.kafkaOutputEnabled': '启用输出',
         'detail.run.kafkaInputKey': 'Inputs 键名',
         'detail.run.inputConfig': '输入配置',
-        'detail.run.outputConfig': '输出配置',
         'detail.run.savingConfig': '保存中',
         'detail.run.savedConfig': '已保存',
         'detail.run.saveConfig': '保存配置',
@@ -142,29 +140,27 @@ describe('IntegrationTab Kafka config', () => {
     expect(screen.queryByText('实验性')).not.toBeInTheDocument();
   });
 
-  it('saves output-only Kafka config without enabling consumer', async () => {
+  it('saves Kafka consumer config without output fields', async () => {
     const user = userEvent.setup();
     render(<IntegrationTab workflow={workflow} />);
 
     await user.click(await screen.findByRole('button', { name: /Kafka 配置/ }));
-    const brokerFields = screen.getAllByPlaceholderText('localhost:9092');
-    await user.type(brokerFields[1], 'localhost:9092');
-    await user.type(screen.getByPlaceholderText('workflow-output'), 'workflow-output');
-    await user.click(screen.getByLabelText('启用输出'));
+    await user.type(screen.getByPlaceholderText('localhost:9092'), 'localhost:9092');
+    await user.type(screen.getByPlaceholderText('workflow-input'), 'workflow-input');
+    await user.click(screen.getByLabelText('启用消费'));
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
     await waitFor(() => {
       expect(workflowAPI.saveKafkaConfig).toHaveBeenCalledWith('wf-1', {
-        enabled: false,
-        inputBroker: '',
-        inputTopic: '',
+        enabled: true,
+        inputBroker: 'localhost:9092',
+        inputTopic: 'workflow-input',
         inputGroupId: '',
         inputKey: 'kafka_message',
-        outputEnabled: true,
-        outputBroker: 'localhost:9092',
-        outputTopic: 'workflow-output',
       });
     });
+    expect(screen.queryByText('输出配置')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('启用输出')).not.toBeInTheDocument();
   });
 
   it('renders poller status badge when runtime is running', async () => {

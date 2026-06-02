@@ -303,9 +303,6 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   const [inputTopic, setInputTopic] = useState('');
   const [inputGroupId, setInputGroupId] = useState('');
   const [inputKey, setInputKey] = useState('kafka_message');
-  const [outputEnabled, setOutputEnabled] = useState(false);
-  const [outputBroker, setOutputBroker] = useState('');
-  const [outputTopic, setOutputTopic] = useState('');
   // Runtime consumer state (independent from saved config) — only this should
   // drive the "Running" indicator, otherwise a connection failure leaves the UI
   // falsely showing the consumer as active.
@@ -356,9 +353,6 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
         setInputTopic(res.data.inputTopic || '');
         setInputGroupId(res.data.inputGroupId || '');
         setInputKey(res.data.inputKey || 'kafka_message');
-        setOutputBroker(res.data.outputBroker || '');
-        setOutputTopic(res.data.outputTopic || '');
-        setOutputEnabled(!!res.data.outputEnabled);
       }
     }).catch(() => {});
     refreshStatus();
@@ -379,7 +373,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
     setSaveError('');
     try {
       const res = await workflowAPI.saveKafkaConfig(workflowId, {
-        enabled, inputBroker, inputTopic, inputGroupId, inputKey, outputEnabled, outputBroker, outputTopic,
+        enabled, inputBroker, inputTopic, inputGroupId, inputKey,
       });
       if (res.data?.consumer) {
         setConsumer(res.data.consumer);
@@ -448,25 +442,12 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             {inputField('Consumer Group', inputGroupId, setInputGroupId, 'flocks-consumer')}
             {inputField(t('detail.run.kafkaInputKey'), inputKey, setInputKey, 'kafka_message')}
           </div>
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
-              <Wifi className="w-3.5 h-3.5 rotate-180" /> {t('detail.run.outputConfig')}
-            </p>
-            {inputField('Broker', outputBroker, setOutputBroker, 'localhost:9092')}
-            {inputField('Topic', outputTopic, setOutputTopic, 'workflow-output')}
-          </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div>
             {toggleOption(
               `kafka-enabled-${workflowId}`,
               t('detail.run.kafkaEnabled'),
               enabled,
               setEnabled,
-            )}
-            {toggleOption(
-              `kafka-output-enabled-${workflowId}`,
-              t('detail.run.kafkaOutputEnabled'),
-              outputEnabled,
-              setOutputEnabled,
             )}
           </div>
           <button

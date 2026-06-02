@@ -56,7 +56,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
     manager._abort_events[workflow_id] = abort
     workers = [
         asyncio.create_task(
-            manager._worker_loop(workflow_id, {}, "kafka_message", queue, abort, None, ""),
+            manager._worker_loop(workflow_id, {}, "kafka_message", queue, abort),
             name=f"test-worker-{i}",
         )
         for i in range(pool_size)
@@ -84,6 +84,37 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Kafka workers should decode raw bytes only when a worker is ready."""
+
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "test-wf-raw-queue"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=8)
+    abort = asyncio.Event()
+    captured: list[dict] = []
+
+    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, producer=None, output_topic=""):  # noqa: ANN001
+        captured.append(msg)
+        abort.set()
+
+    monkeypatch.setattr(manager, "_trigger_workflow", _fake_trigger)
+    queue.put_nowait(
+        kafka_manager._QueuedKafkaMessage(  # noqa: SLF001
+            raw_value=b'{"ok": true}',
+            size_bytes=len(b'{"ok": true}'),
+        )
+    )
+
+    worker = asyncio.create_task(
+        manager._worker_loop(workflow_id, {}, "kafka_message", queue, abort),
+        name="test-worker-raw-queue",
+    )
+    await asyncio.wait_for(worker, timeout=1.0)
+
+    assert captured == [{"ok": True}]
+
+
+@pytest.mark.asyncio
 async def test_stop_workflow_cancels_worker_pool() -> None:
     """``stop_workflow`` must cancel and drain the worker pool cleanly."""
 
@@ -102,7 +133,7 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
 
     workers = [
         asyncio.create_task(
-            manager._worker_loop(workflow_id, {}, "kafka_message", queue, abort, None, ""),
+            manager._worker_loop(workflow_id, {}, "kafka_message", queue, abort),
             name=f"stop-worker-{i}",
         )
         for i in range(3)
@@ -151,92 +182,6 @@ async def test_restart_missing_broker_reports_failed(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_publish_execution_result_allows_output_only_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Kafka output publishing must not require consumer input configuration."""
-
-    manager = kafka_manager.KafkaManager()
-
-    class _Producer:
-        def __init__(self) -> None:
-            self.sent: list[tuple[str, bytes]] = []
-            self.stopped = False
-
-        async def send_and_wait(self, topic: str, value: bytes) -> None:
-            self.sent.append((topic, value))
-
-        async def stop(self) -> None:
-            self.stopped = True
-
-    producer = _Producer()
-    create_calls: list[str] = []
-
-    async def _fake_read(key):  # noqa: ANN001
-        return {
-            "enabled": False,
-            "inputBroker": "",
-            "inputTopic": "",
-            "outputEnabled": True,
-            "outputBroker": "localhost:9092",
-            "outputTopic": "workflow-output",
-        }
-
-    async def _fake_create_producer(broker: str):  # noqa: ANN001
-        create_calls.append(broker)
-        assert broker == "localhost:9092"
-        return producer
-
-    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
-    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
-
-    published = await manager.publish_execution_result("wf-output", "exec-1", {"ok": True})
-    published_again = await manager.publish_execution_result("wf-output", "exec-2", {"ok": "again"})
-
-    assert published is True
-    assert published_again is True
-    assert create_calls == ["localhost:9092"]
-    assert len(producer.sent) == 2
-    topic, value = producer.sent[0]
-    assert topic == "workflow-output"
-    assert json.loads(value.decode("utf-8")) == {
-        "workflowId": "wf-output",
-        "executionId": "exec-1",
-        "outputs": {"ok": True},
-    }
-    assert producer.stopped is False
-
-    await manager.stop_workflow("wf-output")
-    assert producer.stopped is True
-
-
-@pytest.mark.asyncio
-async def test_publish_execution_result_skips_when_output_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configured output broker/topic should not publish when the output toggle is off."""
-
-    manager = kafka_manager.KafkaManager()
-    create_producer_called = False
-
-    async def _fake_read(key):  # noqa: ANN001
-        return {
-            "enabled": False,
-            "outputEnabled": False,
-            "outputBroker": "localhost:9092",
-            "outputTopic": "workflow-output",
-        }
-
-    async def _fake_create_producer(broker: str):  # noqa: ANN001
-        nonlocal create_producer_called
-        create_producer_called = True
-
-    monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
-    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
-
-    published = await manager.publish_execution_result("wf-output", "exec-1", {"ok": True})
-
-    assert published is False
-    assert create_producer_called is False
-
-
-@pytest.mark.asyncio
 async def test_restart_workflow_cleans_resources_after_connect_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -252,17 +197,7 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
             "inputTopic": "workflow-input",
             "inputGroupId": "wf-group",
             "inputKey": "kafka_message",
-            "outputEnabled": True,
-            "outputBroker": "localhost:9092",
-            "outputTopic": "workflow-output",
         }
-
-    class _Producer:
-        def __init__(self) -> None:
-            self.stopped = False
-
-        async def stop(self) -> None:
-            self.stopped = True
 
     class _Consumer:
         def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
@@ -274,19 +209,12 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
         async def stop(self) -> None:
             self.stopped = True
 
-    producer = _Producer()
-
-    async def _fake_create_producer(broker: str):  # noqa: ANN001
-        assert broker == "localhost:9092"
-        return producer
-
     monkeypatch.setattr(kafka_manager.Storage, "read", _fake_read)
     monkeypatch.setattr(
         kafka_manager,
         "read_workflow_from_fs",
         lambda _workflow_id: {"workflowJson": {"start": "n1", "nodes": [], "edges": []}},
     )
-    monkeypatch.setattr(manager, "_create_producer", _fake_create_producer)
     monkeypatch.setitem(sys.modules, "aiokafka", SimpleNamespace(AIOKafkaConsumer=_Consumer))
 
     status = await manager.restart_workflow(workflow_id)
@@ -297,8 +225,6 @@ async def test_restart_workflow_cleans_resources_after_connect_failure(
     assert workflow_id not in manager._worker_pools
     assert workflow_id not in manager._queues
     assert workflow_id not in manager._abort_events
-    assert workflow_id not in manager._producers
-    assert producer.stopped is True
 
 
 def test_decode_message_variants() -> None:
@@ -309,3 +235,70 @@ def test_decode_message_variants() -> None:
     assert kafka_manager._decode_message(None) is None
     # Invalid UTF-8 bytes fall back to a hex repr.
     assert kafka_manager._decode_message(b"\xff\xfe") == "fffe"
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_compacts_kafka_execution_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kafka-triggered execution rows should not retain full raw alert bodies."""
+
+    manager = kafka_manager.KafkaManager()
+    captured_input_params: dict = {}
+    captured_exec_data: dict = {}
+    captured_run_kwargs: dict = {}
+
+    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+        captured_input_params.update(input_params or {})
+        return {"id": "exec-compact", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+        captured_exec_data.update(exec_data)
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
+        large_alert = {"raw_log_id": "alert-1", "req_body": "x" * 50_000}
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            error=None,
+            outputs={
+                "enriched_alerts": [large_alert],
+                "kafka_messages": [{"raw_log_id": "alert-1"}],
+            },
+            history=[
+                {
+                    "node_id": "receive_alert",
+                    "inputs": {"kafka_message": {"alarmData": "x" * 50_000}},
+                    "outputs": {"raw_alerts": [large_alert]},
+                },
+                {
+                    "node_id": "dedup_and_write",
+                    "inputs": {"filtered_alerts": [large_alert]},
+                    "outputs": {"enriched_alerts": [large_alert]},
+                },
+            ],
+            last_node_id="done",
+            steps=2,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+
+    await manager._trigger_workflow(
+        "wf-compact",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"alarmData": "x" * 50_000},
+        "kafka_message",
+    )
+
+    assert captured_input_params["kafka_message"]["alarmData"]["_type"] == "string"
+    assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
+    assert captured_run_kwargs["history_mode"] == "summary"
+    assert captured_exec_data["outputResults"] == {
+        "_enriched_alerts_count": 1,
+        "_kafka_messages_count": 1,
+    }
+    assert captured_exec_data["executionLog"][0]["outputs"] == {"_raw_alerts_count": 1}
+    assert captured_exec_data["executionLog"][1]["inputs"] == {"_filtered_alerts_count": 1}
+    assert len(json.dumps(captured_exec_data, ensure_ascii=False)) < 10_000
