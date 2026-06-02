@@ -215,8 +215,8 @@ class TestCuratedCatalogModels:
         m3 = next(m for m in models if m.id == "minimax-m3")
         assert m3.capabilities.supports_reasoning is True
         assert m3.capabilities.interleaved["field"] == "reasoning_details"
-        assert m3.limits.context_window == 524288
-        assert m3.limits.max_output_tokens == 524288
+        assert m3.limits.context_window == 512000
+        assert m3.limits.max_output_tokens == 512000
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.supports_reasoning is True
         assert m27.capabilities.interleaved["field"] == "reasoning_details"
