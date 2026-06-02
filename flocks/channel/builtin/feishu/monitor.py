@@ -42,6 +42,76 @@ log = Log.create(service="channel.feishu.monitor")
 _CHAT_LOCKS_MAX = 2000
 
 
+class _ObservedWSClient:
+    """Expose disconnect observation for SDK clients that only provide start/stop."""
+
+    def __init__(self, client: Any, *, app_id: str) -> None:
+        self._client = client
+        self._app_id = app_id
+        self._thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
+        self._disconnect_event = threading.Event()
+        self._start_error: Optional[BaseException] = None
+        self._disconnect_error: Optional[BaseException] = None
+        self._stop_requested = False
+
+    def start(self) -> None:
+        self._started.clear()
+        self._disconnect_event.clear()
+        self._start_error = None
+        self._disconnect_error = None
+        self._stop_requested = False
+
+        def _run() -> None:
+            self._started.set()
+            try:
+                self._client.start()
+            except BaseException as exc:
+                if self._start_error is None:
+                    self._start_error = exc
+                self._notify_disconnected(exc)
+            else:
+                self._notify_disconnected(RuntimeError("Feishu websocket client exited"))
+
+        self._thread = threading.Thread(
+            target=_run,
+            name=f"feishu-ws-{self._app_id}",
+            daemon=True,
+        )
+        self._thread.start()
+        self._started.wait(timeout=0.2)
+
+    def stop(self) -> None:
+        self._stop_requested = True
+        self._disconnect_event.set()
+        stop = getattr(self._client, "stop", None)
+        if callable(stop):
+            with contextlib.suppress(Exception):
+                stop()
+        if self._thread:
+            self._thread.join(timeout=5)
+        self._thread = None
+
+    @property
+    def start_error(self) -> Optional[BaseException]:
+        return self._start_error
+
+    @property
+    def disconnected_error(self) -> Optional[BaseException]:
+        return self._disconnect_error
+
+    async def wait_disconnected(self) -> Optional[BaseException]:
+        await asyncio.to_thread(self._disconnect_event.wait)
+        return self._disconnect_error
+
+    def _notify_disconnected(self, error: BaseException) -> None:
+        if self._stop_requested:
+            return
+        if self._disconnect_error is None:
+            self._disconnect_error = error
+        self._disconnect_event.set()
+
+
 def _extract_ws_close_code(exc: BaseException | None) -> int | None:
     """Return a websocket close code from common exception shapes."""
     if exc is None:
@@ -82,15 +152,16 @@ def _build_ws_client(
 ):
     """Build a websocket client compatible with both old and new lark-oapi SDKs."""
     try:
-        import lark_oapi as lark
-        from lark_oapi.adapter.websocket import WSClient
+        lark = importlib.import_module("lark_oapi")
+        ws_adapter = importlib.import_module("lark_oapi.adapter.websocket")
+        ws_client_cls = ws_adapter.WSClient
 
-        return WSClient(
+        return _ObservedWSClient(ws_client_cls(
             app_id=app_id,
             app_secret=app_secret,
             event_handler=event_handler,
             log_level=lark.LogLevel.WARNING,
-        )
+        ), app_id=app_id)
     except ImportError:
         lark = importlib.import_module("lark_oapi")
         ws_module = importlib.import_module("lark_oapi.ws.client")
@@ -232,6 +303,7 @@ def _build_ws_client(
 
             def stop(self) -> None:
                 self._stop_requested = True
+                self._disconnect_event.set()
                 if self._client is None and self._thread and self._thread.is_alive():
                     deadline = time.monotonic() + 0.5
                     while self._client is None and not self._finished.is_set():
@@ -331,33 +403,38 @@ async def start_websocket(
         await _start_single_websocket(accounts[0], on_message, abort_event)
         return
 
+    async def _run_account(account: dict) -> BaseException | None:
+        try:
+            await _start_single_websocket(account, on_message, abort_event)
+            return None
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("feishu.ws.account_failed", {
+                "account_id": account["_account_id"],
+                "error": str(exc),
+            })
+            return exc
+
     tasks = [
         asyncio.create_task(
-            _start_single_websocket(acc, on_message, abort_event),
+            _run_account(acc),
             name=f"feishu-ws-{acc['_account_id']}",
         )
         for acc in accounts
     ]
     try:
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         for t in tasks:
             if not t.done():
                 t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-    except Exception:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for acc, result in zip(accounts, results):
-            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
-                log.error("feishu.ws.account_failed", {
-                    "account_id": acc["_account_id"],
-                    "error": str(result),
-                })
-        raise
+
+    failures = [result for result in results if isinstance(result, BaseException)]
+    if failures and len(failures) == len(accounts) and not (abort_event and abort_event.is_set()):
+        raise RuntimeError("All Feishu websocket accounts stopped") from failures[0]
 
 
 async def _start_single_websocket(

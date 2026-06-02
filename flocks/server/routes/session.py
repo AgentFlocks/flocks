@@ -3571,10 +3571,17 @@ async def _clear_session_history(sessionID: str) -> int:
             detail=f"Session {sessionID} not found",
         )
 
-    await abort_session(sessionID)
-
     from flocks.server.routes.event import publish_event
+    from flocks.session.interaction_queue import InteractionQueue
     from flocks.session.message import Message
+
+    await abort_session(sessionID)
+    await InteractionQueue.clear(sessionID)
+    try:
+        await _publish_prompt_queue(sessionID)
+    except Exception as exc:
+        log.warn("session.clear.prompt_queue_event_error", {"sessionID": sessionID, "error": str(exc)})
+    await _wait_for_session_idle(sessionID)
 
     deleted_count = await Message.clear(sessionID)
     log.info("session.cleared", {"sessionID": sessionID, "deleted": deleted_count})

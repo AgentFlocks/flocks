@@ -394,20 +394,24 @@ async def test_handle_webhook_skips_replayed_requests(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_websocket_card_action_events_are_deduplicated(monkeypatch, tmp_path) -> None:
     abort_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
     on_message = AsyncMock()
     dedup = FeishuDedup(account_id="main", data_dir=tmp_path)
 
     class FakeWSClient:
         def __init__(self, app_id, app_secret, event_handler, log_level):
             self._event_handler = event_handler
+            self._stop_event = threading.Event()
 
         def start(self):
             payload = {"header": {"event_type": "card.action.trigger"}, "event": {}}
             self._event_handler(payload)
             self._event_handler(payload)
-            asyncio.get_running_loop().call_later(0.05, abort_event.set)
+            loop.call_soon_threadsafe(abort_event.set)
+            self._stop_event.wait(timeout=1)
 
         def stop(self):
+            self._stop_event.set()
             return None
 
     fake_lark = types.ModuleType("lark_oapi")
@@ -454,6 +458,45 @@ async def test_websocket_card_action_events_are_deduplicated(monkeypatch, tmp_pa
     )
 
     assert on_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_build_ws_client_adapter_branch_surfaces_disconnect_error(monkeypatch) -> None:
+    class FakeWSClient:
+        def __init__(self, app_id, app_secret, event_handler, log_level):
+            self._stop_event = threading.Event()
+
+        def start(self):
+            self._stop_event.wait(timeout=0.05)
+            raise RuntimeError("socket closed")
+
+        def stop(self):
+            self._stop_event.set()
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_adapter = types.ModuleType("lark_oapi.adapter")
+    fake_websocket = types.ModuleType("lark_oapi.adapter.websocket")
+    fake_websocket.WSClient = FakeWSClient
+
+    monkeypatch.setitem(sys.modules, "lark_oapi", fake_lark)
+    monkeypatch.setitem(sys.modules, "lark_oapi.adapter", fake_adapter)
+    monkeypatch.setitem(sys.modules, "lark_oapi.adapter.websocket", fake_websocket)
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    disconnect_error = await asyncio.wait_for(ws_client.wait_disconnected(), timeout=1.0)
+    ws_client.stop()
+
+    assert isinstance(disconnect_error, RuntimeError)
+    assert str(disconnect_error) == "socket closed"
+    assert ws_client.disconnected_error is disconnect_error
 
 
 def test_build_ws_client_falls_back_to_modern_sdk(monkeypatch) -> None:
@@ -978,46 +1021,56 @@ async def test_start_single_websocket_abort_wins_over_disconnect_waiter(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_start_websocket_raises_when_any_account_fails(monkeypatch) -> None:
-    cancelled_accounts: list[str] = []
+async def test_start_websocket_keeps_other_accounts_running_after_one_fails(monkeypatch) -> None:
+    events: list[str] = []
+    abort_event = asyncio.Event()
 
     async def fake_start_single_websocket(config, on_message, abort_event=None):
         account_id = config["_account_id"]
         if account_id == "main":
             await asyncio.sleep(0)
+            events.append("main_failed")
             raise RuntimeError("socket closed")
-        try:
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            cancelled_accounts.append(account_id)
-            raise
+        events.append("backup_started")
+        await abort_event.wait()
+        events.append("backup_stopped")
 
     monkeypatch.setattr(
         "flocks.channel.builtin.feishu.monitor._start_single_websocket",
         fake_start_single_websocket,
     )
 
-    with pytest.raises(RuntimeError, match="socket closed"):
-        await start_websocket(
-            {
-                "accounts": {
-                    "main": {
-                        "appId": "main-id",
-                        "appSecret": "main-secret",
-                        "connectionMode": "websocket",
-                    },
-                    "backup": {
-                        "appId": "backup-id",
-                        "appSecret": "backup-secret",
-                        "connectionMode": "websocket",
-                    },
-                }
-            },
-            AsyncMock(),
-            asyncio.Event(),
-        )
+    task = asyncio.create_task(start_websocket(
+        {
+            "accounts": {
+                "main": {
+                    "appId": "main-id",
+                    "appSecret": "main-secret",
+                    "connectionMode": "websocket",
+                },
+                "backup": {
+                    "appId": "backup-id",
+                    "appSecret": "backup-secret",
+                    "connectionMode": "websocket",
+                },
+            }
+        },
+        AsyncMock(),
+        abort_event,
+    ))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if "main_failed" in events:
+            break
 
-    assert cancelled_accounts == ["backup"]
+    assert "main_failed" in events
+    assert "backup_started" in events
+    assert not task.done()
+
+    abort_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert "backup_stopped" in events
 
 
 @pytest.mark.asyncio
