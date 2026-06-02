@@ -40,6 +40,8 @@ log = Log.create(service="channel.feishu.monitor")
 
 # _chat_locks LRU cap: evict oldest unlocked entries when exceeded
 _CHAT_LOCKS_MAX = 2000
+_WS_ACCOUNT_RECONNECT_DELAY_S = 1.0
+_WS_ACCOUNT_RECONNECT_MAX_DELAY_S = 30.0
 
 
 class _ObservedWSClient:
@@ -403,18 +405,50 @@ async def start_websocket(
         await _start_single_websocket(accounts[0], on_message, abort_event)
         return
 
-    async def _run_account(account: dict) -> BaseException | None:
+    reconnect_delay_s = float(config.get("websocketReconnectDelaySeconds", _WS_ACCOUNT_RECONNECT_DELAY_S))
+    reconnect_max_delay_s = float(
+        config.get("websocketReconnectMaxDelaySeconds", _WS_ACCOUNT_RECONNECT_MAX_DELAY_S)
+    )
+
+    async def _wait_before_restart(delay_s: float) -> None:
+        if delay_s <= 0:
+            await asyncio.sleep(0)
+            return
+        if abort_event is None:
+            await asyncio.sleep(delay_s)
+            return
         try:
-            await _start_single_websocket(account, on_message, abort_event)
-            return None
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.error("feishu.ws.account_failed", {
-                "account_id": account["_account_id"],
-                "error": str(exc),
-            })
-            return exc
+            await asyncio.wait_for(abort_event.wait(), timeout=delay_s)
+        except asyncio.TimeoutError:
+            return
+
+    async def _run_account(account: dict) -> None:
+        account_id = account["_account_id"]
+        attempt = 0
+        while not (abort_event and abort_event.is_set()):
+            try:
+                await _start_single_websocket(account, on_message, abort_event)
+                if abort_event and abort_event.is_set():
+                    return
+                raise RuntimeError("Feishu websocket account stopped")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                attempt += 1
+                delay_s = min(
+                    reconnect_delay_s * (2 ** min(attempt - 1, 5)),
+                    reconnect_max_delay_s,
+                )
+                log.error("feishu.ws.account_failed", {
+                    "account_id": account_id,
+                    "attempt": attempt,
+                    "error": str(exc),
+                })
+                log.info("feishu.ws.account_restart_scheduled", {
+                    "account_id": account_id,
+                    "delay_s": delay_s,
+                })
+                await _wait_before_restart(delay_s)
 
     tasks = [
         asyncio.create_task(
@@ -424,17 +458,13 @@ async def start_websocket(
         for acc in accounts
     ]
     try:
-        results = await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks)
     except asyncio.CancelledError:
         for t in tasks:
             if not t.done():
                 t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-
-    failures = [result for result in results if isinstance(result, BaseException)]
-    if failures and len(failures) == len(accounts) and not (abort_event and abort_event.is_set()):
-        raise RuntimeError("All Feishu websocket accounts stopped") from failures[0]
 
 
 async def _start_single_websocket(

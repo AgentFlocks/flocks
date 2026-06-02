@@ -1074,6 +1074,60 @@ async def test_start_websocket_keeps_other_accounts_running_after_one_fails(monk
 
 
 @pytest.mark.asyncio
+async def test_start_websocket_restarts_failed_account_while_sibling_runs(monkeypatch) -> None:
+    events: list[str] = []
+    abort_event = asyncio.Event()
+    restart_seen = asyncio.Event()
+    attempts: dict[str, int] = {"main": 0, "backup": 0}
+
+    async def fake_start_single_websocket(config, on_message, abort_event=None):
+        account_id = config["_account_id"]
+        attempts[account_id] += 1
+        events.append(f"{account_id}_start_{attempts[account_id]}")
+        if account_id == "main" and attempts[account_id] == 1:
+            raise RuntimeError("socket closed")
+        if account_id == "main":
+            restart_seen.set()
+        await abort_event.wait()
+        events.append(f"{account_id}_stopped")
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor._start_single_websocket",
+        fake_start_single_websocket,
+    )
+
+    task = asyncio.create_task(start_websocket(
+        {
+            "websocketReconnectDelaySeconds": 0,
+            "accounts": {
+                "main": {
+                    "appId": "main-id",
+                    "appSecret": "main-secret",
+                    "connectionMode": "websocket",
+                },
+                "backup": {
+                    "appId": "backup-id",
+                    "appSecret": "backup-secret",
+                    "connectionMode": "websocket",
+                },
+            },
+        },
+        AsyncMock(),
+        abort_event,
+    ))
+
+    await asyncio.wait_for(restart_seen.wait(), timeout=1.0)
+
+    assert attempts["main"] == 2
+    assert attempts["backup"] == 1
+    assert "backup_start_1" in events
+    assert not task.done()
+
+    abort_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_parse_reaction_event_falls_back_to_user_id(monkeypatch) -> None:
     from flocks.channel.builtin.feishu.monitor import _parse_reaction_event
 
