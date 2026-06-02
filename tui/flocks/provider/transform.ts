@@ -285,7 +285,7 @@ export namespace ProviderTransform {
     if (id.includes("gemini")) return 1.0
     if (id.includes("glm-4.6")) return 1.0
     if (id.includes("glm-4.7")) return 1.0
-    if (id.includes("minimax-m2")) return 1.0
+    if (id.includes("minimax")) return 1.0
     if (id.includes("kimi-k2")) {
       if (id.includes("thinking")) return 1.0
       return 0.6
@@ -296,7 +296,7 @@ export namespace ProviderTransform {
   export function topP(model: Provider.Model) {
     const id = model.id.toLowerCase()
     if (id.includes("qwen")) return 1
-    if (id.includes("minimax-m2")) {
+    if (id.includes("minimax")) {
       return 0.95
     }
     if (id.includes("gemini")) return 0.95
@@ -305,7 +305,7 @@ export namespace ProviderTransform {
 
   export function topK(model: Provider.Model) {
     const id = model.id.toLowerCase()
-    if (id.includes("minimax-m2")) {
+    if (id.includes("minimax")) {
       if (id.includes("m2.1")) return 40
       return 20
     }
