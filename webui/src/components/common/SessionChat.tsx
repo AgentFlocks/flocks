@@ -867,7 +867,12 @@ export default function SessionChat({
 
       if (!properties || !sessionId) return;
 
-      if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
+      if (type === 'session.cleared' && properties.sessionID === sessionId) {
+        abortingRef.current = false;
+        abortedMessageIdRef.current = null;
+        setIsStreaming(false);
+        refetch();
+      } else if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
         setIsStreaming(false);
         const lastAsstMsg = [...messagesRef.current].reverse().find(
           (message) => message.role === 'assistant' && !message.finish,

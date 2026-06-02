@@ -2957,6 +2957,9 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
         await _process_session_message(sessionID, session, request, working_directory)
 
+    async def _clear_history() -> None:
+        await _clear_session_history(sessionID)
+
     async def _run_session_control(output_event, parsed) -> bool:
         if parsed.canonical_name != "compact":
             return False
@@ -2992,6 +2995,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         direct_response=_publish_direct_response,
         run_llm=_run_llm,
         session_control=_run_session_control,
+        clear_history=_clear_history,
     )
     await dispatch_user_input(event, sink)
 
@@ -3228,9 +3232,10 @@ async def send_session_command(sessionID: str, request: CommandRequest):
     """
     Execute a slash command.
 
-    Direct commands (/tools, /skills, /help, /mcp, /clear) are handled
-    without calling the LLM.  Their output is pushed as an assistant message
-    directly via SSE.
+    Direct commands (/tools, /skills, /help, /mcp) are handled without calling
+    the LLM. Their output is pushed as an assistant message directly via SSE.
+    Side-effecting direct commands like /clear run without creating a chat
+    message and instead update session state via callbacks.
 
     LLM-based commands (/plan, /ask, /init, /compact, ...) are routed through
     the normal session-loop pipeline.
@@ -3557,6 +3562,34 @@ async def get_session_statistics(sessionID: str):
         raise HTTPException(status_code=500, detail=f"Failed to get session statistics: {str(e)}")
 
 
+async def _clear_session_history(sessionID: str) -> int:
+    """Clear stored messages for a session and notify subscribed UIs."""
+    session_info = await Session.get_by_id(sessionID)
+    if not session_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+
+    await abort_session(sessionID)
+
+    from flocks.server.routes.event import publish_event
+    from flocks.session.message import Message
+
+    deleted_count = await Message.clear(sessionID)
+    log.info("session.cleared", {"sessionID": sessionID, "deleted": deleted_count})
+
+    try:
+        await publish_event("session.cleared", {
+            "sessionID": sessionID,
+            "deletedMessages": deleted_count,
+        })
+    except Exception as exc:
+        log.warn("session.clear.event_error", {"sessionID": sessionID, "error": str(exc)})
+
+    return deleted_count
+
+
 @router.post("/{sessionID}/clear")
 async def clear_session(sessionID: str):
     """
@@ -3565,24 +3598,14 @@ async def clear_session(sessionID: str):
     Removes all messages from the session while keeping the session itself.
     """
     try:
-        # Verify session exists
-        session_info = await Session.get_by_id(sessionID)
-        if not session_info:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Session {sessionID} not found",
-            )
-
-        # Use Message.clear which handles bulk deletion atomically
-        from flocks.session.message import Message
-        deleted_count = await Message.clear(sessionID)
-
-        log.info("session.cleared", {"sessionID": sessionID, "deleted": deleted_count})
+        deleted_count = await _clear_session_history(sessionID)
         return {
             "status": "success",
             "sessionID": sessionID,
             "deletedMessages": deleted_count,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("session.clear.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to clear session: {str(e)}")

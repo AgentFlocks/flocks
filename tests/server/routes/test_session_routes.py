@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -798,6 +799,29 @@ class TestSessionUtilities:
         assert clear_resp.status_code == status.HTTP_200_OK
 
         # Messages should be gone
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        assert list_resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_clear_command_removes_messages(self, client: AsyncClient, session_id: str):
+        """Command route /clear removes messages via the dispatcher task."""
+        from flocks.server.routes import session as session_routes
+
+        await client.post(
+            f"/api/session/{session_id}/message",
+            json={"parts": [{"type": "text", "text": "msg"}], "noReply": True},
+        )
+
+        clear_resp = await session_routes.send_session_command(
+            session_id,
+            session_routes.CommandRequest(command="clear"),
+        )
+        assert clear_resp["status"] == "accepted"
+
+        pending = list(getattr(session_routes.router, "_pending_tasks", set()))
+        assert pending
+        await asyncio.gather(*pending)
+
         list_resp = await client.get(f"/api/session/{session_id}/message")
         assert list_resp.json() == []
 

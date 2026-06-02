@@ -114,13 +114,17 @@ def _build_ws_client(
                 self._receive_task: Optional[asyncio.Task] = None
                 self._ping_task: Optional[asyncio.Task] = None
                 self._start_error: Optional[BaseException] = None
+                self._disconnect_error: Optional[BaseException] = None
                 self._stop_requested = False
+                self._disconnect_event = threading.Event()
                 self._finished = threading.Event()
 
             def start(self) -> None:
                 self._finished.clear()
                 self._start_error = None
+                self._disconnect_error = None
                 self._stop_requested = False
+                self._disconnect_event.clear()
 
                 def _run() -> None:
                     self._loop = asyncio.new_event_loop()
@@ -146,6 +150,13 @@ def _build_ws_client(
 
                         self._client._ping_loop = _tracked_ping_loop
 
+                    def _notify_disconnected(error: BaseException) -> None:
+                        if self._stop_requested:
+                            return
+                        if self._disconnect_error is None:
+                            self._disconnect_error = error
+                        self._disconnect_event.set()
+
                     async def _receive_message_loop() -> None:
                         self._receive_task = asyncio.current_task()
                         try:
@@ -170,11 +181,22 @@ def _build_ws_client(
                                 "app_id": app_id,
                                 "error": str(e),
                             })
-                            await self._client._disconnect()
+                            with contextlib.suppress(Exception):
+                                await self._client._disconnect()
                             if self._client._auto_reconnect:
-                                await self._client._reconnect()
-                            else:
-                                raise
+                                try:
+                                    await self._client._reconnect()
+                                    return
+                                except Exception as reconnect_error:
+                                    log.error("feishu.ws.reconnect_error", {
+                                        "app_id": app_id,
+                                        "error": str(reconnect_error),
+                                    })
+                                    e = reconnect_error
+                            _notify_disconnected(e)
+                            running_loop = asyncio.get_running_loop()
+                            running_loop.call_soon(running_loop.stop)
+                            return
                         finally:
                             self._receive_task = None
 
@@ -186,8 +208,10 @@ def _build_ws_client(
                     except RuntimeError as e:
                         if "Event loop stopped before Future completed" not in str(e):
                             self._start_error = e
+                            _notify_disconnected(e)
                     except BaseException as e:  # pragma: no cover - defensive
                         self._start_error = e
+                        _notify_disconnected(e)
                     finally:
                         self._finished.set()
 
@@ -267,6 +291,14 @@ def _build_ws_client(
             def start_error(self) -> Optional[BaseException]:
                 return self._start_error
 
+            @property
+            def disconnected_error(self) -> Optional[BaseException]:
+                return self._disconnect_error
+
+            async def wait_disconnected(self) -> Optional[BaseException]:
+                await asyncio.to_thread(self._disconnect_event.wait)
+                return self._disconnect_error
+
         return _CompatWSClient()
 
 
@@ -307,7 +339,17 @@ async def start_websocket(
         for acc in accounts
     ]
     try:
-        # return_exceptions=True: one account failing does not affect others
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    except Exception:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for acc, result in zip(accounts, results):
             if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
@@ -315,12 +357,6 @@ async def start_websocket(
                     "account_id": acc["_account_id"],
                     "error": str(result),
                 })
-    except asyncio.CancelledError:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
-        # Wait for all tasks to finish cancellation to avoid "Task destroyed but pending" warnings
-        await asyncio.gather(*tasks, return_exceptions=True)
         raise
 
 
@@ -517,16 +553,56 @@ async def _start_single_websocket(
     ws_client.start()
 
     # Launch background dedup flush task (only when dedup is enabled)
-    flush_task = await dedup.start_background_flush() if dedup_enabled else asyncio.create_task(asyncio.sleep(0))
+    flush_task = (
+        await dedup.start_background_flush()
+        if dedup_enabled
+        else asyncio.create_task(asyncio.sleep(0))
+    )
+    disconnect_waiter: asyncio.Task | None = None
+    abort_waiter: asyncio.Task | None = None
 
     try:
+        wait_disconnected = getattr(ws_client, "wait_disconnected", None)
+        if callable(wait_disconnected):
+            disconnect_waiter = asyncio.create_task(
+                wait_disconnected(),
+                name=f"feishu-ws-disconnect-{account_id}",
+            )
         if abort_event:
-            await abort_event.wait()
+            abort_waiter = asyncio.create_task(
+                abort_event.wait(),
+                name=f"feishu-ws-abort-{account_id}",
+            )
         else:
-            while True:
-                await asyncio.sleep(3600)
+            abort_waiter = asyncio.create_task(
+                asyncio.Event().wait(),
+                name=f"feishu-ws-abort-{account_id}",
+            )
+
+        waiters = {abort_waiter}
+        if disconnect_waiter is not None:
+            waiters.add(disconnect_waiter)
+
+        done, pending = await asyncio.wait(
+            waiters,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if disconnect_waiter is not None and disconnect_waiter in done:
+            disconnect_error = disconnect_waiter.result()
+            if disconnect_error is None:
+                disconnect_error = getattr(ws_client, "start_error", None)
+            if disconnect_error is None:
+                disconnect_error = RuntimeError("Feishu websocket disconnected")
+            raise RuntimeError(
+                f"Feishu websocket disconnected for account '{account_id}'"
+            ) from disconnect_error
     finally:
         flush_task.cancel()
+        await asyncio.gather(flush_task, return_exceptions=True)
         if dedup_enabled:
             await dedup.flush()   # final flush before exit
         ws_client.stop()

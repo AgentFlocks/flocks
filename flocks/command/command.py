@@ -245,8 +245,8 @@ class Command:
             ),
             CommandDef(
                 name="clear",
-                description="Clear screen output",
-                template="Clear the current UI output only.",
+                description="Clear the current session history",
+                template="Clear all messages in the current session.",
                 execution_kind="direct",
                 allow_attachments=False,
             ),

@@ -27,6 +27,7 @@ class DirectCommandResult:
     text: Optional[str] = None
     prompt: Optional[str] = None
     clear_screen: bool = False
+    clear_history: bool = False
 
 
 def is_agent_safe_direct_command(command: CommandInfo) -> bool:
@@ -145,7 +146,7 @@ async def run_direct_command(
         return DirectCommandResult(handled=True, text=format_help(surface=surface))
 
     if name == "clear":
-        return DirectCommandResult(handled=True, clear_screen=True, text="Screen cleared.")
+        return DirectCommandResult(handled=True, clear_history=True)
 
     if name == "tools":
         if not args or args == "list":
