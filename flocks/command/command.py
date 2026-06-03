@@ -249,6 +249,8 @@ class Command:
                 template="Clear all messages in the current session.",
                 execution_kind="direct",
                 allow_attachments=False,
+                visible_surfaces=ALL_SURFACES,
+                channel_safe=True,
             ),
             CommandDef(
                 name="bug",
