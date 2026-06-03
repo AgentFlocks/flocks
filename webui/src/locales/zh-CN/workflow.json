@@ -253,7 +253,7 @@
       "pollerLastDuration": "最近耗时",
       "pollerSelectedCount": "本轮选中数量",
       "pollerActiveRuns": "活跃执行数",
-      "pollerProcessedMarkCount": "processed 标记数",
+      "pollerProcessedMarkCount": "processed 总数",
       "pollerChannelStatus": "通道通知状态",
       "pollerHint": "这是针对所有 workflow 的通用后台轮询能力。poller 只负责按周期触发执行；具体幂等、状态缓存和输入语义仍由 workflow 自身定义。",
       "syslogSection": "Syslog 输入",

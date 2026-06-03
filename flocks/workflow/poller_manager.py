@@ -111,7 +111,9 @@ class WorkflowPollerManager:
         if isinstance(load_stats, dict) and isinstance(load_stats.get("record_count"), int):
             summary["selectedCount"] = load_stats["record_count"]
 
-        if isinstance(outputs.get("processed_mark_count"), int):
+        if isinstance(outputs.get("processed_cache_size_after"), int):
+            summary["processedMarkCount"] = outputs["processed_cache_size_after"]
+        elif isinstance(outputs.get("processed_mark_count"), int):
             summary["processedMarkCount"] = outputs["processed_mark_count"]
 
         if isinstance(outputs.get("kafka_message_count"), int):

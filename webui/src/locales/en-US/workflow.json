@@ -253,7 +253,7 @@
       "pollerLastDuration": "Last duration",
       "pollerSelectedCount": "Selected count",
       "pollerActiveRuns": "Active runs",
-      "pollerProcessedMarkCount": "Processed mark count",
+      "pollerProcessedMarkCount": "Processed total",
       "pollerChannelStatus": "Channel notify",
       "pollerHint": "This is a generic background polling capability for any workflow. The poller only schedules repeated runs; idempotency, state caches, and input semantics remain defined by the workflow itself.",
       "syslogSection": "Syslog input",

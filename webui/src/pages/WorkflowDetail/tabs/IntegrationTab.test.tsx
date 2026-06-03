@@ -84,7 +84,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.pollerLastDuration': '最近耗时',
         'detail.run.pollerSelectedCount': '本轮选中数量',
         'detail.run.pollerActiveRuns': '活跃执行数',
-        'detail.run.pollerProcessedMarkCount': 'processed 标记数',
+        'detail.run.pollerProcessedMarkCount': 'processed 总数',
         'detail.run.pollerChannelStatus': '通道通知状态',
         'detail.run.pollerHint': 'poller hint',
         'detail.run.syslogSection': 'Syslog',
