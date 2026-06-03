@@ -13,13 +13,12 @@ import time
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
 import glob as file_glob
 
 
-_DEFAULT_LOG_MAX_BYTES = 5 * 1024 * 1024
-_DEFAULT_LOG_BACKUP_COUNT = 3
+_DEFAULT_LOG_RETENTION_DAYS = 30
 _DEFAULT_LOG_VALUE_MAX_CHARS = 8 * 1024
 _MAX_STRUCTURED_ITEMS = 50
 _MAX_STRUCTURED_DEPTH = 4
@@ -37,7 +36,7 @@ def _log_dir() -> Path:
 
 
 def get_log_dir() -> Path:
-    """Return the log directory for file handlers (e.g. workflow). Same as Log.init() uses."""
+    """Return the root log directory used by Flocks."""
     return _log_dir()
 
 
@@ -51,99 +50,29 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def get_log_max_bytes(default: int = _DEFAULT_LOG_MAX_BYTES) -> int:
-    """Return the per-file log size limit in bytes.
-
-    ``FLOCKS_LOG_MAX_BYTES`` is exact; ``FLOCKS_LOG_MAX_MB`` is a convenient
-    human-facing override. When both are set, bytes wins. Values <= 0 disable
-    rotation.
-    """
-    if os.getenv("FLOCKS_LOG_MAX_BYTES") is not None:
-        return _env_int("FLOCKS_LOG_MAX_BYTES", default)
-    max_mb = os.getenv("FLOCKS_LOG_MAX_MB")
-    if max_mb is not None:
-        try:
-            return int(float(max_mb) * 1024 * 1024)
-        except ValueError:
-            return default
-    return default
+def get_log_retention_days(default: int = _DEFAULT_LOG_RETENTION_DAYS) -> int:
+    """Return how long legacy timestamp logs are retained."""
+    return _env_int("FLOCKS_LOG_RETENTION_DAYS", default)
 
 
-def get_log_backup_count(default: int = _DEFAULT_LOG_BACKUP_COUNT) -> int:
-    """Return how many rotated backups to keep for long-lived log files."""
-    return max(0, _env_int("FLOCKS_LOG_BACKUP_COUNT", default))
+class _AppendTextWriter:
+    """Small line-buffered writer for Flocks daily logs."""
 
-
-def rotate_log_file(
-    path: Path,
-    *,
-    max_bytes: Optional[int] = None,
-    backup_count: Optional[int] = None,
-    force: bool = False,
-) -> None:
-    """Rotate ``path`` if it is already over the configured size limit."""
-    limit = get_log_max_bytes() if max_bytes is None else max_bytes
-    backups = get_log_backup_count() if backup_count is None else backup_count
-    if limit <= 0 or not path.exists():
-        return
-    try:
-        if not force and path.stat().st_size < limit:
-            return
-        if backups <= 0:
-            path.unlink(missing_ok=True)
-            return
-        for index in range(backups - 1, 0, -1):
-            src = path.with_name(f"{path.name}.{index}")
-            dst = path.with_name(f"{path.name}.{index + 1}")
-            if src.exists():
-                src.replace(dst)
-        path.replace(path.with_name(f"{path.name}.1"))
-    except OSError:
-        return
-
-
-class _RotatingTextWriter:
-    """Small line-buffered writer with size-based rotation for Flocks logs."""
-
-    def __init__(self, path: Path, *, max_bytes: int, backup_count: int):
+    def __init__(self, path: Path):
         self.path = path
-        self.max_bytes = max_bytes
-        self.backup_count = backup_count
         self._handle: Optional[TextIO] = None
-        self._bytes_written = 0
         self._lock = threading.RLock()
         self._open()
 
     def _open(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = open(self.path, "a", buffering=1, encoding="utf-8")
-        try:
-            self._bytes_written = self.path.stat().st_size
-        except OSError:
-            self._bytes_written = 0
-
-    def _should_rotate(self, message: str) -> bool:
-        if self.max_bytes <= 0:
-            return False
-        return self._bytes_written + len(message.encode("utf-8")) > self.max_bytes
 
     def write(self, message: str) -> int:
-        encoded_len = len(message.encode("utf-8"))
         with self._lock:
-            if self._should_rotate(message):
-                self.close()
-                rotate_log_file(
-                    self.path,
-                    max_bytes=self.max_bytes,
-                    backup_count=self.backup_count,
-                    force=True,
-                )
-                self._open()
             if self._handle is None:
                 self._open()
-            written = self._handle.write(message)
-            self._bytes_written += encoded_len
-            return written
+            return self._handle.write(message)
 
     def flush(self) -> None:
         with self._lock:
@@ -213,15 +142,16 @@ def _format_log_value(value: Any) -> str:
 
 
 def append_upgrade_text_log(message: str) -> None:
-    """Append timestamped lines to ``update.log`` under the configured log directory.
+    """Append timestamped upgrade lines to today's ``errors.log``.
 
     Used for upgrade flows so errors remain on disk when the process had no TTY
-    or when structured ``Log`` output went to a different file than ``backend.log``.
+    or when structured ``Log`` output was not initialized.
     """
     try:
         log_dir = _log_dir()
-        log_dir.mkdir(parents=True, exist_ok=True)
-        path = log_dir / "update.log"
+        day_dir = log_dir / date.today().isoformat()
+        day_dir.mkdir(parents=True, exist_ok=True)
+        path = day_dir / "errors.log"
         stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         normalized = message.replace("\r\n", "\n").replace("\r", "\n")
         with path.open("a", encoding="utf-8") as handle:
@@ -310,12 +240,12 @@ class Logger:
     def warn(self, message: Any = None, extra: Optional[Dict[str, Any]] = None) -> None:
         """Log warning message"""
         if Log._should_log(LogLevel.WARN):
-            Log._write("WARN  " + self._build_message(message, extra))
+            Log._write("WARN  " + self._build_message(message, extra), error=True)
     
     def error(self, message: Any = None, extra: Optional[Dict[str, Any]] = None) -> None:
         """Log error message"""
         if Log._should_log(LogLevel.ERROR):
-            Log._write("ERROR " + self._build_message(message, extra))
+            Log._write("ERROR " + self._build_message(message, extra), error=True)
     
     # Alias for compatibility with standard logging library
     warning = warn
@@ -403,6 +333,10 @@ class Log:
     _last_time: int = int(time.time() * 1000)
     _log_file: Optional[Path] = None
     _writer: Optional[TextIO] = None
+    _error_writer: Optional[TextIO] = None
+    _log_dir_path: Optional[Path] = None
+    _log_date: Optional[str] = None
+    _state_lock = threading.RLock()
     
     # Default logger instance
     Default: Logger = None  # Will be initialized
@@ -413,16 +347,21 @@ class Log:
         return _LEVEL_PRIORITY.get(level, 0) >= _LEVEL_PRIORITY.get(cls._level, 1)
     
     @classmethod
-    def _write(cls, message: str) -> int:
+    def _write(cls, message: str, *, error: bool = False) -> int:
         """Write log message to file and/or stderr"""
         try:
-            if cls._writer:
-                cls._writer.write(message)
-                cls._writer.flush()
-            else:
-                # Fallback to stderr
-                sys.stderr.write(message)
-                sys.stderr.flush()
+            with cls._state_lock:
+                cls._ensure_current_day()
+                if cls._writer:
+                    cls._writer.write(message)
+                    cls._writer.flush()
+                else:
+                    # Fallback to stderr
+                    sys.stderr.write(message)
+                    sys.stderr.flush()
+                if error and cls._error_writer:
+                    cls._error_writer.write(message)
+                    cls._error_writer.flush()
             return len(message)
         except Exception:
             # Silently fail - logging should never break the app
@@ -457,7 +396,7 @@ class Log:
         
         Args:
             print: Whether to print logs to stderr (if False, logs to file)
-            dev: Whether in development mode (affects filename)
+            dev: Kept for compatibility; file output always uses daily logs
             level: Log level (DEBUG, INFO, WARN, ERROR)
         """
         cls._level = level
@@ -469,53 +408,107 @@ class Log:
         # Cleanup old logs
         await cls._cleanup(log_dir)
         
-        if print:
-            # Print to stderr
+        with cls._state_lock:
+            if print:
+                # Print to stderr
+                if cls._writer:
+                    cls._writer.close()
+                if cls._error_writer:
+                    cls._error_writer.close()
+                cls._writer = None
+                cls._error_writer = None
+                cls._log_file = None
+                cls._log_dir_path = None
+                cls._log_date = None
+                return
+
+            if cls._writer:
+                cls._writer.close()
+            if cls._error_writer:
+                cls._error_writer.close()
+
+            cls._log_dir_path = log_dir
             cls._writer = None
-            return
-        
-        # Setup log file
-        if dev:
-            filename = "dev.log"
-        else:
-            # Format: YYYY-MM-DDTHHMMSS.log
-            filename = datetime.now().strftime("%Y-%m-%dT%H%M%S") + ".log"
-        
-        cls._log_file = log_dir / filename
-        
-        # Truncate if exists
-        if cls._log_file.exists():
-            cls._log_file.write_text("")
-        
-        # Open for writing with size-based rotation for long-running sessions.
-        cls._writer = _RotatingTextWriter(
-            cls._log_file,
-            max_bytes=get_log_max_bytes(),
-            backup_count=get_log_backup_count(),
-        )
+            cls._error_writer = None
+            cls._log_date = None
+            cls._open_daily_writers()
         
         # Create default logger
         cls.Default = cls.create(service="default")
+
+    @classmethod
+    def _open_daily_writers(cls) -> None:
+        if cls._log_dir_path is None:
+            return
+        today = date.today().isoformat()
+        day_dir = cls._log_dir_path / today
+        day_dir.mkdir(parents=True, exist_ok=True)
+        cls._log_date = today
+        cls._log_file = day_dir / "flocks.log"
+        cls._writer = _AppendTextWriter(cls._log_file)
+        cls._error_writer = _AppendTextWriter(day_dir / "errors.log")
+
+    @classmethod
+    def _ensure_current_day(cls) -> None:
+        if cls._writer is None or cls._log_dir_path is None:
+            return
+        today = date.today().isoformat()
+        if cls._log_date == today:
+            return
+        if cls._writer:
+            cls._writer.close()
+        if cls._error_writer:
+            cls._error_writer.close()
+        cls._writer = None
+        cls._error_writer = None
+        cls._open_daily_writers()
     
     @classmethod
-    async def _cleanup(cls, log_dir: Path) -> None:
-        """
-        Clean up old log files, keeping only the 10 most recent
+    async def _cleanup(cls, log_dir: Path, retention_days: Optional[int] = None) -> None:
+        """Clean up date directories and legacy timestamp logs by age.
         
         Args:
             log_dir: Directory containing log files
         """
+        days = get_log_retention_days() if retention_days is None else retention_days
+        if days <= 0:
+            return
+        cutoff = datetime.now() - timedelta(days=days)
+
+        def _timestamp_from_name(path: Path) -> Optional[datetime]:
+            stem = path.name.split(".log", 1)[0]
+            try:
+                return datetime.strptime(stem, "%Y-%m-%dT%H%M%S")
+            except ValueError:
+                return None
+
+        def _date_from_dir(path: Path) -> Optional[date]:
+            try:
+                return datetime.strptime(path.name, "%Y-%m-%d").date()
+            except ValueError:
+                return None
+
         try:
+            for path in log_dir.iterdir():
+                if not path.is_dir():
+                    continue
+                day = _date_from_dir(path)
+                if day is not None and day < cutoff.date():
+                    try:
+                        import shutil
+                        shutil.rmtree(path)
+                    except Exception:
+                        pass
+
             # Find base log files matching pattern YYYY-MM-DDTHHMMSS.log.
             # Rotated siblings are deleted together with their base file so
             # old ``.log.1``/``.log.2`` files do not leak forever.
             pattern = str(log_dir / "????-??-??T??????.log")
             files = [Path(path) for path in sorted(file_glob.glob(pattern))]
-            
-            # Keep only the 10 most recent
-            if len(files) > 10:
-                files_to_delete = files[:-10]
-                for path in files_to_delete:
+
+            for path in files:
+                timestamp = _timestamp_from_name(path)
+                if timestamp is not None and timestamp < cutoff:
                     try:
                         path.unlink(missing_ok=True)
                         for rotated in path.parent.glob(f"{path.name}.*"):
@@ -523,12 +516,12 @@ class Log:
                     except Exception:
                         pass  # Silently ignore deletion errors
 
-            kept_files = set(files[-10:])
             rotated_pattern = str(log_dir / "????-??-??T??????.log.*")
             for rotated_path in (Path(path) for path in file_glob.glob(rotated_pattern)):
                 base_name = rotated_path.name.split(".log.", 1)[0] + ".log"
                 base_path = rotated_path.with_name(base_name)
-                if base_path not in kept_files and not base_path.exists():
+                timestamp = _timestamp_from_name(base_path)
+                if not base_path.exists() and timestamp is not None and timestamp < cutoff:
                     try:
                         rotated_path.unlink(missing_ok=True)
                     except Exception:
@@ -571,7 +564,7 @@ class Log:
         """Get the current log file path"""
         if cls._log_file:
             return str(cls._log_file)
-        return str(_log_dir() / "flocks.log")
+        return str(_log_dir() / date.today().isoformat() / "flocks.log")
 
 
 # Initialize Default logger on module import

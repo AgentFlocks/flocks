@@ -6,7 +6,8 @@ import pytest
 import time
 import tempfile
 from pathlib import Path
-from flocks.utils.log import Log, Logger, LogLevel, _RotatingTextWriter, rotate_log_file
+from datetime import datetime, timedelta
+from flocks.utils.log import Log, Logger, LogLevel
 
 
 class TestLoggerCompatibility:
@@ -245,38 +246,6 @@ class TestLoggerCompatibility:
         finally:
             Log._writer = old_stderr
 
-    def test_rotate_log_file_keeps_bounded_backups(self, tmp_path: Path):
-        """Test oversized runtime logs rotate before another process appends."""
-        log_path = tmp_path / "backend.log"
-        log_path.write_text("x" * 20, encoding="utf-8")
-
-        rotate_log_file(log_path, max_bytes=10, backup_count=2)
-
-        assert not log_path.exists()
-        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "x" * 20
-
-        log_path.write_text("y" * 20, encoding="utf-8")
-        rotate_log_file(log_path, max_bytes=10, backup_count=2)
-
-        assert (tmp_path / "backend.log.1").read_text(encoding="utf-8") == "y" * 20
-        assert (tmp_path / "backend.log.2").read_text(encoding="utf-8") == "x" * 20
-
-    def test_rotating_text_writer_rotates_during_log_writes(self, tmp_path: Path):
-        """Test Log's writer rotates when the next line would exceed the limit."""
-        log_path = tmp_path / "session.log"
-        writer = _RotatingTextWriter(log_path, max_bytes=12, backup_count=1)
-
-        try:
-            writer.write("first\n")
-            writer.flush()
-            writer.write("second\n")
-            writer.flush()
-        finally:
-            writer.close()
-
-        assert log_path.read_text(encoding="utf-8") == "second\n"
-        assert (tmp_path / "session.log.1").read_text(encoding="utf-8") == "first\n"
-    
     def test_time_diff_calculation(self):
         """Test time difference calculation between logs"""
         logger = Log.create(service="test")
@@ -342,14 +311,84 @@ class TestLogInitialization:
                 log_dir = Path(tmpdir) / ".flocks" / "logs"
                 assert log_dir.exists()
                 
-                dev_log = log_dir / "dev.log"
-                assert dev_log.exists()
+                today_dir = log_dir / datetime.now().date().isoformat()
+                assert (today_dir / "flocks.log").exists()
+                assert (today_dir / "errors.log").exists()
+                assert not (log_dir / "dev.log").exists()
             finally:
                 # Restore
                 os.environ["HOME"] = str(old_home)
                 if Log._writer:
                     Log._writer.close()
                     Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
+
+    async def test_init_uses_stable_main_log_file(self):
+        """Test production logging appends to the daily flocks.log."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_home = Path.home()
+            import os
+            os.environ["HOME"] = tmpdir
+
+            try:
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                Log.Default.info("first")
+                first_file = Path(Log.file())
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                Log.Default.info("second")
+
+                log_dir = Path(tmpdir) / ".flocks" / "logs"
+                today_dir = log_dir / datetime.now().date().isoformat()
+                assert first_file == today_dir / "flocks.log"
+                assert Path(Log.file()) == first_file
+                assert not list(log_dir.glob("????-??-??T??????.log"))
+                assert not list(log_dir.glob("*.log.1"))
+                content = first_file.read_text(encoding="utf-8")
+                assert "first" in content
+                assert "second" in content
+            finally:
+                os.environ["HOME"] = str(old_home)
+                if Log._writer:
+                    Log._writer.close()
+                    Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
+
+    async def test_warn_and_error_are_copied_to_errors_log(self):
+        """Test warning and error lines are available in errors.log for quick triage."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_home = Path.home()
+            import os
+            os.environ["HOME"] = tmpdir
+
+            try:
+                await Log.init(print=False, dev=False, level=LogLevel.INFO)
+                logger = Log.create(service="error-copy")
+                logger.info("info")
+                logger.warn("warn")
+                logger.error("error")
+
+                log_dir = Path(tmpdir) / ".flocks" / "logs"
+                today_dir = log_dir / datetime.now().date().isoformat()
+                main_content = (today_dir / "flocks.log").read_text(encoding="utf-8")
+                error_content = (today_dir / "errors.log").read_text(encoding="utf-8")
+                assert "info" in main_content
+                assert "warn" in main_content
+                assert "error" in main_content
+                assert "info" not in error_content
+                assert "warn" in error_content
+                assert "error" in error_content
+            finally:
+                os.environ["HOME"] = str(old_home)
+                if Log._writer:
+                    Log._writer.close()
+                    Log._writer = None
+                if Log._error_writer:
+                    Log._error_writer.close()
+                    Log._error_writer = None
     
     async def test_init_print_mode(self):
         """Test that init with print=True uses stderr"""
@@ -357,6 +396,7 @@ class TestLogInitialization:
         
         # Should not create a file writer
         assert Log._writer is None
+        assert Log._error_writer is None
     
     async def test_log_file_path(self):
         """Test log file path method"""
@@ -364,18 +404,37 @@ class TestLogInitialization:
         assert file_path.endswith("flocks.log") or "flocks" in file_path
 
     async def test_cleanup_removes_rotated_siblings_for_old_timestamp_logs(self, tmp_path: Path):
-        """Test cleanup deletes rotated backups for base files outside retention."""
-        for day in range(11):
-            base = tmp_path / f"2026-05-{day + 1:02d}T010203.log"
-            base.write_text("base", encoding="utf-8")
-            (tmp_path / f"{base.name}.1").write_text("rotated", encoding="utf-8")
+        """Test cleanup deletes legacy timestamp logs by age, not by file count."""
+        old_stamp = (datetime.now() - timedelta(days=31)).strftime("%Y-%m-%dT%H%M%S")
+        recent_stamp = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H%M%S")
+        old_base = tmp_path / f"{old_stamp}.log"
+        recent_base = tmp_path / f"{recent_stamp}.log"
+        old_base.write_text("old", encoding="utf-8")
+        (tmp_path / f"{old_base.name}.1").write_text("old rotated", encoding="utf-8")
+        recent_base.write_text("recent", encoding="utf-8")
+        (tmp_path / f"{recent_base.name}.1").write_text("recent rotated", encoding="utf-8")
 
-        await Log._cleanup(tmp_path)
+        await Log._cleanup(tmp_path, retention_days=30)
 
-        assert not (tmp_path / "2026-05-01T010203.log").exists()
-        assert not (tmp_path / "2026-05-01T010203.log.1").exists()
-        assert (tmp_path / "2026-05-02T010203.log").exists()
-        assert (tmp_path / "2026-05-02T010203.log.1").exists()
+        assert not old_base.exists()
+        assert not (tmp_path / f"{old_base.name}.1").exists()
+        assert recent_base.exists()
+        assert (tmp_path / f"{recent_base.name}.1").exists()
+
+    async def test_cleanup_removes_old_date_directories(self, tmp_path: Path):
+        old_day = (datetime.now() - timedelta(days=31)).date().isoformat()
+        recent_day = (datetime.now() - timedelta(days=1)).date().isoformat()
+        old_dir = tmp_path / old_day
+        recent_dir = tmp_path / recent_day
+        old_dir.mkdir()
+        recent_dir.mkdir()
+        (old_dir / "flocks.log").write_text("old", encoding="utf-8")
+        (recent_dir / "flocks.log").write_text("recent", encoding="utf-8")
+
+        await Log._cleanup(tmp_path, retention_days=30)
+
+        assert not old_dir.exists()
+        assert recent_dir.exists()
 
 
 if __name__ == "__main__":

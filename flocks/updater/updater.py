@@ -81,7 +81,7 @@ class ConsoleManifestRelease:
 
 
 def _record_update_journal(message: str) -> None:
-    """Append a human-readable line to ``update.log`` (see ``append_upgrade_text_log``)."""
+    """Append a human-readable upgrade line to today's errors log."""
     from flocks.utils.log import append_upgrade_text_log
 
     append_upgrade_text_log(message)
