@@ -63,6 +63,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
             outputs={
                 "load_stats": {"record_count": 7},
                 "processed_mark_count": 3,
+                "processed_cache_size_after": 11,
                 "channel_notify_status": "sent",
             },
         )
@@ -98,7 +99,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
 
     assert status["lastStatus"] == "success"
     assert status["selectedCount"] == 7
-    assert status["processedMarkCount"] == 3
+    assert status["processedMarkCount"] == 11
     assert status["channelNotifyStatus"] == "sent"
     assert status["state"] == "stopped"
     assert captured_inputs["dedup_source_workflow_name"] == "stream_alert_denoise_gt_fast"

@@ -86,6 +86,18 @@ class _QueuedKafkaMessage:
     size_bytes: int
 
 
+def _strip_execution_only_comments(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_execution_only_comments(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _strip_execution_only_comments(nested)
+        for key, nested in value.items()
+        if not str(key).startswith("_comment")
+    }
+
+
 def _decode_message(raw: Optional[bytes]) -> Any:
     """Decode a Kafka message value to a Python object.
 
@@ -333,6 +345,9 @@ class KafkaManager:
 
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         input_key = str(data.get("inputKey") or "kafka_message")
+        configured_inputs = _strip_execution_only_comments(
+            data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
+        )
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
@@ -358,7 +373,7 @@ class KafkaManager:
             workers.append(
                 asyncio.create_task(
                     self._worker_loop(
-                        workflow_id, workflow_json, input_key, queue, abort,
+                        workflow_id, workflow_json, input_key, configured_inputs, queue, abort,
                     ),
                     name=f"kafka-worker-{workflow_id}-{i}",
                 )
@@ -520,6 +535,7 @@ class KafkaManager:
         workflow_id: str,
         workflow_json: Any,
         input_key: str,
+        configured_inputs: Dict[str, Any],
         queue: asyncio.Queue,
         abort: asyncio.Event,
     ) -> None:
@@ -534,7 +550,7 @@ class KafkaManager:
                 if isinstance(msg, _QueuedKafkaMessage):
                     msg = _decode_message(msg.raw_value)
                 await self._trigger_workflow(
-                    workflow_id, workflow_json, msg, input_key,
+                    workflow_id, workflow_json, msg, input_key, configured_inputs,
                 )
             except asyncio.CancelledError:
                 return
@@ -550,15 +566,21 @@ class KafkaManager:
         workflow_json: Any,
         message: Any,
         input_key: str,
+        configured_inputs: Optional[Dict[str, Any]] = None,
     ) -> None:
-        inputs = {input_key: message}
+        configured_inputs = _strip_execution_only_comments(
+            configured_inputs if isinstance(configured_inputs, dict) else {}
+        )
+        inputs = {**configured_inputs, input_key: message}
+        input_params = {"_trigger": "kafka", input_key: _summarize_large_value(message)}
+        for key, value in configured_inputs.items():
+            if key == input_key:
+                continue
+            input_params[key] = _summarize_large_value(value)
 
         exec_data = await create_execution_record(
             workflow_id,
-            input_params={
-                "_trigger": "kafka",
-                input_key: _summarize_large_value(message),
-            },
+            input_params=input_params,
         )
         exec_id = exec_data["id"]
         start_time = time.time()

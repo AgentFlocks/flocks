@@ -53,27 +53,28 @@ function SectionHeader({
   );
 }
 
-const DEFAULT_POLLER_INPUTS_TEXT = JSON.stringify({}, null, 2);
+const DEFAULT_RUNTIME_INPUTS_TEXT = JSON.stringify({}, null, 2);
+const KAFKA_RAW_INPUT_KEYS = new Set(['kafka_message', 'kafka_value', 'kafka_record']);
 
-function stripExecutionOnlyComments(value: unknown): unknown {
+function stripExecutionOnlyComments(value: unknown, excludedKeys: ReadonlySet<string> = new Set()): unknown {
   if (Array.isArray(value)) {
-    return value.map(stripExecutionOnlyComments);
+    return value.map(item => stripExecutionOnlyComments(item, excludedKeys));
   }
   if (!value || typeof value !== 'object') {
     return value;
   }
   return Object.fromEntries(
     Object.entries(value)
-      .filter(([key]) => !key.startsWith('_comment'))
-      .map(([key, nestedValue]) => [key, stripExecutionOnlyComments(nestedValue)]),
+      .filter(([key]) => !key.startsWith('_comment') && !excludedKeys.has(key))
+      .map(([key, nestedValue]) => [key, stripExecutionOnlyComments(nestedValue, excludedKeys)]),
   );
 }
 
-function stringifyPollerInputs(value: unknown): string {
+function stringifyRuntimeInputs(value: unknown, excludedKeys: ReadonlySet<string> = new Set()): string {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return DEFAULT_POLLER_INPUTS_TEXT;
+    return DEFAULT_RUNTIME_INPUTS_TEXT;
   }
-  return JSON.stringify(stripExecutionOnlyComments(value), null, 2);
+  return JSON.stringify(stripExecutionOnlyComments(value, excludedKeys), null, 2);
 }
 
 function formatTimestamp(ts?: number | null): string {
@@ -303,11 +304,13 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   const [inputTopic, setInputTopic] = useState('');
   const [inputGroupId, setInputGroupId] = useState('');
   const [inputKey, setInputKey] = useState('kafka_message');
+  const [inputsText, setInputsText] = useState(DEFAULT_RUNTIME_INPUTS_TEXT);
   // Runtime consumer state (independent from saved config) — only this should
   // drive the "Running" indicator, otherwise a connection failure leaves the UI
   // falsely showing the consumer as active.
   const [consumer, setConsumer] = useState<KafkaConsumerStatus | null>(null);
   const [saveError, setSaveError] = useState('');
+  const [jsonError, setJsonError] = useState('');
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -346,16 +349,56 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   }
 
   useEffect(() => {
-    workflowAPI.getKafkaConfig(workflowId).then(res => {
-      if (res.data) {
-        setEnabled(!!res.data.enabled);
-        setInputBroker(res.data.inputBroker || '');
-        setInputTopic(res.data.inputTopic || '');
-        setInputGroupId(res.data.inputGroupId || '');
-        setInputKey(res.data.inputKey || 'kafka_message');
+    let cancelled = false;
+
+    const loadKafkaConfig = async () => {
+      let sampleInputs: Record<string, unknown> = {};
+      try {
+        const sampleRes = await workflowAPI.getSampleInputs(workflowId);
+        if (
+          sampleRes.data?.sampleInputs
+          && typeof sampleRes.data.sampleInputs === 'object'
+          && !Array.isArray(sampleRes.data.sampleInputs)
+        ) {
+          sampleInputs = sampleRes.data.sampleInputs;
+        }
+      } catch {
+        sampleInputs = {};
       }
-    }).catch(() => {});
+
+      try {
+        const res = await workflowAPI.getKafkaConfig(workflowId);
+        if (cancelled) return;
+        if (res.data) {
+          setEnabled(!!res.data.enabled);
+          setInputBroker(res.data.inputBroker || '');
+          setInputTopic(res.data.inputTopic || '');
+          setInputGroupId(res.data.inputGroupId || '');
+          setInputKey(res.data.inputKey || 'kafka_message');
+          const configuredInputs = (
+            res.data.inputs
+            && typeof res.data.inputs === 'object'
+            && !Array.isArray(res.data.inputs)
+            && Object.keys(res.data.inputs).length > 0
+          )
+            ? res.data.inputs
+            : sampleInputs;
+          setInputsText(stringifyRuntimeInputs(configuredInputs, KAFKA_RAW_INPUT_KEYS));
+          return;
+        }
+        setInputsText(stringifyRuntimeInputs(sampleInputs, KAFKA_RAW_INPUT_KEYS));
+      } catch {
+        if (!cancelled) {
+          setInputsText(stringifyRuntimeInputs(sampleInputs, KAFKA_RAW_INPUT_KEYS));
+        }
+      }
+    };
+
+    loadKafkaConfig();
     refreshStatus();
+    return () => {
+      cancelled = true;
+    };
   }, [workflowId, refreshStatus]);
 
   // While connecting, poll briefly so the UI converges on the real state.
@@ -368,12 +411,26 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
   }, [isConnecting, refreshStatus]);
 
   const handleSave = async () => {
+    let parsedInputs: Record<string, any>;
+    try {
+      const parsed = JSON.parse(inputsText);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setJsonError(t('detail.run.kafkaInputsJsonError'));
+        return;
+      }
+      parsedInputs = stripExecutionOnlyComments(parsed, KAFKA_RAW_INPUT_KEYS) as Record<string, any>;
+      setJsonError('');
+    } catch {
+      setJsonError(t('detail.run.kafkaInputsJsonError'));
+      return;
+    }
+
     setSaving(true);
     setSaved(false);
     setSaveError('');
     try {
       const res = await workflowAPI.saveKafkaConfig(workflowId, {
-        enabled, inputBroker, inputTopic, inputGroupId, inputKey,
+        enabled, inputBroker, inputTopic, inputGroupId, inputKey, inputs: parsedInputs,
       });
       if (res.data?.consumer) {
         setConsumer(res.data.consumer);
@@ -442,6 +499,20 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             {inputField('Consumer Group', inputGroupId, setInputGroupId, 'flocks-consumer')}
             {inputField(t('detail.run.kafkaInputKey'), inputKey, setInputKey, 'kafka_message')}
           </div>
+          <div className="space-y-2">
+            <label className="block text-xs text-gray-500" htmlFor={`kafka-inputs-${workflowId}`}>
+              {t('detail.run.kafkaInputs')}
+            </label>
+            <textarea
+              id={`kafka-inputs-${workflowId}`}
+              value={inputsText}
+              onChange={e => setInputsText(e.target.value)}
+              rows={8}
+              className="w-full text-xs font-mono border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-red-500"
+              spellCheck={false}
+            />
+            <p className="text-xs text-gray-400">{t('detail.run.kafkaInputsHint')}</p>
+          </div>
           <div>
             {toggleOption(
               `kafka-enabled-${workflowId}`,
@@ -463,6 +534,12 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
             ) : null}
             {saving ? t('detail.run.savingConfig') : saved ? t('detail.run.savedConfig') : t('detail.run.saveConfig')}
           </button>
+          {jsonError && (
+            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+              <span className="flex-1">{jsonError}</span>
+            </div>
+          )}
           {saveError && (
             <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
               <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
@@ -499,7 +576,7 @@ function PollerSection({ workflowId }: { workflowId: string }) {
   const [intervalSeconds, setIntervalSeconds] = useState('30');
   const [timeoutSeconds, setTimeoutSeconds] = useState('7200');
   const [noOverlap, setNoOverlap] = useState(true);
-  const [inputsText, setInputsText] = useState(DEFAULT_POLLER_INPUTS_TEXT);
+  const [inputsText, setInputsText] = useState(DEFAULT_RUNTIME_INPUTS_TEXT);
   const [jsonError, setJsonError] = useState('');
   const [saveError, setSaveError] = useState('');
   const [poller, setPoller] = useState<WorkflowPollerStatus | null>(null);
@@ -543,13 +620,13 @@ function PollerSection({ workflowId }: { workflowId: string }) {
           )
             ? res.data.inputs
             : sampleInputs;
-          setInputsText(stringifyPollerInputs(configuredInputs));
+          setInputsText(stringifyRuntimeInputs(configuredInputs));
           return;
         }
-        setInputsText(stringifyPollerInputs(sampleInputs));
+        setInputsText(stringifyRuntimeInputs(sampleInputs));
       } catch {
         if (!cancelled) {
-          setInputsText(stringifyPollerInputs(sampleInputs));
+          setInputsText(stringifyRuntimeInputs(sampleInputs));
         }
       }
     };
