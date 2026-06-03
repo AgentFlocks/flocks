@@ -324,7 +324,6 @@ export default function AuditLogsPage() {
   useEffect(() => {
     if (!hasFlocksproCapability) return;
     void load(0);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasFlocksproCapability]);
 
   useEffect(() => {
