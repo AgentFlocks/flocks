@@ -116,7 +116,7 @@ flocks stop
 默认服务地址：
 - 后端 API：默认 `http://127.0.0.1:8000`
 - WebUI：默认 `http://127.0.0.1:5173`
-- 远程访问修改 `flocks start --server-host <ip> --webui-host <ip>`
+- 远程访问可通过 `flocks start --webui-host <ip>` 配置
 
 更多 CLI 命令使用 `flocks --help`
 
@@ -159,9 +159,7 @@ docker run -d `
   ghcr.io/agentflocks/flocks:latest
 ```
 
-默认服务地址：
-- 后端 API：默认 `http://127.0.0.1:8000`
-- WebUI：默认 `http://127.0.0.1:5173`
+镜像中的 `EXPOSE` 仅用于声明容器端口；要从宿主机浏览器访问服务，仍需使用 `-p 8000:8000 -p 5173:5173` 映射端口。
 
 ## 4. 常见问题
 
@@ -206,9 +204,20 @@ sudo chown -R <uid>:<gid> ~/.flocks
 ### 4.3 远程访问 Flocks 服务
 ```bash
 __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
-flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
+flocks start --webui-host 0.0.0.0
+# Windows PowerShell
+# $env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="your_domain"; flocks start --webui-host 0.0.0.0
 ```
-虚拟机远程访问失败请指定 host 为虚拟机 IP。
+若从虚拟机远程访问失败，请将 host 指定为虚拟机的 IP。
+
+WebUI 在后端绑定到非回环 IP 时，默认仍使用同源 `/api` 代理模式。这样浏览器 Cookie 与 SSE 保持在同一源，是局域网访问与反向代理场景下更安全的选择。
+
+仅在确实需要浏览器直连后端 URL 时，再显式启用：
+
+```bash
+FLOCKS_WEBUI_DIRECT_BACKEND_URLS=1 \
+flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
+```
 
 ### 4.4 鉴权与 API Token
 
@@ -250,23 +259,25 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 反向代理部署：
 
-- 反代必须主动注入 `X-Forwarded-For`。若缺失，凡是直连本机回环的请求都会被自动放行为 `admin`；中间件依靠该头来区分"真本机"与"经由反代的外部请求"。
-- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确给 Cookie 加 `Secure` 标志。
+- 反代必须主动注入 `X-Forwarded-For`。若缺失该头，且前方存在代理，中间件会拒绝信任回环地址，避免任何直连本机的请求被自动提升为 `admin`。
+- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确设置安全 Cookie 标志。
+- 浏览器流量优先使用同源反代：WebUI 保持在 `/`，后端流量经 `/api`（必要时还有 `/event`）转发。除非有意让浏览器绕过代理直连后端源站，否则不要在反向代理部署中设置 `VITE_API_BASE_URL`。
+- 对于 SSE 端点，请关闭代理缓冲并保持 HTTP/1.1 启用。
 
 忘记密码 / 应急恢复：
 
-- 在服务器上执行 `flocks admin generate-one-time-password`，账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**这种状态下所有非浏览器接口都会返回 403**，请勿在不通知调用方的情况下对依赖自动化的账号执行该命令。
+- 在宿主机上执行 `flocks admin generate-one-time-password`。`admin` 账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**此状态下所有非浏览器端点均返回 403**，若该账号被自动化依赖，请先协调后再执行。
 
 无主 session（CLI / 后台任务 / inbound 渠道）：
 
-- 没有 auth 上下文创建出的 session（CLI 子命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 字段为空。bootstrap admin 仍可看到，但**之后新增的 member 账号将完全看不到**。可通过下列命令把这类 session 批量赋给指定 admin：
+- 在无鉴权上下文中创建的 session（CLI 命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 为空。bootstrap admin 仍可见，但之后新增的 member 账号不可见。可用以下命令回填归属：
 
   ```bash
   flocks admin reassign-orphan-sessions --username admin --dry-run   # 预览
   flocks admin reassign-orphan-sessions --username admin             # 实际写入
   ```
 
-  命令会输出 `scanned / orphaned / reassigned / failed` 四个计数；只要 `failed` 非零就以 exit code 2 退出，方便 CI / 脚本捕获"部分写入"情况、修复底层故障（一般是临时存储错误）后再次运行。
+  命令会汇总 `scanned / orphaned / reassigned / failed` 计数；`failed` 非零时以退出码 2 结束，便于 CI / 脚本发现部分写入并在修复底层原因（通常为临时存储错误）后重试。
 
 ## 5. 加入社区
 

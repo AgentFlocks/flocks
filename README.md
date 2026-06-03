@@ -117,7 +117,7 @@ flocks stop
 The default service URLs are:
 - Backend API: `http://127.0.0.1:8000` by default
 - WebUI: `http://127.0.0.1:5173` by default
-- Remote access configurable via `flocks start --server-host <ip> --webui-host <ip>`
+- Remote access configurable via `flocks start --webui-host <ip>`
 
 Flocks CLI usage: `flocks --help`
 
@@ -203,7 +203,9 @@ sudo chown -R <uid>:<gid> ~/.flocks
 ### 4.3 Remote Access to Flocks Service
 ```bash
 __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
-flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
+flocks start --webui-host 0.0.0.0
+# windows powershell
+# $env:__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS="your_domain"; flocks start --webui-host 0.0.0.0
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
 
@@ -215,7 +217,7 @@ Only enable direct browser-to-backend URLs when you explicitly need them:
 
 ```bash
 FLOCKS_WEBUI_DIRECT_BACKEND_URLS=1 \
-flocks start --server-host 10.0.0.8 --webui-host 0.0.0.0
+flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
 ```
 
 ### 4.4 Authentication & API Token
