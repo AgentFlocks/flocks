@@ -75,6 +75,31 @@ class TestDispatchUserInput:
         assert not llm
 
     @pytest.mark.asyncio
+    async def test_clear_is_allowed_on_channel_surface(self):
+        direct = []
+        llm = []
+        clear_history_calls = []
+        sink = CallbackOutputSink(
+            "channel",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+            clear_history=lambda: _append(clear_history_calls, "cleared"),
+        )
+        event = UserInputEvent(
+            source_type="wecom",
+            sessionID="ses_test",
+            text="/clear",
+            parts=[{"type": "text", "text": "/clear"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert clear_history_calls == ["cleared"]
+        assert not direct
+        assert not llm
+
+    @pytest.mark.asyncio
     async def test_llm_command_routes_raw_slash_text(self):
         direct = []
         llm = []

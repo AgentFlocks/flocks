@@ -735,6 +735,61 @@ class TestFeishuNativeCommands:
         assert "Available / commands:" in delivered[0]
 
     @pytest.mark.asyncio
+    async def test_clear_command_clears_channel_session_history(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/clear",
+            mention_text="/clear",
+        )
+
+        delivered: list[str] = []
+        clear_history = AsyncMock(return_value=3)
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.session._clear_session_history",
+            clear_history,
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/clear",
+            scope_override=None,
+        )
+
+        assert handled is True
+        clear_history.assert_awaited_once_with("session_1")
+        assert delivered == ["已清空当前会话历史，共删除 3 条消息。"]
+
+    @pytest.mark.asyncio
     async def test_append_user_message_stores_feishu_media_part(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.config.config import ChannelConfig
