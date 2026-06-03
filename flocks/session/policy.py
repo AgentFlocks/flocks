@@ -52,6 +52,20 @@ class SessionPolicy:
         return bool(metadata.get("shared_local"))
 
     @staticmethod
+    def _has_no_owner(session: "SessionInfo") -> bool:
+        return not session.owner_user_id and not session.owner_username
+
+    @classmethod
+    def is_shared(cls, session: "SessionInfo") -> bool:
+        """Whether the session is accessible to all local users.
+
+        True when explicitly marked ``shared_local`` or when the session has no
+        owner (e.g. channel-originated sessions created without an HTTP auth
+        context). Used both for permission checks and the UI "shared" badge.
+        """
+        return cls.is_local_shared(session) or cls._has_no_owner(session)
+
+    @staticmethod
     def _shared_read_user_ids(session: "SessionInfo") -> set[str]:
         metadata = getattr(session, "metadata", None)
         if not isinstance(metadata, dict):
@@ -77,12 +91,15 @@ class SessionPolicy:
         Whether the session should be visible in listings / fetch.
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
-        - Logged-in users: owner or local-shared readers.
+        - Logged-in users: owner, local-shared readers, or any user for ownerless
+          sessions (e.g. channel-originated sessions created without an auth context).
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return True
         if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session):
             return True
         return cls.is_shared_read_only(session, resolved)
 
@@ -91,16 +108,26 @@ class SessionPolicy:
         """
         Session write permission.
 
-        Shared users are read-only. Only owner can write.
+        Owner can always write. Any authenticated user may write ownerless
+        sessions (e.g. channel-originated sessions that have no HTTP auth
+        context at creation time).
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_owner(session, resolved)
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session):
+            return True
+        return False
 
     @classmethod
     def can_delete(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_owner(session, resolved)
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session):
+            return True
+        return False
