@@ -1,0 +1,65 @@
+schema_version: 1
+provider: huaweicloud_waf_api
+
+# Service-level connectivity probe.
+# `host_list` is a lightweight read-only call with page=1,pagesize=1.
+connectivity:
+  tool: hw_waf_host
+  params:
+    action: host_list
+    page: 1
+    pagesize: 1
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+fixtures:
+  hw_waf_host:
+    - label: "List cloud mode protected domains (page 1)"
+      label_cn: "查询云模式防护域名列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: host_list
+        page: 1
+        pagesize: 10
+      assert:
+        success: true
+
+    - label: "List dedicated mode protected domains (page 1)"
+      label_cn: "查询独享模式防护域名列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: premium_host_list
+        page: 1
+        pagesize: 10
+      assert:
+        success: true
+
+  hw_waf_policy:
+    - label: "List protection policies (page 1)"
+      label_cn: "查询防护策略列表（第 1 页）"
+      tags: [smoke]
+      params:
+        action: policy_list
+        page: 1
+        pagesize: 10
+      assert:
+        success: true
+
+  hw_waf_event:
+    - label: "List attack events (last hour)"
+      label_cn: "查询近 1 小时攻击事件"
+      tags: [smoke]
+      params:
+        action: event_list
+        page: 1
+        pagesize: 10
+      assert:
+        success: true
+
+  hw_waf_overview:
+    - label: "Query security statistics"
+      label_cn: "查询安全统计概览"
+      tags: [smoke]
+      params:
+        action: overview_statistics
+      assert:
+        success: true

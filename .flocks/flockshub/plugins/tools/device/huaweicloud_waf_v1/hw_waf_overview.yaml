@@ -1,0 +1,110 @@
+name: hw_waf_overview
+description: >
+  Huawei Cloud WAF security overview and statistics tool. Use the `action`
+  parameter to query QPS data, bandwidth statistics, attack counts, top
+  attacked domains, and security report subscriptions.
+description_cn: >
+  华为云 WAF 安全总览与统计工具。通过 `action` 参数查询 QPS 数据、带宽统计、
+  攻击防护次数、Top 被攻击域名，以及安全报告订阅管理等接口。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huaweicloud_waf_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        安全总览动作名，可选值：
+        - overview_statistics
+          用途: 查询安全总览请求与攻击数量汇总
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_qps
+          用途: 查询 QPS 时序数据（每 5 分钟一个数据点）
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_bandwidth
+          用途: 查询带宽时序数据
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_top_domains
+          用途: 查询 Top 受攻击域名排行
+          必填: `from`、`to`
+          常用: `from`、`to`、`top`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_attack_types
+          用途: 查询攻击类型分布
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_top_ip
+          用途: 查询 Top 攻击源 IP
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`、`top`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_top_url
+          用途: 查询 Top 被攻击 URL
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`、`top`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - overview_response_code
+          用途: 查询响应码时序统计数据
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - console_config
+          用途: 查询当前局点支持的 WAF 特性配置
+          必填: 无
+          常用: 无
+          风险提示: 只读查询接口
+          是否任务型: 否
+      enum:
+        - overview_statistics
+        - overview_qps
+        - overview_bandwidth
+        - overview_top_domains
+        - overview_attack_types
+        - overview_top_ip
+        - overview_top_url
+        - overview_response_code
+        - console_config
+    from:
+      type: integer
+      description: >
+        查询开始时间，Unix 毫秒级时间戳。
+        可使用 Python datetime 动态计算：
+        int(datetime.now().timestamp() * 1000) - 86400000（最近 24 小时）
+    to:
+      type: integer
+      description: 查询结束时间，Unix 毫秒级时间戳，必须大于 from
+    hosts:
+      type: array
+      items:
+        type: string
+      description: 防护域名 ID 列表（过滤用，不传则汇总所有域名）
+    top:
+      type: integer
+      description: 返回 Top N 条数，默认 5
+      default: 5
+    enterprise_project_id:
+      type: string
+      description: 企业项目 ID（可选）
+  required:
+    - action
+handler:
+  type: script
+  script_file: hw_waf.handler.py
+  function: overview

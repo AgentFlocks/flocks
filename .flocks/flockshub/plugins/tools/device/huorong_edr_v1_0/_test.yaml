@@ -1,0 +1,49 @@
+schema_version: 1
+provider: huorong_api
+
+# Service-level connectivity probe.
+# `group_list` is a lightweight read-only call with no required params.
+connectivity:
+  tool: huorong_group
+  params:
+    action: group_list
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+fixtures:
+  huorong_group:
+    - label: "List all groups"
+      label_cn: "获取全部分组列表"
+      tags: [smoke]
+      params:
+        action: group_list
+      assert:
+        success: true
+
+  huorong_clnts:
+    - label: "List online endpoints"
+      label_cn: "查询上线终端列表"
+      tags: [smoke]
+      params:
+        action: clnts_online
+        offset: 0
+      assert:
+        success: true
+
+    - label: "List endpoint details (page 1)"
+      label_cn: "查询终端详情（第 1 页）"
+      tags: [smoke]
+      params:
+        action: clnts_list
+        offset: 0
+      assert:
+        success: true
+
+  huorong_task:
+    - label: "Create virus scan task"
+      label_cn: "创建查杀扫描任务"
+      tags: [smoke]
+      params:
+        action: task_create
+        offset: 0
+      assert:
+        success: true
