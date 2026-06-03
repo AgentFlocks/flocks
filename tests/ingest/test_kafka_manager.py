@@ -340,6 +340,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
         {"alarmData": {"id": 1}},
         "kafka_message",
         {
+            "_comment": "remove me",
             "kafka_message": {"should": "be overridden"},
             "kafka_output_enabled": True,
             "kafka_output_topic": "topic_soc_flocks_result_log",

@@ -1396,6 +1396,18 @@ class KafkaConfigRequest(BaseModel):
     inputs: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _strip_execution_only_comments(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_execution_only_comments(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _strip_execution_only_comments(nested)
+        for key, nested in value.items()
+        if not str(key).startswith("_comment")
+    }
+
+
 class WorkflowPollerConfigRequest(BaseModel):
     """Per-workflow background poller configuration."""
 
@@ -1592,7 +1604,7 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "inputGroupId": req.inputGroupId,
             "inputKey": req.inputKey,
             "autoOffsetReset": req.autoOffsetReset,
-            "inputs": req.inputs,
+            "inputs": _strip_execution_only_comments(req.inputs),
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(_kafka_config_key(workflow_id), config)

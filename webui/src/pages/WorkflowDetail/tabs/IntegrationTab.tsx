@@ -418,7 +418,7 @@ function KafkaSection({ workflowId }: { workflowId: string }) {
         setJsonError(t('detail.run.kafkaInputsJsonError'));
         return;
       }
-      parsedInputs = parsed;
+      parsedInputs = stripExecutionOnlyComments(parsed, KAFKA_RAW_INPUT_KEYS) as Record<string, any>;
       setJsonError('');
     } catch {
       setJsonError(t('detail.run.kafkaInputsJsonError'));

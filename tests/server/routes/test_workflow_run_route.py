@@ -77,7 +77,11 @@ async def test_save_kafka_config_persists_consumer_settings(
         inputTopic="workflow-input",
         inputGroupId="wf-group",
         inputKey="kafka_message",
-        inputs={"kafka_output_enabled": True, "kafka_output_topic": "topic_soc_flocks_result_log"},
+        inputs={
+            "_comment": "remove me",
+            "kafka_output_enabled": True,
+            "kafka_output_topic": "topic_soc_flocks_result_log",
+        },
     )
 
     response = await workflow_module.save_kafka_config("wf-input", req)

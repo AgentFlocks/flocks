@@ -86,6 +86,18 @@ class _QueuedKafkaMessage:
     size_bytes: int
 
 
+def _strip_execution_only_comments(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_execution_only_comments(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _strip_execution_only_comments(nested)
+        for key, nested in value.items()
+        if not str(key).startswith("_comment")
+    }
+
+
 def _decode_message(raw: Optional[bytes]) -> Any:
     """Decode a Kafka message value to a Python object.
 
@@ -333,7 +345,9 @@ class KafkaManager:
 
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         input_key = str(data.get("inputKey") or "kafka_message")
-        configured_inputs = data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
+        configured_inputs = _strip_execution_only_comments(
+            data.get("inputs") if isinstance(data.get("inputs"), dict) else {}
+        )
 
         queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._queues[workflow_id] = queue
@@ -554,7 +568,9 @@ class KafkaManager:
         input_key: str,
         configured_inputs: Optional[Dict[str, Any]] = None,
     ) -> None:
-        configured_inputs = configured_inputs if isinstance(configured_inputs, dict) else {}
+        configured_inputs = _strip_execution_only_comments(
+            configured_inputs if isinstance(configured_inputs, dict) else {}
+        )
         inputs = {**configured_inputs, input_key: message}
         input_params = {"_trigger": "kafka", input_key: _summarize_large_value(message)}
         for key, value in configured_inputs.items():

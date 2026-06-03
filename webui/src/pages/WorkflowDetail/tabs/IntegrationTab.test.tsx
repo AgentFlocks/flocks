@@ -202,6 +202,43 @@ describe('IntegrationTab Kafka config', () => {
     expect(workflowAPI.saveKafkaConfig).not.toHaveBeenCalled();
   });
 
+  it('strips execution-only comment keys before saving kafka extra inputs', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationTab workflow={workflow} />);
+
+    await user.click(await screen.findByRole('button', { name: /Kafka 配置/ }));
+    const textarea = screen.getByLabelText('额外 Inputs JSON');
+    fireEvent.change(textarea, {
+      target: {
+        value: `{
+  "_comment": "remove me",
+  "kafka_output_enabled": true,
+  "nested": {
+    "_comment_nested": "remove too",
+    "topic": "topic_soc_flocks_result_log"
+  }
+}`,
+      },
+    });
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.saveKafkaConfig).toHaveBeenCalledWith('wf-1', {
+        enabled: false,
+        inputBroker: '',
+        inputTopic: '',
+        inputGroupId: '',
+        inputKey: 'kafka_message',
+        inputs: {
+          kafka_output_enabled: true,
+          nested: {
+            topic: 'topic_soc_flocks_result_log',
+          },
+        },
+      });
+    });
+  });
+
   it('renders poller status badge when runtime is running', async () => {
     workflowAPI.getPollerStatus.mockResolvedValue({
       data: {
