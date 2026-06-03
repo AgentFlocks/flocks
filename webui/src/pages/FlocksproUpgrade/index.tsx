@@ -58,6 +58,22 @@ const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
 const DISMISSED_REJECTED_REQUESTS_KEY = 'flockspro-dismissed-rejected-requests';
 const HEALTH_POLL_INTERVAL = 2000;
 const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isValidInternationalPhone(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (!/^[+\d\s()-]+$/.test(trimmed)) {
+    return false;
+  }
+  if ((trimmed.match(/\+/g) || []).length > 1 || (trimmed.includes('+') && !trimmed.startsWith('+'))) {
+    return false;
+  }
+  const digits = trimmed.replace(/[^\d]/g, '');
+  return digits.length >= 6 && digits.length <= 15;
+}
 
 function loadDismissedRejectedRequestIds(): Set<string> {
   if (typeof window === 'undefined') {
@@ -618,8 +634,18 @@ export default function FlocksproUpgradePage() {
   const createUpgradeRequest = async () => {
     const company = applyForm.company.trim();
     const applicantName = applyForm.applicantName.trim();
-    if (!company || !applicantName) {
+    const applicantEmail = applyForm.applicantEmail.trim();
+    const applicantPhone = applyForm.applicantPhone.trim();
+    if (!company || !applicantName || !applicantEmail || !applicantPhone) {
       setApplyFormError(t('upgrade.formRequiredError'));
+      return;
+    }
+    if (!EMAIL_PATTERN.test(applicantEmail)) {
+      setApplyFormError(t('upgrade.invalidEmailError'));
+      return;
+    }
+    if (!isValidInternationalPhone(applicantPhone)) {
+      setApplyFormError(t('upgrade.invalidPhoneError'));
       return;
     }
 
@@ -633,9 +659,8 @@ export default function FlocksproUpgradePage() {
         request_kind: 'new',
         company,
         applicant_name: applicantName,
-        sales_rep_name: applyForm.salesRepName.trim() || undefined,
-        applicant_email: applyForm.applicantEmail.trim() || undefined,
-        applicant_phone: applyForm.applicantPhone.trim() || undefined,
+        applicant_email: applicantEmail,
+        applicant_phone: applicantPhone,
         notes: applyForm.notes.trim() || undefined,
       };
       const created = await consoleUpgradeApi.createRequest(payload);
@@ -1279,36 +1304,18 @@ export default function FlocksproUpgradePage() {
                 placeholder={t('upgrade.applicantNamePlaceholderRequired')}
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
               />
-              <div className="space-y-1">
-                <input
-                  value={applyForm.salesRepName}
-                  onChange={(event) => setApplyForm((prev) => ({ ...prev, salesRepName: event.target.value }))}
-                  placeholder={t('upgrade.salesRepNamePlaceholder')}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
-                />
-                <p className="text-xs text-gray-500">
-                  {t('upgrade.salesRepHintPrefix')}{' '}
-                  <a
-                    href="https://threatbook.cn/trial?"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-slate-900 underline underline-offset-2"
-                  >
-                    {t('upgrade.salesRepHintLinkText')}
-                  </a>
-                  {t('upgrade.salesRepHintSuffix')}
-                </p>
-              </div>
               <input
                 value={applyForm.applicantEmail}
                 onChange={(event) => setApplyForm((prev) => ({ ...prev, applicantEmail: event.target.value }))}
                 placeholder={t('upgrade.applicantEmailPlaceholder')}
+                required
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
               />
               <input
                 value={applyForm.applicantPhone}
                 onChange={(event) => setApplyForm((prev) => ({ ...prev, applicantPhone: event.target.value }))}
                 placeholder={t('upgrade.applicantPhonePlaceholder')}
+                required
                 className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-200"
               />
               <textarea

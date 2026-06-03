@@ -7,6 +7,7 @@ import base64
 import importlib.util
 import os
 import json
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -16,7 +17,7 @@ from uuid import uuid4
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from flocks.console.login import ConsoleLoginService
 from flocks.server.auth import require_admin, require_user
@@ -44,9 +45,34 @@ class UpgradeRequestCreate(BaseModel):
     company: str = Field(min_length=1)
     applicant_name: str = Field(min_length=1)
     sales_rep_name: Optional[str] = None
-    applicant_email: Optional[str] = None
-    applicant_phone: Optional[str] = None
+    applicant_email: str = Field(min_length=1)
+    applicant_phone: str = Field(min_length=1)
     notes: Optional[str] = None
+
+    @field_validator("applicant_email")
+    @classmethod
+    def validate_applicant_email(cls, value: str) -> str:
+        email = value.strip()
+        if not email:
+            raise ValueError("Applicant email is required.")
+        if not re.fullmatch(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+            raise ValueError("Invalid email format.")
+        return email
+
+    @field_validator("applicant_phone")
+    @classmethod
+    def validate_applicant_phone(cls, value: str) -> str:
+        phone = value.strip()
+        if not phone:
+            raise ValueError("Applicant phone is required.")
+        if not re.fullmatch(r"^[+\d\s()-]+$", phone):
+            raise ValueError("Invalid phone format.")
+        if phone.count("+") > 1 or ("+" in phone and not phone.startswith("+")):
+            raise ValueError("Invalid phone format.")
+        digit_count = len(re.sub(r"\D", "", phone))
+        if digit_count < 6 or digit_count > 15:
+            raise ValueError("Phone number must contain 6 to 15 digits.")
+        return phone
 
 
 class UpgradeRequestStatus(BaseModel):

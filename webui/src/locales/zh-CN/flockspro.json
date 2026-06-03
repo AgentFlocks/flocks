@@ -75,16 +75,16 @@
       "expired_unactivated": "已超时"
     },
     "licenseStatusLabels": {
-      "poc": "POC授权",
-      "commercial": "商业授权",
+      "poc": "POC授权（90天）",
+      "commercial": "商用授权（365天）",
       "revoked": "已吊销",
       "expired": "已到期",
       "superseded": "已替换",
       "active": "有效"
     },
     "licenseTypeLabels": {
-      "poc": "POC授权",
-      "commercial": "商业授权"
+      "poc": "POC授权（90天）",
+      "commercial": "商用授权（365天）"
     },
     "updatedAt": "审批状态更新时间",
     "manualRefresh": "刷新审批状态",
@@ -126,18 +126,20 @@
     "applyDialogTitle": "Flocks Pro 升级申请",
     "productLabel": "申请的版本",
     "licenseTypeLabel": "申请的授权类型",
-    "licenseTypePoc": "POC授权",
-    "licenseTypeCommercial": "正式授权",
+    "licenseTypePoc": "POC授权（90天）",
+    "licenseTypeCommercial": "商用授权（365天）",
     "companyPlaceholderRequired": "公司（必填）",
     "applicantNamePlaceholderRequired": "申请人姓名（必填）",
     "salesRepNamePlaceholder": "销售代表姓名（选填）",
     "salesRepHintPrefix": "如果没有销售代表，请前往",
     "salesRepHintLinkText": "ThreatBook 产品试用页面",
     "salesRepHintSuffix": "进行试用申请。",
-    "applicantEmailPlaceholder": "申请人邮箱（选填）",
-    "applicantPhonePlaceholder": "申请人电话（选填）",
-    "notesPlaceholder": "申请说明（选填）",
-    "formRequiredError": "请填写公司和申请人姓名"
+    "applicantEmailPlaceholder": "申请人邮箱（必填）",
+    "applicantPhonePlaceholder": "申请人电话（必填）",
+    "notesPlaceholder": "申请说明（选填，可说明主要使用场景、定时任务及每日 Token 消耗量等）",
+    "formRequiredError": "请填写公司、申请人姓名、申请人邮箱和申请人电话",
+    "invalidEmailError": "请输入有效的申请人邮箱",
+    "invalidPhoneError": "请输入有效的申请人电话（支持国际号码）"
   },
   "callback": {
     "processing": "正在完成云账号登录，请稍候...",

@@ -124,6 +124,8 @@ async def test_create_upgrade_request_requires_console_login(
             "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
+            "applicant_email": "alice@example.com",
+            "applicant_phone": "+1 415 555 0100",
         },
     )
 
@@ -712,6 +714,8 @@ async def test_create_upgrade_request_does_not_link_previous_request_when_omitte
             "company": "acme",
             "applicant_name": "alice",
             "sales_rep_name": "bob",
+            "applicant_email": "alice@example.com",
+            "applicant_phone": "+1 415 555 0100",
         },
     )
 
@@ -763,6 +767,8 @@ async def test_create_upgrade_request_maps_console_failure_to_502(
             "license_type": "poc",
             "company": "acme",
             "applicant_name": "alice",
+            "applicant_email": "alice@example.com",
+            "applicant_phone": "+1 415 555 0100",
         },
     )
 

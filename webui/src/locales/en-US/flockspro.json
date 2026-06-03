@@ -134,10 +134,12 @@
     "salesRepHintPrefix": "If you do not have a sales representative, please visit",
     "salesRepHintLinkText": "the ThreatBook trial page",
     "salesRepHintSuffix": "to leave your contact information.",
-    "applicantEmailPlaceholder": "Applicant Email (optional)",
-    "applicantPhonePlaceholder": "Applicant Phone (optional)",
-    "notesPlaceholder": "Notes (optional)",
-    "formRequiredError": "Company and applicant name are required"
+    "applicantEmailPlaceholder": "Applicant Email (required)",
+    "applicantPhonePlaceholder": "Applicant Phone (required)",
+    "notesPlaceholder": "Notes (optional, e.g. main use cases, scheduled tasks, daily token consumption)",
+    "formRequiredError": "Company, applicant name, applicant email, and applicant phone are required",
+    "invalidEmailError": "Please enter a valid applicant email.",
+    "invalidPhoneError": "Please enter a valid applicant phone number (international numbers supported)."
   },
   "callback": {
     "processing": "Completing console login, please wait...",
