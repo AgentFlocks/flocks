@@ -182,6 +182,7 @@ export interface KafkaConfig {
   inputGroupId?: string;
   inputKey?: string;
   autoOffsetReset?: string;
+  inputs?: Record<string, any>;
   updatedAt?: number;
 }
 
@@ -309,6 +310,7 @@ export const workflowAPI = {
     inputGroupId?: string;
     inputKey?: string;
     autoOffsetReset?: string;
+    inputs?: Record<string, any>;
   }) =>
     client.post<{ ok: boolean; consumer?: KafkaConsumerStatus }>(
       `/api/workflow/${id}/kafka-config`,

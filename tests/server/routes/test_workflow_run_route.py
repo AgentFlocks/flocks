@@ -77,6 +77,7 @@ async def test_save_kafka_config_persists_consumer_settings(
         inputTopic="workflow-input",
         inputGroupId="wf-group",
         inputKey="kafka_message",
+        inputs={"kafka_output_enabled": True, "kafka_output_topic": "topic_soc_flocks_result_log"},
     )
 
     response = await workflow_module.save_kafka_config("wf-input", req)
@@ -89,6 +90,10 @@ async def test_save_kafka_config_persists_consumer_settings(
     assert saved_config["inputTopic"] == "workflow-input"
     assert saved_config["inputGroupId"] == "wf-group"
     assert saved_config["inputKey"] == "kafka_message"
+    assert saved_config["inputs"] == {
+        "kafka_output_enabled": True,
+        "kafka_output_topic": "topic_soc_flocks_result_log",
+    }
     assert "outputEnabled" not in saved_config
     assert "outputBroker" not in saved_config
     assert "outputTopic" not in saved_config

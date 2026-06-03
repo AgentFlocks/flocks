@@ -55,6 +55,9 @@ vi.mock('react-i18next', () => ({
         'detail.run.kafkaExperimental': '实验性',
         'detail.run.kafkaEnabled': '启用消费',
         'detail.run.kafkaInputKey': 'Inputs 键名',
+        'detail.run.kafkaInputs': '额外 Inputs JSON',
+        'detail.run.kafkaInputsHint': 'kafka inputs hint',
+        'detail.run.kafkaInputsJsonError': 'Kafka Inputs 必须是合法的 JSON 对象',
         'detail.run.inputConfig': '输入配置',
         'detail.run.savingConfig': '保存中',
         'detail.run.savedConfig': '已保存',
@@ -157,10 +160,46 @@ describe('IntegrationTab Kafka config', () => {
         inputTopic: 'workflow-input',
         inputGroupId: '',
         inputKey: 'kafka_message',
+        inputs: {},
       });
     });
     expect(screen.queryByText('输出配置')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('启用输出')).not.toBeInTheDocument();
+  });
+
+  it('prefills kafka extra inputs from sample inputs without kafka raw payload keys', async () => {
+    workflowAPI.getSampleInputs.mockResolvedValue({
+      data: {
+        sampleInputs: {
+          _comment: 'ignore me',
+          kafka_message: { id: 1 },
+          source: 'demo',
+          kafka_output_enabled: true,
+        },
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} />);
+    await userEvent.setup().click(await screen.findByRole('button', { name: /Kafka 配置/ }));
+
+    const textarea = await screen.findByLabelText('额外 Inputs JSON');
+    expect(textarea).toHaveValue(`{
+  "source": "demo",
+  "kafka_output_enabled": true
+}`);
+  });
+
+  it('blocks saving kafka config when extra inputs json is invalid', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationTab workflow={workflow} />);
+
+    await user.click(await screen.findByRole('button', { name: /Kafka 配置/ }));
+    const textarea = screen.getByLabelText('额外 Inputs JSON');
+    fireEvent.change(textarea, { target: { value: '{"broken": ' } });
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    expect(await screen.findByText('Kafka Inputs 必须是合法的 JSON 对象')).toBeInTheDocument();
+    expect(workflowAPI.saveKafkaConfig).not.toHaveBeenCalled();
   });
 
   it('renders poller status badge when runtime is running', async () => {

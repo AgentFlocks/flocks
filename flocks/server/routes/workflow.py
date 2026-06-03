@@ -1393,6 +1393,7 @@ class KafkaConfigRequest(BaseModel):
     inputGroupId: Optional[str] = None
     inputKey: str = "kafka_message"
     autoOffsetReset: str = "latest"
+    inputs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkflowPollerConfigRequest(BaseModel):
@@ -1591,6 +1592,7 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "inputGroupId": req.inputGroupId,
             "inputKey": req.inputKey,
             "autoOffsetReset": req.autoOffsetReset,
+            "inputs": req.inputs,
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(_kafka_config_key(workflow_id), config)
