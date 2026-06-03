@@ -89,16 +89,21 @@ export default function CommandDropdown({
  * 从输入文本中解析 slash 命令的名称和参数
  * 例如 "/plan create a feature" → { command: "plan", args: "create a feature" }
  */
+export function isSlashCommandName(command: string): boolean {
+  return command.length > 0 && !/[\\/]/.test(command);
+}
+
 export function parseSlashCommand(text: string): { command: string; args: string } | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith('/')) return null;
   const withoutSlash = trimmed.slice(1);
   const spaceIndex = withoutSlash.indexOf(' ');
-  if (spaceIndex === -1) {
-    return { command: withoutSlash, args: '' };
+  const command = spaceIndex === -1 ? withoutSlash : withoutSlash.slice(0, spaceIndex);
+  if (!isSlashCommandName(command)) {
+    return null;
   }
   return {
-    command: withoutSlash.slice(0, spaceIndex),
-    args: withoutSlash.slice(spaceIndex + 1).trim(),
+    command,
+    args: spaceIndex === -1 ? '' : withoutSlash.slice(spaceIndex + 1).trim(),
   };
 }
