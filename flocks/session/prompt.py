@@ -259,10 +259,16 @@ class SystemPrompt:
         """Build stable workspace metadata that should stay cache-friendly."""
         working_dir = directory or os.getcwd()
         is_git = vcs == "git"
+
+        from flocks.workspace.manager import WorkspaceManager
+        ws = WorkspaceManager.get_instance()
+        outputs_dir = str(ws.get_default_outputs_dir())
+
         env_info = [
             "Here is some useful information about the environment you are running in:",
             "<env>",
             f"  Source code directory: {working_dir}",
+            f"  Workspace outputs directory: {outputs_dir}",
             f"  Is directory a git repo: {'yes' if is_git else 'no'}",
             f"  Platform: {platform.system().lower()}",
             "   Python executor: uv python",

@@ -18,6 +18,8 @@
   "systemCenter": "系统中心",
   "accountManagement": "账号管理",
   "systemLog": "系统日志",
+  "flocksproUpgrade": "Flocks Pro",
+  "auditLogs": "审计日志",
   "expandNav": "展开导航",
   "collapseNav": "收起导航",
   "switchLanguage": "切换语言",
@@ -26,5 +28,6 @@
   "versionInfo": "Flocks 版本信息",
   "updateAvailable": "发现新版本",
   "updateNow": "立即升级",
-  "currentVersionLabel": "当前 v{{version}}"
+  "currentVersionLabel": "当前 v{{version}}",
+  "currentProductVersionLabel": "当前 {{version}}"
 }

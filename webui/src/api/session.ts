@@ -91,6 +91,22 @@ export const sessionApi = {
   },
 
   /**
+   * 本地共享会话（所有本地账号可见，只读）
+   */
+  shareLocal: async (sessionId: string) => {
+    const response = await client.post(`/api/session/${sessionId}/share-local`);
+    return response.data;
+  },
+
+  /**
+   * 取消本地共享会话
+   */
+  unshareLocal: async (sessionId: string) => {
+    const response = await client.post(`/api/session/${sessionId}/unshare-local`);
+    return response.data;
+  },
+
+  /**
    * 清空会话消息
    */
   clear: async (sessionId: string) => {

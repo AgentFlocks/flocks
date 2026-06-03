@@ -11,11 +11,14 @@ oh-my-opencode's lifecycle stages:
 - event
 """
 
+import asyncio
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Callable, Awaitable
 
+from flocks.extensions import FailPolicy, normalize_fail_policy, normalize_timeout
 from flocks.utils.log import Log
 
 
@@ -32,6 +35,19 @@ class HookStage:
     CHANNEL_INBOUND = "channel.inbound"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
     CHANNEL_OUTBOUND_AFTER = "channel.outbound.after"
+
+
+_DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
+    HookStage.CHAT_MESSAGE: 5.0,
+    HookStage.LLM_BEFORE: 5.0,
+    HookStage.LLM_AFTER: 5.0,
+    HookStage.TOOL_BEFORE: 5.0,
+    HookStage.TOOL_AFTER: 5.0,
+    HookStage.CHANNEL_INBOUND: 5.0,
+    HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
+    HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
+    HookStage.EVENT: 10.0,
+}
 
 
 @dataclass
@@ -74,7 +90,9 @@ class HookBase:
 class _HookEntry:
     order: int
     name: str
-    hook: HookBase
+    hook: HookBase = field(compare=False)
+    timeout_seconds: Optional[float] = field(default=None, compare=False)
+    fail_policy: FailPolicy = field(default=FailPolicy.ISOLATE, compare=False)
 
 
 class HookPipeline:
@@ -95,13 +113,22 @@ class HookPipeline:
         order: int = 0,
         *,
         plugin_managed: bool = False,
+        timeout_seconds: Optional[float] = None,
+        fail_policy: FailPolicy | str | None = None,
+        critical: bool = False,
     ) -> None:
         cls.unregister(name)
         if plugin_managed:
             cls._plugin_hook_names.add(name)
         else:
             cls._plugin_hook_names.discard(name)
-        cls._hooks.append(_HookEntry(order=order, name=name, hook=hook))
+        cls._hooks.append(_HookEntry(
+            order=order,
+            name=name,
+            hook=hook,
+            timeout_seconds=normalize_timeout(timeout_seconds),
+            fail_policy=normalize_fail_policy(fail_policy, critical=critical),
+        ))
         cls._hooks.sort()
         log.info("hook.registered", {"name": name, "order": order})
 
@@ -289,7 +316,7 @@ class HookPipeline:
         input_data: Dict[str, Any],
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
-        started_at = time.perf_counter()
+        stage_started_at = time.perf_counter()
         project_dir = await cls._resolve_project_dir(input_data)
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
@@ -300,19 +327,43 @@ class HookPipeline:
                 continue
             handler_count += 1
             try:
-                result = handler(ctx)
-                if isinstance(result, Awaitable):
-                    await result
+                timeout_seconds = entry.timeout_seconds
+                if timeout_seconds is None:
+                    timeout_seconds = _DEFAULT_STAGE_TIMEOUTS.get(stage, 5.0)
+                handler_started_at = time.perf_counter()
+                if timeout_seconds is not None:
+                    await asyncio.wait_for(
+                        cls._invoke_handler(handler, ctx),
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    await cls._invoke_handler(handler, ctx)
+            except asyncio.TimeoutError:
+                duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
+                log.warning("hook.timeout", {
+                    "stage": stage,
+                    "hook": entry.name,
+                    "duration_ms": duration_ms,
+                    "timeout_ms": int((timeout_seconds or 0) * 1000),
+                    "critical": entry.fail_policy != FailPolicy.ISOLATE,
+                    "fail_policy": entry.fail_policy.value,
+                })
+                if entry.fail_policy != FailPolicy.ISOLATE:
+                    raise
             except Exception as exc:
                 log.error("hook.error", {
                     "stage": stage,
                     "hook": entry.name,
                     "error": str(exc),
+                    "critical": entry.fail_policy != FailPolicy.ISOLATE,
+                    "fail_policy": entry.fail_policy.value,
                 })
+                if entry.fail_policy != FailPolicy.ISOLATE:
+                    raise
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,
-            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+            "duration_ms": int((time.perf_counter() - stage_started_at) * 1000),
         })
         return ctx
 
@@ -350,6 +401,12 @@ class HookPipeline:
             recursive=True,
             max_depth=2,
         ))
+
+    @staticmethod
+    async def _invoke_handler(handler: Callable[[HookContext], Awaitable[None]], ctx: HookContext) -> None:
+        result = handler(ctx)
+        if inspect.isawaitable(result):
+            await result
 
     @staticmethod
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:

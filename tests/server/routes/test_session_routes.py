@@ -185,7 +185,7 @@ class TestSessionMessages:
 
 class TestSessionDeletePermissions:
     @pytest.mark.asyncio
-    async def test_owner_and_admin_can_delete_but_not_other_member(
+    async def test_only_owner_can_delete(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -209,8 +209,68 @@ class TestSessionDeletePermissions:
         assert forbidden.status_code == status.HTTP_403_FORBIDDEN
 
         monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
-        admin_ok = await client.delete(f"/api/session/{session.id}")
-        assert admin_ok.status_code == status.HTTP_200_OK
+        admin_forbidden = await client.delete(f"/api/session/{session.id}")
+        assert admin_forbidden.status_code == status.HTTP_403_FORBIDDEN
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        owner_ok = await client.delete(f"/api/session/{session.id}")
+        assert owner_ok.status_code == status.HTTP_200_OK
+
+
+class TestSessionLocalSharing:
+    @pytest.mark.asyncio
+    async def test_owner_can_share_and_unshare_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        create_resp = await client.post("/api/session", json={"title": "share-session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+
+        share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert share_resp.status_code == status.HTTP_200_OK
+        assert share_resp.json()["isShared"] is True
+
+        unshare_resp = await client.post(f"/api/session/{session_id}/unshare-local")
+        assert unshare_resp.status_code == status.HTTP_200_OK
+        assert unshare_resp.json()["isShared"] is False
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_change_share_or_continue_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        viewer = AuthUser(id="usr_viewer", username="viewer", role="member", status="active")
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        create_resp = await client.post("/api/session", json={"title": "share-session-2"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        owner_share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert owner_share_resp.status_code == status.HTTP_200_OK
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+
+        share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert share_resp.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
+
+        unshare_resp = await client.post(f"/api/session/{session_id}/unshare-local")
+        assert unshare_resp.status_code == status.HTTP_403_FORBIDDEN
+
+        prompt_resp = await client.post(
+            f"/api/session/{session_id}/prompt_async",
+            json={"parts": [{"type": "text", "text": "blocked"}]},
+        )
+        assert prompt_resp.status_code == status.HTTP_403_FORBIDDEN
 
 
 class TestSessionMessagesRemaining:

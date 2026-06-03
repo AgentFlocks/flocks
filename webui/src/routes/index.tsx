@@ -30,9 +30,12 @@ const ConfigPage = lazy(() => import('@/pages/Config'));
 const ChannelPage = lazy(() => import('@/pages/Channel'));
 const PermissionPage = lazy(() => import('@/pages/Permission'));
 const MonitoringPage = lazy(() => import('@/pages/Monitoring'));
+const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
 const WorkspacePage = lazy(() => import('@/pages/Workspace'));
 const DeviceIntegrationPage = lazy(() => import('@/pages/DeviceIntegration'));
 const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
+const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
+const FlocksproUpgradeCallbackPage = lazy(() => import('@/pages/FlocksproUpgrade/Callback'));
 
 function LazyRoute({ children }: { children: React.ReactNode }) {
   return (
@@ -40,6 +43,14 @@ function LazyRoute({ children }: { children: React.ReactNode }) {
       {children}
     </Suspense>
   );
+}
+
+function AdminOnlyRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth();
+  if (user?.role !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
 }
 
 export function Routes() {
@@ -135,7 +146,16 @@ export function Routes() {
         <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
+        <Route path="audit-logs" element={<LazyRoute><AuditLogsPage /></LazyRoute>} />
         <Route path="admin/users" element={<Navigate to="/config" replace />} />
+        <Route
+          path="flockspro-upgrade"
+          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradePage /></LazyRoute></AdminOnlyRoute>}
+        />
+        <Route
+          path="flockspro-upgrade/callback"
+          element={<AdminOnlyRoute><LazyRoute><FlocksproUpgradeCallbackPage /></LazyRoute></AdminOnlyRoute>}
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </RouterRoutes>

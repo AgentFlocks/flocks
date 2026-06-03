@@ -36,6 +36,8 @@ except ImportError:  # pragma: no cover - unavailable on Windows
 MIN_NODE_MAJOR = 22
 FOLLOW_POLL_INTERVAL = 0.5
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
+DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
+DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
 MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
@@ -936,6 +938,7 @@ def start_backend(config: ServiceConfig, console) -> None:
     backend_env["_FLOCKS_WEBUI_HOST"] = config.frontend_host
     backend_env["_FLOCKS_WEBUI_PORT"] = str(config.frontend_port)
     backend_env["PYTHONUNBUFFERED"] = "1"
+    backend_env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
 
     console.print("[flocks] 启动后端服务...")
     process = _spawn_process(
@@ -1627,6 +1630,14 @@ def build_frontend_env(config: ServiceConfig) -> dict[str, str]:
     if _should_inject_direct_backend_urls(config.backend_host):
         env["VITE_API_BASE_URL"] = backend_url
         env["VITE_WS_BASE_URL"] = websocket_access_base_url(config)
+
+    # Provide portal defaults for plain `flocks start`, while still allowing
+    # callers to override via explicit environment variables.
+    env.setdefault("FLOCKS_CONSOLE_BASE_URL", DEFAULT_FLOCKS_CONSOLE_BASE_URL)
+    env.setdefault(
+        "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
+        DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS,
+    )
 
     # When using the bundled toolchain (Windows installer), npm/node spawned by
     # `npm run build/preview` must be able to locate the bundled node.exe via
