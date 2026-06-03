@@ -108,7 +108,7 @@ function TabButton({ active, onClick, icon, label }: {
 // ─── Files Tab ────────────────────────────────────────────────────────────
 
 function FilesTab() {
-  const toast = useToast();
+  const { success: toastSuccess, error: toastError } = useToast();
   const confirm = useConfirm();
   const { t } = useTranslation('workspace');
 
@@ -126,6 +126,8 @@ function FilesTab() {
   const [dragOver, setDragOver] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const latestDirRequestIdRef = useRef(0);
+  const didInitRef = useRef(false);
 
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
@@ -133,22 +135,36 @@ function FilesTab() {
   }, []);
 
   const loadDir = useCallback(async (path: string, options?: { preservePanel?: boolean }) => {
+    const requestId = latestDirRequestIdRef.current + 1;
+    latestDirRequestIdRef.current = requestId;
     setLoading(true);
     if (!options?.preservePanel) {
       dispatchPanel({ type: 'close' });
     }
     try {
       const res = await workspaceAPI.list(path);
+      if (requestId !== latestDirRequestIdRef.current) {
+        return;
+      }
       setItems(Array.isArray(res.data) ? res.data : []);
       setCurrentPath(path);
     } catch (e: any) {
-      toast.error(t('files.toast.loadDirFailed'), e?.response?.data?.detail ?? e.message);
+      if (requestId !== latestDirRequestIdRef.current) {
+        return;
+      }
+      toastError(t('files.toast.loadDirFailed'), e?.response?.data?.detail ?? e.message);
     } finally {
-      setLoading(false);
+      if (requestId === latestDirRequestIdRef.current) {
+        setLoading(false);
+      }
     }
-  }, [toast, t]);
+  }, [t, toastError]);
 
   useEffect(() => {
+    if (didInitRef.current) {
+      return;
+    }
+    didInitRef.current = true;
     loadDir('');
   }, [loadDir]);
 
@@ -162,10 +178,10 @@ function FilesTab() {
       try {
         await loadFileContent(node.path);
       } catch (e: any) {
-        toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        toastError(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
       }
     }
-  }, [loadDir, loadFileContent, toast, t]);
+  }, [loadDir, loadFileContent, toastError, t]);
 
   const handleRefresh = useCallback(async () => {
     await loadDir(currentPath, { preservePanel: true });
@@ -174,10 +190,10 @@ function FilesTab() {
       try {
         await loadFileContent(panel.node.path);
       } catch (e: any) {
-        toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        toastError(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
       }
     }
-  }, [currentPath, loadDir, loadFileContent, panel.node, toast, t]);
+  }, [currentPath, loadDir, loadFileContent, panel.node, toastError, t]);
 
   const handleSave = useCallback(async () => {
     if (!panel.node || panel.editContent === null) return;
@@ -185,13 +201,13 @@ function FilesTab() {
     try {
       await workspaceAPI.writeFile(panel.node.path, panel.editContent);
       dispatchPanel({ type: 'save_done', content: panel.editContent });
-      toast.success(t('files.toast.saveSuccess'));
+      toastSuccess(t('files.toast.saveSuccess'));
       loadDir(currentPath);
     } catch (e: any) {
       dispatchPanel({ type: 'cancel_edit' });
-      toast.error(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [panel.node, panel.editContent, currentPath, loadDir, toast]);
+  }, [panel.node, panel.editContent, currentPath, loadDir, toastError, toastSuccess, t]);
 
   const handleDelete = useCallback(async (node: WorkspaceNode) => {
     const ok = await confirm({
@@ -207,13 +223,13 @@ function FilesTab() {
       } else {
         await workspaceAPI.deleteDir(node.path);
       }
-      toast.success(t('files.toast.deleteSuccess'));
+      toastSuccess(t('files.toast.deleteSuccess'));
       if (panel.node?.path === node.path) dispatchPanel({ type: 'close' });
       loadDir(currentPath);
     } catch (e: any) {
-      toast.error(t('files.toast.deleteFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.deleteFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [confirm, panel.node, currentPath, loadDir, toast]);
+  }, [confirm, panel.node, currentPath, loadDir, toastError, toastSuccess, t]);
 
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -223,15 +239,15 @@ function FilesTab() {
       const uploaded = res.data.uploaded;
       const errors = uploaded.filter((u) => u.error);
       const ok = uploaded.filter((u) => !u.error);
-      if (ok.length > 0) toast.success(t('files.toast.uploadSuccess', { count: ok.length }));
-      if (errors.length > 0) toast.error(t('files.toast.uploadPartialFail', { count: errors.length }), errors.map((e) => e.error).join('; '));
+      if (ok.length > 0) toastSuccess(t('files.toast.uploadSuccess', { count: ok.length }));
+      if (errors.length > 0) toastError(t('files.toast.uploadPartialFail', { count: errors.length }), errors.map((e) => e.error).join('; '));
       loadDir(currentPath);
     } catch (e: any) {
-      toast.error(t('files.toast.uploadFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.uploadFailed'), e?.response?.data?.detail ?? e.message);
     } finally {
       setUploading(false);
     }
-  }, [currentPath, loadDir, toast]);
+  }, [currentPath, loadDir, toastError, toastSuccess, t]);
 
   const handleCreateDir = useCallback(async () => {
     const name = newDir.name.trim();
@@ -242,9 +258,9 @@ function FilesTab() {
       setNewDir({ show: false, name: '' });
       loadDir(currentPath);
     } catch (e: any) {
-      toast.error(t('files.toast.createDirFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('files.toast.createDirFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [newDir.name, currentPath, loadDir, toast]);
+  }, [newDir.name, currentPath, loadDir, toastError, t]);
 
   const breadcrumbs = currentPath ? ['', ...currentPath.split('/')] : [''];
 
@@ -476,7 +492,7 @@ function FilesTab() {
 type MemoryLoadState = 'idle' | 'loading' | 'error';
 
 function MemoryTab() {
-  const toast = useToast();
+  const { error: toastError } = useToast();
   const { t } = useTranslation('workspace');
   const [files, setFiles] = useState<WorkspaceNode[]>([]);
   const [loadState, setLoadState] = useState<MemoryLoadState>('loading');
@@ -497,9 +513,9 @@ function MemoryTab() {
       setLoadState('idle');
     } catch (e: any) {
       setLoadState('error');
-      toast.error(t('memory.loadMemoryFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('memory.loadMemoryFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [toast]);
+  }, [toastError, t]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -513,7 +529,7 @@ function MemoryTab() {
       setContentState('ready');
     } catch (e: any) {
       setContentState('error');
-      toast.error(t('memory.readFileFailed'), e?.response?.data?.detail ?? e.message);
+      toastError(t('memory.readFileFailed'), e?.response?.data?.detail ?? e.message);
     }
   };
 

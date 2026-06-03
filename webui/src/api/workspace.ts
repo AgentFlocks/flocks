@@ -118,7 +118,7 @@ export function fileIcon(node: WorkspaceNode): string {
   if (node.type === 'directory') return '📁';
   const ext = node.name.split('.').pop()?.toLowerCase() ?? '';
   const map: Record<string, string> = {
-    md: '📝', txt: '📄', log: '📋', json: '🔧', yaml: '🔧', yml: '🔧',
+    md: '📝', txt: '📄', log: '📋', json: '🔧', jsonl: '🔧', yaml: '🔧', yml: '🔧',
     py: '🐍', js: '🟨', ts: '🔷', tsx: '🔷', jsx: '🟨',
     sh: '⚙️', bash: '⚙️', csv: '📊', pdf: '📕', png: '🖼️',
     jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', zip: '🗜️', tar: '🗜️', gz: '🗜️',

@@ -344,6 +344,15 @@ class TestReadFile:
         assert data["path"] == "outputs/note.md"
         assert data["content"] == "# Hello\nWorld"
 
+    def test_read_jsonl_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "events.jsonl").write_text('{"id": 1}\n{"id": 2}\n')
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/events.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/events.jsonl"
+        assert data["content"] == '{"id": 1}\n{"id": 2}\n'
+
     def test_read_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/file?path=ghost.txt")
         assert r.status_code == 404
