@@ -352,6 +352,20 @@ class TestReadFile:
         data = r.json()
         assert data["path"] == "outputs/events.jsonl"
         assert data["content"] == '{"id": 1}\n{"id": 2}\n'
+        assert data["truncated"] is False
+
+    def test_read_large_text_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", "10")
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "large.jsonl").write_text("0123456789ABCDEF", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/large.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/large.jsonl"
+        assert data["content"] == "0123456789"
+        assert data["truncated"] is True
+        assert data["size"] == 16
+        assert data["preview_limit_bytes"] == 10
 
     def test_read_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/file?path=ghost.txt")
@@ -554,6 +568,19 @@ class TestMemoryView:
         data = r.json()
         assert data["path"] == "MEMORY.md"
         assert "Key facts" in data["content"]
+        assert data["truncated"] is False
+
+    def test_read_large_memory_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", "8")
+        mem = _mem(workspace_client)
+        (mem / "large.md").write_text("abcdefghijk", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=large.md")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["content"] == "abcdefgh"
+        assert data["truncated"] is True
+        assert data["size"] == 11
+        assert data["preview_limit_bytes"] == 8
 
     def test_read_memory_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/memory/file?path=ghost.md")

@@ -22,17 +22,19 @@ interface PanelState {
   node: WorkspaceNode | null;
   content: string | null;
   editContent: string | null;
+  truncated: boolean;
+  previewLimitBytes: number | null;
   editing: boolean;
   saving: boolean;
 }
 
 const PANEL_INIT: PanelState = {
-  node: null, content: null, editContent: null, editing: false, saving: false,
+  node: null, content: null, editContent: null, truncated: false, previewLimitBytes: null, editing: false, saving: false,
 };
 
 type PanelAction =
   | { type: 'select'; node: WorkspaceNode }
-  | { type: 'content_loaded'; content: string }
+  | { type: 'content_loaded'; content: string; truncated?: boolean; previewLimitBytes?: number | null }
   | { type: 'start_edit' }
   | { type: 'edit_change'; text: string }
   | { type: 'save_start' }
@@ -45,7 +47,12 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
     case 'select':
       return { ...PANEL_INIT, node: action.node };
     case 'content_loaded':
-      return { ...state, content: action.content };
+      return {
+        ...state,
+        content: action.content,
+        truncated: action.truncated ?? false,
+        previewLimitBytes: action.previewLimitBytes ?? null,
+      };
     case 'start_edit':
       return { ...state, editing: true, editContent: state.content ?? '' };
     case 'edit_change':
@@ -131,7 +138,12 @@ function FilesTab() {
 
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
-    dispatchPanel({ type: 'content_loaded', content: res.data.content });
+    dispatchPanel({
+      type: 'content_loaded',
+      content: res.data.content,
+      truncated: res.data.truncated,
+      previewLimitBytes: res.data.preview_limit_bytes,
+    });
   }, []);
 
   const loadDir = useCallback(async (path: string, options?: { preservePanel?: boolean }) => {
@@ -196,7 +208,7 @@ function FilesTab() {
   }, [currentPath, loadDir, loadFileContent, panel.node, toastError, t]);
 
   const handleSave = useCallback(async () => {
-    if (!panel.node || panel.editContent === null) return;
+    if (!panel.node || panel.editContent === null || panel.truncated) return;
     dispatchPanel({ type: 'save_start' });
     try {
       await workspaceAPI.writeFile(panel.node.path, panel.editContent);
@@ -423,7 +435,7 @@ function FilesTab() {
             <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
             <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
             <div className="flex items-center gap-1 flex-shrink-0">
-              {panel.node.is_text_file && !panel.editing && (
+              {panel.node.is_text_file && !panel.editing && !panel.truncated && (
                 <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
                   <Edit3 className="w-4 h-4" />
                 </button>
@@ -454,18 +466,25 @@ function FilesTab() {
 
           <div className="flex-1 min-h-0 overflow-hidden">
             {panel.node.is_text_file ? (
-              panel.editing ? (
-                <textarea
-                  value={panel.editContent ?? ''}
-                  onChange={(e) => dispatchPanel({ type: 'edit_change', text: e.target.value })}
-                  className="w-full h-full resize-none p-4 text-sm font-mono text-gray-800 border-none outline-none bg-white"
-                  spellCheck={false}
-                />
-              ) : (
-                <pre className="w-full h-full overflow-auto p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words bg-white">
-                  {panel.content ?? <LoadingSpinner />}
-                </pre>
-              )
+              <div className="flex h-full flex-col">
+                {panel.truncated && (
+                  <div className="mx-4 mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    {t('files.truncatedPreview', { limit: formatBytes(panel.previewLimitBytes ?? 0) })}
+                  </div>
+                )}
+                {panel.editing ? (
+                  <textarea
+                    value={panel.editContent ?? ''}
+                    onChange={(e) => dispatchPanel({ type: 'edit_change', text: e.target.value })}
+                    className="w-full h-full resize-none p-4 text-sm font-mono text-gray-800 border-none outline-none bg-white"
+                    spellCheck={false}
+                  />
+                ) : (
+                  <pre className="w-full h-full overflow-auto p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words bg-white">
+                    {panel.content ?? <LoadingSpinner />}
+                  </pre>
+                )}
+              </div>
             ) : (
               <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-400 p-6">
                 <AlertTriangle className="w-10 h-10 text-orange-300" />

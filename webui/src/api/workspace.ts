@@ -30,6 +30,14 @@ export interface UploadResult {
   error?: string;
 }
 
+export interface WorkspaceFileContentResponse {
+  path: string;
+  content: string;
+  truncated?: boolean;
+  size?: number;
+  preview_limit_bytes?: number;
+}
+
 export type UploadPurpose = 'chat';
 
 // ─── API ───────────────────────────────────────────────────────────────────
@@ -66,7 +74,7 @@ export const workspaceAPI = {
   },
 
   readFile: (path: string) =>
-    client.get<{ path: string; content: string }>('/api/workspace/file', { params: { path } }),
+    client.get<WorkspaceFileContentResponse>('/api/workspace/file', { params: { path } }),
 
   writeFile: (path: string, content: string) =>
     client.put<{ path: string; written: boolean }>('/api/workspace/file', { path, content }),
@@ -92,7 +100,7 @@ export const workspaceAPI = {
     client.get<WorkspaceNode[]>('/api/workspace/memory/list'),
 
   readMemoryFile: (path: string) =>
-    client.get<{ path: string; content: string }>('/api/workspace/memory/file', { params: { path } }),
+    client.get<WorkspaceFileContentResponse>('/api/workspace/memory/file', { params: { path } }),
 
   // Stats
   stats: () =>

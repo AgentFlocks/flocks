@@ -35,6 +35,7 @@ const translations: Record<string, string> = {
   'files.download': 'Download',
   'files.downloadFile': 'Download file',
   'files.binaryPreview': 'Binary file cannot be previewed',
+  'files.truncatedPreview': 'Preview truncated to first {{limit}}',
   'files.emptyDir': 'Empty directory',
   'files.dropHere': 'Drop files here',
   'files.uploading': 'Uploading',
@@ -57,6 +58,9 @@ vi.mock('react-i18next', () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       if (key === 'files.confirm.deleteDesc') {
         return `Delete ${params?.name ?? ''}`;
+      }
+      if (key === 'files.truncatedPreview') {
+        return `Preview truncated to first ${params?.limit ?? ''}`;
       }
       return translations[key] ?? key;
     },
@@ -178,5 +182,29 @@ describe('WorkspacePage', () => {
     expect(mocks.list.mock.calls.filter(([path]) => path === '')).toHaveLength(1);
     expect(mocks.list.mock.calls.filter(([path]) => path === 'reports')).toHaveLength(2);
     expect(mocks.toastSuccess).toHaveBeenCalledWith('Deleted');
+  });
+
+  it('大文件预览被截断时显示提示并禁用编辑', async () => {
+    mocks.list.mockResolvedValue({
+      data: [file('events.jsonl', 'events.jsonl')],
+    });
+    mocks.readFile.mockResolvedValue({
+      data: {
+        path: 'events.jsonl',
+        content: '{"id":1}\n',
+        truncated: true,
+        preview_limit_bytes: 16,
+        size: 1024,
+      },
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(await screen.findByText('events.jsonl'));
+
+    expect(await screen.findByText('Preview truncated to first 16 B')).toBeInTheDocument();
+    expect(screen.getByText('{"id":1}')).toBeInTheDocument();
+    expect(screen.queryByTitle('Edit')).not.toBeInTheDocument();
   });
 });
