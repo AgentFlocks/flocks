@@ -1,7 +1,7 @@
 name: huaweicloud_waf
 vendor: huaweicloud
 service_id: huaweicloud_waf_api
-version: "1.0"
+version: "39"
 integration_type: device
 description: >
   Huawei Cloud Web Application Firewall (WAF) API service. Configure
@@ -61,7 +61,7 @@ defaults:
   region: "cn-north-4"
   timeout: 60
   category: custom
-  product_version: "1.0"
+  product_version: "39"
 notes: |
   华为云 WAF API 支持两种认证方式：
   1. AK/SK 签名认证（推荐）：使用 SDK-HMAC-SHA256 签名，
