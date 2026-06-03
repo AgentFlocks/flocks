@@ -952,6 +952,50 @@ def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_pat
     assert backend_env["_FLOCKS_WEBUI_HOST"] == "127.0.0.1"
     assert backend_env["_FLOCKS_WEBUI_PORT"] == "5173"
     assert console.messages[-1] == f"[flocks] 后端已启动，日志: {paths.backend_log}"
+    assert backend_env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
+
+
+def test_start_backend_allows_overriding_console_base_url(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    spawn_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_flocks_cli_command",
+        lambda root=None: ["python", "-m", "flocks.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *args, **kwargs: spawn_calls.append({"args": args, "kwargs": kwargs}) or SimpleNamespace(pid=2468),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://custom-console.example.com")
+
+    service_manager.start_backend(service_manager.ServiceConfig(), console)
+
+    backend_env = spawn_calls[0]["kwargs"]["env"]
+    assert backend_env["FLOCKS_CONSOLE_BASE_URL"] == "https://custom-console.example.com"
 
 
 def test_build_frontend_env_uses_backend_host_and_port() -> None:
@@ -1006,6 +1050,37 @@ def test_build_frontend_env_keeps_proxy_mode_for_loopback_backend_host(monkeypat
     assert env["FLOCKS_API_PROXY_TARGET"] == "http://127.0.0.1:9000"
     assert "VITE_API_BASE_URL" not in env
     assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -> None:
+    monkeypatch.delenv("FLOCKS_CONSOLE_BASE_URL", raising=False)
+    monkeypatch.delenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", raising=False)
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_FLOCKS_CONSOLE_BASE_URL
+    assert (
+        env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
+        == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+    )
+
+
+def test_build_frontend_env_allows_overriding_portal_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("FLOCKS_CONSOLE_BASE_URL", "https://custom.example.com")
+    monkeypatch.setenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", "custom.example.com")
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["FLOCKS_CONSOLE_BASE_URL"] == "https://custom.example.com"
+    assert env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "custom.example.com"
 
 
 def test_build_frontend_env_allows_direct_backend_urls_when_opted_in(monkeypatch) -> None:

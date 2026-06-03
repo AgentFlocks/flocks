@@ -1,0 +1,30 @@
+name: Publish core release archive
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  publish-core-archive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build release archive from GitHub source tarball
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          OSS_VERSION="${RELEASE_TAG}"
+          ARCHIVE_URL="https://github.com/${{ github.repository }}/archive/refs/tags/${OSS_VERSION}.tar.gz"
+          mkdir -p dist
+          ARCHIVE_FILENAME="flocks-${OSS_VERSION#v}.tar.gz"
+          curl -fSL "${ARCHIVE_URL}" -o "dist/${ARCHIVE_FILENAME}"
+          shasum -a 256 "dist/${ARCHIVE_FILENAME}" | tee "dist/${ARCHIVE_FILENAME}.sha256"
+
+      - name: Upload archive to GitHub Release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256

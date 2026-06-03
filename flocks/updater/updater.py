@@ -13,6 +13,7 @@ The updater tries each source in turn and falls back to the next on failure.
 """
 
 import asyncio
+import importlib.util
 import json
 import os
 import re
@@ -28,8 +29,8 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
-from typing import Any, AsyncGenerator
-from urllib.parse import quote
+from typing import Any, AsyncGenerator, Awaitable, Callable
+from urllib.parse import quote, urlparse
 
 import httpx
 
@@ -67,6 +68,18 @@ _PRESERVE_NAMES: set[str] = {
 log = Log.create(service="updater")
 
 
+@dataclass(frozen=True)
+class ConsoleManifestRelease:
+    version: str
+    release_notes: str | None
+    release_url: str | None
+    bundle_url: str
+    bundle_sha256: str | None
+    bundle_format: str
+    manifest: dict[str, Any]
+    console_session_token: str | None = None
+
+
 def _record_update_journal(message: str) -> None:
     """Append a human-readable line to ``update.log`` (see ``append_upgrade_text_log``)."""
     from flocks.utils.log import append_upgrade_text_log
@@ -92,6 +105,12 @@ class _FrontendNpmCandidate:
     npm: str
     env: dict[str, str] | None
     source: str
+
+
+@dataclass(frozen=True)
+class _ProComponentSnapshot:
+    installed: bool
+    version: str | None = None
 
 
 # ------------------------------------------------------------------ #
@@ -867,6 +886,27 @@ def _resolve_update_mirror_profile(
     return UpdateMirrorProfile(region=None, sources=sources)
 
 
+async def _resolve_sources_for_edition(configured_sources: list[str]) -> list[str]:
+    """
+    Resolve effective sources by runtime edition state.
+
+    The generic Flocks update endpoint checks OSS releases. Pro bundle upgrades
+    opt into the Console manifest explicitly via ``force_console_manifest``.
+    """
+    return list(configured_sources)
+
+
+def _is_flockspro_license_active() -> bool:
+    try:
+        if importlib.util.find_spec("flockspro") is None:
+            return False
+        from flockspro.license.runtime import is_pro_feature_enabled  # type: ignore[import-not-found]
+
+        return bool(is_pro_feature_enabled())
+    except Exception:
+        return False
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitHub
 # ------------------------------------------------------------------ #
@@ -961,6 +1001,59 @@ def _download_filename_for_url(url: str, filename: str) -> str:
     return str(Path(filename).with_suffix(".zip"))
 
 
+def _archive_format_for_url(url: str, manifest_format: str | None = None) -> str:
+    normalized = (manifest_format or "").strip().lower().replace("tgz", "tar.gz")
+    if normalized in {"zip", "tar.gz"}:
+        return normalized
+
+    path = urlparse(url).path.lower()
+    if path.endswith(".zip"):
+        return "zip"
+    if path.endswith(".tar.gz") or path.endswith(".tgz"):
+        return "tar.gz"
+    return "tar.gz"
+
+
+def _console_manifest_display_version(data: dict[str, Any]) -> str:
+    component_version = str(data.get("flockspro_component_version") or "").strip()
+    if component_version:
+        return component_version
+    display_version = str(data.get("display_version") or data.get("version") or data.get("latest_version") or "").strip()
+    if display_version:
+        return display_version
+    compare_version = str(data.get("compare_version") or "").strip()
+    return f"pro-v{compare_version}" if compare_version else ""
+
+
+def _archive_filename_for_format(latest_tag: str, fmt: str) -> str:
+    return f"flocks-{latest_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = __import__("hashlib").sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_download_sha256(path: Path, expected_sha256: str | None) -> None:
+    expected = (expected_sha256 or "").strip().lower()
+    if not expected:
+        return
+    actual = _sha256_file(path).lower()
+    if actual != expected:
+        raise ValueError(f"bundle sha256 mismatch: expected {expected}, got {actual}")
+
+
+async def _raise_download_status_error(resp: httpx.Response) -> None:
+    body = (await resp.aread()).decode("utf-8", errors="replace").strip()
+    detail = f"HTTP {resp.status_code} {resp.reason_phrase}".strip()
+    if body:
+        detail = f"{detail}: {body[:500]}"
+    raise RuntimeError(detail)
+
+
 # ------------------------------------------------------------------ #
 # Release API — GitLab
 # ------------------------------------------------------------------ #
@@ -1018,6 +1111,113 @@ async def _fetch_gitlab_release(
     )
 
 
+async def _load_console_session_token() -> str | None:
+    def _token_from_payload(payload: Any) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        token = str(payload.get("console_session_token") or "").strip()
+        if not token:
+            return None
+        expires_at_raw = str(payload.get("expires_at") or "").strip()
+        if expires_at_raw:
+            try:
+                expires_at = datetime.fromisoformat(expires_at_raw)
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at <= datetime.now(timezone.utc):
+                    return None
+            except ValueError:
+                return None
+        return token
+
+    shared_session_path = _flocks_root() / "run" / "console-session.json"
+    try:
+        shared_session = json.loads(shared_session_path.read_text(encoding="utf-8"))
+    except Exception:
+        shared_session = None
+
+    token = _token_from_payload(shared_session)
+    if token:
+        return token
+
+    try:
+        from flocks.storage.storage import Storage
+
+        session = await Storage.get("console:session")
+    except Exception:
+        session = None
+
+    token = _token_from_payload(session)
+    if token:
+        return token
+    return None
+
+
+async def _fetch_console_manifest_release_info(console_session_token: str | None = None) -> ConsoleManifestRelease:
+    """
+    Fetch latest Pro bundle manifest from console.
+    """
+    manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
+    if not manifest_base:
+        raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置，无法使用 console-manifest 源")
+
+    channel = (os.getenv("FLOCKS_UPDATE_CHANNEL") or "flockspro").strip() or "flockspro"
+    url = f"{manifest_base}/v1/manifest/latest?channel={channel}"
+    headers: dict[str, str] = {}
+    token = str(console_session_token or "").strip() or await _load_console_session_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.get(url, headers=headers, follow_redirects=True)
+        resp.raise_for_status()
+        data = resp.json()
+    if not isinstance(data, dict):
+        raise ValueError("manifest 响应格式无效")
+
+    if bool(data.get("frozen")):
+        raise ValueError("console manifest channel is frozen")
+    frozen_until_raw = str(data.get("frozen_until") or "").strip()
+    if frozen_until_raw:
+        text = frozen_until_raw[:-1] + "+00:00" if frozen_until_raw.endswith("Z") else frozen_until_raw
+        frozen_until = datetime.fromisoformat(text)
+        if frozen_until.tzinfo is None:
+            frozen_until = frozen_until.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) < frozen_until:
+            raise ValueError("console manifest channel frozen_until not reached")
+
+    latest = _console_manifest_display_version(data)
+    if not latest:
+        raise ValueError("manifest 响应缺少 compare_version/display_version")
+    bundle_url = str(
+        data.get("bundle_url")
+        or data.get("url")
+        or data.get("zipball_url")
+        or data.get("tarball_url")
+        or ""
+    ).strip()
+    if not bundle_url:
+        raise ValueError("manifest 响应缺少 bundle_url")
+    bundle_format = _archive_format_for_url(bundle_url, str(data.get("bundle_format") or data.get("archive_format") or ""))
+    return ConsoleManifestRelease(
+        version=latest,
+        release_notes=data.get("release_notes") or data.get("notes"),
+        release_url=data.get("release_url") or bundle_url,
+        bundle_url=bundle_url,
+        bundle_sha256=str(data.get("bundle_sha256") or "").strip() or None,
+        bundle_format=bundle_format,
+        manifest=data,
+        console_session_token=token,
+    )
+
+
+async def _fetch_console_manifest_release() -> tuple[str, str | None, str | None, str | None, str | None]:
+    info = await _fetch_console_manifest_release_info()
+    if info.bundle_format == "zip":
+        return info.version, info.release_notes, info.release_url, info.bundle_url, None
+    return info.version, info.release_notes, info.release_url, None, info.bundle_url
+
+
 # ------------------------------------------------------------------ #
 # Multi-source dispatcher
 # ------------------------------------------------------------------ #
@@ -1038,6 +1238,8 @@ async def _fetch_release_from_source(
         return await _fetch_gitee_release(gitee_repo or repo, gitee_token)
     if source == "gitlab":
         return await _fetch_gitlab_release(repo, token, base_url)
+    if source == "console-manifest":
+        return await _fetch_console_manifest_release()
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -1060,6 +1262,13 @@ def _archive_url_for_source(
         base = (base_url or "https://gitlab.com").rstrip("/")
         proj = repo.split("/")[-1]
         return f"{base}/{repo}/-/archive/{raw_tag}/{proj}-{raw_tag}.{'zip' if fmt == 'zip' else 'tar.gz'}"
+    if source == "console-manifest":
+        manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
+        if not manifest_base:
+            raise ValueError("FLOCKS_CONSOLE_BASE_URL 未配置")
+        raw_tag = tag if tag.startswith("v") else f"v{tag}"
+        ext = "zip" if fmt == "zip" else "tar.gz"
+        return f"{manifest_base}/v1/manifest/archive/{raw_tag}.{ext}"
     raise ValueError(f"Unknown source: {source}")
 
 
@@ -1076,7 +1285,9 @@ def _token_for_source(source: str, token: str | None, gitee_token: str | None) -
 
 def _parse_version(v: str) -> tuple[int, ...]:
     parts: list[int] = []
-    for seg in v.lstrip("v").split("."):
+    normalized = v.strip().lower().removeprefix("refs/tags/").removeprefix("pro-").removeprefix("v")
+    normalized = normalized.replace("-", ".").replace("_", ".")
+    for seg in normalized.split("."):
         m = re.match(r"(\d+)", seg)
         if not m:
             m = re.search(r"(\d+)", seg)
@@ -1094,7 +1305,7 @@ def _pick_best_tag(names: list[str]) -> str:
     if not candidates:
         return ""
     candidates.sort(key=lambda x: x[0], reverse=True)
-    return candidates[0][1].lstrip("v")
+    return candidates[0][1].removeprefix("v")
 
 
 async def _latest_tag_from_git_remote_async(
@@ -1150,11 +1361,79 @@ async def _download_archive(
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
         async with client.stream("GET", url, headers=headers) as resp:
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                await _raise_download_status_error(resp)
             with open(dest, "wb") as f:
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     f.write(chunk)
 
+    return dest
+
+
+async def _download_console_bundle(
+    url: str,
+    token: str | None,
+    dest_dir: Path,
+    filename: str,
+    progress_callback: Callable[[UpdateProgress], Awaitable[None]] | None = None,
+) -> Path:
+    """Download a Pro bundle, sending the console session token only to Console origin."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / _download_filename_for_url(url, filename)
+    headers = (
+        {
+            "Authorization": f"Bearer {token}",
+            "x-console-session-token": token,
+        }
+        if token and _is_console_origin_url(url)
+        else {}
+    )
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30, read=300), follow_redirects=True) as client:
+        async with client.stream("GET", url, headers=headers) as resp:
+            if resp.status_code != 200:
+                await _raise_download_status_error(resp)
+            total_bytes = None
+            content_length = getattr(resp, "headers", {}).get("content-length")
+            if content_length:
+                try:
+                    parsed_content_length = int(content_length)
+                    total_bytes = parsed_content_length if parsed_content_length > 0 else None
+                except ValueError:
+                    total_bytes = None
+            downloaded_bytes = 0
+            last_progress_emit = 0.0
+            last_percent: int | None = None
+            with dest.open("wb") as handle:
+                async for chunk in resp.aiter_bytes(chunk_size=65536):
+                    handle.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if not progress_callback:
+                        continue
+                    percent = (
+                        min(100, int(downloaded_bytes * 100 / total_bytes))
+                        if total_bytes
+                        else None
+                    )
+                    now = time.monotonic()
+                    should_emit = (
+                        downloaded_bytes == total_bytes
+                        or now - last_progress_emit >= 0.25
+                    )
+                    if percent is not None and percent == last_percent and downloaded_bytes != total_bytes:
+                        should_emit = False
+                    if should_emit:
+                        last_progress_emit = now
+                        last_percent = percent
+                        await progress_callback(
+                            UpdateProgress(
+                                stage="fetching",
+                                message="Downloading Flocks Pro bundle...",
+                                bundle_filename=dest.name,
+                                downloaded_bytes=downloaded_bytes,
+                                total_bytes=total_bytes,
+                                percent=percent,
+                            )
+                        )
     return dest
 
 
@@ -1277,6 +1556,121 @@ def _detect_archive_root(extracted_dir: Path) -> Path:
     return extracted_dir
 
 
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _resolve_bundle_member_path(bundle_root: Path, relative_path: str) -> Path | None:
+    raw_path = Path(relative_path)
+    if not relative_path or raw_path.is_absolute() or ".." in raw_path.parts:
+        raise ValueError("Pro bundle manifest contains an unsafe wheel path")
+    return bundle_root / raw_path
+
+
+def _resolve_pro_bundle_content(content_root: Path) -> tuple[Path, Path | None, dict[str, Any]]:
+    """
+    Return the OSS source root and optional flockspro wheel when an archive is a
+    Pro bundle. Plain OSS archives are returned unchanged.
+    """
+    manifest_path = content_root / "manifest.json"
+    flocks_dir = content_root / "flocks"
+    if not manifest_path.is_file() or not flocks_dir.is_dir():
+        return content_root, None, {}
+
+    manifest = _load_json_file(manifest_path)
+    wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
+    wheel_path = _resolve_bundle_member_path(content_root, wheel_value) if wheel_value else None
+    if wheel_path is None or not wheel_path.is_file():
+        wheels = sorted((content_root / "wheels").glob("*.whl"))
+        wheel_path = wheels[0] if wheels else None
+    return flocks_dir, wheel_path, manifest
+
+
+def _resolve_pro_bundle_wheel(content_root: Path) -> tuple[Path, dict[str, Any]]:
+    manifest_path = content_root / "manifest.json"
+    manifest = _load_json_file(manifest_path) if manifest_path.is_file() else {}
+    wheel_value = str(manifest.get("flockspro_wheel") or "").strip()
+    wheel_path = _resolve_bundle_member_path(content_root, wheel_value) if wheel_value else None
+    if wheel_path is None or not wheel_path.is_file():
+        wheels = sorted((content_root / "wheels").glob("*.whl"))
+        wheel_path = wheels[0] if wheels else None
+    if wheel_path is None or not wheel_path.is_file():
+        raise ValueError("Pro bundle 中未找到 flockspro wheel")
+    return wheel_path, manifest
+
+
+def _is_pro_component_installed() -> bool:
+    return importlib.util.find_spec("flockspro") is not None
+
+
+def _venv_python_path(install_root: Path) -> Path:
+    if sys.platform == "win32":
+        return install_root / ".venv" / "Scripts" / "python.exe"
+    return install_root / ".venv" / "bin" / "python"
+
+
+async def _snapshot_pro_component(install_root: Path) -> _ProComponentSnapshot:
+    python_path = _venv_python_path(install_root)
+    if not python_path.exists():
+        return _ProComponentSnapshot(installed=False)
+    code, out, _ = await _run_async(
+        [
+            str(python_path),
+            "-c",
+            "import importlib.metadata as m\n"
+            "import sys\n"
+            "try:\n"
+            " print(m.version('flockspro'))\n"
+            "except m.PackageNotFoundError:\n"
+            " sys.exit(2)\n",
+        ],
+        cwd=install_root,
+        timeout=30,
+    )
+    if code == 0 and out.strip():
+        return _ProComponentSnapshot(installed=True, version=out.strip())
+    return _ProComponentSnapshot(installed=False)
+
+
+async def _restore_pro_component_snapshot(
+    snapshot: _ProComponentSnapshot,
+    *,
+    uv_path: str,
+    install_root: Path,
+    env: dict[str, str] | None,
+) -> str | None:
+    python_path = _venv_python_path(install_root)
+    if not python_path.exists():
+        return f"Python environment may need manual repair: missing {python_path}"
+    if snapshot.installed and snapshot.version:
+        cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", f"flockspro=={snapshot.version}"]
+    else:
+        cmd = [uv_path, "pip", "uninstall", "--python", str(python_path), "-y", "flockspro"]
+    code, _, err = await _run_async(cmd, cwd=install_root, timeout=180, env=env)
+    if code != 0:
+        return f"Python environment may need manual repair: {err}"
+    return None
+
+
+def _write_pro_bundle_install_marker(manifest: dict[str, Any], *, bundle_sha256: str | None = None) -> None:
+    marker = _flocks_root() / "run" / "pro-bundle-installed.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "display_version": manifest.get("display_version"),
+        "installed_version": manifest.get("display_version"),
+        "oss_version": manifest.get("oss_version"),
+        "flockspro_component_version": manifest.get("flockspro_component_version"),
+        "build_id": manifest.get("build_id"),
+        "bundle_sha256": bundle_sha256 or manifest.get("bundle_sha256"),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    marker.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+
+
 class _NullConsole:
     def print(self, *args, **kwargs) -> None:
         return None
@@ -1294,6 +1688,35 @@ def _current_service_config():
         no_browser=True,
         skip_frontend_build=True,
     )
+
+
+def _build_service_restart_argv(install_root: Path | None = None) -> list[str]:
+    repo_root = install_root or _get_repo_root()
+    if sys.platform == "win32":
+        venv_python = repo_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_python = repo_root / ".venv" / "bin" / "python"
+
+    if not venv_python.exists():
+        raise FileNotFoundError(f"Restart runtime is missing: {venv_python}")
+
+    config = _current_service_config()
+    return [
+        str(venv_python),
+        "-m",
+        "flocks.cli.main",
+        "restart",
+        "--no-browser",
+        "--skip-webui-build",
+        "--server-host",
+        str(config.backend_host),
+        "--server-port",
+        str(config.backend_port),
+        "--webui-host",
+        str(config.frontend_host),
+        "--webui-port",
+        str(config.frontend_port),
+    ]
 
 
 def _spawn_detached_process(
@@ -1789,6 +2212,10 @@ def _extract_archive(archive_path: Path, dest_dir: Path) -> Path:
             tar.extractall(dest_dir, filter="data")
     elif archive_path.suffix == ".zip":
         with zipfile.ZipFile(archive_path, "r") as zf:
+            for member in zf.infolist():
+                member_path = Path(member.filename)
+                if member_path.is_absolute() or ".." in member_path.parts:
+                    raise ValueError(f"Unsafe archive path: {member.filename}")
             zf.extractall(dest_dir)
     else:
         raise ValueError(f"Unsupported archive format: {archive_path.name}")
@@ -1910,6 +2337,25 @@ def _read_pyproject_version() -> str:
     return ""
 
 
+def _read_pro_bundle_installed_version() -> str:
+    marker = _flocks_root() / "run" / "pro-bundle-installed.json"
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    component_version = str(payload.get("flockspro_component_version") or "").strip()
+    if component_version:
+        return component_version
+    installed_version = str(payload.get("installed_version") or "").strip()
+    if installed_version.startswith(("pro-v", "pro-V")):
+        return installed_version
+    if installed_version:
+        return f"pro-{installed_version}" if installed_version.startswith(("v", "V")) else f"pro-v{installed_version}"
+    return ""
+
+
 def get_current_version() -> str:
     """
     Return the running version.
@@ -1981,18 +2427,28 @@ async def get_latest_release(
     raise RuntimeError("No sources configured and git fallback failed")
 
 
-async def check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+async def check_update(
+    *,
+    locale: str | None = None,
+    region: str | None = None,
+    force_console_manifest: bool = False,
+) -> VersionInfo:
     """Return version comparison info without performing any upgrade."""
     from flocks.updater.deploy import detect_deploy_mode
 
-    current = get_current_version()
     mode = detect_deploy_mode()
     ucfg = await _get_updater_config()
+    effective_sources = await _resolve_sources_for_edition(ucfg.sources)
+    if force_console_manifest:
+        effective_sources = ["console-manifest"]
     profile = _resolve_update_mirror_profile(
-        ucfg.sources,
+        effective_sources,
         region=region,
         locale=locale,
     )
+    current = _read_pro_bundle_installed_version() if profile.sources == ["console-manifest"] else get_current_version()
+    if not current:
+        current = get_current_version()
 
     if not ucfg.enabled:
         return VersionInfo(
@@ -2001,12 +2457,24 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
             update_allowed=(mode != "docker"),
         )
 
+    bundle_sha256: str | None = None
+    bundle_format: str | None = None
     try:
-        tag, notes, url, zipball, tarball = await get_latest_release(
-            repo=ucfg.repo,
-            token=ucfg.token,
-            sources_override=profile.sources,
-        )
+        if profile.sources == ["console-manifest"]:
+            manifest_info = await _fetch_console_manifest_release_info()
+            tag = manifest_info.version
+            notes = manifest_info.release_notes
+            url = manifest_info.release_url
+            bundle_sha256 = manifest_info.bundle_sha256
+            bundle_format = manifest_info.bundle_format
+            zipball = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
+            tarball = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
+        else:
+            tag, notes, url, zipball, tarball = await get_latest_release(
+                repo=ucfg.repo,
+                token=ucfg.token,
+                sources_override=profile.sources,
+            )
     except Exception as exc:
         log.warning("updater.check_failed", {"error": str(exc)})
         return VersionInfo(
@@ -2017,14 +2485,27 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
         )
 
     has_update = _parse_version(tag) > _parse_version(current)
+    log.info(
+        "updater.check.result",
+        {
+            "current": current,
+            "latest": tag,
+            "has_update": has_update,
+            "sources": profile.sources,
+            "region": profile.region,
+        },
+    )
     return VersionInfo(
         current_version=current,
         latest_version=tag,
+        edition="flockspro" if profile.sources == ["console-manifest"] else "flocks",
         has_update=has_update,
         release_notes=notes,
         release_url=url,
         zipball_url=zipball,
         tarball_url=tarball,
+        bundle_sha256=bundle_sha256,
+        bundle_format=bundle_format if bundle_format in {"zip", "tar.gz"} else None,
         deploy_mode=mode,
         update_allowed=(mode != "docker"),
     )
@@ -2035,14 +2516,113 @@ async def check_update(*, locale: str | None = None, region: str | None = None) 
 # ------------------------------------------------------------------ #
 
 
+def _absolute_console_url(url: str) -> str:
+    manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").rstrip("/")
+    if manifest_base and not manifest_base.startswith(("http://", "https://")):
+        manifest_base = f"https://{manifest_base}"
+    if url.startswith(("http://", "https://")):
+        parsed_url = urlparse(url)
+        parsed_base = urlparse(manifest_base) if manifest_base else None
+        if parsed_base and (parsed_url.hostname or "").lower() == (parsed_base.hostname or "").lower():
+            url_port = parsed_url.port or _default_port(parsed_url.scheme)
+            base_port = parsed_base.port or _default_port(parsed_base.scheme)
+            if url_port in {None, 80, 443} and base_port in {None, 80, 443}:
+                return parsed_url._replace(scheme=parsed_base.scheme, netloc=parsed_base.netloc).geturl()
+        return url
+    if url.startswith("file://"):
+        return url
+    if not manifest_base:
+        return url
+    if url.startswith("/"):
+        return f"{manifest_base}{url}"
+    return f"{manifest_base}/{url}"
+
+
+def _is_console_origin_url(url: str) -> bool:
+    manifest_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").strip().rstrip("/")
+    if not manifest_base:
+        return False
+    if not manifest_base.startswith(("http://", "https://")):
+        manifest_base = f"https://{manifest_base}"
+    parsed_url = urlparse(url)
+    parsed_base = urlparse(manifest_base)
+    return (
+        parsed_url.scheme.lower() == parsed_base.scheme.lower()
+        and (parsed_url.hostname or "").lower() == (parsed_base.hostname or "").lower()
+        and (parsed_url.port or _default_port(parsed_url.scheme)) == (parsed_base.port or _default_port(parsed_base.scheme))
+    )
+
+
+def _default_port(scheme: str) -> int | None:
+    if scheme == "http":
+        return 80
+    if scheme == "https":
+        return 443
+    return None
+
+
+def _ensure_pro_heartbeat_env_default() -> None:
+    """Default Pro heartbeat endpoint to console when env is unset."""
+    existing = os.getenv("FLOCKSPRO_HEARTBEAT_URL", "").strip()
+    if existing:
+        return
+    console_base = os.getenv("FLOCKS_CONSOLE_BASE_URL", "").strip().rstrip("/")
+    if not console_base:
+        return
+    if not console_base.startswith(("http://", "https://")):
+        console_base = f"https://{console_base}"
+    heartbeat_url = f"{console_base}/v1/heartbeats"
+    os.environ["FLOCKSPRO_HEARTBEAT_URL"] = heartbeat_url
+    log.info("updater.pro_bundle.heartbeat_url.defaulted", {"heartbeat_url": heartbeat_url})
+
+
+async def perform_pro_bundle_install(
+    *,
+    restart: bool = True,
+    console_session_token: str | None = None,
+) -> AsyncGenerator[UpdateProgress, None]:
+    """Apply the Console Pro bundle as a combined OSS core + Pro component upgrade."""
+    try:
+        if console_session_token:
+            manifest_info = await _fetch_console_manifest_release_info(console_session_token)
+        else:
+            manifest_info = await _fetch_console_manifest_release_info()
+    except Exception as exc:
+        log.error("updater.pro_bundle.manifest_failed", {"error": str(exc)})
+        yield UpdateProgress(
+            stage="error",
+            message="Failed to fetch the Flocks Pro bundle manifest.",
+            success=False,
+        )
+        return
+
+    zipball_url = manifest_info.bundle_url if manifest_info.bundle_format == "zip" else None
+    tarball_url = manifest_info.bundle_url if manifest_info.bundle_format != "zip" else None
+    async for progress in perform_update(
+        manifest_info.version,
+        zipball_url=zipball_url,
+        tarball_url=tarball_url,
+        bundle_sha256=manifest_info.bundle_sha256,
+        bundle_format=manifest_info.bundle_format,
+        console_session_token=manifest_info.console_session_token,
+        restart=restart,
+        force_console_manifest=True,
+    ):
+        yield progress
+
+
 async def perform_update(
     latest_tag: str,
     *,
     zipball_url: str | None = None,
     tarball_url: str | None = None,
+    bundle_sha256: str | None = None,
+    bundle_format: str | None = None,
+    console_session_token: str | None = None,
     restart: bool = True,
     locale: str | None = None,
     region: str | None = None,
+    force_console_manifest: bool = False,
 ) -> AsyncGenerator[UpdateProgress, None]:
     """
     Async generator that executes the upgrade steps and yields progress events.
@@ -2054,46 +2634,117 @@ async def perform_update(
     If one source fails the download, the next source is tried automatically.
     """
     ucfg = await _get_updater_config()
+    effective_sources = await _resolve_sources_for_edition(ucfg.sources)
+    if force_console_manifest:
+        effective_sources = ["console-manifest"]
     profile = _resolve_update_mirror_profile(
-        ucfg.sources,
+        effective_sources,
         region=region,
         locale=locale,
     )
     install_root = _get_repo_root()
     current_version = get_current_version()
     handover_active = False
+    pro_bundle_marker_manifest: dict[str, Any] | None = None
+    pro_component_snapshot: _ProComponentSnapshot | None = None
 
+    console_manifest_info: ConsoleManifestRelease | None = None
     fmt = _choose_archive_format(ucfg.archive_format)
+    if profile.sources == ["console-manifest"]:
+        if not (zipball_url or tarball_url) or console_session_token is None:
+            try:
+                console_manifest_info = await _fetch_console_manifest_release_info()
+            except Exception as exc:
+                log.error("updater.console_manifest.fetch_failed", {"error": str(exc)})
+                yield UpdateProgress(
+                    stage="error",
+                    message="Failed to check the Pro bundle manifest. Please check your network connection.",
+                    success=False,
+                )
+                return
+            if _parse_version(console_manifest_info.version) != _parse_version(latest_tag):
+                yield UpdateProgress(
+                    stage="error",
+                    message="Requested Pro bundle version does not match the latest approved manifest.",
+                    success=False,
+                )
+                return
+            if console_manifest_info.bundle_format == "zip":
+                zipball_url = console_manifest_info.bundle_url
+            else:
+                tarball_url = console_manifest_info.bundle_url
+            bundle_sha256 = console_manifest_info.bundle_sha256
+            bundle_format = console_manifest_info.bundle_format
+            console_session_token = console_manifest_info.console_session_token
+        primary_bundle_url = zipball_url or tarball_url or ""
+        fmt = _archive_format_for_url(primary_bundle_url, bundle_format)
 
     # ------------------------------------------------------------------ #
     # Step 1 – download source archive
     # ------------------------------------------------------------------ #
     sources_desc = " → ".join(profile.sources)
-    yield UpdateProgress(stage="fetching", message=f"Downloading source archive (sources: {sources_desc})...")
+    archive_filename = _archive_filename_for_format(latest_tag, fmt)
+    if profile.sources == ["console-manifest"]:
+        archive_filename = _download_filename_for_url(
+            _absolute_console_url(zipball_url or tarball_url or ""),
+            f"flockspro-bundle-{Path(latest_tag).name}.{'zip' if fmt == 'zip' else 'tar.gz'}",
+        )
+    yield UpdateProgress(
+        stage="fetching",
+        message=f"Downloading {'Flocks Pro bundle' if profile.sources == ['console-manifest'] else 'source archive'} (sources: {sources_desc})...",
+        bundle_filename=archive_filename if profile.sources == ["console-manifest"] else None,
+    )
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="flocks-update-"))
     if sys.platform == "win32":
         tmp_dir = _resolve_windows_long_path(tmp_dir)
-    archive_filename = f"flocks-{latest_tag}.{fmt}"
     try:
-        archive_path = await _download_with_fallback(
-            sources=profile.sources,
-            repo=ucfg.repo,
-            tag=latest_tag,
-            fmt=fmt,
-            token=ucfg.token,
-            gitee_token=ucfg.gitee_token,
-            primary_zipball=zipball_url,
-            primary_tarball=tarball_url,
-            dest_dir=tmp_dir,
-            filename=archive_filename,
-            base_url=ucfg.base_url,
-            gitee_repo=ucfg.gitee_repo,
-        )
+        if profile.sources == ["console-manifest"]:
+            primary_bundle_url = _absolute_console_url(zipball_url or tarball_url or "")
+            if not primary_bundle_url:
+                raise ValueError("Console manifest did not provide a bundle URL")
+            progress_queue: asyncio.Queue[UpdateProgress] = asyncio.Queue()
+
+            async def _queue_download_progress(progress: UpdateProgress) -> None:
+                await progress_queue.put(progress)
+
+            download_task = asyncio.create_task(
+                _download_console_bundle(
+                    primary_bundle_url,
+                    console_session_token or await _load_console_session_token(),
+                    tmp_dir,
+                    archive_filename,
+                    progress_callback=_queue_download_progress,
+                )
+            )
+            while not download_task.done():
+                try:
+                    yield await asyncio.wait_for(progress_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+            while not progress_queue.empty():
+                yield progress_queue.get_nowait()
+            archive_path = await download_task
+            await asyncio.to_thread(_verify_download_sha256, archive_path, bundle_sha256)
+        else:
+            archive_path = await _download_with_fallback(
+                sources=profile.sources,
+                repo=ucfg.repo,
+                tag=latest_tag,
+                fmt=fmt,
+                token=ucfg.token,
+                gitee_token=ucfg.gitee_token,
+                primary_zipball=zipball_url,
+                primary_tarball=tarball_url,
+                dest_dir=tmp_dir,
+                filename=archive_filename,
+                base_url=ucfg.base_url,
+                gitee_repo=ucfg.gitee_repo,
+            )
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         log.error("updater.download.all_failed", {"error": str(exc)})
-        _dl_msg = "Failed to download the update. Please check your network connection."
+        _dl_msg = f"Failed to download the update: {exc}"
         _record_update_journal(f"ERROR {_dl_msg} ({exc})")
         yield UpdateProgress(
             stage="error",
@@ -2132,6 +2783,9 @@ async def perform_update(
             archive_path,
             extract_dir,
         )
+        content_root, pro_wheel_path, pro_bundle_manifest = _resolve_pro_bundle_content(content_root)
+        if profile.sources == ["console-manifest"] and pro_wheel_path is None:
+            raise ValueError("Pro bundle 中未找到 flockspro wheel")
     except Exception as exc:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         msg = f"Failed to extract files: {exc}"
@@ -2332,16 +2986,57 @@ async def perform_update(
         yield UpdateProgress(stage="error", message=f"Dependency sync failed: {err}", success=False)
         return
 
+    if pro_wheel_path is not None:
+        yield UpdateProgress(
+            stage="syncing",
+            message="Installing Flocks Pro component...",
+            pro_component_filename=pro_wheel_path.name,
+        )
+        python_path = _venv_python_path(install_root)
+        install_cmd = [uv_path, "pip", "install", "--python", str(python_path), "--no-deps", str(pro_wheel_path)]
+        pro_component_snapshot = await _snapshot_pro_component(install_root)
+        code, _, err = await _run_async(
+            install_cmd,
+            cwd=install_root,
+            timeout=180,
+            env=sync_env,
+        )
+        if code != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await _restore_after_apply_failure()
+            restore_error = await _restore_pro_component_snapshot(
+                pro_component_snapshot,
+                uv_path=uv_path,
+                install_root=install_root,
+                env=sync_env,
+            )
+            message = f"Flocks Pro component install failed: {err}"
+            if restore_error:
+                message = f"{message}\n{restore_error}"
+            yield UpdateProgress(stage="error", message=message, success=False)
+            return
+        if pro_bundle_manifest:
+            pro_bundle_marker_manifest = pro_bundle_manifest
+
     if sys.platform == "win32":
         validation_error = await _validate_windows_restart_runtime(install_root)
         if validation_error:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             await _restore_after_apply_failure()
+            if pro_component_snapshot is not None:
+                await _restore_pro_component_snapshot(
+                    pro_component_snapshot,
+                    uv_path=uv_path,
+                    install_root=install_root,
+                    env=sync_env,
+                )
             yield UpdateProgress(stage="error", message=validation_error, success=False)
             return
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
     _write_version_marker(latest_tag.lstrip("v"))
+    if pro_bundle_marker_manifest:
+        _write_pro_bundle_install_marker(pro_bundle_marker_manifest, bundle_sha256=bundle_sha256)
 
     try:
         _refresh_global_cli_entry(install_root)
@@ -2359,6 +3054,7 @@ async def perform_update(
     # is not left behind half-way through cutover.
     # ------------------------------------------------------------------ #
     if not restart:
+        log.info("updater.apply.done", {"version": latest_tag, "restart": False, "region": profile.region})
         yield UpdateProgress(
             stage="done",
             message=f"Upgraded to v{latest_tag}",

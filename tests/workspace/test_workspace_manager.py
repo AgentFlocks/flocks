@@ -6,6 +6,7 @@ and security (path-traversal prevention).
 """
 
 from pathlib import Path
+import datetime as dt
 
 import pytest
 
@@ -85,6 +86,19 @@ class TestDirectoryPaths:
         """Calling ensure_dirs twice must not raise."""
         manager.ensure_dirs()
         manager.ensure_dirs()
+
+    def test_default_outputs_dir_uses_legacy_oss_layout(self, tmp_workspace: Path, manager):
+        outputs_dir = manager.get_default_outputs_dir(today=dt.date(2026, 5, 9))
+        assert outputs_dir == tmp_workspace / "outputs" / "2026-05-09"
+        assert outputs_dir.is_dir()
+
+    def test_default_outputs_dir_supports_username_layout(self, tmp_workspace: Path, manager):
+        outputs_dir = manager.get_default_outputs_dir(
+            username=" chen/jie ",
+            today=dt.date(2026, 5, 9),
+        )
+        assert outputs_dir == tmp_workspace / "users" / "chen_jie" / "outputs" / "2026-05-09"
+        assert outputs_dir.is_dir()
 
 
 # ─── Path resolution ──────────────────────────────────────────────────────────

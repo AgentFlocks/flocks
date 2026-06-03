@@ -1,0 +1,190 @@
+{
+  "title": "Flocks Pro",
+  "description": "在本地完成云账号登录、升级申请与升级执行。",
+  "actions": {
+    "refresh": "刷新",
+    "cancel": "取消",
+    "confirm": "确定",
+    "submit": "提交申请",
+    "submitting": "提交中..."
+  },
+  "errors": {
+    "fetchConsoleLoginStatus": "获取登录状态失败",
+    "startConsoleLogin": "发起云账号登录失败",
+    "finishConsoleLogin": "云登录回调处理失败",
+    "logoutConsoleLogin": "退出登录失败",
+    "fetchRequests": "获取升级申请失败",
+    "createRequest": "创建升级申请失败",
+    "refreshRequest": "刷新申请状态失败",
+    "cancelRequest": "撤回申请失败",
+    "startUpgrade": "开始升级失败"
+  },
+  "consoleLogin": {
+    "title": "云账号登录",
+    "description": "在本地发起登录，跳转云端登录，完成后回跳本地确认。",
+    "accountLabel": "云账户：",
+    "loading": "加载中...",
+    "bound": "已登录云账号",
+    "unbound": "未登录",
+    "unknownAccount": "未知账号",
+    "missingAccountHint": "当前会话未携带云账号名，请退出登录后重新登录。",
+    "loginAction": "云账号登录",
+    "logoutAction": "退出登录"
+  },
+  "upgrade": {
+    "title": "升级为Flocks Pro",
+    "description": "查看当前授权信息、提交申请并跟踪审批进度。",
+    "installedTitle": "Flocks Pro {{version}}",
+    "installedDescription": "Flocks Pro 已安装并完成授权激活。",
+    "installedVersion": "Flocks Pro 版本",
+    "licenseStatus": "License 状态",
+    "licenseId": "License ID",
+    "expiresAt": "License 到期时间",
+    "remainingDays": "License 剩余时间",
+    "remainingDaysValue": "{{count}} 天",
+    "daysUnit": "天",
+    "quota": "授权额度",
+    "adminQuotaValue": "{{count}} 管理员",
+    "memberQuotaValue": "{{count}} 成员",
+    "lastSyncedAt": "授权信息同步时间",
+    "licenseDetails": "License 详情",
+    "showLicenseDetails": "查看 License 详情",
+    "hideLicenseDetails": "收起 License 详情",
+    "licenseFieldLabels": {
+      "license_id": "License ID",
+      "install_id": "安装 ID",
+      "fingerprint": "机器指纹"
+    },
+    "refreshing": "刷新中...",
+    "syncLicenseAction": "同步授权信息",
+    "syncingLicense": "同步中...",
+    "applyAction": "申请升级",
+    "applyNewLicenseAction": "申请新授权",
+    "revokedOrExpiredHint": "当前 License 已失效，可重新提交 Flocks Pro 申请。",
+    "loginFirst": "请先完成云账号登录后再申请升级。",
+    "pendingRequestExists": "当前已有升级申请在处理中，请刷新状态或撤回后再发起新申请。",
+    "currentRequest": "当前申请",
+    "status": "状态",
+    "statusLabels": {
+      "pending": "待审批",
+      "reviewing": "审批中",
+      "approved": "已通过",
+      "activated": "已激活",
+      "rejected": "已拒绝",
+      "cancelled": "已撤回",
+      "expired_unactivated": "已超时"
+    },
+    "licenseStatusLabels": {
+      "poc": "POC授权（90天）",
+      "commercial": "商用授权（365天）",
+      "revoked": "已吊销",
+      "expired": "已到期",
+      "superseded": "已替换",
+      "active": "有效"
+    },
+    "licenseTypeLabels": {
+      "poc": "POC授权（90天）",
+      "commercial": "商用授权（365天）"
+    },
+    "updatedAt": "审批状态更新时间",
+    "manualRefresh": "刷新审批状态",
+    "cancel": "撤回申请",
+    "rejectedTitle": "申请已被拒绝",
+    "dismissRejected": "关闭拒绝反馈",
+    "startUpgrade": "开始升级",
+    "inDevelopment": "Flocks Pro升级正在开发中",
+    "installingHint": "正在下载并安装 Flocks Pro 组件，期间不会升级 OSS core。",
+    "waitingRestart": "升级已安装，正在等待服务重启完成...",
+    "restartTimeout": "服务重启超时，请稍后手动刷新页面确认状态。",
+    "afterUpgradeHint": "开始升级后将下载 Pro bundle，仅安装 flockspro wheel，并在完成后自动重启。",
+    "bundleFilename": "Bundle 文件",
+    "proComponentFilename": "Pro 组件文件",
+    "downloadProgressLabel": "{{percent}}% · {{downloaded}} / {{total}}",
+    "downloadProgressUnknown": "已下载 {{downloaded}}",
+    "stageLabels": {
+      "fetching": "下载 Pro bundle",
+      "backing_up": "备份",
+      "applying": "应用",
+      "syncing": "安装 Flocks Pro",
+      "building": "构建",
+      "restarting": "重启服务",
+      "done": "完成",
+      "error": "失败"
+    },
+    "noRequest": "暂无升级申请记录。",
+    "history": "申请历史",
+    "licenseHistory": "历史 License",
+    "historyColumns": {
+      "licenseId": "lic-id",
+      "licenseType": "授权类型",
+      "status": "状态",
+      "appliedAt": "申请时间",
+      "expiresAt": "到期时间",
+      "durationDays": "有效期天数",
+      "account": "云账号"
+    },
+    "applyDialogTitle": "Flocks Pro 升级申请",
+    "productLabel": "申请的版本",
+    "licenseTypeLabel": "申请的授权类型",
+    "licenseTypePoc": "POC授权（90天）",
+    "licenseTypeCommercial": "商用授权（365天）",
+    "companyPlaceholderRequired": "公司（必填）",
+    "applicantNamePlaceholderRequired": "申请人姓名（必填）",
+    "salesRepNamePlaceholder": "销售代表姓名（选填）",
+    "salesRepHintPrefix": "如果没有销售代表，请前往",
+    "salesRepHintLinkText": "ThreatBook 产品试用页面",
+    "salesRepHintSuffix": "进行试用申请。",
+    "applicantEmailPlaceholder": "申请人邮箱（必填）",
+    "applicantPhonePlaceholder": "申请人电话（必填）",
+    "notesPlaceholder": "申请说明（选填，可说明主要使用场景、定时任务及每日 Token 消耗量等）",
+    "formRequiredError": "请填写公司、申请人姓名、申请人邮箱和申请人电话",
+    "invalidEmailError": "请输入有效的申请人邮箱",
+    "invalidPhoneError": "请输入有效的申请人电话（支持国际号码）"
+  },
+  "callback": {
+    "processing": "正在完成云账号登录，请稍候...",
+    "missingConsoleLoginId": "缺少 console_login_id，无法完成登录。",
+    "exchangeFailed": "登录回调处理失败",
+    "failedTitle": "登录失败"
+  },
+  "audit": {
+    "title": "审计日志",
+    "description": "查看 Pro 审计事件，支持按事件类型、用户与时间范围筛选。",
+    "loading": "加载中...",
+    "empty": "暂无审计记录",
+    "total": "共 {{total}} 条",
+    "page": "第 {{page}} / {{pageCount}} 页",
+    "actions": {
+      "search": "查询",
+      "exportExcel": "下载 Excel",
+      "exporting": "下载中...",
+      "reset": "重置",
+      "prev": "上一页",
+      "next": "下一页"
+    },
+    "filters": {
+      "eventType": "事件类型（event_type）",
+      "allEventTypes": "全部事件类型",
+      "actor": "操作者用户名（username）",
+      "allResults": "全部结果"
+    },
+    "result": {
+      "success": "成功",
+      "failed": "失败"
+    },
+    "table": {
+      "time": "时间",
+      "eventType": "事件",
+      "actor": "操作者",
+      "resource": "资源",
+      "result": "结果",
+      "payload": "详情"
+    },
+    "errors": {
+      "fetch": "获取审计日志失败",
+      "export": "导出审计日志失败",
+      "forbidden": "仅管理员可查看审计日志",
+      "unavailable": "当前版本不支持审计日志"
+    }
+  }
+}

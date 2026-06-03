@@ -314,6 +314,10 @@ class ToolOutputConfig(BaseModel):
 
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
+
+
+class FlocksProConfig(BaseModel):
+    """Flocks Pro configuration"""
     url: Optional[str] = None
 
 
@@ -577,7 +581,7 @@ class ConfigInfo(BaseModel):
         ),
     )
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
-    enterprise: Optional[EnterpriseConfig] = None
+    flockspro: Optional[FlocksProConfig] = None
     compaction: Optional[CompactionConfig] = None
     tool_output: Optional[ToolOutputConfig] = Field(
         None,
@@ -625,6 +629,11 @@ class ConfigInfo(BaseModel):
     updater: Optional[UpdaterConfig] = Field(
         None,
         description="Self-update configuration (GitHub repo, git remote, etc.)",
+    )
+    portal_base_url: Optional[str] = Field(
+        None,
+        alias="portalBaseUrl",
+        description="Console portal base URL used by OSS console account login redirect.",
     )
 
     @model_validator(mode='after')
