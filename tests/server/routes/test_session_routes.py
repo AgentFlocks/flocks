@@ -20,6 +20,15 @@ import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import AuthUser
+from flocks.session.core.status import SessionStatus, SessionStatusBusy
+from flocks.session.message import (
+    Message,
+    MessageRole,
+    ToolPart,
+    ToolStateError,
+    ToolStateRunning,
+)
+from flocks.session.orphan_tools import INTERRUPTED_TOOL_ERROR
 from flocks.session.session import Session
 
 # ===========================================================================
@@ -177,6 +186,70 @@ class TestSessionMessages:
             any(p.get("text") == "Hello!" for p in m.get("parts", []))
             for m in messages
         )
+
+    @pytest.mark.asyncio
+    async def test_list_messages_keeps_running_tool_when_session_busy(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_busy_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_busy_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        SessionStatus.set(session_id, SessionStatusBusy())
+        try:
+            resp = await client.get(f"/api/session/{session_id}/message")
+        finally:
+            SessionStatus.clear(session_id)
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        running_part = next(p for p in parts if p.id == "part_busy_running")
+        assert running_part.state.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_list_messages_recovers_orphan_running_tool_when_session_idle(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_idle_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_idle_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                metadata={"sessionId": "ses_child"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        repaired_part = next(p for p in parts if p.id == "part_idle_running")
+        assert isinstance(repaired_part.state, ToolStateError)
+        assert repaired_part.state.status == "error"
+        assert repaired_part.state.error == INTERRUPTED_TOOL_ERROR
+        assert repaired_part.state.metadata == {"sessionId": "ses_child"}
+        assert repaired_part.state.time["start"] == 1000
+        assert repaired_part.state.time["end"] >= 1000
 
 
 # ===========================================================================

@@ -1187,6 +1187,11 @@ async def get_session_messages(
     _require_session_read_access(session, current_user)
 
     try:
+        from flocks.session.orphan_tools import abort_orphan_running_parts
+        from flocks.session.core.status import SessionStatus
+
+        if sessionID not in SessionStatus.get_busy_session_ids():
+            await abort_orphan_running_parts(sessionID)
         messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
         if limit:
             messages_with_parts = messages_with_parts[-limit:]
@@ -3847,5 +3852,3 @@ async def clear_session(sessionID: str, http_request: Request):
     except Exception as e:
         log.error("session.clear.error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to clear session: {str(e)}")
-
-
