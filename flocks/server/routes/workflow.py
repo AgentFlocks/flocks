@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
@@ -57,6 +57,25 @@ from flocks.workflow.execution_store import (
 from flocks.workflow.io import load_workflow, dump_workflow
 from flocks.workflow.tool_context import build_workflow_tool_context
 from flocks.workflow.tools import get_tool_registry
+from flocks.workflow.triggers import (
+    TriggerDefinition,
+    TriggerEvent,
+    build_trigger_event,
+    preview_trigger_mapping,
+    set_workflow_json_triggers,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
+from flocks.workflow.triggers.dispatcher import evaluate_trigger_filter
+from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
+from flocks.workflow.triggers.compat import (
+    kafka_trigger_to_legacy_config,
+    legacy_kafka_trigger_from_config,
+    legacy_schedule_trigger_from_config,
+    legacy_syslog_trigger_from_config,
+    schedule_trigger_to_legacy_config,
+    syslog_trigger_to_legacy_config,
+)
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
@@ -65,6 +84,7 @@ from flocks.utils.log import Log
 
 
 router = APIRouter()
+webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
 
 
@@ -153,6 +173,11 @@ class WorkflowExecutionResponse(BaseModel):
     duration: Optional[float] = Field(None, description="Duration (seconds)")
     executionLog: List[Dict[str, Any]] = Field(default_factory=list, description="Execution log")
     errorMessage: Optional[str] = Field(None, description="Error message")
+    triggerId: Optional[str] = Field(None, description="Trigger ID")
+    triggerType: Optional[str] = Field(None, description="Trigger type")
+    deliveryId: Optional[str] = Field(None, description="Trigger delivery ID")
+    attempt: Optional[int] = Field(None, description="Trigger attempt")
+    triggerSource: Optional[str] = Field(None, description="Trigger source")
     currentNodeId: Optional[str] = Field(None, description="Current running node ID")
     currentNodeType: Optional[str] = Field(None, description="Current running node type")
     currentPhase: Optional[str] = Field(None, description="Current execution phase")
@@ -392,6 +417,151 @@ def _workflow_stats_key(workflow_id: str) -> str:
 
 def _syslog_config_key(workflow_id: str) -> str:
     return f"{WORKFLOW_SYSLOG_CONFIG_PREFIX}{workflow_id}"
+
+
+async def _read_legacy_trigger_defs(workflow_id: str) -> List[TriggerDefinition]:
+    triggers: List[TriggerDefinition] = []
+    for key, converter in (
+        (_kafka_config_key(workflow_id), legacy_kafka_trigger_from_config),
+        (f"workflow_poller_config/{workflow_id}", legacy_schedule_trigger_from_config),
+        (_syslog_config_key(workflow_id), legacy_syslog_trigger_from_config),
+    ):
+        try:
+            config = await Storage.read(key)
+        except Exception:
+            config = None
+        trigger = converter(config)
+        if trigger is not None:
+            triggers.append(trigger)
+    return triggers
+
+
+async def _get_workflow_trigger_defs(
+    workflow_id: str,
+    workflow_data: Optional[Dict[str, Any]] = None,
+) -> List[TriggerDefinition]:
+    data = workflow_data or _read_workflow_from_fs(workflow_id)
+    if not data:
+        return []
+    workflow_json = data.get("workflowJson") or {}
+    triggers = workflow_trigger_definitions_from_json(workflow_json)
+    # Once the workflow JSON explicitly declares a trigger list, it becomes the
+    # single source of truth, even when the list is empty.
+    if workflow_json_declares_triggers(workflow_json):
+        return triggers
+    return await _read_legacy_trigger_defs(workflow_id)
+
+
+def _trigger_to_api_dict(trigger: TriggerDefinition) -> Dict[str, Any]:
+    return trigger.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+
+def _replace_or_append_trigger(
+    triggers: List[TriggerDefinition],
+    trigger: TriggerDefinition,
+) -> List[TriggerDefinition]:
+    updated = [existing for existing in triggers if existing.id != trigger.id]
+    updated.append(trigger)
+    return updated
+
+
+def _disable_legacy_trigger_of_type(
+    workflow_id: str,
+    trigger_type: str,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    now_ms = int(time.time() * 1000)
+    if trigger_type == "kafka":
+        return (
+            _kafka_config_key(workflow_id),
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    if trigger_type == "schedule":
+        return (
+            f"workflow_poller_config/{workflow_id}",
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    if trigger_type == "syslog":
+        return (
+            _syslog_config_key(workflow_id),
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    return None, None
+
+
+async def _sync_trigger_legacy_state(workflow_id: str, trigger: TriggerDefinition) -> Optional[Dict[str, Any]]:
+    if trigger.type == "kafka":
+        config = kafka_trigger_to_legacy_config(workflow_id, trigger)
+        await Storage.write(_kafka_config_key(workflow_id), config)
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        return await _kafka_default_manager.restart_workflow(workflow_id)
+    if trigger.type == "schedule":
+        config = schedule_trigger_to_legacy_config(workflow_id, trigger)
+        await Storage.write(f"workflow_poller_config/{workflow_id}", config)
+        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+        return await _poller_default_manager.restart_workflow(workflow_id)
+    if trigger.type == "syslog":
+        config = syslog_trigger_to_legacy_config(workflow_id, trigger)
+        await Storage.write(_syslog_config_key(workflow_id), config)
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        return await _syslog_default_manager.restart_workflow(workflow_id)
+    return await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+
+
+async def _remove_legacy_trigger_state(workflow_id: str, trigger: TriggerDefinition) -> None:
+    """Remove legacy trigger configs so deleted unified triggers do not reappear."""
+    if trigger.type == "kafka":
+        try:
+            from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+            await _kafka_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(_kafka_config_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+        return
+    if trigger.type == "schedule":
+        try:
+            from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+            await _poller_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(f"workflow_poller_config/{workflow_id}")
+        except Storage.NotFoundError:
+            pass
+        return
+    if trigger.type == "syslog":
+        try:
+            from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+            await _syslog_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        try:
+            await Storage.remove(_syslog_config_key(workflow_id))
+        except Storage.NotFoundError:
+            pass
+
+
+async def _persist_workflow_triggers(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    triggers: List[TriggerDefinition],
+) -> Dict[str, Any]:
+    workflow_json = workflow_data.get("workflowJson") or {}
+    updated_json = set_workflow_json_triggers(workflow_json, triggers)
+    data = dict(workflow_data)
+    data["workflowJson"] = updated_json
+    data["updatedAt"] = int(time.time() * 1000)
+    is_global = data.get("source") == "global"
+    _write_workflow_to_fs(workflow_id, updated_json, data, data.get("markdownContent"), global_store=is_global)
+    return data
 
 
 async def _run_workflow_execution_task(
@@ -1124,6 +1294,8 @@ async def workflow_center_releases(workflow_id: str):
 async def get_workflow_history(
     workflow_id: str,
     limit: int = Query(50, ge=1, le=100, description="Max results"),
+    trigger_id: Optional[str] = Query(None, alias="triggerId"),
+    trigger_type: Optional[str] = Query(None, alias="triggerType"),
 ):
     """
     Get workflow execution history
@@ -1131,7 +1303,8 @@ async def get_workflow_history(
     Returns list of recent executions for this workflow.
     """
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         # 单次查询批量读取所有 execution 记录，避免 N 次单独 read 导致超长耗时
@@ -1142,6 +1315,10 @@ async def get_workflow_history(
                 if not isinstance(exec_data, dict):
                     continue
                 if exec_data.get("workflowId") != workflow_id:
+                    continue
+                if trigger_id and exec_data.get("triggerId") != trigger_id:
+                    continue
+                if trigger_type and exec_data.get("triggerType") != trigger_type:
                     continue
                 executions.append(WorkflowExecutionResponse(**exec_data))
             except Exception as e:
@@ -1408,6 +1585,38 @@ def _strip_execution_only_comments(value: Any) -> Any:
     }
 
 
+class TriggerEventPayloadRequest(BaseModel):
+    """Sample event payload for trigger preview/testing."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    body: Any = None
+    headers: Dict[str, Any] = Field(default_factory=dict)
+    query: Dict[str, Any] = Field(default_factory=dict)
+    path_params: Dict[str, Any] = Field(default_factory=dict, alias="pathParams")
+
+
+class TriggerPreviewResponse(BaseModel):
+    """Preview result for trigger mapping and filtering."""
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    triggerId: str
+    triggerType: str
+    matched: bool
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    filterError: Optional[str] = None
+
+
+class TriggerSaveResponse(BaseModel):
+    """Persisted trigger definition with runtime status."""
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    trigger: Dict[str, Any]
+    status: Optional[Dict[str, Any]] = None
+
+
 class WorkflowPollerConfigRequest(BaseModel):
     """Per-workflow background poller configuration."""
 
@@ -1582,6 +1791,243 @@ async def list_workflow_services():
         raise HTTPException(status_code=500, detail=f"Failed to list services: {str(e)}")
 
 
+def _find_trigger_or_404(triggers: List[TriggerDefinition], trigger_id: str) -> TriggerDefinition:
+    trigger = next((item for item in triggers if item.id == trigger_id), None)
+    if trigger is None:
+        raise HTTPException(status_code=404, detail=f"Trigger not found: {trigger_id}")
+    return trigger
+
+
+@router.get("/workflow/{workflow_id}/triggers")
+async def list_workflow_triggers(workflow_id: str):
+    """List unified triggers for a workflow with runtime status."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    statuses = {
+        item.get("triggerId"): item
+        for item in await default_trigger_runtime.get_workflow_trigger_statuses(
+            workflow_id,
+            set_workflow_json_triggers(data.get("workflowJson") or {}, triggers),
+        )
+    }
+    return [
+        {
+            "trigger": _trigger_to_api_dict(trigger),
+            "status": statuses.get(trigger.id),
+        }
+        for trigger in triggers
+    ]
+
+
+@router.post("/workflow/{workflow_id}/triggers", response_model=TriggerSaveResponse)
+async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
+    """Create or replace a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    updated = _replace_or_append_trigger(existing, trigger)
+    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    status = await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+    return TriggerSaveResponse(trigger=_trigger_to_api_dict(trigger), status=status)
+
+
+@router.put("/workflow/{workflow_id}/triggers/{trigger_id}", response_model=TriggerSaveResponse)
+async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: TriggerDefinition):
+    """Update a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    _find_trigger_or_404(existing, trigger_id)
+    updated_trigger = trigger.model_copy(update={"id": trigger_id})
+    updated = _replace_or_append_trigger(existing, updated_trigger)
+    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    status = await default_trigger_runtime.get_trigger_status(workflow_id, updated_trigger)
+    return TriggerSaveResponse(trigger=_trigger_to_api_dict(updated_trigger), status=status)
+
+
+@router.delete("/workflow/{workflow_id}/triggers/{trigger_id}")
+async def delete_workflow_trigger(workflow_id: str, trigger_id: str):
+    """Delete a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(existing, trigger_id)
+    remaining = [item for item in existing if item.id != trigger_id]
+    persisted = await _persist_workflow_triggers(workflow_id, data, remaining)
+    await _remove_legacy_trigger_state(workflow_id, trigger)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    return {"ok": True, "triggerId": trigger_id}
+
+
+@router.get("/workflow/{workflow_id}/triggers/{trigger_id}/status")
+async def get_workflow_trigger_status(workflow_id: str, trigger_id: str):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    return await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+
+
+@router.post("/workflow/{workflow_id}/triggers/{trigger_id}/preview-mapping", response_model=TriggerPreviewResponse)
+async def preview_workflow_trigger_mapping(
+    workflow_id: str,
+    trigger_id: str,
+    payload: TriggerEventPayloadRequest,
+):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=payload.body,
+        headers=payload.headers,
+        query=payload.query,
+        path_params=payload.path_params,
+    )
+    matched, filter_error = evaluate_trigger_filter(trigger, event)
+    return TriggerPreviewResponse(
+        triggerId=trigger.id or trigger_id,
+        triggerType=trigger.type,
+        matched=matched,
+        inputs=preview_trigger_mapping(trigger, event),
+        filterError=filter_error,
+    )
+
+
+@router.post("/workflow/{workflow_id}/triggers/{trigger_id}/test")
+async def test_workflow_trigger(
+    workflow_id: str,
+    trigger_id: str,
+    payload: TriggerEventPayloadRequest,
+):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    workflow_json = data.get("workflowJson") or {}
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=payload.body,
+        headers=payload.headers,
+        query=payload.query,
+        path_params=payload.path_params,
+    )
+    result = await default_trigger_runtime.dispatch_event(
+        workflow_id=workflow_id,
+        workflow_json=workflow_json,
+        trigger=trigger,
+        event=event,
+    )
+    return {
+        "ok": True,
+        "trigger": _trigger_to_api_dict(trigger),
+        **result,
+    }
+
+
+@router.get("/workflow-trigger-plugins")
+async def list_workflow_trigger_plugins():
+    return default_trigger_runtime.list_plugin_specs()
+
+
+def _resolve_trigger_secret(secret_ref: Optional[str]) -> Optional[str]:
+    if not secret_ref:
+        return None
+    try:
+        from flocks.security import get_secret_manager
+
+        return get_secret_manager().get(secret_ref)
+    except Exception:
+        return None
+
+
+def _authorize_webhook_trigger(trigger: TriggerDefinition, headers: Dict[str, str], query: Dict[str, str]) -> None:
+    auth = trigger.auth
+    if auth is None or auth.type in {"none", ""}:
+        return
+    if auth.type == "api_key":
+        expected = auth.apiKey or _resolve_trigger_secret(auth.secretRef)
+        if not expected:
+            raise HTTPException(status_code=401, detail="Webhook trigger API key is not configured")
+        header_name = (auth.headerName or "x-api-key").lower()
+        actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
+        if actual != expected:
+            raise HTTPException(status_code=401, detail="Invalid webhook API key")
+        return
+    if auth.type == "hmac":
+        expected = _resolve_trigger_secret(auth.secretRef)
+        if not expected:
+            raise HTTPException(status_code=401, detail="Webhook trigger secret is not configured")
+        signature = headers.get((auth.headerName or "x-flocks-signature").lower())
+        if signature != expected:
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        return
+    raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
+
+
+@webhook_router.post("/webhook/workflows/{workflow_id}/{trigger_id}")
+async def invoke_workflow_webhook_trigger(
+    workflow_id: str,
+    trigger_id: str,
+    request: Request,
+):
+    """Invoke a webhook/custom_webhook trigger and dispatch the workflow."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    workflow_json = data.get("workflowJson") or {}
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    if trigger.type not in {"webhook", "custom_webhook"}:
+        raise HTTPException(status_code=400, detail=f"Trigger is not a webhook trigger: {trigger_id}")
+
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    query = {key: value for key, value in request.query_params.items()}
+    _authorize_webhook_trigger(trigger, headers, query)
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = (await request.body()).decode("utf-8", errors="replace")
+
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=body,
+        headers=headers,
+        query=query,
+        path_params={"workflow_id": workflow_id, "trigger_id": trigger_id},
+        raw=body,
+        source=(trigger.source or {}).get("path") or str(request.url.path),
+    )
+    result = await default_trigger_runtime.dispatch_event(
+        workflow_id=workflow_id,
+        workflow_json=workflow_json,
+        trigger=trigger,
+        event=event,
+    )
+    return {
+        "ok": True,
+        "matched": result.get("matched", True),
+        "executed": result.get("executed", False),
+        "inputs": result.get("inputs", {}),
+        "result": result.get("result"),
+    }
+
+
 @router.post("/workflow/{workflow_id}/kafka-config")
 async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
     """
@@ -1608,6 +2054,30 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(_kafka_config_key(workflow_id), config)
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "kafka-default",
+                "type": "kafka",
+                "enabled": req.enabled,
+                "source": {
+                    "inputBroker": req.inputBroker or "",
+                    "inputTopic": req.inputTopic or "",
+                    "inputGroupId": req.inputGroupId or "",
+                    "autoOffsetReset": req.autoOffsetReset,
+                },
+                "mapping": {
+                    req.inputKey or "kafka_message": "$.body",
+                },
+                "inputs": _strip_execution_only_comments(req.inputs),
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            _replace_or_append_trigger(triggers, unified_trigger),
+        )
 
         from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
 
@@ -1634,6 +2104,13 @@ async def get_kafka_config(workflow_id: str):
     """
     try:
         config = await Storage.read(_kafka_config_key(workflow_id))
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "kafka"), None)
+                if trigger is not None:
+                    config = kafka_trigger_to_legacy_config(workflow_id, trigger)
         return config  # None / null if not configured
     except Exception as e:
         log.error("workflow.kafka_config.get.error", {"id": workflow_id, "error": str(e)})
@@ -1661,7 +2138,8 @@ async def get_kafka_status(workflow_id: str):
 async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfigRequest):
     """Save background poller configuration for a workflow."""
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         config = {
@@ -1674,6 +2152,29 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(f"workflow_poller_config/{workflow_id}", config)
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "schedule-default",
+                "type": "schedule",
+                "enabled": req.enabled,
+                "source": {
+                    "mode": "interval",
+                    "intervalSeconds": req.intervalSeconds,
+                },
+                "runtime": {
+                    "timeoutSeconds": req.timeoutSeconds,
+                    "noOverlap": req.noOverlap,
+                },
+                "inputs": req.inputs,
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            _replace_or_append_trigger(triggers, unified_trigger),
+        )
 
         from flocks.workflow.poller_manager import default_manager as _poller_default_manager
 
@@ -1696,7 +2197,15 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
 async def get_workflow_poller_config(workflow_id: str):
     """Get saved poller configuration for a workflow."""
     try:
-        return await Storage.read(f"workflow_poller_config/{workflow_id}")
+        config = await Storage.read(f"workflow_poller_config/{workflow_id}")
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "schedule"), None)
+                if trigger is not None:
+                    config = schedule_trigger_to_legacy_config(workflow_id, trigger)
+        return config
     except Exception as e:
         log.error("workflow.poller_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get poller config: {str(e)}")
@@ -1718,7 +2227,8 @@ async def get_workflow_poller_status(workflow_id: str):
 async def run_workflow_poller_once(workflow_id: str):
     """Trigger one immediate poller execution for a workflow."""
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         from flocks.workflow.poller_manager import default_manager as _poller_default_manager
@@ -1758,6 +2268,29 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
             "updatedAt": int(time.time() * 1000),
         }
         await Storage.write(_syslog_config_key(workflow_id), config)
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "syslog-default",
+                "type": "syslog",
+                "enabled": req.enabled,
+                "source": {
+                    "protocol": req.protocol,
+                    "host": req.host,
+                    "port": req.port,
+                    "format": req.msg_format,
+                },
+                "mapping": {
+                    req.input_key or "syslog_message": "$.body",
+                },
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            _replace_or_append_trigger(triggers, unified_trigger),
+        )
 
         from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
 
@@ -1782,6 +2315,13 @@ async def get_syslog_config(workflow_id: str):
     """Get saved syslog configuration for a workflow."""
     try:
         config = await Storage.read(_syslog_config_key(workflow_id))
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "syslog"), None)
+                if trigger is not None:
+                    config = syslog_trigger_to_legacy_config(workflow_id, trigger)
         return config
     except Exception as e:
         log.error("workflow.syslog_config.get.error", {"id": workflow_id, "error": str(e)})

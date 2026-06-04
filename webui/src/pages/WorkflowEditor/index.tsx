@@ -216,6 +216,7 @@ function convertToWorkflowJSON(nodes: Node[], edges: Edge[], workflow: Workflow)
     start: workflow.workflowJson.start,
     nodes: apiNodes,
     edges: apiEdges,
+    triggers: workflow.workflowJson.triggers,
     metadata: workflow.workflowJson.metadata,
   };
 }

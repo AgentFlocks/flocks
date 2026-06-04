@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -571,12 +572,27 @@ class KafkaManager:
         configured_inputs = _strip_execution_only_comments(
             configured_inputs if isinstance(configured_inputs, dict) else {}
         )
-        inputs = {**configured_inputs, input_key: message}
+        delivery_id = f"kafka-{uuid.uuid4().hex}"
+        inputs = {
+            **configured_inputs,
+            input_key: message,
+            "_flocks": {
+                "trigger": {
+                    "id": "kafka-default",
+                    "type": "kafka",
+                    "source": "kafka",
+                    "deliveryId": delivery_id,
+                    "receivedAt": int(time.time() * 1000),
+                    "attempt": 1,
+                }
+            },
+        }
         input_params = {"_trigger": "kafka", input_key: _summarize_large_value(message)}
         for key, value in configured_inputs.items():
             if key == input_key:
                 continue
             input_params[key] = _summarize_large_value(value)
+        input_params["_flocks"] = inputs["_flocks"]
 
         exec_data = await create_execution_record(
             workflow_id,
@@ -609,6 +625,11 @@ class KafkaManager:
                 "currentNodeId": result.last_node_id,
                 "currentPhase": status,
                 "currentStepIndex": result.steps,
+                "triggerId": "kafka-default",
+                "triggerType": "kafka",
+                "deliveryId": delivery_id,
+                "attempt": 1,
+                "triggerSource": "kafka",
             })
         except Exception as exc:
             duration = time.time() - start_time
@@ -622,6 +643,11 @@ class KafkaManager:
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "currentPhase": "error",
+                "triggerId": "kafka-default",
+                "triggerType": "kafka",
+                "deliveryId": delivery_id,
+                "attempt": 1,
+                "triggerSource": "kafka",
             })
         finally:
             try:

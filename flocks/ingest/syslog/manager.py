@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from typing import Any, Dict, List
 
 from flocks.storage.storage import Storage
@@ -451,7 +452,20 @@ class SyslogManager:
         syslog_msg: dict,
         input_key: str,
     ) -> None:
-        inputs = {input_key: syslog_msg}
+        delivery_id = f"syslog-{uuid.uuid4().hex}"
+        inputs = {
+            input_key: syslog_msg,
+            "_flocks": {
+                "trigger": {
+                    "id": "syslog-default",
+                    "type": "syslog",
+                    "source": "syslog",
+                    "deliveryId": delivery_id,
+                    "receivedAt": int(time.time() * 1000),
+                    "attempt": 1,
+                }
+            },
+        }
 
         exec_data = await create_execution_record(
             workflow_id,
@@ -479,6 +493,11 @@ class SyslogManager:
                 "currentNodeId": result.last_node_id,
                 "currentPhase": status,
                 "currentStepIndex": result.steps,
+                "triggerId": "syslog-default",
+                "triggerType": "syslog",
+                "deliveryId": delivery_id,
+                "attempt": 1,
+                "triggerSource": "syslog",
             })
         except Exception as exc:
             duration = time.time() - start_time
@@ -492,6 +511,11 @@ class SyslogManager:
                 "finishedAt": int(time.time() * 1000),
                 "duration": duration,
                 "currentPhase": "error",
+                "triggerId": "syslog-default",
+                "triggerType": "syslog",
+                "deliveryId": delivery_id,
+                "attempt": 1,
+                "triggerSource": "syslog",
             })
         finally:
             try:
