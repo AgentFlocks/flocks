@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tomllib
 from os import utime
 from pathlib import Path
 from types import SimpleNamespace
@@ -426,6 +427,36 @@ def test_build_uv_sync_env_returns_none_on_windows(
     assert updater._build_uv_sync_env() is None
 
 
+def test_build_dependency_sync_command_skips_project_install_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+
+    assert updater._build_dependency_sync_command("uv", uv_default_index="https://mirror.example/simple") == [
+        "uv",
+        "sync",
+        "--no-install-project",
+        "--default-index",
+        "https://mirror.example/simple",
+    ]
+
+
+def test_build_dependency_sync_command_keeps_project_install_on_non_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+
+    assert updater._build_dependency_sync_command("uv") == ["uv", "sync"]
+
+
+def test_wheel_build_config_does_not_force_include_flockshub() -> None:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    wheel_config = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]
+
+    assert ".flocks/flockshub" not in wheel_config.get("force-include", {})
+
+
 def test_build_frontend_subprocess_env_prepends_bundled_node_on_windows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -539,6 +570,8 @@ async def test_download_archive_uses_curl_user_agent_for_gitee_web_archive(
     captured: dict[str, object] = {}
 
     class _FakeStreamResponse:
+        status_code = 200
+
         async def __aenter__(self):
             return self
 
@@ -593,6 +626,8 @@ async def test_download_archive_keeps_auth_header_for_non_gitee_sources(
     captured: dict[str, object] = {}
 
     class _FakeStreamResponse:
+        status_code = 200
+
         async def __aenter__(self):
             return self
 

@@ -570,6 +570,16 @@ def _dependency_sync_timeout_seconds() -> int:
     return _DEPENDENCY_SYNC_TIMEOUT_SECONDS
 
 
+def _build_dependency_sync_command(uv_path: str, *, uv_default_index: str | None = None) -> list[str]:
+    """Build the ``uv sync`` command used by the self-updater."""
+    cmd = [uv_path, "sync"]
+    if sys.platform == "win32":
+        cmd.append("--no-install-project")
+    if uv_default_index:
+        cmd.extend(["--default-index", uv_default_index])
+    return cmd
+
+
 # ------------------------------------------------------------------ #
 # Async subprocess helpers
 # ------------------------------------------------------------------ #
@@ -2892,9 +2902,7 @@ async def perform_update(
         return
 
     log.info("updater.dependencies.sync", {"tool": "uv sync", "path": uv_path})
-    uv_cmd = [uv_path, "sync"]
-    if profile.uv_default_index:
-        uv_cmd.extend(["--default-index", profile.uv_default_index])
+    uv_cmd = _build_dependency_sync_command(uv_path, uv_default_index=profile.uv_default_index)
 
     sync_env = _build_uv_sync_env()
     sync_timeout = _dependency_sync_timeout_seconds()
@@ -2957,7 +2965,7 @@ async def perform_update(
             },
         )
         await asyncio.sleep(3)
-        uv_cmd = [uv_path, "sync"]
+        uv_cmd = _build_dependency_sync_command(uv_path)
         try:
             code, _, err = await _run_uv_sync(uv_cmd)
         except subprocess.TimeoutExpired:
