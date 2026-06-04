@@ -4,6 +4,7 @@ from pathlib import Path
 from datetime import date
 
 import pytest
+from fastapi import HTTPException
 
 from flocks.server.routes import logs as log_routes
 
@@ -74,7 +75,7 @@ async def test_latest_log_prefers_main_flocks_log(tmp_path: Path, monkeypatch) -
 
     response = await log_routes.read_latest_log(tail=10)
 
-    assert response.filename == "flocks.log"
+    assert response.filename == f"{today}/flocks.log"
     assert response.content == "main"
 
 
@@ -88,7 +89,7 @@ async def test_read_log_allows_daily_log_files(tmp_path: Path, monkeypatch) -> N
 
     response = await log_routes.read_log(f"{today}/flocks.log", tail=10)
 
-    assert response.filename == "flocks.log"
+    assert response.filename == f"{today}/flocks.log"
     assert response.content == "main"
 
 
@@ -97,5 +98,23 @@ async def test_read_log_rejects_rotated_suffix_files(tmp_path: Path, monkeypatch
     (tmp_path / "backend.log.1").write_text("rotated\n", encoding="utf-8")
     monkeypatch.setattr(log_routes, "get_log_dir", lambda: tmp_path)
 
-    with pytest.raises(Exception):
+    with pytest.raises(HTTPException) as exc_info:
         await log_routes.read_log("backend.log.1", tail=10)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_read_log_returns_same_nested_filename_as_list(tmp_path: Path, monkeypatch) -> None:
+    today = date.today().isoformat()
+    day_dir = tmp_path / today
+    day_dir.mkdir()
+    (day_dir / "errors.log").write_text("warn\n", encoding="utf-8")
+    monkeypatch.setattr(log_routes, "get_log_dir", lambda: tmp_path)
+
+    listed = await log_routes.list_logs()
+    listed_name = next(item.name for item in listed.files if item.name.endswith("errors.log"))
+    response = await log_routes.read_log(listed_name, tail=10)
+
+    assert listed_name == f"{today}/errors.log"
+    assert response.filename == listed_name
+    assert response.content == "warn"

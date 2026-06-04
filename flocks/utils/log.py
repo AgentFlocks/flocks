@@ -11,6 +11,7 @@ import os
 import sys
 import time
 import threading
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
 from datetime import date, datetime, timedelta
@@ -51,7 +52,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 def get_log_retention_days(default: int = _DEFAULT_LOG_RETENTION_DAYS) -> int:
-    """Return how long legacy timestamp logs are retained."""
+    """Return how long daily log directories and legacy timestamp logs are retained."""
     return _env_int("FLOCKS_LOG_RETENTION_DAYS", default)
 
 
@@ -462,6 +463,7 @@ class Log:
         cls._writer = None
         cls._error_writer = None
         cls._open_daily_writers()
+        cls._cleanup_sync(cls._log_dir_path)
     
     @classmethod
     async def _cleanup(cls, log_dir: Path, retention_days: Optional[int] = None) -> None:
@@ -470,6 +472,11 @@ class Log:
         Args:
             log_dir: Directory containing log files
         """
+        cls._cleanup_sync(log_dir, retention_days=retention_days)
+
+    @classmethod
+    def _cleanup_sync(cls, log_dir: Path, retention_days: Optional[int] = None) -> None:
+        """Clean up date directories and legacy timestamp logs by age."""
         days = get_log_retention_days() if retention_days is None else retention_days
         if days <= 0:
             return
@@ -495,7 +502,6 @@ class Log:
                 day = _date_from_dir(path)
                 if day is not None and day < cutoff.date():
                     try:
-                        import shutil
                         shutil.rmtree(path)
                     except Exception:
                         pass

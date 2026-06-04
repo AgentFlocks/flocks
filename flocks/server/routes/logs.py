@@ -68,18 +68,18 @@ async def read_latest_log(
 
     today_log = log_dir / date.today().isoformat() / "flocks.log"
     if today_log.is_file():
-        return _read_log_file(today_log, tail)
+        return _read_log_file(today_log, tail, filename=_relative_log_name(log_dir, today_log))
 
     for day_dir in sorted(_iter_date_dirs(log_dir), reverse=True):
         main_log = day_dir / "flocks.log"
         if main_log.is_file():
-            return _read_log_file(main_log, tail)
+            return _read_log_file(main_log, tail, filename=_relative_log_name(log_dir, main_log))
 
     log_files = sorted(_iter_log_files(log_dir), key=lambda f: f.stat().st_mtime, reverse=True)
     if not log_files:
         raise HTTPException(status_code=404, detail="No log files found")
 
-    return _read_log_file(log_files[0], tail)
+    return _read_log_file(log_files[0], tail, filename=_relative_log_name(log_dir, log_files[0]))
 
 
 @router.get(
@@ -101,7 +101,7 @@ async def read_log(
     if not log_path.resolve().is_relative_to(log_dir.resolve()):
         raise HTTPException(status_code=403, detail="Access denied")
 
-    return _read_log_file(log_path, tail)
+    return _read_log_file(log_path, tail, filename=filename)
 
 
 def _is_date_dir(path: Path) -> bool:
@@ -148,7 +148,11 @@ def _iter_log_files(log_dir: Path) -> List[Path]:
     return files
 
 
-def _read_log_file(path: Path, tail: int) -> LogContentResponse:
+def _relative_log_name(log_dir: Path, path: Path) -> str:
+    return path.relative_to(log_dir).as_posix()
+
+
+def _read_log_file(path: Path, tail: int, filename: str | None = None) -> LogContentResponse:
     try:
         lines: deque[str] = deque(maxlen=tail)
         total = 0
@@ -163,7 +167,7 @@ def _read_log_file(path: Path, tail: int) -> LogContentResponse:
     content = "\n".join(lines)
 
     return LogContentResponse(
-        filename=path.name,
+        filename=filename or path.name,
         content=content,
         total_lines=total,
         truncated=truncated,

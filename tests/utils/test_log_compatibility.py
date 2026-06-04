@@ -7,6 +7,7 @@ import time
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
+import flocks.utils.log as log_module
 from flocks.utils.log import Log, Logger, LogLevel
 
 
@@ -435,6 +436,51 @@ class TestLogInitialization:
 
         assert not old_dir.exists()
         assert recent_dir.exists()
+
+    async def test_day_rollover_switches_writer_and_runs_cleanup(self, tmp_path: Path, monkeypatch):
+        """Test long-running processes move to the new daily log and clean old days."""
+        old_day = (datetime.now() - timedelta(days=31)).date().isoformat()
+        first_day = (datetime.now() - timedelta(days=1)).date()
+        second_day = datetime.now().date()
+        old_dir = tmp_path / old_day
+        old_dir.mkdir()
+        (old_dir / "flocks.log").write_text("old", encoding="utf-8")
+
+        class FakeDate:
+            current = first_day
+
+            @classmethod
+            def today(cls):
+                return cls.current
+
+        monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path))
+        monkeypatch.setattr(log_module, "date", FakeDate)
+
+        try:
+            await Log.init(print=False, dev=False, level=LogLevel.INFO)
+            Log.Default.info("first day")
+            first_file = Path(Log.file())
+
+            FakeDate.current = second_day
+            Log.Default.warn("second day")
+            second_file = Path(Log.file())
+
+            assert first_file == tmp_path / first_day.isoformat() / "flocks.log"
+            assert second_file == tmp_path / second_day.isoformat() / "flocks.log"
+            assert "first day" in first_file.read_text(encoding="utf-8")
+            assert "second day" in second_file.read_text(encoding="utf-8")
+            assert "second day" in (tmp_path / second_day.isoformat() / "errors.log").read_text(encoding="utf-8")
+            assert not old_dir.exists()
+        finally:
+            if Log._writer:
+                Log._writer.close()
+                Log._writer = None
+            if Log._error_writer:
+                Log._error_writer.close()
+                Log._error_writer = None
+            Log._log_file = None
+            Log._log_dir_path = None
+            Log._log_date = None
 
 
 if __name__ == "__main__":
