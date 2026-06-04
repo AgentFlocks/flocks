@@ -15,8 +15,6 @@ import {
   ChevronRight,
   Globe,
   Loader2,
-  Play,
-  RefreshCw,
   Server,
   Trash2,
   Workflow as WorkflowIcon,
@@ -29,7 +27,6 @@ import {
   WorkflowServiceDriver,
   WorkflowTrigger,
   WorkflowTriggerPlugin,
-  WorkflowTriggerPreview,
   WorkflowTriggerRecord,
   WorkflowTriggerType,
 } from '@/api/workflow';
@@ -138,14 +135,6 @@ function parseJsonObject(text: string, label: string): { ok: true; value: JsonOb
     return { ok: true, value: parsed };
   } catch {
     return { ok: false, error: `${label} 必须是合法的 JSON 对象` };
-  }
-}
-
-function parseJsonValue(text: string, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
-  try {
-    return { ok: true, value: JSON.parse(text || '{}') };
-  } catch {
-    return { ok: false, error: `${label} 必须是合法的 JSON` };
   }
 }
 
@@ -469,7 +458,6 @@ function TriggerEditor({
   draft,
   status,
   plugins,
-  workflowSampleInputs,
   showIdentityHeader,
   saving,
   deleting,
@@ -479,13 +467,11 @@ function TriggerEditor({
   onDelete,
   onSave,
   onRunOnce,
-  onRefreshPlugins,
 }: {
   workflowId: string;
   draft: WorkflowTrigger | null;
   status?: JsonObject;
   plugins: WorkflowTriggerPlugin[];
-  workflowSampleInputs: JsonObject;
   showIdentityHeader: boolean;
   saving: boolean;
   deleting: boolean;
@@ -495,38 +481,16 @@ function TriggerEditor({
   onDelete: () => void;
   onSave: (next: WorkflowTrigger) => Promise<WorkflowTrigger | null> | void;
   onRunOnce?: () => Promise<void>;
-  onRefreshPlugins?: () => Promise<void>;
 }) {
   const [inputsText, setInputsText] = useState(DEFAULT_JSON_TEXT);
-  const [mappingText, setMappingText] = useState(DEFAULT_JSON_TEXT);
-  const [sampleBodyText, setSampleBodyText] = useState(DEFAULT_JSON_TEXT);
-  const [sampleHeadersText, setSampleHeadersText] = useState(DEFAULT_JSON_TEXT);
-  const [sampleQueryText, setSampleQueryText] = useState(DEFAULT_JSON_TEXT);
   const [jsonError, setJsonError] = useState('');
-  const [actionError, setActionError] = useState('');
-  const [previewResult, setPreviewResult] = useState<WorkflowTriggerPreview | null>(null);
-  const [testResult, setTestResult] = useState<Record<string, any> | null>(null);
-  const [previewing, setPreviewing] = useState(false);
-  const [testing, setTesting] = useState(false);
   const [runningOnce, setRunningOnce] = useState(false);
-  const [refreshingPlugins, setRefreshingPlugins] = useState(false);
 
   useEffect(() => {
     if (!draft) return;
     setInputsText(stringifyJson(draft.inputs ?? {}));
-    setMappingText(stringifyJson(draft.mapping ?? {}));
-    const defaultSample = draft.testSamples?.[0];
-    const fallbackPayload = (draft.type === 'schedule' || draft.type === 'kafka')
-      ? workflowSampleInputs
-      : {};
-    setSampleBodyText(JSON.stringify(defaultSample?.payload ?? fallbackPayload, null, 2));
-    setSampleHeadersText(stringifyJson(defaultSample?.headers ?? {}));
-    setSampleQueryText(stringifyJson(defaultSample?.query ?? {}));
     setJsonError('');
-    setActionError('');
-    setPreviewResult(null);
-    setTestResult(null);
-  }, [draft, workflowSampleInputs]);
+  }, [draft]);
 
   if (!draft) {
     return (
@@ -587,43 +551,14 @@ function TriggerEditor({
 
   const syncJsonEditors = (): WorkflowTrigger | null => {
     const inputsParsed = parseJsonObject(inputsText, 'Inputs');
-    const mappingParsed = parseJsonObject(mappingText, 'Mapping');
-    const sampleBodyParsed = parseJsonValue(sampleBodyText, 'Sample Body');
-    const sampleHeadersParsed = parseJsonObject(sampleHeadersText, 'Sample Headers');
-    const sampleQueryParsed = parseJsonObject(sampleQueryText, 'Sample Query');
     if (!inputsParsed.ok) {
       setJsonError(inputsParsed.error);
-      return null;
-    }
-    if (!mappingParsed.ok) {
-      setJsonError(mappingParsed.error);
-      return null;
-    }
-    if (!sampleBodyParsed.ok) {
-      setJsonError(sampleBodyParsed.error);
-      return null;
-    }
-    if (!sampleHeadersParsed.ok) {
-      setJsonError(sampleHeadersParsed.error);
-      return null;
-    }
-    if (!sampleQueryParsed.ok) {
-      setJsonError(sampleQueryParsed.error);
       return null;
     }
     setJsonError('');
     const nextDraft = {
       ...draft,
       inputs: inputsParsed.value,
-      mapping: mappingParsed.value,
-      testSamples: [
-        {
-          name: draft.testSamples?.[0]?.name ?? 'default',
-          payload: sampleBodyParsed.value,
-          headers: sampleHeadersParsed.value,
-          query: sampleQueryParsed.value,
-        },
-      ],
     };
     onChange(nextDraft);
     return nextDraft;
@@ -634,74 +569,8 @@ function TriggerEditor({
     if (!nextDraft) {
       return null;
     }
-    setActionError('');
     const savedTrigger = await onSave(nextDraft);
     return savedTrigger ?? nextDraft;
-  };
-
-  const runPreview = async () => {
-    const savedTrigger = await persistCurrentDraft();
-    if (!savedTrigger) {
-      return;
-    }
-    const sample = savedTrigger.testSamples?.[0];
-    setPreviewing(true);
-    setActionError('');
-    setPreviewResult(null);
-    try {
-      const response = await workflowAPI.previewTriggerMapping(workflowId, savedTrigger.id, {
-        body: sample?.payload ?? {},
-        headers: sample?.headers ?? {},
-        query: sample?.query ?? {},
-      });
-      setPreviewResult(response.data);
-    } catch (err: unknown) {
-      setActionError(extractErrorMessage(err, '预览 Mapping 失败'));
-    } finally {
-      setPreviewing(false);
-    }
-  };
-
-  const runTest = async () => {
-    const savedTrigger = await persistCurrentDraft();
-    if (!savedTrigger) {
-      return;
-    }
-    const sample = savedTrigger.testSamples?.[0];
-    setTesting(true);
-    setActionError('');
-    setTestResult(null);
-    try {
-      const response = await workflowAPI.testTrigger(workflowId, savedTrigger.id, {
-        body: sample?.payload ?? {},
-        headers: sample?.headers ?? {},
-        query: sample?.query ?? {},
-      });
-      setTestResult(response.data);
-    } catch (err: unknown) {
-      setActionError(extractErrorMessage(err, '测试 Trigger 失败'));
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  const handlePrefillSampleInputs = () => {
-    const nextInputs = stringifyJson(workflowSampleInputs);
-    setInputsText(nextInputs);
-    setSampleBodyText(nextInputs);
-    const nextDraft = {
-      ...draft,
-      inputs: workflowSampleInputs,
-      testSamples: [
-        {
-          name: draft.testSamples?.[0]?.name ?? 'default',
-          payload: workflowSampleInputs,
-          headers: draft.testSamples?.[0]?.headers ?? {},
-          query: draft.testSamples?.[0]?.query ?? {},
-        },
-      ],
-    };
-    onChange(nextDraft);
   };
 
   return (
@@ -935,112 +804,12 @@ function TriggerEditor({
               当前没有可用的自定义 Trigger 插件。
             </div>
           ) : null}
-          <button
-            type="button"
-            onClick={async () => {
-              if (!onRefreshPlugins) return;
-              setRefreshingPlugins(true);
-              try {
-                await onRefreshPlugins();
-              } finally {
-                setRefreshingPlugins(false);
-              }
-            }}
-            disabled={!onRefreshPlugins || refreshingPlugins}
-            className="inline-flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshingPlugins ? 'animate-spin' : ''}`} />
-            {refreshingPlugins ? '刷新中...' : '刷新插件列表'}
-          </button>
         </div>
       ) : null}
-
-      <Field label="Filter Expr" hint="当前仅 expr 生效，留空表示不过滤">
-        <Input
-          value={String(draft.filter?.expr ?? '')}
-          onChange={(e) => updateDraft({ filter: { ...(draft.filter ?? {}), expr: e.target.value } })}
-          placeholder="body.severity == 'high'"
-        />
-      </Field>
-
-      <Field label="Mapping（JSON）" hint='例如：{ "alert_data": "$.body.data[0]" }'>
-        <TextArea value={mappingText} onChange={(e) => setMappingText(e.target.value)} rows={5} />
-      </Field>
 
       <Field label="Inputs（JSON）" hint='直接填写工作流需要的输入，例如：{ "alert_data": { "id": 1 } }'>
         <TextArea value={inputsText} onChange={(e) => setInputsText(e.target.value)} rows={6} />
       </Field>
-
-      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
-        <div className="text-xs font-medium text-gray-700">测试样例</div>
-        <Field label="Sample Body（JSON）">
-          <TextArea value={sampleBodyText} onChange={(e) => setSampleBodyText(e.target.value)} rows={5} />
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Sample Headers（JSON）">
-            <TextArea value={sampleHeadersText} onChange={(e) => setSampleHeadersText(e.target.value)} rows={4} />
-          </Field>
-          <Field label="Sample Query（JSON）">
-            <TextArea value={sampleQueryText} onChange={(e) => setSampleQueryText(e.target.value)} rows={4} />
-          </Field>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {(isSchedule || isKafka) && Object.keys(workflowSampleInputs).length > 0 ? (
-            <button
-              type="button"
-              onClick={handlePrefillSampleInputs}
-              className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white"
-            >
-              使用 Sample Inputs 预填
-            </button>
-          ) : null}
-          {isSchedule && onRunOnce ? (
-            <button
-              type="button"
-              onClick={async () => {
-                const savedTrigger = await persistCurrentDraft();
-                if (!savedTrigger || !onRunOnce) return;
-                setRunningOnce(true);
-                setActionError('');
-                try {
-                  await onRunOnce();
-                } catch (err: unknown) {
-                  setActionError(extractErrorMessage(err, '立即执行失败'));
-                } finally {
-                  setRunningOnce(false);
-                }
-              }}
-              disabled={runningOnce}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
-            >
-              <Play className="w-3.5 h-3.5" />
-              {runningOnce ? '执行中...' : '立即执行一轮'}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => {
-              void runPreview();
-            }}
-            disabled={previewing}
-            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
-          >
-            {previewing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-            {previewing ? '预览中...' : 'Preview Mapping'}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void runTest();
-            }}
-            disabled={testing}
-            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
-          >
-            {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-            {testing ? '测试中...' : 'Test Trigger'}
-          </button>
-        </div>
-      </div>
 
       {status ? (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-600 space-y-1">
@@ -1053,6 +822,25 @@ function TriggerEditor({
       ) : null}
 
       <div className="grid grid-cols-1 gap-2">
+        {isSchedule && onRunOnce ? (
+          <button
+            type="button"
+            onClick={async () => {
+              const savedTrigger = await persistCurrentDraft();
+              if (!savedTrigger || !onRunOnce) return;
+              setRunningOnce(true);
+              try {
+                await onRunOnce();
+              } finally {
+                setRunningOnce(false);
+              }
+            }}
+            disabled={runningOnce || saving}
+            className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {runningOnce ? '执行中...' : '立即执行一轮'}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => {
@@ -1065,36 +853,10 @@ function TriggerEditor({
         </button>
       </div>
 
-      {previewResult ? (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-700 space-y-2">
-          <div className="font-medium">Preview Result</div>
-          <div>matched: {String(previewResult.matched)}</div>
-          {previewResult.filterError ? <div className="text-red-600">filterError: {previewResult.filterError}</div> : null}
-          <pre className="overflow-auto rounded bg-white p-2 font-mono text-[11px] text-gray-700">
-            {JSON.stringify(previewResult.inputs, null, 2)}
-          </pre>
-        </div>
-      ) : null}
-
-      {testResult ? (
-        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-700 space-y-2">
-          <div className="font-medium">Test Result</div>
-          <pre className="overflow-auto rounded bg-white p-2 font-mono text-[11px] text-gray-700">
-            {JSON.stringify(testResult, null, 2)}
-          </pre>
-        </div>
-      ) : null}
-
       {jsonError ? (
         <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
           <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{jsonError}</span>
-        </div>
-      ) : null}
-      {actionError ? (
-        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
-          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-          <span>{actionError}</span>
         </div>
       ) : null}
       {error ? (
@@ -1281,12 +1043,18 @@ function TriggersSection({
   };
 
   const runScheduleOnce = async () => {
-    await workflowAPI.runPollerOnce(workflow.id);
-    setSuccess('已触发一次即时执行');
-    await Promise.all([
-      refresh({ preferredId: draft?.id ?? selectedTriggerId, syncDraft: true }),
-      syncWorkflowFromServer(),
-    ]);
+    try {
+      setError('');
+      setSuccess('');
+      await workflowAPI.runPollerOnce(workflow.id);
+      setSuccess('已触发一次即时执行');
+      await Promise.all([
+        refresh({ preferredId: draft?.id ?? selectedTriggerId, syncDraft: true }),
+        syncWorkflowFromServer(),
+      ]);
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, '立即执行失败'));
+    }
   };
 
   const persistDraft = async (nextDraft?: WorkflowTrigger): Promise<WorkflowTrigger | null> => {
@@ -1412,28 +1180,6 @@ function TriggersSection({
               <WorkflowIcon className="w-3.5 h-3.5" />
               Kafka
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                void createTrigger('custom_adapter');
-              }}
-              disabled={!!getCreateDisabledReason('custom_adapter')}
-              title={getCreateDisabledReason('custom_adapter')}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              Custom Adapter
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                void refresh({ preferredId: selectedTriggerId, syncDraft: false });
-              }}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              刷新
-            </button>
           </div>
 
           {hint ? (
@@ -1526,7 +1272,6 @@ function TriggersSection({
                   draft={draft}
                   status={selectedRecord?.status as JsonObject | undefined}
                   plugins={plugins}
-                  workflowSampleInputs={workflowSampleInputs}
                   showIdentityHeader={records.length === 1}
                   saving={saving}
                   deleting={deleting}
@@ -1543,9 +1288,6 @@ function TriggersSection({
                   }}
                   onSave={persistDraft}
                   onRunOnce={draft?.type === 'schedule' ? runScheduleOnce : undefined}
-                  onRefreshPlugins={async () => {
-                    await refresh({ preferredId: draft?.id ?? selectedTriggerId, syncDraft: false });
-                  }}
                 />
               ) : null}
             </>

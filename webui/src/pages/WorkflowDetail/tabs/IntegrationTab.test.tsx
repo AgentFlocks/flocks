@@ -13,8 +13,6 @@ const { workflowAPI } = vi.hoisted(() => ({
     createTrigger: vi.fn(),
     updateTrigger: vi.fn(),
     deleteTrigger: vi.fn(),
-    previewTriggerMapping: vi.fn(),
-    testTrigger: vi.fn(),
     listTriggerPlugins: vi.fn(),
     runPollerOnce: vi.fn(),
   },
@@ -105,20 +103,6 @@ describe('IntegrationTab trigger workspace', () => {
       data: { trigger },
     }));
     workflowAPI.deleteTrigger.mockResolvedValue({ data: { ok: true, triggerId: 'hook-1' } });
-    workflowAPI.previewTriggerMapping.mockResolvedValue({
-      data: {
-        triggerId: 'hook-1',
-        triggerType: 'custom_webhook',
-        matched: true,
-        inputs: { event: { ok: true } },
-      },
-    });
-    workflowAPI.testTrigger.mockResolvedValue({
-      data: {
-        ok: true,
-        inputs: { event: { ok: true } },
-      },
-    });
     workflowAPI.listTriggerPlugins.mockResolvedValue({ data: [] });
     workflowAPI.runPollerOnce.mockResolvedValue({ data: { ok: true, status: { state: 'running' } } });
   });
@@ -141,7 +125,8 @@ describe('IntegrationTab trigger workspace', () => {
     expect(screen.getByRole('button', { name: 'Webhook' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Syslog' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Kafka' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Custom Adapter' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Custom Adapter' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '刷新' })).not.toBeInTheDocument();
   });
 
   it('renders trigger list in the unified workspace', async () => {
@@ -167,9 +152,9 @@ describe('IntegrationTab trigger workspace', () => {
 
     expect((await screen.findAllByText('Daily Scan')).length).toBeGreaterThan(0);
     expect(screen.getByText('Inputs（JSON）')).toBeInTheDocument();
-    expect(screen.getByText('Mapping（JSON）')).toBeInTheDocument();
-    expect(screen.getByText('Filter Expr')).toBeInTheDocument();
-    expect(screen.getByText('测试样例')).toBeInTheDocument();
+    expect(screen.queryByText('Mapping（JSON）')).not.toBeInTheDocument();
+    expect(screen.queryByText('Filter Expr')).not.toBeInTheDocument();
+    expect(screen.queryByText('测试样例')).not.toBeInTheDocument();
   });
 
   it('does not render duplicated trigger card when only one trigger exists', async () => {
@@ -324,36 +309,6 @@ describe('IntegrationTab trigger workspace', () => {
     render(<IntegrationTab workflow={workflow} />);
 
     expect(await screen.findByRole('button', { name: 'Schedule' })).toBeDisabled();
-  });
-
-  it('prefills schedule inputs from workflow sample inputs', async () => {
-    const user = userEvent.setup();
-    workflowAPI.getTriggers.mockResolvedValue({
-      data: [
-        {
-          trigger: {
-            id: 'schedule-1',
-            name: 'Daily Scan',
-            type: 'schedule',
-            enabled: true,
-            source: { mode: 'interval', intervalSeconds: 60 },
-            runtime: { timeoutSeconds: 7200, noOverlap: true },
-            mapping: {},
-            inputs: {},
-            testSamples: [{ name: 'default', payload: {} }],
-          },
-          status: { state: 'running' },
-        },
-      ],
-    });
-
-    render(<IntegrationTab workflow={workflow} />);
-
-    await user.click(await screen.findByRole('button', { name: '使用 Sample Inputs 预填' }));
-
-    await waitFor(() => {
-      expect(getFieldTextarea('Inputs（JSON）')).toHaveValue('{\n  "customerId": 42\n}');
-    });
   });
 
   it('toggles trigger enabled state from the trigger list', async () => {

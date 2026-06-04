@@ -313,7 +313,7 @@ Scan the QR code with **WeChat** to join our official discussion group.
 
 ## 6. Contributing
 
-See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for development setup, coding standards, testing expectations, and Pull Request guidelines.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, coding standards, testing expectations, and Pull Request guidelines.
 
 ## 7. License
 
