@@ -847,19 +847,24 @@ class InboundDispatcher:
         scope_override: Optional[str],
     ) -> None:
         from flocks.session.session import Session
-        from flocks.channel.inbound.session_binding import _build_title
+        from flocks.channel.inbound.session_binding import (
+            _build_title,
+            resolve_channel_session_owner_kwargs,
+        )
 
         session = await Session.get_by_id(binding.session_id)
         if not session:
             await callbacks.deliver_text("当前会话不存在，请发送一条普通消息后重试。")
             return
 
+        owner_kwargs = await resolve_channel_session_owner_kwargs(session)
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
             title=_build_title(msg),
             agent=session.agent,
             **Session.inherited_model_kwargs(session),
+            **owner_kwargs,
         )
         new_binding = await self.binding_service.rebind(
             msg,

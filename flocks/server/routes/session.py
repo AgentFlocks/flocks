@@ -132,7 +132,7 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_local_shared(session)
+    is_shared = SessionPolicy.is_shared(session)
 
     return SessionResponse(
         id=session.id,

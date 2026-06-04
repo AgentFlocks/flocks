@@ -75,3 +75,22 @@ def test_can_read_local_shared_visible_to_all_local_users():
     assert SessionPolicy.can_read(session, owner) is True
     assert SessionPolicy.can_read(session, admin) is True
     assert SessionPolicy.can_read(session, stranger) is True
+
+
+def test_ownerless_session_is_not_marked_shared():
+    session = _make_session(owner_user_id=None, owner_username=None)
+    assert SessionPolicy.is_shared(session) is False
+
+
+def test_ownerless_session_admin_can_manage_but_member_cannot():
+    admin = _make_user(user_id="usr_admin", username="admin", role="admin")
+    member = _make_user(user_id="usr_member", username="member", role="member")
+    session = _make_session(owner_user_id=None, owner_username=None)
+
+    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_write(session, admin) is True
+    assert SessionPolicy.can_delete(session, admin) is True
+
+    assert SessionPolicy.can_read(session, member) is False
+    assert SessionPolicy.can_write(session, member) is False
+    assert SessionPolicy.can_delete(session, member) is False

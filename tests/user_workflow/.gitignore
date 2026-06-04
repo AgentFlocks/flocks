@@ -1,0 +1,4 @@
+# 本地用户自定义 workflow 测试目录
+# 默认忽略目录内所有内容，仅保留当前 .gitignore 以便目录可被提交。
+*
+!.gitignore
