@@ -96,4 +96,3 @@ async def test_event_dispatcher_skips_execution_when_filter_does_not_match() -> 
     assert result["matched"] is False
     assert result["executed"] is False
     assert result["inputs"]["severity"] == "low"
-

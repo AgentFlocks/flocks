@@ -207,4 +207,3 @@ def set_workflow_json_triggers(
         metadata.pop("triggers", None)
         updated["metadata"] = metadata
     return updated
-

@@ -265,4 +265,3 @@ class EventDispatcher:
             "executed": True,
             "result": result,
         }
-

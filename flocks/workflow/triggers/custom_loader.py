@@ -75,4 +75,3 @@ def load_trigger_plugin_module(plugin_spec: Dict[str, Any]) -> Optional[ModuleTy
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-

@@ -418,8 +418,23 @@ export default function WorkflowEditor() {
 
     try {
       setSaving(true);
-      const workflowJson = convertToWorkflowJSON(nodes, edges, workflow);
+      const latestWorkflow = (await workflowAPI.get(id!)).data;
+      const workflowForSave: Workflow = {
+        ...workflow,
+        name: latestWorkflow.name,
+        workflowJson: {
+          ...workflow.workflowJson,
+          triggers: latestWorkflow.workflowJson.triggers,
+          metadata: latestWorkflow.workflowJson.metadata,
+          version: latestWorkflow.workflowJson.version,
+        },
+      };
+      const workflowJson = convertToWorkflowJSON(nodes, edges, workflowForSave);
       await workflowAPI.update(id!, { workflowJson });
+      setWorkflow({
+        ...latestWorkflow,
+        workflowJson,
+      });
       alert(t('editor.saveSuccess'));
     } catch (error: any) {
       console.error('Failed to save workflow:', error);

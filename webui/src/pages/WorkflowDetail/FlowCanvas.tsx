@@ -19,7 +19,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { Code2, Zap, GitBranch, RotateCw, X, ChevronRight, Wrench, Sparkles, Globe, Workflow } from 'lucide-react';
-import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
+import { WorkflowJSON, WorkflowNode as APINode, WorkflowTrigger } from '@/api/workflow';
 
 // ─────────────────────────────────────────────
 // Node type config
@@ -212,6 +212,25 @@ const TYPE_LABELS: Record<string, string> = {
   manual: 'Manual',
   plugin: 'Plugin',
 };
+
+function summarizeTrigger(trigger: WorkflowTrigger): string {
+  const source = trigger?.source ?? {};
+  switch (trigger?.type) {
+    case 'schedule':
+      return source.cron ? `Cron ${source.cron}` : `Every ${source.intervalSeconds ?? 300}s`;
+    case 'kafka':
+      return `${source.inputTopic ?? '-'} @ ${source.inputBroker ?? '-'}`;
+    case 'syslog':
+      return `${source.protocol ?? 'udp'}://${source.host ?? '0.0.0.0'}:${source.port ?? 5140}`;
+    case 'webhook':
+    case 'custom_webhook':
+      return `${source.method ?? 'POST'} /webhook/workflows/.../${trigger?.id ?? ''}`;
+    case 'custom_adapter':
+      return source.adapterId || source.pluginId || 'Custom adapter';
+    default:
+      return trigger?.description || TYPE_LABELS[trigger?.type ?? ''] || String(trigger?.type ?? 'Trigger');
+  }
+}
 
 // ─────────────────────────────────────────────
 // Compact view node
@@ -517,9 +536,10 @@ function buildLayout(
   const startPosition = startId ? positions.get(startId) ?? { x: 0, y: 0 } : { x: 0, y: 0 };
   const triggerNodeWidth = NODE_W;
   const triggerGap = 36;
-  if (startId && workflowTriggers.length > 0) {
+  if (workflowTriggers.length > 0) {
     const totalWidth = workflowTriggers.length * triggerNodeWidth + Math.max(0, workflowTriggers.length - 1) * triggerGap;
-    const startX = startPosition.x - totalWidth / 2 + triggerNodeWidth / 2;
+    const anchorY = startId ? startPosition.y - (NODE_H + V_GAP) : 0;
+    const startX = (startId ? startPosition.x : 0) - totalWidth / 2 + triggerNodeWidth / 2;
     workflowTriggers.forEach((trigger, idx) => {
       const triggerNodeId = `trigger:${trigger.id}`;
       nodes.push({
@@ -527,24 +547,26 @@ function buildLayout(
         type: 'view',
         position: {
           x: startX + idx * (triggerNodeWidth + triggerGap),
-          y: startPosition.y - (NODE_H + V_GAP),
+          y: anchorY,
         },
         data: {
           label: trigger.name || trigger.id,
           nodeType: trigger.type,
-          description: trigger.description || JSON.stringify(trigger.source ?? {}),
+          description: trigger.description || summarizeTrigger(trigger),
           isTrigger: true,
         },
       });
-      edges.push({
-        id: `e-${triggerNodeId}-${startId}`,
-        source: triggerNodeId,
-        target: startId,
-        type: 'smoothstep',
-        animated: Boolean(trigger.enabled),
-        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
-        style: { stroke: '#7dd3fc', strokeWidth: 1.5, strokeDasharray: '5 4' },
-      });
+      if (startId) {
+        edges.push({
+          id: `e-${triggerNodeId}-${startId}`,
+          source: triggerNodeId,
+          target: startId,
+          type: 'smoothstep',
+          animated: Boolean(trigger.enabled),
+          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+          style: { stroke: '#7dd3fc', strokeWidth: 1.5, strokeDasharray: '5 4' },
+        });
+      }
     });
   }
 

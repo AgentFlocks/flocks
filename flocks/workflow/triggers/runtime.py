@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,7 +30,13 @@ from .compat import (
 )
 from .custom_loader import list_trigger_plugins, load_trigger_plugin_module
 from .dispatcher import EventDispatcher, TriggerDispatchError, build_trigger_event
-from .models import TriggerDefinition, TriggerEvent, TriggerRuntimeStatus, workflow_trigger_definitions_from_json
+from .models import (
+    TriggerDefinition,
+    TriggerEvent,
+    TriggerRuntimeStatus,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
 
 log = Log.create(service="workflow.trigger.runtime")
 
@@ -46,6 +53,7 @@ class TriggerRuntime:
         self._custom_adapter_tasks: Dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._custom_adapters: Dict[tuple[str, str], Any] = {}
         self._custom_status: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._custom_adapter_signatures: Dict[tuple[str, str], str] = {}
 
     def _iter_workflows(self) -> List[Dict[str, Any]]:
         merged: Dict[str, Dict[str, Any]] = {}
@@ -60,9 +68,31 @@ class TriggerRuntime:
                     merged[entry.name] = data
         return list(merged.values())
 
+    async def _write_disabled_legacy_configs(self, workflow_id: str) -> None:
+        now_ms = _now_ms()
+        await Storage.write(
+            f"{LEGACY_POLLER_CONFIG_PREFIX}{workflow_id}",
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+        await Storage.write(
+            f"{LEGACY_SYSLOG_CONFIG_PREFIX}{workflow_id}",
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+        await Storage.write(
+            f"{LEGACY_KAFKA_CONFIG_PREFIX}{workflow_id}",
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+
+    @staticmethod
+    def _trigger_signature(trigger: TriggerDefinition) -> str:
+        payload = trigger.model_dump(mode="json", exclude_none=True)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
     async def _sync_legacy_configs_from_workflow(self, workflow_id: str, workflow_json: Dict[str, Any]) -> List[TriggerDefinition]:
         triggers = workflow_trigger_definitions_from_json(workflow_json)
         if not triggers:
+            if workflow_json_declares_triggers(workflow_json):
+                await self._write_disabled_legacy_configs(workflow_id)
             return []
 
         by_type = {trigger.type: trigger for trigger in triggers}
@@ -246,6 +276,7 @@ class TriggerRuntime:
                 await task
             except Exception:
                 pass
+        self._custom_adapter_signatures.pop(key, None)
         self._custom_status[key] = {
             "workflowId": workflow_id,
             "triggerId": trigger_id,
@@ -256,16 +287,30 @@ class TriggerRuntime:
 
     async def _start_custom_adapters_for_workflow(self, workflow_id: str, workflow_json: Dict[str, Any]) -> None:
         triggers = workflow_trigger_definitions_from_json(workflow_json)
-        desired_ids = {trigger.id for trigger in triggers if trigger.type == "custom_adapter" and trigger.enabled}
+        desired_signatures = {
+            (workflow_id, trigger.id or ""): self._trigger_signature(trigger)
+            for trigger in triggers
+            if trigger.type == "custom_adapter" and trigger.enabled
+        }
         for active_workflow_id, active_trigger_id in list(self._custom_adapter_tasks.keys()):
-            if active_workflow_id == workflow_id and active_trigger_id not in desired_ids:
+            key = (active_workflow_id, active_trigger_id)
+            if active_workflow_id != workflow_id:
+                continue
+            if key not in desired_signatures:
+                await self._stop_custom_adapter(active_workflow_id, active_trigger_id)
+                continue
+            if self._custom_adapter_signatures.get(key) != desired_signatures[key]:
                 await self._stop_custom_adapter(active_workflow_id, active_trigger_id)
 
         for trigger in triggers:
             if trigger.type != "custom_adapter" or not trigger.enabled:
                 continue
             key = (workflow_id, trigger.id or "")
-            if key in self._custom_adapter_tasks:
+            trigger_signature = desired_signatures[key]
+            if (
+                key in self._custom_adapter_tasks
+                and self._custom_adapter_signatures.get(key) == trigger_signature
+            ):
                 continue
             plugin_id = str((trigger.source or {}).get("adapterId") or (trigger.source or {}).get("pluginId") or "").strip()
             plugin_spec = next((item for item in list_trigger_plugins() if item.get("id") == plugin_id), None)
@@ -366,6 +411,7 @@ class TriggerRuntime:
                     }
 
             self._custom_adapters[key] = adapter
+            self._custom_adapter_signatures[key] = trigger_signature
             self._custom_adapter_tasks[key] = asyncio.create_task(
                 _runner(),
                 name=f"trigger-custom-{workflow_id}-{trigger.id}",
@@ -429,4 +475,3 @@ class TriggerRuntime:
 
 
 default_runtime = TriggerRuntime()
-

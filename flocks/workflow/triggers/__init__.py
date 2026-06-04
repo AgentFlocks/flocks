@@ -36,4 +36,3 @@ __all__ = [
     "workflow_json_declares_triggers",
     "workflow_trigger_definitions_from_json",
 ]
-

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -86,6 +87,8 @@ from flocks.utils.log import Log
 router = APIRouter()
 webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
+
+_LEGACY_SINGLETON_TRIGGER_TYPES = frozenset({"schedule", "kafka", "syslog"})
 
 
 @dataclass
@@ -1798,6 +1801,30 @@ def _find_trigger_or_404(triggers: List[TriggerDefinition], trigger_id: str) -> 
     return trigger
 
 
+def _validate_trigger_type_constraints(triggers: List[TriggerDefinition]) -> None:
+    singleton_ids_by_type: Dict[str, List[str]] = {}
+    for trigger in triggers:
+        if trigger.type not in _LEGACY_SINGLETON_TRIGGER_TYPES:
+            continue
+        singleton_ids_by_type.setdefault(trigger.type, []).append(trigger.id or "")
+
+    duplicates = {
+        trigger_type: trigger_ids
+        for trigger_type, trigger_ids in singleton_ids_by_type.items()
+        if len(trigger_ids) > 1
+    }
+    if not duplicates:
+        return
+
+    first_type = sorted(duplicates)[0]
+    trigger_ids = [trigger_id for trigger_id in duplicates[first_type] if trigger_id]
+    detail = (
+        f"Only one {first_type} trigger is supported per workflow; "
+        f"found: {', '.join(trigger_ids) or 'multiple triggers'}"
+    )
+    raise HTTPException(status_code=409, detail=detail)
+
+
 @router.get("/workflow/{workflow_id}/triggers")
 async def list_workflow_triggers(workflow_id: str):
     """List unified triggers for a workflow with runtime status."""
@@ -1829,6 +1856,7 @@ async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
         raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
     existing = await _get_workflow_trigger_defs(workflow_id, data)
     updated = _replace_or_append_trigger(existing, trigger)
+    _validate_trigger_type_constraints(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
@@ -1845,6 +1873,7 @@ async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: Tr
     _find_trigger_or_404(existing, trigger_id)
     updated_trigger = trigger.model_copy(update={"id": trigger_id})
     updated = _replace_or_append_trigger(existing, updated_trigger)
+    _validate_trigger_type_constraints(updated)
     persisted = await _persist_workflow_triggers(workflow_id, data, updated)
     await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
     status = await default_trigger_runtime.get_trigger_status(workflow_id, updated_trigger)
@@ -1954,7 +1983,22 @@ def _resolve_trigger_secret(secret_ref: Optional[str]) -> Optional[str]:
         return None
 
 
-def _authorize_webhook_trigger(trigger: TriggerDefinition, headers: Dict[str, str], query: Dict[str, str]) -> None:
+def _normalize_hmac_signature(signature: Optional[str]) -> Optional[str]:
+    if not signature:
+        return None
+    value = signature.strip()
+    if value.lower().startswith("sha256="):
+        return value.split("=", 1)[1].strip()
+    return value
+
+
+def _authorize_webhook_trigger(
+    trigger: TriggerDefinition,
+    headers: Dict[str, str],
+    query: Dict[str, str],
+    *,
+    raw_body: bytes,
+) -> None:
     auth = trigger.auth
     if auth is None or auth.type in {"none", ""}:
         return
@@ -1971,8 +2015,13 @@ def _authorize_webhook_trigger(trigger: TriggerDefinition, headers: Dict[str, st
         expected = _resolve_trigger_secret(auth.secretRef)
         if not expected:
             raise HTTPException(status_code=401, detail="Webhook trigger secret is not configured")
-        signature = headers.get((auth.headerName or "x-flocks-signature").lower())
-        if signature != expected:
+        signature = _normalize_hmac_signature(headers.get((auth.headerName or "x-flocks-signature").lower()))
+        expected_signature = hmac.new(
+            expected.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not signature or not hmac.compare_digest(signature, expected_signature):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
         return
     raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
@@ -1993,15 +2042,18 @@ async def invoke_workflow_webhook_trigger(
     trigger = _find_trigger_or_404(triggers, trigger_id)
     if trigger.type not in {"webhook", "custom_webhook"}:
         raise HTTPException(status_code=400, detail=f"Trigger is not a webhook trigger: {trigger_id}")
+    if not trigger.enabled:
+        raise HTTPException(status_code=403, detail=f"Trigger is disabled: {trigger_id}")
 
     headers = {key.lower(): value for key, value in request.headers.items()}
     query = {key: value for key, value in request.query_params.items()}
-    _authorize_webhook_trigger(trigger, headers, query)
+    raw_body = await request.body()
+    _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
 
     try:
-        body = await request.json()
+        body = json.loads(raw_body.decode("utf-8"))
     except Exception:
-        body = (await request.body()).decode("utf-8", errors="replace")
+        body = raw_body.decode("utf-8", errors="replace")
 
     event = build_trigger_event(
         workflow_id=workflow_id,
@@ -2024,7 +2076,7 @@ async def invoke_workflow_webhook_trigger(
         "matched": result.get("matched", True),
         "executed": result.get("executed", False),
         "inputs": result.get("inputs", {}),
-        "result": result.get("result"),
+        "deliveryId": event.source.deliveryId,
     }
 
 
@@ -2039,7 +2091,8 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
     instead of falsely claiming the consumer is running.
     """
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         config = {
@@ -2073,10 +2126,12 @@ async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
             }
         )
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(
             workflow_id,
             data,
-            _replace_or_append_trigger(triggers, unified_trigger),
+            updated_triggers,
         )
 
         from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
@@ -2170,10 +2225,12 @@ async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfi
             }
         )
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(
             workflow_id,
             data,
-            _replace_or_append_trigger(triggers, unified_trigger),
+            updated_triggers,
         )
 
         from flocks.workflow.poller_manager import default_manager as _poller_default_manager
@@ -2254,7 +2311,8 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
     instead of falsely claiming "Listening".
     """
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         config = {
@@ -2286,10 +2344,12 @@ async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
             }
         )
         triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
         await _persist_workflow_triggers(
             workflow_id,
             data,
-            _replace_or_append_trigger(triggers, unified_trigger),
+            updated_triggers,
         )
 
         from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager

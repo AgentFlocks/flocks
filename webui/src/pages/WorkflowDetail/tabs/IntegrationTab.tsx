@@ -15,6 +15,8 @@ import {
   ChevronRight,
   Globe,
   Loader2,
+  Play,
+  RefreshCw,
   Server,
   Trash2,
   Workflow as WorkflowIcon,
@@ -27,6 +29,7 @@ import {
   WorkflowServiceDriver,
   WorkflowTrigger,
   WorkflowTriggerPlugin,
+  WorkflowTriggerPreview,
   WorkflowTriggerRecord,
   WorkflowTriggerType,
 } from '@/api/workflow';
@@ -36,11 +39,13 @@ import { extractErrorMessage } from '@/utils/error';
 
 export interface IntegrationTabProps {
   workflow: Workflow;
+  onWorkflowUpdated?: (updated: Workflow) => void;
 }
 
 type JsonObject = Record<string, any>;
 
 const DEFAULT_JSON_TEXT = JSON.stringify({}, null, 2);
+const LEGACY_SINGLETON_TYPES: WorkflowTriggerType[] = ['schedule', 'kafka', 'syslog'];
 
 function SectionHeader({
   title,
@@ -136,6 +141,14 @@ function parseJsonObject(text: string, label: string): { ok: true; value: JsonOb
   }
 }
 
+function parseJsonValue(text: string, label: string): { ok: true; value: unknown } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: JSON.parse(text || '{}') };
+  } catch {
+    return { ok: false, error: `${label} 必须是合法的 JSON` };
+  }
+}
+
 function formatTimestamp(ts?: number | null): string {
   if (!ts) return '-';
   return new Date(ts).toLocaleString();
@@ -224,6 +237,7 @@ function createTriggerDraft(
   workflowId: string,
   existingTriggers: WorkflowTrigger[],
   availablePlugins: WorkflowTriggerPlugin[] = [],
+  workflowSampleInputs: JsonObject = {},
 ): WorkflowTrigger {
   const timestamp = Date.now();
   if (type === 'schedule') {
@@ -235,8 +249,8 @@ function createTriggerDraft(
       source: { mode: 'interval', intervalSeconds: 300 },
       runtime: { timeoutSeconds: 7200, noOverlap: true },
       mapping: {},
-      inputs: {},
-      testSamples: [{ name: 'default', payload: {} }],
+      inputs: workflowSampleInputs,
+      testSamples: [{ name: 'default', payload: workflowSampleInputs }],
     };
   }
   if (type === 'kafka') {
@@ -252,8 +266,8 @@ function createTriggerDraft(
         autoOffsetReset: 'latest',
       },
       mapping: { kafka_message: '$.body' },
-      inputs: {},
-      testSamples: [{ name: 'default', payload: { example: true } }],
+      inputs: workflowSampleInputs,
+      testSamples: [{ name: 'default', payload: Object.keys(workflowSampleInputs).length > 0 ? workflowSampleInputs : { example: true } }],
     };
   }
   if (type === 'syslog') {
@@ -455,6 +469,7 @@ function TriggerEditor({
   draft,
   status,
   plugins,
+  workflowSampleInputs,
   showIdentityHeader,
   saving,
   deleting,
@@ -463,11 +478,14 @@ function TriggerEditor({
   onChange,
   onDelete,
   onSave,
+  onRunOnce,
+  onRefreshPlugins,
 }: {
   workflowId: string;
   draft: WorkflowTrigger | null;
   status?: JsonObject;
   plugins: WorkflowTriggerPlugin[];
+  workflowSampleInputs: JsonObject;
   showIdentityHeader: boolean;
   saving: boolean;
   deleting: boolean;
@@ -475,16 +493,40 @@ function TriggerEditor({
   success: string;
   onChange: (next: WorkflowTrigger) => void;
   onDelete: () => void;
-  onSave: () => void;
+  onSave: (next: WorkflowTrigger) => Promise<WorkflowTrigger | null> | void;
+  onRunOnce?: () => Promise<void>;
+  onRefreshPlugins?: () => Promise<void>;
 }) {
   const [inputsText, setInputsText] = useState(DEFAULT_JSON_TEXT);
+  const [mappingText, setMappingText] = useState(DEFAULT_JSON_TEXT);
+  const [sampleBodyText, setSampleBodyText] = useState(DEFAULT_JSON_TEXT);
+  const [sampleHeadersText, setSampleHeadersText] = useState(DEFAULT_JSON_TEXT);
+  const [sampleQueryText, setSampleQueryText] = useState(DEFAULT_JSON_TEXT);
   const [jsonError, setJsonError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [previewResult, setPreviewResult] = useState<WorkflowTriggerPreview | null>(null);
+  const [testResult, setTestResult] = useState<Record<string, any> | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [runningOnce, setRunningOnce] = useState(false);
+  const [refreshingPlugins, setRefreshingPlugins] = useState(false);
 
   useEffect(() => {
     if (!draft) return;
     setInputsText(stringifyJson(draft.inputs ?? {}));
+    setMappingText(stringifyJson(draft.mapping ?? {}));
+    const defaultSample = draft.testSamples?.[0];
+    const fallbackPayload = (draft.type === 'schedule' || draft.type === 'kafka')
+      ? workflowSampleInputs
+      : {};
+    setSampleBodyText(JSON.stringify(defaultSample?.payload ?? fallbackPayload, null, 2));
+    setSampleHeadersText(stringifyJson(defaultSample?.headers ?? {}));
+    setSampleQueryText(stringifyJson(defaultSample?.query ?? {}));
     setJsonError('');
-  }, [draft]);
+    setActionError('');
+    setPreviewResult(null);
+    setTestResult(null);
+  }, [draft, workflowSampleInputs]);
 
   if (!draft) {
     return (
@@ -502,6 +544,7 @@ function TriggerEditor({
   const isKafka = draft.type === 'kafka';
   const isSyslog = draft.type === 'syslog';
   const isAdapter = draft.type === 'custom_adapter';
+  const webhookInvokeUrl = `${window.location.origin}/webhook/workflows/${workflowId}/${draft.id}`;
   const inputKey = isKafka
     ? getTriggerInputKey(draft, 'kafka_message')
     : isSyslog
@@ -542,18 +585,123 @@ function TriggerEditor({
     });
   };
 
-  const syncJsonEditors = (): boolean => {
+  const syncJsonEditors = (): WorkflowTrigger | null => {
     const inputsParsed = parseJsonObject(inputsText, 'Inputs');
+    const mappingParsed = parseJsonObject(mappingText, 'Mapping');
+    const sampleBodyParsed = parseJsonValue(sampleBodyText, 'Sample Body');
+    const sampleHeadersParsed = parseJsonObject(sampleHeadersText, 'Sample Headers');
+    const sampleQueryParsed = parseJsonObject(sampleQueryText, 'Sample Query');
     if (!inputsParsed.ok) {
       setJsonError(inputsParsed.error);
-      return false;
+      return null;
+    }
+    if (!mappingParsed.ok) {
+      setJsonError(mappingParsed.error);
+      return null;
+    }
+    if (!sampleBodyParsed.ok) {
+      setJsonError(sampleBodyParsed.error);
+      return null;
+    }
+    if (!sampleHeadersParsed.ok) {
+      setJsonError(sampleHeadersParsed.error);
+      return null;
+    }
+    if (!sampleQueryParsed.ok) {
+      setJsonError(sampleQueryParsed.error);
+      return null;
     }
     setJsonError('');
-    onChange({
+    const nextDraft = {
       ...draft,
       inputs: inputsParsed.value,
-    });
-    return true;
+      mapping: mappingParsed.value,
+      testSamples: [
+        {
+          name: draft.testSamples?.[0]?.name ?? 'default',
+          payload: sampleBodyParsed.value,
+          headers: sampleHeadersParsed.value,
+          query: sampleQueryParsed.value,
+        },
+      ],
+    };
+    onChange(nextDraft);
+    return nextDraft;
+  };
+
+  const persistCurrentDraft = async () => {
+    const nextDraft = syncJsonEditors();
+    if (!nextDraft) {
+      return null;
+    }
+    setActionError('');
+    const savedTrigger = await onSave(nextDraft);
+    return savedTrigger ?? nextDraft;
+  };
+
+  const runPreview = async () => {
+    const savedTrigger = await persistCurrentDraft();
+    if (!savedTrigger) {
+      return;
+    }
+    const sample = savedTrigger.testSamples?.[0];
+    setPreviewing(true);
+    setActionError('');
+    setPreviewResult(null);
+    try {
+      const response = await workflowAPI.previewTriggerMapping(workflowId, savedTrigger.id, {
+        body: sample?.payload ?? {},
+        headers: sample?.headers ?? {},
+        query: sample?.query ?? {},
+      });
+      setPreviewResult(response.data);
+    } catch (err: unknown) {
+      setActionError(extractErrorMessage(err, '预览 Mapping 失败'));
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
+  const runTest = async () => {
+    const savedTrigger = await persistCurrentDraft();
+    if (!savedTrigger) {
+      return;
+    }
+    const sample = savedTrigger.testSamples?.[0];
+    setTesting(true);
+    setActionError('');
+    setTestResult(null);
+    try {
+      const response = await workflowAPI.testTrigger(workflowId, savedTrigger.id, {
+        body: sample?.payload ?? {},
+        headers: sample?.headers ?? {},
+        query: sample?.query ?? {},
+      });
+      setTestResult(response.data);
+    } catch (err: unknown) {
+      setActionError(extractErrorMessage(err, '测试 Trigger 失败'));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const handlePrefillSampleInputs = () => {
+    const nextInputs = stringifyJson(workflowSampleInputs);
+    setInputsText(nextInputs);
+    setSampleBodyText(nextInputs);
+    const nextDraft = {
+      ...draft,
+      inputs: workflowSampleInputs,
+      testSamples: [
+        {
+          name: draft.testSamples?.[0]?.name ?? 'default',
+          payload: workflowSampleInputs,
+          headers: draft.testSamples?.[0]?.headers ?? {},
+          query: draft.testSamples?.[0]?.query ?? {},
+        },
+      ],
+    };
+    onChange(nextDraft);
   };
 
   return (
@@ -605,7 +753,22 @@ function TriggerEditor({
             <Field label="调度模式">
               <Select
                 value={String(source.mode ?? (source.cron ? 'cron' : 'interval'))}
-                onChange={(e) => updateSource({ mode: e.target.value })}
+                onChange={(e) => {
+                  const nextMode = e.target.value;
+                  if (nextMode === 'cron') {
+                    updateSource({
+                      mode: nextMode,
+                      cron: String(source.cron ?? '*/5 * * * *'),
+                      intervalSeconds: undefined,
+                    });
+                    return;
+                  }
+                  updateSource({
+                    mode: nextMode,
+                    intervalSeconds: Math.max(1, Number.parseInt(String(source.intervalSeconds ?? 300), 10)),
+                    cron: undefined,
+                  });
+                }}
               >
                 <option value="interval">Interval</option>
                 <option value="cron">Cron</option>
@@ -650,20 +813,18 @@ function TriggerEditor({
         <div className="grid grid-cols-1 gap-3">
           <div className="grid grid-cols-2 gap-3">
             <Field label="方法">
-              <Select value={String(source.method ?? 'POST')} onChange={(e) => updateSource({ method: e.target.value })}>
+              <Select value="POST" onChange={() => updateSource({ method: 'POST' })}>
                 <option value="POST">POST</option>
-                <option value="PUT">PUT</option>
-                <option value="PATCH">PATCH</option>
               </Select>
             </Field>
-            <Field label="逻辑路径" hint="当前服务端实际入口固定为 /webhook/workflows/{workflowId}/{triggerId}">
-              <Input value={String(source.path ?? '')} onChange={(e) => updateSource({ path: e.target.value })} />
+            <Field label="逻辑路径" hint="仅用于说明来源，服务端实际入口固定且不可编辑">
+              <Input value={String(source.path ?? '')} readOnly className="bg-gray-50 text-gray-500" />
             </Field>
           </div>
           <Field label="实际调用地址">
             <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-700">{`/webhook/workflows/${workflowId}/${draft.id}`}</span>
-              <CopyButton text={`/webhook/workflows/${workflowId}/${draft.id}`} />
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-gray-700">{webhookInvokeUrl}</span>
+              <CopyButton text={webhookInvokeUrl} />
             </div>
           </Field>
           <div className="grid grid-cols-2 gap-3">
@@ -774,12 +935,112 @@ function TriggerEditor({
               当前没有可用的自定义 Trigger 插件。
             </div>
           ) : null}
+          <button
+            type="button"
+            onClick={async () => {
+              if (!onRefreshPlugins) return;
+              setRefreshingPlugins(true);
+              try {
+                await onRefreshPlugins();
+              } finally {
+                setRefreshingPlugins(false);
+              }
+            }}
+            disabled={!onRefreshPlugins || refreshingPlugins}
+            className="inline-flex items-center justify-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshingPlugins ? 'animate-spin' : ''}`} />
+            {refreshingPlugins ? '刷新中...' : '刷新插件列表'}
+          </button>
         </div>
       ) : null}
+
+      <Field label="Filter Expr" hint="当前仅 expr 生效，留空表示不过滤">
+        <Input
+          value={String(draft.filter?.expr ?? '')}
+          onChange={(e) => updateDraft({ filter: { ...(draft.filter ?? {}), expr: e.target.value } })}
+          placeholder="body.severity == 'high'"
+        />
+      </Field>
+
+      <Field label="Mapping（JSON）" hint='例如：{ "alert_data": "$.body.data[0]" }'>
+        <TextArea value={mappingText} onChange={(e) => setMappingText(e.target.value)} rows={5} />
+      </Field>
 
       <Field label="Inputs（JSON）" hint='直接填写工作流需要的输入，例如：{ "alert_data": { "id": 1 } }'>
         <TextArea value={inputsText} onChange={(e) => setInputsText(e.target.value)} rows={6} />
       </Field>
+
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-3">
+        <div className="text-xs font-medium text-gray-700">测试样例</div>
+        <Field label="Sample Body（JSON）">
+          <TextArea value={sampleBodyText} onChange={(e) => setSampleBodyText(e.target.value)} rows={5} />
+        </Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Sample Headers（JSON）">
+            <TextArea value={sampleHeadersText} onChange={(e) => setSampleHeadersText(e.target.value)} rows={4} />
+          </Field>
+          <Field label="Sample Query（JSON）">
+            <TextArea value={sampleQueryText} onChange={(e) => setSampleQueryText(e.target.value)} rows={4} />
+          </Field>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {(isSchedule || isKafka) && Object.keys(workflowSampleInputs).length > 0 ? (
+            <button
+              type="button"
+              onClick={handlePrefillSampleInputs}
+              className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white"
+            >
+              使用 Sample Inputs 预填
+            </button>
+          ) : null}
+          {isSchedule && onRunOnce ? (
+            <button
+              type="button"
+              onClick={async () => {
+                const savedTrigger = await persistCurrentDraft();
+                if (!savedTrigger || !onRunOnce) return;
+                setRunningOnce(true);
+                setActionError('');
+                try {
+                  await onRunOnce();
+                } catch (err: unknown) {
+                  setActionError(extractErrorMessage(err, '立即执行失败'));
+                } finally {
+                  setRunningOnce(false);
+                }
+              }}
+              disabled={runningOnce}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
+            >
+              <Play className="w-3.5 h-3.5" />
+              {runningOnce ? '执行中...' : '立即执行一轮'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              void runPreview();
+            }}
+            disabled={previewing}
+            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
+          >
+            {previewing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+            {previewing ? '预览中...' : 'Preview Mapping'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void runTest();
+            }}
+            disabled={testing}
+            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-white disabled:opacity-60"
+          >
+            {testing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+            {testing ? '测试中...' : 'Test Trigger'}
+          </button>
+        </div>
+      </div>
 
       {status ? (
         <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-600 space-y-1">
@@ -795,8 +1056,7 @@ function TriggerEditor({
         <button
           type="button"
           onClick={() => {
-            if (!syncJsonEditors()) return;
-            onSave();
+            void persistCurrentDraft();
           }}
           disabled={saving}
           className="rounded-lg border border-gray-200 px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
@@ -805,10 +1065,36 @@ function TriggerEditor({
         </button>
       </div>
 
+      {previewResult ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-700 space-y-2">
+          <div className="font-medium">Preview Result</div>
+          <div>matched: {String(previewResult.matched)}</div>
+          {previewResult.filterError ? <div className="text-red-600">filterError: {previewResult.filterError}</div> : null}
+          <pre className="overflow-auto rounded bg-white p-2 font-mono text-[11px] text-gray-700">
+            {JSON.stringify(previewResult.inputs, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+
+      {testResult ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-700 space-y-2">
+          <div className="font-medium">Test Result</div>
+          <pre className="overflow-auto rounded bg-white p-2 font-mono text-[11px] text-gray-700">
+            {JSON.stringify(testResult, null, 2)}
+          </pre>
+        </div>
+      ) : null}
+
       {jsonError ? (
         <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
           <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
           <span>{jsonError}</span>
+        </div>
+      ) : null}
+      {actionError ? (
+        <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span>{actionError}</span>
         </div>
       ) : null}
       {error ? (
@@ -827,7 +1113,13 @@ function TriggerEditor({
   );
 }
 
-function TriggersSection({ workflow }: { workflow: Workflow }) {
+function TriggersSection({
+  workflow,
+  onWorkflowUpdated,
+}: {
+  workflow: Workflow;
+  onWorkflowUpdated?: (updated: Workflow) => void;
+}) {
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(false);
   const [records, setRecords] = useState<WorkflowTriggerRecord[]>([]);
@@ -840,8 +1132,25 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
   const [success, setSuccess] = useState('');
   const [hint, setHint] = useState('');
   const [dirty, setDirty] = useState(false);
+  const workflowSampleInputs = workflow.workflowJson.metadata?.sampleInputs ?? {};
 
-  const refresh = useCallback(async (preferredId?: string | null) => {
+  const syncWorkflowFromServer = useCallback(async (): Promise<Workflow | null> => {
+    try {
+      const response = await workflowAPI.get(workflow.id);
+      onWorkflowUpdated?.(response.data);
+      return response.data;
+    } catch {
+      return null;
+    }
+  }, [onWorkflowUpdated, workflow.id]);
+
+  const refresh = useCallback(async ({
+    preferredId = null,
+    syncDraft = true,
+  }: {
+    preferredId?: string | null;
+    syncDraft?: boolean;
+  } = {}) => {
     if (!workflowAPI.getTriggers) return;
     setLoading(true);
     try {
@@ -857,7 +1166,7 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
         ? (preferredId ?? null)
         : nextRecords[0]?.trigger.id ?? null;
       setSelectedTriggerId(nextSelectedId);
-      if (!dirty) {
+      if (syncDraft) {
         const selected = nextRecords.find((item) => item.trigger.id === nextSelectedId)?.trigger ?? null;
         setDraft(selected ? cloneTrigger(selected) : null);
       }
@@ -866,15 +1175,38 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
     } finally {
       setLoading(false);
     }
-  }, [workflow.id, dirty]);
+  }, [workflow.id]);
+
+  const confirmDiscardIfDirty = useCallback((message: string) => {
+    if (!dirty) {
+      return true;
+    }
+    return window.confirm(message);
+  }, [dirty]);
+
+  const getCreateDisabledReason = useCallback((type: WorkflowTriggerType): string => {
+    if (
+      LEGACY_SINGLETON_TYPES.includes(type)
+      && records.some((item) => item.trigger.type === type)
+    ) {
+      return `${triggerTypeLabel(type)} 当前每个工作流只支持一个`;
+    }
+    if (type === 'custom_adapter' && plugins.length === 0) {
+      return '当前没有可用的自定义 Trigger 插件';
+    }
+    return '';
+  }, [plugins.length, records]);
 
   useEffect(() => {
-    void refresh(null);
+    void refresh({ preferredId: null, syncDraft: true });
   }, [refresh]);
 
   const selectedRecord = records.find((item) => item.trigger.id === selectedTriggerId) ?? null;
 
   const selectTrigger = (triggerId: string) => {
+    if (!confirmDiscardIfDirty('当前 Trigger 有未保存修改，确认切换并放弃这些改动吗？')) {
+      return;
+    }
     const selected = records.find((item) => item.trigger.id === triggerId)?.trigger ?? null;
     setSelectedTriggerId(triggerId);
     setDraft(selected ? cloneTrigger(selected) : null);
@@ -886,41 +1218,94 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
 
   const createTrigger = async (type: WorkflowTriggerType) => {
     if (!workflowAPI.createTrigger) return;
-    if (type === 'custom_adapter' && plugins.length === 0) {
-      setError('');
-      setSuccess('');
-      setHint('自定义 Trigger 依赖插件。请先在 `~/.flocks/plugins/triggers/<plugin-id>/` 或工作区 `.flocks/plugins/triggers/<plugin-id>/` 下添加插件目录，并至少提供 `trigger.json`（或 `trigger.yaml`）和 `handler.py`，然后点击刷新。');
+    const disabledReason = getCreateDisabledReason(type);
+    if (disabledReason) {
+      setHint(disabledReason);
+      return;
+    }
+    if (!confirmDiscardIfDirty('当前 Trigger 有未保存修改，确认创建新 Trigger 并放弃这些改动吗？')) {
       return;
     }
     setError('');
     setSuccess('');
     setHint('');
     try {
-      const trigger = createTriggerDraft(type, workflow.id, records.map((item) => item.trigger), plugins);
-      await workflowAPI.createTrigger(workflow.id, trigger);
-      await refresh(trigger.id);
-      const selected = records.find((item) => item.trigger.id === trigger.id)?.trigger ?? trigger;
+      const trigger = createTriggerDraft(
+        type,
+        workflow.id,
+        records.map((item) => item.trigger),
+        plugins,
+        workflowSampleInputs,
+      );
+      const response = await workflowAPI.createTrigger(workflow.id, trigger);
+      const savedTrigger = response.data.trigger ?? trigger;
+      await Promise.all([
+        refresh({ preferredId: savedTrigger.id, syncDraft: true }),
+        syncWorkflowFromServer(),
+      ]);
+      const selected = savedTrigger;
       setDraft(cloneTrigger(selected));
-      setSelectedTriggerId(trigger.id);
+      setSelectedTriggerId(savedTrigger.id);
       setDirty(false);
     } catch (err: unknown) {
       setError(extractErrorMessage(err, '创建 Trigger 失败'));
     }
   };
 
-  const persistDraft = async (): Promise<WorkflowTrigger | null> => {
-    if (!draft || !workflowAPI.updateTrigger) return null;
+  const toggleTriggerEnabled = async (trigger: WorkflowTrigger) => {
+    if (!workflowAPI.updateTrigger) return;
     setSaving(true);
     setError('');
     setSuccess('');
     try {
-      const response = await workflowAPI.updateTrigger(workflow.id, draft.id, draft);
+      await workflowAPI.updateTrigger(workflow.id, trigger.id, {
+        ...trigger,
+        enabled: !trigger.enabled,
+      });
+      setSuccess(!trigger.enabled ? 'Trigger 已启用' : 'Trigger 已停用');
+      await Promise.all([
+        refresh({ preferredId: trigger.id, syncDraft: selectedTriggerId === trigger.id }),
+        syncWorkflowFromServer(),
+      ]);
+      if (selectedTriggerId === trigger.id && draft) {
+        setDraft({
+          ...draft,
+          enabled: !trigger.enabled,
+        });
+      }
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, '更新 Trigger 状态失败'));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const runScheduleOnce = async () => {
+    await workflowAPI.runPollerOnce(workflow.id);
+    setSuccess('已触发一次即时执行');
+    await Promise.all([
+      refresh({ preferredId: draft?.id ?? selectedTriggerId, syncDraft: true }),
+      syncWorkflowFromServer(),
+    ]);
+  };
+
+  const persistDraft = async (nextDraft?: WorkflowTrigger): Promise<WorkflowTrigger | null> => {
+    const currentDraft = nextDraft ?? draft;
+    if (!currentDraft || !workflowAPI.updateTrigger) return null;
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      const response = await workflowAPI.updateTrigger(workflow.id, currentDraft.id, currentDraft);
       const savedTrigger = response.data.trigger;
       setDraft(cloneTrigger(savedTrigger));
       setDirty(false);
       setSuccess('Trigger 已保存');
       setHint('');
-      await refresh(savedTrigger.id);
+      await Promise.all([
+        refresh({ preferredId: savedTrigger.id, syncDraft: true }),
+        syncWorkflowFromServer(),
+      ]);
       return savedTrigger;
     } catch (err: unknown) {
       setError(extractErrorMessage(err, '保存 Trigger 失败'));
@@ -932,6 +1317,13 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
 
   const handleDeleteTrigger = async (triggerId: string, label: string) => {
     if (!workflowAPI.deleteTrigger) return;
+    if (
+      dirty
+      && selectedTriggerId === triggerId
+      && !window.confirm('当前 Trigger 有未保存修改，确认删除并放弃这些改动吗？')
+    ) {
+      return;
+    }
     if (!window.confirm(`确认删除 Trigger「${label}」吗？`)) {
       return;
     }
@@ -947,7 +1339,10 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
       }
       setSuccess('Trigger 已删除');
       setHint('');
-      await refresh(selectedTriggerId === triggerId ? null : selectedTriggerId);
+      await Promise.all([
+        refresh({ preferredId: selectedTriggerId === triggerId ? null : selectedTriggerId, syncDraft: true }),
+        syncWorkflowFromServer(),
+      ]);
     } catch (err: unknown) {
       setError(extractErrorMessage(err, '删除 Trigger 失败'));
     } finally {
@@ -976,7 +1371,9 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
               onClick={() => {
                 void createTrigger('schedule');
               }}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              disabled={!!getCreateDisabledReason('schedule')}
+              title={getCreateDisabledReason('schedule')}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <CalendarClock className="w-3.5 h-3.5" />
               Schedule
@@ -996,7 +1393,9 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
               onClick={() => {
                 void createTrigger('syslog');
               }}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              disabled={!!getCreateDisabledReason('syslog')}
+              title={getCreateDisabledReason('syslog')}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Server className="w-3.5 h-3.5" />
               Syslog
@@ -1006,10 +1405,34 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
               onClick={() => {
                 void createTrigger('kafka');
               }}
-              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              disabled={!!getCreateDisabledReason('kafka')}
+              title={getCreateDisabledReason('kafka')}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <WorkflowIcon className="w-3.5 h-3.5" />
               Kafka
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void createTrigger('custom_adapter');
+              }}
+              disabled={!!getCreateDisabledReason('custom_adapter')}
+              title={getCreateDisabledReason('custom_adapter')}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              Custom Adapter
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void refresh({ preferredId: selectedTriggerId, syncDraft: false });
+              }}
+              className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              刷新
             </button>
           </div>
 
@@ -1062,6 +1485,18 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
                           </span>
                           <button
                             type="button"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void toggleTriggerEnabled(trigger);
+                            }}
+                            disabled={saving}
+                            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-white disabled:opacity-60"
+                          >
+                            {trigger.enabled ? '停用' : '启用'}
+                          </button>
+                          <button
+                            type="button"
                             aria-label={`删除 ${trigger.name || trigger.id}`}
                             onClick={(event) => {
                               event.preventDefault();
@@ -1091,6 +1526,7 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
                   draft={draft}
                   status={selectedRecord?.status as JsonObject | undefined}
                   plugins={plugins}
+                  workflowSampleInputs={workflowSampleInputs}
                   showIdentityHeader={records.length === 1}
                   saving={saving}
                   deleting={deleting}
@@ -1105,8 +1541,10 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
                   onDelete={() => {
                     void handleDelete();
                   }}
-                  onSave={() => {
-                    void persistDraft();
+                  onSave={persistDraft}
+                  onRunOnce={draft?.type === 'schedule' ? runScheduleOnce : undefined}
+                  onRefreshPlugins={async () => {
+                    await refresh({ preferredId: draft?.id ?? selectedTriggerId, syncDraft: false });
                   }}
                 />
               ) : null}
@@ -1118,11 +1556,11 @@ function TriggersSection({ workflow }: { workflow: Workflow }) {
   );
 }
 
-export default function IntegrationTab({ workflow }: IntegrationTabProps) {
+export default function IntegrationTab({ workflow, onWorkflowUpdated }: IntegrationTabProps) {
   return (
     <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
       <PublishSection workflowId={workflow.id} />
-      <TriggersSection workflow={workflow} />
+      <TriggersSection workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
     </div>
   );
 }

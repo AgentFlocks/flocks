@@ -137,4 +137,3 @@ def trigger_to_legacy_config(workflow_id: str, trigger: TriggerDefinition) -> tu
     if trigger.type == "kafka":
         return f"{LEGACY_KAFKA_CONFIG_PREFIX}{workflow_id}", kafka_trigger_to_legacy_config(workflow_id, trigger)
     return None, None
-

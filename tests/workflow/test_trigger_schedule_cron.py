@@ -32,4 +32,3 @@ def test_poller_next_run_uses_cron_when_present() -> None:
     )
 
     assert next_run_at == 300000
-

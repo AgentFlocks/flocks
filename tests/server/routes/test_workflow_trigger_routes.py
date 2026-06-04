@@ -217,6 +217,46 @@ async def test_create_workflow_trigger_persists_and_restarts_runtime(
 
 
 @pytest.mark.asyncio
+async def test_create_workflow_trigger_rejects_multiple_legacy_singletons(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "schedule-default",
+                        "type": "schedule",
+                        "enabled": True,
+                        "source": {"intervalSeconds": 60},
+                    }
+                ],
+            },
+        } if workflow_id == "wf-1" else None,
+    )
+
+    response = await client.post(
+        "/api/workflow/wf-1/triggers",
+        json={
+            "id": "schedule-extra",
+            "type": "schedule",
+            "enabled": True,
+            "source": {"intervalSeconds": 300},
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "Only one schedule trigger" in response.json()["message"]
+
+
+@pytest.mark.asyncio
 async def test_delete_workflow_trigger_removes_definition_and_restarts_runtime(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -342,4 +382,103 @@ async def test_webhook_route_authorizes_and_dispatches_trigger(
     assert body["ok"] is True
     assert body["executed"] is True
     assert body["inputs"]["payload"] == {"severity": "high"}
+    assert isinstance(body["deliveryId"], str)
+    assert "result" not in body
 
+
+@pytest.mark.asyncio
+async def test_webhook_route_rejects_disabled_trigger(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": False,
+                        "auth": {"type": "api_key", "apiKey": "demo-secret"},
+                    }
+                ],
+            },
+        },
+    )
+
+    response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-api-key": "demo-secret"},
+        json={"severity": "high"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert "disabled" in response.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_route_validates_hmac_signature(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        workflow_routes,
+        "_read_workflow_from_fs",
+        lambda workflow_id: {
+            "id": workflow_id,
+            "workflowJson": {
+                "start": "n1",
+                "nodes": [{"id": "n1", "type": "python", "code": "result = {'ok': True}"}],
+                "edges": [],
+                "triggers": [
+                    {
+                        "id": "hook-default",
+                        "type": "custom_webhook",
+                        "enabled": True,
+                        "auth": {
+                            "type": "hmac",
+                            "secretRef": "secret://demo-hook",
+                            "headerName": "x-signature",
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    monkeypatch.setattr(workflow_routes, "_resolve_trigger_secret", lambda _ref: "demo-secret")
+
+    async def _fake_dispatch_event(**_kwargs: Any) -> dict[str, Any]:
+        return {"matched": True, "executed": True, "inputs": {}}
+
+    monkeypatch.setattr(
+        workflow_routes,
+        "default_trigger_runtime",
+        SimpleNamespace(dispatch_event=_fake_dispatch_event),
+    )
+
+    payload = b'{"severity":"high"}'
+    signature = workflow_routes.hmac.new(
+        b"demo-secret",
+        payload,
+        workflow_routes.hashlib.sha256,
+    ).hexdigest()
+
+    ok_response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-signature": f"sha256={signature}", "content-type": "application/json"},
+        content=payload,
+    )
+    assert ok_response.status_code == 200, ok_response.text
+
+    bad_response = await client.post(
+        "/webhook/workflows/wf-1/hook-default",
+        headers={"x-signature": "sha256=bad-signature", "content-type": "application/json"},
+        content=payload,
+    )
+    assert bad_response.status_code == 401, bad_response.text
