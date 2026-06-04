@@ -57,13 +57,12 @@ class SessionPolicy:
 
     @classmethod
     def is_shared(cls, session: "SessionInfo") -> bool:
-        """Whether the session is accessible to all local users.
+        """Whether the session is explicitly shared to all local users.
 
-        True when explicitly marked ``shared_local`` or when the session has no
-        owner (e.g. channel-originated sessions created without an HTTP auth
-        context). Used both for permission checks and the UI "shared" badge.
+        Ownerless sessions are a legacy / unauthenticated compatibility state,
+        not a sharing state. The UI badge should only reflect explicit sharing.
         """
-        return cls.is_local_shared(session) or cls._has_no_owner(session)
+        return cls.is_local_shared(session)
 
     @staticmethod
     def _shared_read_user_ids(session: "SessionInfo") -> set[str]:
@@ -91,15 +90,15 @@ class SessionPolicy:
         Whether the session should be visible in listings / fetch.
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
-        - Logged-in users: owner, local-shared readers, or any user for ownerless
-          sessions (e.g. channel-originated sessions created without an auth context).
+        - Logged-in users: owner, local-shared readers, shared readers, or admins
+          managing ownerless legacy/channel sessions.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return True
         if cls.is_owner(session, resolved):
             return True
-        if cls._has_no_owner(session):
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
             return True
         return cls.is_shared_read_only(session, resolved)
 
@@ -108,16 +107,15 @@ class SessionPolicy:
         """
         Session write permission.
 
-        Owner can always write. Any authenticated user may write ownerless
-        sessions (e.g. channel-originated sessions that have no HTTP auth
-        context at creation time).
+        Owner can always write. Admins may repair/manage ownerless sessions
+        accumulated before local ownership was available.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
         if cls.is_owner(session, resolved):
             return True
-        if cls._has_no_owner(session):
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
             return True
         return False
 
@@ -128,6 +126,6 @@ class SessionPolicy:
             return False
         if cls.is_owner(session, resolved):
             return True
-        if cls._has_no_owner(session):
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
             return True
         return False
