@@ -219,6 +219,7 @@ class SandboxPythonExecRuntime(Runtime):
 
     sandbox: Dict[str, Any]
     tool_registry: Optional[Any] = None
+    cancel_checker: Optional[Callable[[], bool]] = None
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
