@@ -22,6 +22,24 @@ from flocks.tool.credential_context import (
 _SAMPLE_CONFIG = {"base_url": "https://10.201.255.17", "enabled": True}
 
 
+@pytest.fixture(autouse=True)
+def _reset_context_vars():
+    """Reset all three ContextVars before AND after every test.
+
+    ContextVars persist for the lifetime of an execution context (the test
+    thread), so without explicit cleanup a test that sets a var can leak state
+    into the next test — even if the next test calls _set_context(), it might
+    leave the var in an unexpected state if it only sets some of the vars.
+    """
+    _config_override.set(None)
+    _config_override_service.set(None)
+    _config_override_storage_key.set(None)
+    yield
+    _config_override.set(None)
+    _config_override_service.set(None)
+    _config_override_storage_key.set(None)
+
+
 def _set_context(
     *,
     config: dict,
