@@ -345,7 +345,9 @@ class SessionLoop:
         # Mark orphaned running tool parts as error (e.g. from server restart).
         # Wrapped in try/except so cleanup failures never block the session loop.
         try:
-            await cls._abort_orphan_running_parts(session_id)
+            from flocks.session.orphan_tools import abort_orphan_running_parts
+
+            await abort_orphan_running_parts(session_id)
         except Exception as exc:
             log.warn("loop.orphan_cleanup_failed", {
                 "session_id": session_id,
@@ -394,57 +396,6 @@ class SessionLoop:
             except Exception as exc:
                 log.warn("loop.idle.event_error", {"error": str(exc)})
     
-    @classmethod
-    async def _abort_orphan_running_parts(cls, session_id: str) -> None:
-        """Mark any tool parts stuck in 'running' status as error.
-
-        When the server restarts while a synchronous tool (e.g. delegate_task)
-        is executing, the tool part stays 'running' in storage forever.  On the
-        next session loop start we know nothing is actually executing yet, so
-        any 'running' parts are orphans.
-        """
-        import time as _time
-        from flocks.session.message import (
-            ToolPart, ToolStateError,
-        )
-
-        messages = await Message.list(session_id)
-        now_ms = int(_time.time() * 1000)
-        repaired = 0
-
-        for msg in messages:
-            parts = await Message.parts(msg.id, session_id)
-            for part in parts:
-                if not isinstance(part, ToolPart):
-                    continue
-                state = part.state
-                if getattr(state, "status", None) != "running":
-                    continue
-
-                time_info = getattr(state, "time", {}) or {}
-                start_ms = time_info.get("start", now_ms)
-
-                error_state = ToolStateError(
-                    status="error",
-                    input=getattr(state, "input", {}),
-                    error="Interrupted by server restart",
-                    time={"start": start_ms, "end": now_ms},
-                )
-                # Preserve metadata (e.g. sessionId) so the card still works
-                meta = getattr(state, "metadata", None)
-                if meta:
-                    error_state.metadata = meta
-
-                part.state = error_state
-                await Message.store_part(session_id, msg.id, part)
-                repaired += 1
-
-        if repaired:
-            log.info("loop.orphan_parts_aborted", {
-                "session_id": session_id,
-                "count": repaired,
-            })
-
     @staticmethod
     async def _resolve_model(
         session: Any,
