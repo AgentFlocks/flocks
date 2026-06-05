@@ -64,6 +64,7 @@
   },
   "workflowStatus": {
     "running": "运行中",
+    "cancelling": "取消中",
     "publishing": "发布中",
     "success": "成功",
     "SUCCEEDED": "成功",

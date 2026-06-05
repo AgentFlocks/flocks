@@ -14,6 +14,7 @@ interface StatusConfig {
 
 const STATUS_STYLE_MAP: Record<string, StatusConfig> = {
   running:    { className: 'bg-red-100 text-red-700',    dot: 'bg-red-500' },
+  cancelling: { className: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500' },
   publishing: { className: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-500' },
   success:    { className: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
   SUCCEEDED:  { className: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
