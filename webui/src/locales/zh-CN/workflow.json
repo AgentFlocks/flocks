@@ -59,6 +59,7 @@
       "phase": {
         "queued": "排队中",
         "running": "执行中",
+        "cancelling": "取消中",
         "success": "已完成",
         "error": "执行失败",
         "timeout": "超时",
@@ -199,6 +200,7 @@
       "publishSection": "发布为 API",
       "publishFailed": "发布失败",
       "stopFailed": "停止失败",
+      "cancelRequested": "已请求停止，正在等待当前步骤响应取消",
       "apiKeyShow": "显示",
       "apiKeyHide": "隐藏",
       "curlExample": "调用示例（curl）",

@@ -64,6 +64,7 @@
   },
   "workflowStatus": {
     "running": "Running",
+    "cancelling": "Cancelling",
     "publishing": "Publishing",
     "success": "Success",
     "SUCCEEDED": "Success",

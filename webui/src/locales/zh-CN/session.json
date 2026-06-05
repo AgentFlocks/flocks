@@ -146,7 +146,18 @@
       "inputParams": "输入参数",
       "outputResult": "输出结果",
       "errorLabel": "错误",
-      "elapsed": "耗时"
+      "elapsed": "耗时",
+      "workflowStage": "当前阶段：{{phase}}",
+      "workflowNode": "节点：{{node}}",
+      "workflowStep": "步骤：{{step}}",
+      "workflowPhase": {
+        "queued": "排队中",
+        "running": "执行中",
+        "success": "已完成",
+        "error": "执行失败",
+        "timeout": "超时",
+        "cancelled": "已取消"
+      }
     }
   },
   "groupToday": "今天",

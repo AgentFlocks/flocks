@@ -50,6 +50,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.testRun': '测试运行',
         'detail.run.stopRun': '停止运行',
         'detail.run.stopping': '停止中...',
+        'detail.run.cancelRequested': '已请求停止，正在等待当前步骤响应取消',
         'detail.run.outputResults': '输出结果',
         'detail.run.savingSampleInputs': '正在保存输入',
         'detail.run.sampleInputsSaved': '输入已保存',
@@ -186,6 +187,10 @@ describe('RunTab', () => {
     await waitFor(() => {
       expect(workflowAPI.cancelExecution).toHaveBeenCalledWith('wf-1', 'exec-1');
     });
+
+    expect(await screen.findByRole('button', { name: '停止中...' })).toBeDisabled();
+    expect(screen.getByText('cancelling')).toBeInTheDocument();
+    expect(screen.getByText('已请求停止，正在等待当前步骤响应取消')).toBeInTheDocument();
   });
 
   it('keeps the running execution visible when history is temporarily empty', async () => {

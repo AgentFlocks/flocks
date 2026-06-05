@@ -179,3 +179,94 @@ def test_run_workflow_cancels_native_tool_node() -> None:
 
     assert result.status == "CANCELLED"
     assert time.perf_counter() - started < 1.0
+
+
+def test_run_workflow_cancels_python_node_llm_ask(monkeypatch) -> None:
+    """Python node llm.ask() should use the same cooperative cancellation path."""
+    from flocks.provider import provider as provider_mod
+    from flocks.workflow import llm as workflow_llm_mod
+
+    class _FakeResponse:
+        def __init__(self, content: str):
+            self.content = content
+
+    class _FakeModel:
+        def __init__(self, model_id: str):
+            self.id = model_id
+
+    class _SlowProvider:
+        id = "demo"
+
+        def configure(self, _cfg):
+            return None
+
+        def is_configured(self):
+            return True
+
+        async def chat(self, model_id: str, messages, **kwargs):
+            del model_id, messages, kwargs
+            await asyncio.sleep(5)
+            return _FakeResponse("late")
+
+    provider = _SlowProvider()
+
+    monkeypatch.setattr(provider_mod.Provider, "_ensure_initialized", lambda: None)
+
+    async def _noop_apply_config(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(provider_mod.Provider, "apply_config", _noop_apply_config)
+    monkeypatch.setattr(provider_mod.Provider, "get", lambda pid: provider if pid == "demo" else None)
+    monkeypatch.setattr(
+        provider_mod.Provider,
+        "list_models",
+        lambda provider_id=None: [_FakeModel("m")] if provider_id == "demo" else [],
+    )
+
+    async def _noop_config_get():
+        class _Cfg:
+            model = None
+
+            def model_dump(self, **kwargs):
+                del kwargs
+                return {}
+
+        return _Cfg()
+
+    async def _resolve_default_llm():
+        return {"provider_id": "demo", "model_id": "m"}
+
+    monkeypatch.setattr(workflow_llm_mod.Config, "get", _noop_config_get)
+    monkeypatch.setattr(workflow_llm_mod.Config, "resolve_default_llm", _resolve_default_llm)
+
+    workflow = {
+        "name": "cancel_python_llm_ask",
+        "start": "slow",
+        "nodes": [
+            {
+                "id": "slow",
+                "type": "python",
+                "code": "outputs['answer'] = llm.ask('hello')",
+            }
+        ],
+        "edges": [],
+    }
+
+    cancel_event = threading.Event()
+    timer = threading.Timer(0.05, cancel_event.set)
+    started = time.perf_counter()
+    timer.start()
+    try:
+        result = run_workflow(
+            workflow=workflow,
+            inputs={},
+            ensure_requirements=False,
+            node_timeout_s=10,
+            cancel=cancel_event.is_set,
+        )
+    finally:
+        timer.cancel()
+
+    assert result.status == "CANCELLED"
+    assert result.outputs == {}
+    assert time.perf_counter() - started < 1.0

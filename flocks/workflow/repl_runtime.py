@@ -89,7 +89,7 @@ class PythonExecRuntime(Runtime):
         # a line tracer so simple Python loops can be interrupted by UI stop.
         g["cancelled"] = _cancel_requested
         g["is_cancelled"] = _cancel_requested
-        g.setdefault("llm", get_lazy_llm())
+        g["llm"] = get_lazy_llm(cancel_checker=self.cancel_checker)
         reg = self.tool_registry or get_tool_registry()
         if hasattr(reg, "cancel_checker"):
             try:
@@ -219,6 +219,7 @@ class SandboxPythonExecRuntime(Runtime):
 
     sandbox: Dict[str, Any]
     tool_registry: Optional[Any] = None
+    cancel_checker: Optional[Callable[[], bool]] = None
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -596,7 +597,7 @@ sys.stdout.flush()
                     retry_delay_s = float(retry_delay_raw)
                 except Exception as exc:
                     raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
-                output = get_lazy_llm().ask(
+                output = get_lazy_llm(cancel_checker=self.cancel_checker).ask(
                     prompt,
                     temperature=temperature,
                     model=model,

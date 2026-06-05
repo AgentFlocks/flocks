@@ -34,6 +34,7 @@ import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
+import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -3196,6 +3197,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
+  const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
 
   if (isWaitingForAnswer) {
     // Outer spacing is owned by the part wrapper in SessionChat's parts map.
@@ -3216,24 +3218,36 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     // spacing so every adjacent tool / thinking / text part is separated by a
     // single, uniform 8px gap. See the comment on the wrapper in `parts.map`.
     <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
-      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-center gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
-        <span className={`${config.iconColor} flex-shrink-0`}>{config.icon}</span>
-        <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
-        {inputSummary && (
-          <span
-            className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-          >
-            {inputSummary}
-          </span>
-        )}
-        {displayTitle && !inputSummary && (
-          <span
-            className="text-[11px] text-zinc-400 truncate min-w-0"
-          >
-            {displayTitle}
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 min-w-0 select-none hover:bg-zinc-50 transition-colors">
+        <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
+            {workflowHeaderSummary ? (
+              <span className="text-[11px] text-emerald-700 truncate min-w-0">
+                {workflowHeaderSummary}
+              </span>
+            ) : (
+              <>
+                {inputSummary && (
+                  <span
+                    className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
+                  >
+                    {inputSummary}
+                  </span>
+                )}
+                {displayTitle && !inputSummary && (
+                  <span
+                    className="text-[11px] text-zinc-400 truncate min-w-0"
+                  >
+                    {displayTitle}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
           <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`}>
             {config.label}
           </span>
