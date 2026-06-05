@@ -175,8 +175,8 @@ export default function PropertyPanel({
           </div>
         )}
 
-        {/* ── branch: select_key ── */}
-        {nodeType === 'branch' && (
+        {/* ── conditional routing: select_key ── */}
+        {['branch', 'loop', 'logic'].includes(nodeType) && (
           <div>
             <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
               <Settings className="w-4 h-4" />
@@ -187,30 +187,36 @@ export default function PropertyPanel({
               value={formData.select_key || ''}
               onChange={(e) => set('select_key', e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 font-mono text-sm"
-              placeholder={t('editor.branchKeyPlaceholder')}
+              placeholder={t('editor.branchKeyPlaceholder') || 'result'}
             />
+            <p className="text-xs text-gray-500 mt-1">
+              branch / loop / logic use this input path to choose the outgoing edge label.
+            </p>
           </div>
         )}
 
-        {/* ── branch / loop: join ── */}
-        {(nodeType === 'branch' || nodeType === 'loop') && (
-          <>
-            <div>
-              <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
-                <Settings className="w-4 h-4" />
-                {t('editor.joinMerge')}
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={!!formData.join}
-                  onChange={(e) => set('join', e.target.checked)}
-                  className="w-4 h-4 text-red-600 border-gray-300 rounded"
-                />
-                <span className="text-sm text-gray-600">{t('editor.enableOutputMerge')}</span>
-              </div>
+        {/* ── join: applies to any downstream merge node ── */}
+        <div className="rounded-lg border border-sky-100 bg-sky-50/60 p-3 space-y-3">
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+              <Settings className="w-4 h-4" />
+              {t('editor.joinMerge')}
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={!!formData.join}
+                onChange={(e) => set('join', e.target.checked)}
+                className="w-4 h-4 text-red-600 border-gray-300 rounded"
+              />
+              <span className="text-sm text-gray-600">{t('editor.enableOutputMerge')}</span>
             </div>
-            {formData.join && (
+            <p className="text-xs text-gray-500 mt-1">
+              Enable this on a node that merges multiple non-exclusive incoming paths.
+            </p>
+          </div>
+          {formData.join && (
+            <>
               <div>
                 <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
                   <Settings className="w-4 h-4" />
@@ -225,9 +231,38 @@ export default function PropertyPanel({
                   <option value="namespace">{t('editor.joinModeNamespace')}</option>
                 </select>
               </div>
-            )}
-          </>
-        )}
+              <div>
+                <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                  <Settings className="w-4 h-4" />
+                  Join Conflict
+                </label>
+                <select
+                  value={formData.join_conflict || 'overwrite'}
+                  onChange={(e) => set('join_conflict', e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm"
+                >
+                  <option value="overwrite">overwrite</option>
+                  <option value="error">error</option>
+                </select>
+              </div>
+              {formData.join_mode === 'namespace' && (
+                <div>
+                  <label className="flex items-center gap-2 text-sm font-medium text-gray-700 mb-2">
+                    <Settings className="w-4 h-4" />
+                    Namespace Key
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.join_namespace_key || ''}
+                    onChange={(e) => set('join_namespace_key', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 font-mono text-sm"
+                    placeholder="__by_source__"
+                  />
+                </div>
+              )}
+            </>
+          )}
+        </div>
 
         {/* ── tool node ── */}
         {nodeType === 'tool' && (
