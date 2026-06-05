@@ -1187,12 +1187,12 @@ async def get_session_messages(
     _require_session_read_access(session, current_user)
 
     try:
-        from flocks.session.orphan_tools import abort_orphan_running_parts
+        from flocks.session.orphan_tools import abort_orphan_running_parts_in_messages
         from flocks.session.core.status import SessionStatus
 
-        if sessionID not in SessionStatus.get_busy_session_ids():
-            await abort_orphan_running_parts(sessionID)
         messages_with_parts = await Message.list_with_parts(sessionID, include_archived=True)
+        if sessionID not in SessionStatus.get_busy_session_ids():
+            await abort_orphan_running_parts_in_messages(sessionID, messages_with_parts)
         if limit:
             messages_with_parts = messages_with_parts[-limit:]
         

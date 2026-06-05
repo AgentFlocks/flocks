@@ -251,6 +251,26 @@ class TestSessionMessages:
         assert repaired_part.state.time["start"] == 1000
         assert repaired_part.state.time["end"] >= 1000
 
+    @pytest.mark.asyncio
+    async def test_list_messages_uses_preloaded_orphan_recovery_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session import orphan_tools
+
+        preloaded_recovery = AsyncMock(return_value=0)
+        legacy_recovery = AsyncMock(side_effect=AssertionError("legacy recovery should not be called"))
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts_in_messages", preloaded_recovery)
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts", legacy_recovery)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        preloaded_recovery.assert_awaited_once()
+        legacy_recovery.assert_not_called()
+
 
 # ===========================================================================
 # Delete permissions (single-admin model)

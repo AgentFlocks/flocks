@@ -3,7 +3,7 @@
 import time
 from typing import Iterable, Optional
 
-from flocks.session.message import Message, ToolPart, ToolStateError
+from flocks.session.message import Message, MessageWithParts, ToolPart, ToolStateError
 from flocks.session.session import SessionInfo
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
@@ -15,33 +15,39 @@ log = Log.create(service="session.orphan_tools")
 INTERRUPTED_TOOL_ERROR = "Interrupted by server restart"
 
 
-async def abort_orphan_running_parts(session_id: str) -> int:
-    """Mark persisted running tool parts as interrupted errors."""
-    messages = await Message.list(session_id)
+def _build_interrupted_error_state(state: object, now_ms: int) -> ToolStateError:
+    """Create the terminal error state used for recovered orphaned tools."""
+    time_info = getattr(state, "time", {}) or {}
+    start_ms = time_info.get("start", now_ms)
+
+    return ToolStateError(
+        status="error",
+        input=getattr(state, "input", {}),
+        error=INTERRUPTED_TOOL_ERROR,
+        metadata=getattr(state, "metadata", None),
+        time={"start": start_ms, "end": now_ms},
+    )
+
+
+async def abort_orphan_running_parts_in_messages(
+    session_id: str,
+    messages_with_parts: Iterable[MessageWithParts],
+) -> int:
+    """Mark running tool parts as interrupted using preloaded message parts."""
     now_ms = int(time.time() * 1000)
     repaired = 0
 
-    for msg in messages:
-        parts = await Message.parts(msg.id, session_id)
-        for part in parts:
+    for msg_with_parts in messages_with_parts:
+        message_id = msg_with_parts.info.id
+        for part in msg_with_parts.parts:
             if not isinstance(part, ToolPart):
                 continue
             state = part.state
             if getattr(state, "status", None) != "running":
                 continue
 
-            time_info = getattr(state, "time", {}) or {}
-            start_ms = time_info.get("start", now_ms)
-
-            error_state = ToolStateError(
-                status="error",
-                input=getattr(state, "input", {}),
-                error=INTERRUPTED_TOOL_ERROR,
-                metadata=getattr(state, "metadata", None),
-                time={"start": start_ms, "end": now_ms},
-            )
-            part.state = error_state
-            await Message.store_part(session_id, msg.id, part)
+            part.state = _build_interrupted_error_state(state, now_ms)
+            await Message.store_part(session_id, message_id, part)
             repaired += 1
 
     if repaired:
@@ -50,6 +56,12 @@ async def abort_orphan_running_parts(session_id: str) -> int:
             "count": repaired,
         })
     return repaired
+
+
+async def abort_orphan_running_parts(session_id: str) -> int:
+    """Mark persisted running tool parts as interrupted errors."""
+    messages_with_parts = await Message.list_with_parts(session_id)
+    return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
 
 
 async def abort_orphan_running_parts_for_sessions(

@@ -12,6 +12,7 @@ from flocks.session.orphan_tools import (
     INTERRUPTED_TOOL_ERROR,
     abort_all_orphan_running_parts,
     abort_orphan_running_parts,
+    abort_orphan_running_parts_in_messages,
 )
 from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.session import Session
@@ -79,6 +80,54 @@ async def test_abort_orphan_running_parts_leaves_terminal_tools_unchanged():
     assert repaired == 0
     assert completed_part.state.status == "completed"
     assert completed_part.state.time == {"start": 1000, "end": 2000}
+
+
+@pytest.mark.asyncio
+async def test_abort_orphan_running_parts_in_messages_reuses_loaded_parts():
+    session = await Session.create(project_id="proj_orphan_loaded", directory="/tmp")
+    msg = await Message.create(session.id, MessageRole.ASSISTANT, "")
+    running = ToolPart(
+        id="part_orphan_loaded_running",
+        sessionID=session.id,
+        messageID=msg.id,
+        callID="call_orphan_loaded_running",
+        tool="bash",
+        state=ToolStateRunning(
+            input={"cmd": "sleep 60"},
+            metadata={"sessionId": "ses_child"},
+            time={"start": 4321},
+        ),
+    )
+    completed = ToolPart(
+        id="part_orphan_loaded_completed",
+        sessionID=session.id,
+        messageID=msg.id,
+        callID="call_orphan_loaded_completed",
+        tool="bash",
+        state=ToolStateCompleted(
+            input={"cmd": "pwd"},
+            output="/tmp",
+            title="bash",
+            metadata={},
+            time={"start": 1000, "end": 2000},
+        ),
+    )
+
+    await Message.store_part(session.id, msg.id, running)
+    await Message.store_part(session.id, msg.id, completed)
+
+    messages = await Message.list_with_parts(session.id)
+    repaired = await abort_orphan_running_parts_in_messages(session.id, messages)
+
+    assert repaired == 1
+    repaired_running = next(p for p in messages[0].parts if p.id == "part_orphan_loaded_running")
+    untouched_completed = next(p for p in messages[0].parts if p.id == "part_orphan_loaded_completed")
+    assert isinstance(repaired_running.state, ToolStateError)
+    assert repaired_running.state.error == INTERRUPTED_TOOL_ERROR
+    assert repaired_running.state.metadata == {"sessionId": "ses_child"}
+    assert repaired_running.state.time["start"] == 4321
+    assert repaired_running.state.time["end"] >= 4321
+    assert untouched_completed.state.status == "completed"
 
 
 @pytest.mark.asyncio
