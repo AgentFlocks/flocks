@@ -22,7 +22,7 @@ const mocks = vi.hoisted(() => ({
   updateDevice: vi.fn(),
   deleteDevice: vi.fn(),
   testDevice: vi.fn(),
-  getDeviceCredentials: vi.fn(),
+  revealDeviceCredentials: vi.fn(),
   listDeviceTools: vi.fn(),
   updateDeviceTool: vi.fn(),
   listApiServices: vi.fn(),
@@ -46,9 +46,28 @@ vi.mock('react-i18next', () => ({
         'toolbar.addDevice': '立即添加设备',
         'empty.addNow': '立即添加设备',
         'config.closeAriaLabel': '关闭设备配置面板',
+        'config.showSecretAction': '显示',
+        'config.hideSecretAction': '隐藏',
         'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
+        'wizard.customCardTitle': '自定义设备',
+        'wizard.customModes.api.title': 'API 接入',
+        'wizard.customModes.webcli.title': 'WebCLI 接入',
+        'wizard.customModes.workflow.title': 'Workflow 接入',
+        'custom.actions.submit': '提交给 Rex',
+        'custom.actions.openSessionList': '前往会话列表查看',
+        'custom.workflow.goToWorkflows': '前往工作流列表',
+        'custom.form.api.deviceNameLabel': '设备产品名',
+        'custom.form.api.vendorNameLabel': '厂商名称',
+        'custom.form.api.baseUrlLabel': 'Base URL',
+        'custom.form.api.docsUrlLabel': 'API 文档链接',
+        'custom.form.webcli.deviceNameLabel': '设备产品名',
+        'custom.form.webcli.vendorNameLabel': '厂商名称',
+        'custom.form.webcli.productUrlLabel': '产品 URL',
+        'custom.form.webcli.targetInterfacesLabel': '需要获取的接口或页面行为',
+        'custom.form.webcli.authHintLabel': '认证/权限提示',
       };
-
+      if (key === 'config.showSecretAria') return `显示${String(params?.label ?? '')}`;
+      if (key === 'config.hideSecretAria') return `隐藏${String(params?.label ?? '')}`;
       return translations[key] ?? key;
     },
     i18n: { language: 'zh-CN' },
@@ -112,7 +131,7 @@ vi.mock('@/api/device', () => ({
   deviceAPI: {
     list: (...args: unknown[]) => mocks.listDevices(...args),
     get: (...args: unknown[]) => mocks.getDevice(...args),
-    getCredentials: (...args: unknown[]) => mocks.getDeviceCredentials(...args),
+    revealCredentials: (...args: unknown[]) => mocks.revealDeviceCredentials(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
     createGroup: (...args: unknown[]) => mocks.createGroup(...args),
     updateGroup: (...args: unknown[]) => mocks.updateGroup(...args),
@@ -180,7 +199,7 @@ describe('DeviceIntegrationPage', () => {
     });
     mocks.listApiServices.mockResolvedValue({ data: [buildTemplate()] });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
-    mocks.getDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
+    mocks.revealDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
     mocks.setToolEnabled.mockResolvedValue({ data: {} });
     mocks.listDeviceTools.mockResolvedValue({ data: [] });
@@ -474,7 +493,7 @@ describe('DeviceIntegrationPage', () => {
         ],
       },
     });
-    mocks.getDeviceCredentials.mockResolvedValueOnce({
+    mocks.revealDeviceCredentials.mockResolvedValueOnce({
       data: {
         fields: {
           api_key: 'long-real-onesec-api-key-Cd4Y',
@@ -491,7 +510,7 @@ describe('DeviceIntegrationPage', () => {
     await user.click(screen.getByRole('button', { name: '显示API Key' }));
 
     await waitFor(() => {
-      expect(mocks.getDeviceCredentials).toHaveBeenCalledWith('device-1');
+      expect(mocks.revealDeviceCredentials).toHaveBeenCalledWith('device-1', 'api_key');
       expect(screen.getByDisplayValue('long-real-onesec-api-key-Cd4Y')).toBeInTheDocument();
     });
   });

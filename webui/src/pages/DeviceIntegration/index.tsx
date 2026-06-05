@@ -227,20 +227,20 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                 {selectedVendor
                   ? t('wizard.selectVendorTitle', { vendor: i18n.language.startsWith('zh') ? selectedVendor.nameCn : selectedVendor.nameEn })
                   : inModeSelection
-                    ? (i18n.language.startsWith('zh') ? '选择接入方式' : 'Select access mode')
+                    ? t('wizard.modeTitle')
                     : t('wizard.title')}
               </h3>
               <div className="flex items-center gap-1.5 mt-0.5">
                 <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${!selectedVendor && !inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-500'}`}>
-                  {i18n.language.startsWith('zh') ? '1 选择厂商 / 自定义' : '1 Select vendor / custom'}
+                  {t('wizard.step1Custom')}
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
                 <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${selectedVendor || inModeSelection ? 'bg-blue-100 text-blue-700' : 'bg-zinc-100 text-zinc-400'}`}>
-                  {i18n.language.startsWith('zh') ? '2 选择设备 / 方式' : '2 Select device / mode'}
+                  {t('wizard.step2Custom')}
                 </span>
                 <ChevronRight className="w-2.5 h-2.5 text-zinc-300" />
                 <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-400">
-                  {i18n.language.startsWith('zh') ? '3 填写资料 / 配置' : '3 Fill in details / config'}
+                  {t('wizard.step3Custom')}
                 </span>
               </div>
             </div>
@@ -254,11 +254,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
         <div className="flex-1 overflow-y-auto p-5">
           {!selectedVendor && !inModeSelection ? (
             <>
-              <p className="text-xs text-zinc-400 mb-4">
-                {i18n.language.startsWith('zh')
-                  ? '选择设备所属厂商，或创建自定义设备接入'
-                  : 'Choose a vendor or create a custom device integration'}
-              </p>
+              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setShowCustomModes(true)}
@@ -268,10 +264,10 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                     自
                   </div>
                   <div className="text-center">
-                    <p className="text-sm font-semibold text-zinc-800">自定义设备</p>
-                    <p className="text-xs text-zinc-400">API / WebCLI / Workflow</p>
+                    <p className="text-sm font-semibold text-zinc-800">{t('wizard.customCardTitle')}</p>
+                    <p className="text-xs text-zinc-400">{t('wizard.customCardSubtitle')}</p>
                     <p className="text-[10px] text-blue-600 mt-0.5 font-medium">
-                      创建新的接入方式
+                      {t('wizard.customCardCta')}
                     </p>
                   </div>
                   <ChevronRight className="w-3.5 h-3.5 text-blue-400 transition-colors" />
@@ -306,23 +302,23 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
             </>
           ) : inModeSelection ? (
             <>
-              <p className="text-xs text-zinc-400 mb-4">请选择自定义设备的接入方式</p>
+              <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseCustomMode')}</p>
               <div className="space-y-3">
                 {[
                   {
                     key: 'api' as const,
-                    title: 'API 接入',
-                    desc: '设备提供 API 能力时使用。需要提供 API 文档，最终生成可复用的 device 插件。',
+                    title: t('wizard.customModes.api.title'),
+                    desc: t('wizard.customModes.api.desc'),
                   },
                   {
                     key: 'webcli' as const,
-                    title: 'WebCLI 接入',
-                    desc: '设备没有开放 API 时使用。先生成并集成 skill/CLI 资产；如果是安全设备场景，再额外生成可在设备页使用的 device 插件。',
+                    title: t('wizard.customModes.webcli.title'),
+                    desc: t('wizard.customModes.webcli.desc'),
                   },
                   {
                     key: 'workflow' as const,
-                    title: 'Workflow 接入',
-                    desc: '适用于 Syslog、Kafka、Webhook。设备页会引导你前往工作流集成页面完成对应入口配置。',
+                    title: t('wizard.customModes.workflow.title'),
+                    desc: t('wizard.customModes.workflow.desc'),
                   },
                 ].map((mode) => (
                   <button
@@ -592,16 +588,16 @@ function DeviceConfigPanel({
 
     setRevealingFields((p) => ({ ...p, [key]: true }));
     try {
-      const res = await deviceAPI.getCredentials(device.id);
+      const res = await deviceAPI.revealCredentials(device.id, key);
       const revealedValue = res.data.fields?.[key];
       if (typeof revealedValue !== 'string') {
-        toast.error('读取密钥失败');
+        toast.error(t('config.secretRevealFailed'));
         return;
       }
       setFields((p) => ({ ...p, [key]: revealedValue }));
       setVisibility((p) => ({ ...p, [key]: true }));
     } catch {
-      toast.error('读取密钥失败');
+      toast.error(t('config.secretRevealFailed'));
     } finally {
       setRevealingFields((p) => ({ ...p, [key]: false }));
     }
@@ -763,8 +759,10 @@ function DeviceConfigPanel({
                                 type="button"
                                 onClick={() => handleToggleFieldVisibility(f, hasExisting)}
                                 disabled={revealing}
-                                aria-label={show ? `隐藏${f.label}` : `显示${f.label}`}
-                                title={show ? '隐藏' : '显示'}
+                                aria-label={show
+                                  ? t('config.hideSecretAria', { label: f.label })
+                                  : t('config.showSecretAria', { label: f.label })}
+                                title={show ? t('config.hideSecretAction') : t('config.showSecretAction')}
                                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-600 disabled:opacity-60"
                               >
                                 {revealing ? <Loader2 className="w-4 h-4 animate-spin" /> : show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
