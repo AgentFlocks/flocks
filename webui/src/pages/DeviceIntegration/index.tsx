@@ -841,6 +841,7 @@ function DeviceConfigPanel({
         <ToolDetailModal
           tool={toolModal}
           initialSection="test"
+          deviceId={device?.id}
           onClose={() => setToolModal(null)}
         />
       )}
