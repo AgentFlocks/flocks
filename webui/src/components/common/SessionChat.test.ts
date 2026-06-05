@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -458,6 +458,32 @@ describe('SessionChat agent mentions', () => {
         }),
       );
     });
+  });
+});
+
+describe('SessionChat slash command routing', () => {
+  it('sends absolute filesystem paths as normal prompts instead of slash commands', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    const text = '/tmp/stream_alert_denoise/rex_integration_guide.md\n\nuse this file';
+    const textarea = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: text } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: [{ type: 'text', text }],
+        }),
+      );
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
   });
 });
 

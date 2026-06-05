@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
-import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
@@ -2415,15 +2415,20 @@ export default function SessionChat({
                       const cursor = e.target.selectionStart ?? val.length;
                       const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
+                      const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
                       if (mention && !trimmed.startsWith('/')) {
                         setMentionRange({ start: mention.start, end: mention.end });
                         setMentionQuery(mention.query);
                         setSelectedMentionIndex(0);
                         setShowCommandDropdown(false);
-                      } else if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                      } else if (
+                        trimmed.startsWith('/') &&
+                        !trimmed.includes(' ') &&
+                        (slashQuery === '' || isSlashCommandName(slashQuery)) &&
+                        successfulAttachments.length === 0
+                      ) {
                         void loadCommandsIfNeeded();
-                        const q = trimmed.slice(1);
-                        setCommandQuery(q);
+                        setCommandQuery(slashQuery);
                         setSelectedCommandIndex(0);
                         setShowCommandDropdown(true);
                         setMentionRange(null);
