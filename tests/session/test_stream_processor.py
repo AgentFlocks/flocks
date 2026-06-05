@@ -482,6 +482,66 @@ class TestToolCallExecution:
         assert len(event_callback.await_args_list) == baseline_calls
 
     @pytest.mark.asyncio
+    async def test_completed_tool_cancels_pending_running_metadata_tasks(self):
+        proc = _make_processor(event_callback=AsyncMock())
+        created_tasks = []
+
+        class _FakeTask:
+            def __init__(self, coro):
+                self._callbacks = []
+                self.cancelled = False
+                coro.close()
+
+            def add_done_callback(self, callback):
+                self._callbacks.append(callback)
+
+            def cancel(self):
+                if self.cancelled:
+                    return
+                self.cancelled = True
+                for callback in list(self._callbacks):
+                    callback(self)
+
+            def result(self):
+                raise asyncio.CancelledError()
+
+        def _fake_create_task(coro):
+            task = _FakeTask(coro)
+            created_tasks.append(task)
+            return task
+
+        async def _successful_execute(*, tool_name, ctx, **kwargs):
+            ctx.metadata({
+                "title": "Running workflow: inflight-update",
+                "metadata": {"phase": "running", "step_index": 1},
+            })
+            return ToolResult(success=True, output="ok", title=tool_name, metadata={})
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=_successful_execute,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.asyncio.create_task",
+                side_effect=_fake_create_task,
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_inflight", tool_name="run_workflow"))
+            await proc.process_event(
+                ToolCallEvent(
+                    tool_call_id="tc_inflight",
+                    tool_name="run_workflow",
+                    input={"workflow": "wf.json"},
+                )
+            )
+
+        assert len(created_tasks) == 2
+        assert all(task.cancelled for task in created_tasks)
+
+    @pytest.mark.asyncio
     async def test_tool_call_skips_tool_span_without_langfuse_generation(self):
         proc = _make_processor()
 

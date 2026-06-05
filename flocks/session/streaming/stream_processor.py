@@ -654,6 +654,22 @@ class StreamProcessor:
                         import copy
 
                         _finished = [False]
+                        _pending_tasks: set[asyncio.Task[Any]] = set()
+
+                        def _track_task(coro: Awaitable[None]) -> None:
+                            task = asyncio.create_task(coro)
+                            _pending_tasks.add(task)
+
+                            def _cleanup(done_task: asyncio.Task[Any]) -> None:
+                                _pending_tasks.discard(done_task)
+                                try:
+                                    done_task.result()
+                                except asyncio.CancelledError:
+                                    pass
+                                except Exception as exc:
+                                    log.debug("stream.metadata_task.error", {"error": str(exc)})
+
+                            task.add_done_callback(_cleanup)
 
                         def _cb(metadata: Dict[str, Any]):
                             if _finished[0]:
@@ -686,9 +702,11 @@ class StreamProcessor:
                                                 }
                                             },
                                         )
+                                    except asyncio.CancelledError:
+                                        return
                                     except Exception as exc:
                                         log.debug("stream.metadata_publish.error", {"error": str(exc)})
-                                asyncio.create_task(_safe_publish())
+                                _track_task(_safe_publish())
 
                             # Persist updated running state so metadata (e.g. sessionId)
                             # survives page reload / session switch
@@ -717,11 +735,18 @@ class StreamProcessor:
                                         self.assistant_message.id,
                                         part,
                                     )
+                                except asyncio.CancelledError:
+                                    return
                                 except Exception as exc:
                                     log.debug("stream.metadata_persist.error", {"error": str(exc)})
-                            asyncio.create_task(_persist_running_metadata())
+                            _track_task(_persist_running_metadata())
 
-                        _cb.mark_finished = lambda: _finished.__setitem__(0, True)
+                        def _mark_finished() -> None:
+                            _finished[0] = True
+                            for task in list(_pending_tasks):
+                                task.cancel()
+
+                        _cb.mark_finished = _mark_finished
                         return _cb
 
                     ctx = ToolContext(

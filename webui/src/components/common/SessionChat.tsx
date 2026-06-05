@@ -3197,7 +3197,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
-  const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state));
+  const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
 
   if (isWaitingForAnswer) {
     // Outer spacing is owned by the part wrapper in SessionChat's parts map.
