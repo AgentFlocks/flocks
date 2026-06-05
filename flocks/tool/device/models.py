@@ -151,6 +151,10 @@ class DeviceIntegrationUpdate(BaseModel):
     fields: Optional[Dict[str, str]] = None
 
 
+class DeviceCredentialResponse(BaseModel):
+    fields: Dict[str, str] = Field(default_factory=dict)
+
+
 class DeviceTestResult(BaseModel):
     success: bool
     message: str

@@ -59,8 +59,31 @@
     "step1": "1 选择厂商",
     "step2": "2 选择设备",
     "step3": "3 填写配置",
+    "modeTitle": "选择接入方式",
+    "step1Custom": "1 选择厂商 / 自定义",
+    "step2Custom": "2 选择设备 / 方式",
+    "step3Custom": "3 填写资料 / 配置",
     "selectVendorTitle": "选择 {{vendor}} 设备",
     "vendorHint": "选择设备所属厂商，共 {{count}} 家",
+    "chooseVendorOrCustom": "选择设备所属厂商，或创建自定义设备接入",
+    "customCardTitle": "自定义设备",
+    "customCardSubtitle": "API / WebCLI / Workflow",
+    "customCardCta": "创建新的接入方式",
+    "chooseCustomMode": "请选择自定义设备的接入方式",
+    "customModes": {
+      "api": {
+        "title": "API 接入",
+        "desc": "设备提供 API 能力时使用。需要提供 API 文档，最终生成可复用的 device 插件。"
+      },
+      "webcli": {
+        "title": "WebCLI 接入",
+        "desc": "设备没有开放 API 时使用。先生成并集成 skill/CLI 资产；如果是安全设备场景，再额外生成可在设备页使用的 device 插件。"
+      },
+      "workflow": {
+        "title": "Workflow 接入",
+        "desc": "适用于 Syslog、Kafka、Webhook。设备页会引导你前往工作流集成页面完成对应入口配置。"
+      }
+    },
     "productCount": "{{count}} 种设备",
     "instanceCount": "已接入 {{count}} 台",
     "productHint": "共 {{count}} 款设备，同款设备可多次接入"
@@ -78,6 +101,11 @@
     "roomLabel": "所属机房",
     "connectionParams": "连接参数",
     "secretConfigured": "已配置 · 保持不变请勿修改，清空则删除",
+    "secretRevealFailed": "读取密钥失败",
+    "showSecretAction": "显示",
+    "hideSecretAction": "隐藏",
+    "showSecretAria": "显示{{label}}",
+    "hideSecretAria": "隐藏{{label}}",
     "sslLabel": "SSL 验证",
     "sslHint": "关闭可访问自签名证书的内网设备",
     "enabledLabel": "启用设备",
@@ -121,5 +149,94 @@
     "deleteDone": "已删除设备",
     "deleteFailed": "删除失败",
     "actionFailed": "操作失败"
+  },
+
+  "custom": {
+    "title": {
+      "api": "自定义设备 API 接入",
+      "webcli": "自定义设备 WebCLI 接入",
+      "workflow": "自定义设备 Workflow 接入"
+    },
+    "subtitle": {
+      "api": "提供 API 文档，生成可复用的 device 插件",
+      "webcli": "提供产品 URL 和目标接口，生成可在设备页使用的 WebCLI device 插件",
+      "workflow": "Syslog、Kafka、Webhook 统一在工作流集成页面配置"
+    },
+    "welcome": {
+      "api": "请补充 API 文档链接或直接上传文档文件，我会用 tool-builder skill 帮你生成可在设备页使用的 device 插件。",
+      "webcli": "请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果需要，再额外生成 device 插件。",
+      "workflow": "Workflow 接入不在这里创建插件，请前往工作流集成页面，根据需要配置 Syslog、Kafka 或 Webhook。"
+    },
+    "validation": {
+      "deviceNameRequired": "请填写设备产品名",
+      "vendorNameRequired": "请填写厂商名称",
+      "baseUrlRequired": "请填写 Base URL",
+      "productUrlRequired": "请填写产品 URL",
+      "targetInterfacesRequired": "请填写需要获取的接口或页面行为"
+    },
+    "toast": {
+      "submitSuccess": "已提交给 Rex，请继续完成插件生成",
+      "submitFailed": "提交给 Rex 失败"
+    },
+    "details": {
+      "prepareTitle": "提交给 Rex 前请准备好接入资料",
+      "prepareIntro": "提交后会直接进入 Rex 对话。",
+      "apiNext": "你可以继续补充 API 文档链接、上传文档文件或说明接口细节。插件生成完成后，可返回设备页继续后续配置。",
+      "webcliNext": "你可以继续补充页面操作、抓包目标和认证方式。最终结果应当是可在设备页识别的 WebCLI device 插件；如果需要，也可以额外保留 CLI 作为调试入口。"
+    },
+    "rex": {
+      "apiHint": "与 Rex 协作生成插件后，可返回设备页查看是否已出现对应 device 插件。若 API 文档不便粘贴，可直接在当前对话中上传。",
+      "webcliHint": "与 Rex 协作完成后，请确认 WebCLI device 插件已生成。完成后可返回设备页继续查看和配置；CLI 仅作为可选调试入口保留。",
+      "placeholder": "继续补充接口说明、认证细节或调试信息",
+      "pending": "Rex 准备中..."
+    },
+    "workflow": {
+      "heading": "Workflow 接入目前支持 Syslog、Kafka、Webhook",
+      "body": "你可以在工作流详情页的 Integration 标签中，按实际场景选择 Syslog、Kafka 或 Webhook，然后把设备或外部系统的数据推送到对应入口。",
+      "requirementsTitle": "配置要求",
+      "requirement1": "根据数据来源选择接入方式：日志转发选 Syslog，消息队列选 Kafka，HTTP 回调选 Webhook。",
+      "requirement2": "确认工作流监听地址、Topic 或 Webhook URL 能从设备侧或上游系统访问，并正确映射输入字段。",
+      "requirement3": "配置完成后，到工作流执行历史中确认是否已经收到并消费对应输入数据。",
+      "goToWorkflows": "前往工作流列表"
+    },
+    "actions": {
+      "backToSelection": "返回选择方式",
+      "backToForm": "返回资料填写",
+      "openSessionList": "前往会话列表查看",
+      "submit": "提交给 Rex"
+    },
+    "form": {
+      "common": {
+        "versionLabel": "产品版本"
+      },
+      "api": {
+        "deviceNameLabel": "设备产品名",
+        "deviceNamePlaceholder": "例如：自定义堡垒机",
+        "vendorNameLabel": "厂商名称",
+        "vendorNamePlaceholder": "例如：Acme Security",
+        "versionPlaceholder": "例如：v3.2.1",
+        "baseUrlLabel": "Base URL",
+        "baseUrlPlaceholder": "例如：https://device.example.com/api",
+        "docsUrlLabel": "API 文档链接",
+        "docsUrlPlaceholder": "例如：https://device.example.com/openapi",
+        "docsUrlHint": "没有公开链接也没关系，提交后可在 Rex 对话中继续上传 API 文档。",
+        "capabilitiesLabel": "期望接入的能力范围",
+        "capabilitiesPlaceholder": "默认全部 API，可选定需要的 API",
+        "capabilitiesHint": "默认全部 API；如果你只想接特定接口，可以在这里指定需要的 API。"
+      },
+      "webcli": {
+        "deviceNameLabel": "设备产品名",
+        "deviceNamePlaceholder": "例如：自定义态势平台",
+        "vendorNameLabel": "厂商名称",
+        "vendorNamePlaceholder": "例如：Acme Security",
+        "versionPlaceholder": "例如：2026.05",
+        "productUrlLabel": "产品 URL",
+        "productUrlPlaceholder": "例如：https://device.example.com",
+        "targetInterfacesLabel": "需要获取的接口或页面行为",
+        "targetInterfacesPlaceholder": "例如：抓取告警列表接口、资产详情接口，以及“封禁 IP”按钮对应请求",
+        "authHintLabel": "认证/权限提示",
+        "authHintPlaceholder": "例如：需要管理员角色；接口依赖 Cookie + X-CSRF-Token"
+      }
+    }
   }
 }

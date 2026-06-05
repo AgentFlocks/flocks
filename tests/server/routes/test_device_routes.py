@@ -30,6 +30,7 @@ def _fake_row(*, fields: Dict[str, str], verify_ssl: bool = False) -> dict:
     """
     return {
         "id": "dev-test",
+        "storage_key": "onesec_api_v2_8_2",
         "fields": json.dumps(fields),
         "verify_ssl": int(bool(verify_ssl)),
     }
@@ -194,5 +195,66 @@ class TestDeviceTestEndpoint:
         monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
 
         resp = await client.post("/api/devices/missing-id/test", json={})
+
+        assert resp.status_code == 404
+
+
+class TestDeviceCredentialEndpoint:
+    @pytest.mark.asyncio
+    async def test_reveals_only_requested_field_and_emits_audit(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        captured: dict = {}
+
+        async def fake_fetch_device(device_id: str):
+            captured["device_id"] = device_id
+            return _fake_row(
+                fields={
+                    "api_key": "{secret:device_dev-test_api_key}",
+                    "base_url": "https://console.onesec.net",
+                }
+            )
+
+        monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
+        monkeypatch.setattr(
+            device_routes,
+            "resolve_for_runtime",
+            lambda db_fields: {
+                **db_fields,
+                "api_key": "long-real-onesec-api-key-Cd4Y",
+            },
+        )
+        async def fake_emit_audit(event_type: str, payload: dict):
+            captured["audit_event_type"] = event_type
+            captured["audit_payload"] = payload
+
+        monkeypatch.setattr(device_routes, "_emit_device_audit", fake_emit_audit)
+
+        resp = await client.post(
+            "/api/devices/dev-test/credentials",
+            json={"field": "api_key"},
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert captured["device_id"] == "dev-test"
+        assert captured["audit_event_type"] == "device.credentials_reveal"
+        assert captured["audit_payload"]["device_id"] == "dev-test"
+        assert captured["audit_payload"]["field_keys"] == ["api_key"]
+        assert resp.json() == {
+            "fields": {
+                "api_key": "long-real-onesec-api-key-Cd4Y",
+            }
+        }
+
+    @pytest.mark.asyncio
+    async def test_returns_404_for_unknown_device(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_fetch_device(device_id: str):
+            return None
+
+        monkeypatch.setattr(device_routes, "fetch_device", fake_fetch_device)
+
+        resp = await client.post("/api/devices/missing-id/credentials", json={})
 
         assert resp.status_code == 404
