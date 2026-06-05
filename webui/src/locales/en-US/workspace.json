@@ -26,7 +26,14 @@
     "close": "Close",
     "uploading": "Uploading...",
     "binaryPreview": "Binary files cannot be previewed",
+    "unsupportedPreview": "This file type cannot be previewed. Please download to view.",
     "downloadFile": "Download File",
+    "readFailed": "Failed to load file content",
+    "retry": "Retry",
+    "previewTabs": {
+      "review": "Review",
+      "raw": "Raw"
+    },
     "toast": {
       "loadDirFailed": "Failed to load directory",
       "readFileFailed": "Failed to read file",

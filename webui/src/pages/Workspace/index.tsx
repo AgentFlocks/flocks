@@ -12,27 +12,34 @@ import { useConfirm } from '@/components/common/ConfirmDialog';
 import {
   workspaceAPI, WorkspaceNode, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
+import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
+import {
+  formatReviewContent, isJsonNode, isMarkdownNode, isTextPreviewNode,
+} from './filePreview';
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
 type Tab = 'files' | 'memory';
+type PreviewTab = 'review' | 'raw';
 
 // Preview/edit panel state consolidated into a single object
 interface PanelState {
   node: WorkspaceNode | null;
   content: string | null;
+  contentError: string | null;
   editContent: string | null;
   editing: boolean;
   saving: boolean;
 }
 
 const PANEL_INIT: PanelState = {
-  node: null, content: null, editContent: null, editing: false, saving: false,
+  node: null, content: null, contentError: null, editContent: null, editing: false, saving: false,
 };
 
 type PanelAction =
   | { type: 'select'; node: WorkspaceNode }
-  | { type: 'content_loaded'; content: string }
+  | { type: 'content_loaded'; path: string; content: string }
+  | { type: 'content_failed'; path: string; error: string }
   | { type: 'start_edit' }
   | { type: 'edit_change'; text: string }
   | { type: 'save_start' }
@@ -45,7 +52,11 @@ function panelReducer(state: PanelState, action: PanelAction): PanelState {
     case 'select':
       return { ...PANEL_INIT, node: action.node };
     case 'content_loaded':
-      return { ...state, content: action.content };
+      if (state.node?.path !== action.path) return state;
+      return { ...state, content: action.content, contentError: null };
+    case 'content_failed':
+      if (state.node?.path !== action.path) return state;
+      return { ...state, contentError: action.error };
     case 'start_edit':
       return { ...state, editing: true, editContent: state.content ?? '' };
     case 'edit_change':
@@ -89,6 +100,24 @@ export default function WorkspacePage() {
   );
 }
 
+function PreviewTabButton({ active, label, onClick }: {
+  active: boolean; label: string; onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`px-3 py-1.5 text-sm font-medium rounded-t-md border-b-2 -mb-px transition-colors ${
+        active
+          ? 'border-slate-700 text-slate-800'
+          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
 function TabButton({ active, onClick, icon, label }: {
   active: boolean; onClick: () => void; icon: React.ReactNode; label: string;
 }) {
@@ -119,6 +148,7 @@ function FilesTab() {
 
   // Preview/edit panel — consolidated into a reducer
   const [panel, dispatchPanel] = useReducer(panelReducer, PANEL_INIT);
+  const [previewTab, setPreviewTab] = useState<PreviewTab>('review');
 
   // Upload / new-dir state
   const [uploading, setUploading] = useState(false);
@@ -127,15 +157,20 @@ function FilesTab() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const closePanel = useCallback(() => {
+    dispatchPanel({ type: 'close' });
+    setPreviewTab('review');
+  }, []);
+
   const loadFileContent = useCallback(async (path: string) => {
     const res = await workspaceAPI.readFile(path);
-    dispatchPanel({ type: 'content_loaded', content: res.data.content });
+    dispatchPanel({ type: 'content_loaded', path, content: res.data.content });
   }, []);
 
   const loadDir = useCallback(async (path: string, options?: { preservePanel?: boolean }) => {
     setLoading(true);
     if (!options?.preservePanel) {
-      dispatchPanel({ type: 'close' });
+      closePanel();
     }
     try {
       const res = await workspaceAPI.list(path);
@@ -146,23 +181,39 @@ function FilesTab() {
     } finally {
       setLoading(false);
     }
-  }, [toast, t]);
+  }, [toast, t, closePanel]);
 
   useEffect(() => {
-    loadDir('');
-  }, [loadDir]);
+    void loadDir('');
+    // Mount-only: avoid re-fetching (and closing the preview panel) when callback identity changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const textPreviewDrawerOpen = Boolean(panel.node && isTextPreviewNode(panel.node));
+
+  useEffect(() => {
+    if (!textPreviewDrawerOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [textPreviewDrawerOpen]);
 
   const handleSelectNode = useCallback(async (node: WorkspaceNode) => {
     if (node.type === 'directory') {
       loadDir(node.path);
       return;
     }
+    setPreviewTab('review');
     dispatchPanel({ type: 'select', node });
-    if (node.is_text_file) {
+    if (isTextPreviewNode(node)) {
       try {
         await loadFileContent(node.path);
       } catch (e: any) {
-        toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        const message = e?.response?.data?.detail ?? e.message;
+        dispatchPanel({ type: 'content_failed', path: node.path, error: message });
+        toast.error(t('files.toast.readFileFailed'), message);
       }
     }
   }, [loadDir, loadFileContent, toast, t]);
@@ -170,14 +221,27 @@ function FilesTab() {
   const handleRefresh = useCallback(async () => {
     await loadDir(currentPath, { preservePanel: true });
 
-    if (panel.node?.is_text_file) {
+    if (panel.node && isTextPreviewNode(panel.node)) {
       try {
         await loadFileContent(panel.node.path);
       } catch (e: any) {
-        toast.error(t('files.toast.readFileFailed'), e?.response?.data?.detail ?? e.message);
+        const message = e?.response?.data?.detail ?? e.message;
+        dispatchPanel({ type: 'content_failed', path: panel.node.path, error: message });
+        toast.error(t('files.toast.readFileFailed'), message);
       }
     }
   }, [currentPath, loadDir, loadFileContent, panel.node, toast, t]);
+
+  const handleRetryContent = useCallback(async () => {
+    if (!panel.node || !isTextPreviewNode(panel.node)) return;
+    try {
+      await loadFileContent(panel.node.path);
+    } catch (e: any) {
+      const message = e?.response?.data?.detail ?? e.message;
+      dispatchPanel({ type: 'content_failed', path: panel.node.path, error: message });
+      toast.error(t('files.toast.readFileFailed'), message);
+    }
+  }, [loadFileContent, panel.node, toast, t]);
 
   const handleSave = useCallback(async () => {
     if (!panel.node || panel.editContent === null) return;
@@ -185,13 +249,14 @@ function FilesTab() {
     try {
       await workspaceAPI.writeFile(panel.node.path, panel.editContent);
       dispatchPanel({ type: 'save_done', content: panel.editContent });
+      setPreviewTab('review');
       toast.success(t('files.toast.saveSuccess'));
-      loadDir(currentPath);
+      loadDir(currentPath, { preservePanel: true });
     } catch (e: any) {
       dispatchPanel({ type: 'cancel_edit' });
       toast.error(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [panel.node, panel.editContent, currentPath, loadDir, toast]);
+  }, [panel.node, panel.editContent, currentPath, loadDir, toast, t]);
 
   const handleDelete = useCallback(async (node: WorkspaceNode) => {
     const ok = await confirm({
@@ -208,12 +273,12 @@ function FilesTab() {
         await workspaceAPI.deleteDir(node.path);
       }
       toast.success(t('files.toast.deleteSuccess'));
-      if (panel.node?.path === node.path) dispatchPanel({ type: 'close' });
+      if (panel.node?.path === node.path) closePanel();
       loadDir(currentPath);
     } catch (e: any) {
       toast.error(t('files.toast.deleteFailed'), e?.response?.data?.detail ?? e.message);
     }
-  }, [confirm, panel.node, currentPath, loadDir, toast]);
+  }, [confirm, panel.node, currentPath, loadDir, toast, closePanel, t]);
 
   const handleUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -400,32 +465,121 @@ function FilesTab() {
         )}
       </div>
 
-      {/* Right: preview / edit panel */}
-      {panel.node && (
-        <div className="w-96 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
+      {/* Text preview: 2/3 overlay drawer */}
+      {panel.node && isTextPreviewNode(panel.node) && (
+        <>
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={closePanel} aria-hidden />
+          <div
+            className="fixed right-0 top-0 bottom-0 z-50 w-2/3 max-w-full flex flex-col bg-white shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label={panel.node.name}
+            data-testid="workspace-preview-drawer"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
+              <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
+              <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {!panel.editing && (
+                  <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
+                    <Edit3 className="w-4 h-4" />
+                  </button>
+                )}
+                {panel.editing && (
+                  <>
+                    <button onClick={handleSave} disabled={panel.saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
+                      <Save className="w-4 h-4" />
+                    </button>
+                    <button onClick={() => dispatchPanel({ type: 'cancel_edit' })} title={t('files.cancel')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                      <X className="w-4 h-4" />
+                    </button>
+                  </>
+                )}
+                <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                  <Download className="w-4 h-4" />
+                </a>
+                <button onClick={closePanel} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="px-4 py-1.5 bg-gray-50 border-b border-gray-100 flex gap-4 text-xs text-gray-400 flex-shrink-0">
+              <span>{formatBytes(panel.node.size ?? 0)}</span>
+              <span>{formatDate(panel.node.modified_at)}</span>
+            </div>
+
+            {!panel.editing && isMarkdownNode(panel.node) && (
+              <div className="flex gap-1 px-4 pt-2 border-b border-gray-100 flex-shrink-0">
+                <PreviewTabButton
+                  active={previewTab === 'review'}
+                  label={t('files.previewTabs.review')}
+                  onClick={() => setPreviewTab('review')}
+                />
+                <PreviewTabButton
+                  active={previewTab === 'raw'}
+                  label={t('files.previewTabs.raw')}
+                  onClick={() => setPreviewTab('raw')}
+                />
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 overflow-hidden">
+              {panel.editing ? (
+                <textarea
+                  value={panel.editContent ?? ''}
+                  onChange={(e) => dispatchPanel({ type: 'edit_change', text: e.target.value })}
+                  className="w-full h-full resize-none p-4 text-sm font-mono text-gray-800 border-none outline-none bg-white"
+                  spellCheck={false}
+                />
+              ) : panel.contentError ? (
+                <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-400 p-6">
+                  <AlertTriangle className="w-10 h-10 text-orange-300" />
+                  <p className="text-sm text-center">{t('files.readFailed')}</p>
+                  <p className="text-xs text-center text-gray-400 max-w-md break-words">{panel.contentError}</p>
+                  <button
+                    type="button"
+                    onClick={handleRetryContent}
+                    className="px-3 py-1.5 text-sm text-sky-700 hover:underline"
+                  >
+                    {t('files.retry')}
+                  </button>
+                </div>
+              ) : panel.content == null ? (
+                <div className="flex items-center justify-center h-32"><LoadingSpinner /></div>
+              ) : isMarkdownNode(panel.node) && previewTab === 'review' ? (
+                <div className="h-full overflow-auto p-4">
+                  <StreamingMarkdown content={formatReviewContent(panel.node, panel.content)} isStreaming={false} />
+                </div>
+              ) : isJsonNode(panel.node) ? (
+                <pre className="w-full h-full overflow-auto p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words bg-white">
+                  <code>{panel.content}</code>
+                </pre>
+              ) : (
+                <pre className="w-full h-full overflow-auto p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words bg-white">
+                  {panel.content}
+                </pre>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Other files: compact download panel */}
+      {panel.node && panel.node.type === 'file' && !isTextPreviewNode(panel.node) && (
+        <div
+          className="w-96 flex-shrink-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden"
+          data-testid="workspace-download-panel"
+        >
           <div className="flex items-center gap-2 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
             <span className="text-sm flex-shrink-0">{fileIcon(panel.node)}</span>
             <span className="flex-1 text-sm font-medium text-gray-800 truncate">{panel.node.name}</span>
             <div className="flex items-center gap-1 flex-shrink-0">
-              {panel.node.is_text_file && !panel.editing && (
-                <button onClick={() => dispatchPanel({ type: 'start_edit' })} title={t('files.edit')} className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded">
-                  <Edit3 className="w-4 h-4" />
-                </button>
-              )}
-              {panel.editing && (
-                <>
-                  <button onClick={handleSave} disabled={panel.saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
-                    <Save className="w-4 h-4" />
-                  </button>
-                  <button onClick={() => dispatchPanel({ type: 'cancel_edit' })} title={t('files.cancel')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-                    <X className="w-4 h-4" />
-                  </button>
-                </>
-              )}
               <a href={workspaceAPI.downloadUrl(panel.node.path)} download={panel.node.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
                 <Download className="w-4 h-4" />
               </a>
-              <button onClick={() => dispatchPanel({ type: 'close' })} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
+              <button onClick={closePanel} title={t('files.close')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
                 <X className="w-4 h-4" />
               </button>
             </div>
@@ -436,34 +590,17 @@ function FilesTab() {
             <span>{formatDate(panel.node.modified_at)}</span>
           </div>
 
-          <div className="flex-1 min-h-0 overflow-hidden">
-            {panel.node.is_text_file ? (
-              panel.editing ? (
-                <textarea
-                  value={panel.editContent ?? ''}
-                  onChange={(e) => dispatchPanel({ type: 'edit_change', text: e.target.value })}
-                  className="w-full h-full resize-none p-4 text-sm font-mono text-gray-800 border-none outline-none bg-white"
-                  spellCheck={false}
-                />
-              ) : (
-                <pre className="w-full h-full overflow-auto p-4 text-sm font-mono text-gray-700 whitespace-pre-wrap break-words bg-white">
-                  {panel.content ?? <LoadingSpinner />}
-                </pre>
-              )
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full gap-3 text-gray-400 p-6">
-                <AlertTriangle className="w-10 h-10 text-orange-300" />
-                <p className="text-sm text-center">{t('files.binaryPreview')}</p>
-                <a
-                  href={workspaceAPI.downloadUrl(panel.node.path)}
-                  download={panel.node.name}
-                  className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-800"
-                >
-                  <Download className="w-4 h-4" />
-                  {t('files.downloadFile')}
-                </a>
-              </div>
-            )}
+          <div className="flex flex-col items-center justify-center flex-1 gap-3 text-gray-400 p-6 min-h-[12rem]">
+            <AlertTriangle className="w-10 h-10 text-orange-300" />
+            <p className="text-sm text-center">{t('files.unsupportedPreview')}</p>
+            <a
+              href={workspaceAPI.downloadUrl(panel.node.path)}
+              download={panel.node.name}
+              className="flex items-center gap-2 px-4 py-2 bg-slate-700 text-white text-sm rounded-lg hover:bg-slate-800"
+            >
+              <Download className="w-4 h-4" />
+              {t('files.downloadFile')}
+            </a>
           </div>
         </div>
       )}
