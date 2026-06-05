@@ -676,7 +676,7 @@ export default function Layout() {
             <Outlet />
           ) : (
             <div className="h-full overflow-y-auto">
-              <div className="min-h-full p-6 flex flex-col">
+              <div className="min-h-full p-6">
                 <Outlet />
               </div>
             </div>

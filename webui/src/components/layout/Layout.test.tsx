@@ -291,6 +291,19 @@ describe('Layout onboarding entry', () => {
     expect(screen.queryByPlaceholderText('onboarding.bootstrap.tbPlaceholder')).not.toBeInTheDocument();
   });
 
+  it('keeps standard pages out of a flex column content wrapper', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    await flushEffects();
+
+    const contentWrapper = container.querySelector('main .min-h-full.p-6');
+    expect(contentWrapper).not.toBeNull();
+    expect(contentWrapper).not.toHaveClass('flex');
+    expect(contentWrapper).not.toHaveClass('flex-col');
+  });
+
   it('polls update checks hourly', async () => {
     vi.useFakeTimers();
 
