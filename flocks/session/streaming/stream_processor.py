@@ -96,6 +96,7 @@ class StreamProcessor:
         session_id: str,
         assistant_message: MessageInfo,
         agent: AgentInfo,
+        abort_event: Optional[asyncio.Event] = None,
         permission_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
         text_delta_callback: Optional[Callable[[str], Awaitable[None]]] = None,
         reasoning_delta_callback: Optional[Callable[[str], Awaitable[None]]] = None,
@@ -112,6 +113,7 @@ class StreamProcessor:
         self.session_id = session_id
         self.assistant_message = assistant_message
         self.agent = agent
+        self.abort_event = abort_event or asyncio.Event()
         self.permission_callback = permission_callback
         self.text_delta_callback = text_delta_callback
         self.reasoning_delta_callback = reasoning_delta_callback
@@ -667,6 +669,8 @@ class StreamProcessor:
                                 state_dict["title"] = snapshot["title"]
                             if self.event_publish_callback:
                                 async def _safe_publish():
+                                    if _finished[0]:
+                                        return
                                     try:
                                         await self.event_publish_callback(
                                             "message.part.updated",
@@ -725,23 +729,25 @@ class StreamProcessor:
                         message_id=self.assistant_message.id,
                         agent=self.agent.name,
                         call_id=tool_call_id,
+                        abort_event=self.abort_event,
                         permission_callback=self.permission_callback,
                         extra=sandbox_meta["extra"],
                         metadata_callback=_make_metadata_cb(),
                         event_publish_callback=self.event_publish_callback,
                     )
-                    
-                    result = await ToolRegistry.execute(
-                        tool_name=tool_name,
-                        ctx=ctx,
-                        **tool_input
-                    )
-
-                    # Mark metadata callback as finished so pending async persist
-                    # tasks won't overwrite the upcoming completed/error state
                     cb = ctx._metadata_callback
-                    if cb and hasattr(cb, 'mark_finished'):
-                        cb.mark_finished()
+                    try:
+                        result = await ToolRegistry.execute(
+                            tool_name=tool_name,
+                            ctx=ctx,
+                            **tool_input
+                        )
+                    finally:
+                        # Mark metadata callback as finished so pending async
+                        # running-state updates cannot overwrite completed,
+                        # errored, or interrupted tool state.
+                        if cb and hasattr(cb, 'mark_finished'):
+                            cb.mark_finished()
 
             # Hook pipeline: tool.execute.after
             try:
@@ -867,6 +873,67 @@ class StreamProcessor:
                 except Exception as e:
                     log.error("stream.tool_end_callback.error", {"error": str(e)})
             
+        except asyncio.CancelledError:
+            interrupt_msg = "Tool execution was interrupted"
+            log.info("stream.tool_call.cancelled", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+            })
+            try:
+                if tool_span_ctx is not None:
+                    tool_span_ctx.end(
+                        output=interrupt_msg,
+                        metadata={"success": False},
+                        level="ERROR",
+                        status_message="tool_cancelled",
+                    )
+            except Exception as _span_err:
+                log.debug("stream.tool_span.cancel_end_failed", {"error": str(_span_err)})
+
+            tool_state.status = "error"
+            tool_state.error = interrupt_msg
+
+            try:
+                tool_end_time = int(datetime.now().timestamp() * 1000)
+                error_state = ToolStateError(
+                    status="error",
+                    input=tool_input,
+                    error=interrupt_msg,
+                    time={"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
+                )
+
+                error_part = ToolPart(
+                    id=tool_state.part_id,
+                    sessionID=self.session_id,
+                    messageID=self.assistant_message.id,
+                    type="tool",
+                    callID=tool_call_id,
+                    tool=tool_name,
+                    state=error_state,
+                )
+                await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+                if self.event_publish_callback:
+                    await self.event_publish_callback("message.part.updated", {
+                        "part": {
+                            "id": tool_state.part_id,
+                            "messageID": self.assistant_message.id,
+                            "sessionID": self.session_id,
+                            "type": "tool",
+                            "callID": tool_call_id,
+                            "tool": tool_name,
+                            "state": {
+                                "status": "error",
+                                "input": tool_input,
+                                "error": interrupt_msg,
+                                "time": {"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
+                            }
+                        }
+                    })
+            except Exception as store_e:
+                log.error("stream.tool_call.cancelled_update_failed", {"error": str(store_e)})
+
+            raise
         except Exception as e:
             log.error("stream.tool_call.error", {
                 "tool_call_id": tool_call_id,

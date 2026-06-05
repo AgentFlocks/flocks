@@ -58,11 +58,13 @@ def _make_processor(
     text_callback=None,
     reasoning_callback=None,
     event_callback=None,
+    abort_event=None,
 ):
     return StreamProcessor(
         session_id=session_id,
         assistant_message=_make_assistant_msg(session_id),
         agent=_make_agent(),
+        abort_event=abort_event,
         text_delta_callback=text_callback,
         reasoning_delta_callback=reasoning_callback,
         event_publish_callback=event_callback,
@@ -421,6 +423,63 @@ class TestToolCallExecution:
             )
 
         assert "tc_exec" in proc.tool_calls
+
+    @pytest.mark.asyncio
+    async def test_tool_call_passes_session_abort_event_to_tool_context(self):
+        abort_event = asyncio.Event()
+        proc = _make_processor(abort_event=abort_event)
+        seen_abort = {}
+
+        async def _fake_execute(*, tool_name, ctx, **kwargs):
+            seen_abort["event"] = ctx.abort
+            return ToolResult(success=True, output="ok", title=tool_name, metadata={})
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(side_effect=_fake_execute),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_abort", tool_name="run_workflow"))
+            await proc.process_event(
+                ToolCallEvent(tool_call_id="tc_abort", tool_name="run_workflow", input={"workflow": "wf.json"})
+            )
+
+        assert seen_abort["event"] is abort_event
+
+    @pytest.mark.asyncio
+    async def test_cancelled_tool_blocks_late_running_metadata_updates(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+        saved_cb = {}
+
+        async def _cancelled_execute(*, tool_name, ctx, **kwargs):
+            saved_cb["cb"] = ctx._metadata_callback
+            raise asyncio.CancelledError()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch("flocks.session.streaming.stream_processor.Message.update_part", new=AsyncMock()),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(side_effect=_cancelled_execute),
+            ),
+        ):
+            await proc.process_event(ToolInputStartEvent(id="tc_cancel", tool_name="run_workflow"))
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(
+                    ToolCallEvent(tool_call_id="tc_cancel", tool_name="run_workflow", input={"workflow": "wf.json"})
+                )
+
+        baseline_calls = len(event_callback.await_args_list)
+        saved_cb["cb"]({
+            "title": "Running workflow: late-update",
+            "metadata": {"phase": "running", "step_index": 99},
+        })
+        await asyncio.sleep(0)
+        assert len(event_callback.await_args_list) == baseline_calls
 
     @pytest.mark.asyncio
     async def test_tool_call_skips_tool_span_without_langfuse_generation(self):
