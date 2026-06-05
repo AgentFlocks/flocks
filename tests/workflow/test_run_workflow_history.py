@@ -1,4 +1,4 @@
-"""Test run_workflow tool returns execution history in results."""
+"""Test run_workflow tool keeps execution history in metadata."""
 
 import json
 import pytest
@@ -8,21 +8,16 @@ from flocks.tool.task.run_workflow import run_workflow_tool
 from flocks.tool.registry import ToolContext
 
 
-class MockToolContext:
-    """Mock ToolContext for testing."""
-    
-    async def ask(self, **kwargs):
-        """Mock permission request - always allow."""
-        pass
-    
-    def metadata(self, data=None, **kwargs):
-        """Mock metadata update."""
-        pass
+class MockToolContext(ToolContext):
+    """ToolContext with stable IDs for workflow tests."""
+
+    def __init__(self) -> None:
+        super().__init__(session_id="test-session", message_id="test-message")
 
 
 @pytest.mark.asyncio
 async def test_workflow_history_in_output():
-    """Test that workflow execution history is included in tool output."""
+    """History stays in metadata while the default output stays concise."""
     
     # Create a simple test workflow
     workflow = {
@@ -104,18 +99,17 @@ async def test_workflow_history_in_output():
     assert "outputs" in result.metadata
     assert result.metadata["outputs"]["final"] == 35
     
-    # Verify output text contains history information
-    assert "Execution History" in result.output
-    assert "step1" in result.output
-    assert "step2" in result.output
-    assert "step3" in result.output
-    assert "Inputs:" in result.output
-    assert "Outputs:" in result.output
+    # Verify output text no longer expands the full execution history
+    assert "Status: SUCCEEDED" in result.output
+    assert "Final Outputs:" in result.output
+    assert "Execution History" not in result.output
+    assert "Inputs:" not in result.output
+    assert "Stdout:" not in result.output
 
 
 @pytest.mark.asyncio
 async def test_workflow_history_with_error():
-    """Test that workflow history is included even when execution fails."""
+    """History is preserved in metadata even when execution fails."""
     
     workflow = {
         "name": "test_error_workflow",
@@ -172,14 +166,16 @@ async def test_workflow_history_with_error():
     assert "Intentional error" in step2["error"]
     assert "traceback" in step2
     
-    # Output should contain error information
+    # Output should contain only the top-level failure summary
     assert "Error:" in result.output
-    assert "step2" in result.output
+    assert "Execution History" not in result.output
+    assert "Inputs:" not in result.output
+    assert "Stdout:" not in result.output
 
 
 @pytest.mark.asyncio
 async def test_workflow_history_with_stdout():
-    """Test that stdout from nodes is captured in history."""
+    """Stdout remains in metadata history even if hidden from tool output."""
     
     workflow = {
         "name": "test_stdout_workflow",
@@ -214,9 +210,9 @@ async def test_workflow_history_with_stdout():
     assert "stdout" in step1
     assert "Hello from step1" in step1["stdout"]
     
-    # Output should show stdout
-    assert "Stdout:" in result.output
-    assert "Hello from step1" in result.output
+    # Output should stay concise and omit per-step stdout details
+    assert "Stdout:" not in result.output
+    assert "Hello from step1" not in result.output
 
 
 if __name__ == "__main__":

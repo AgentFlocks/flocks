@@ -161,8 +161,13 @@ async def _build_description() -> str:
     return result
 
 
-def _format_workflow_result(result: Any) -> str:
-    """Format RunWorkflowResult or dict as readable output"""
+def _format_workflow_result(result: Any, *, include_history: bool = False) -> str:
+    """Format RunWorkflowResult or dict as readable output.
+
+    By default the returned text omits step-by-step execution history so
+    session tool output stays concise. The structured history remains
+    available in metadata and persisted execution records.
+    """
     if hasattr(result, '__dict__'):
         # RunWorkflowResult object
         data = result.__dict__
@@ -194,7 +199,7 @@ def _format_workflow_result(result: Any) -> str:
         except Exception:
             output_lines.append(str(data.get('outputs')))
     
-    if data.get('history'):
+    if include_history and data.get('history'):
         history = data.get('history', [])
         if history:
             output_lines.append(f"\n{'='*80}")

@@ -17,6 +17,7 @@ import re
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
 
@@ -1892,6 +1893,40 @@ class SessionRunner:
     def _clone_cached_chat_messages(payloads: List[Dict[str, Any]]) -> List[ChatMessage]:
         return [ChatMessage.model_validate(copy.deepcopy(payload)) for payload in payloads]
 
+    @staticmethod
+    def _display_file_path(filepath: str) -> str:
+        """Format a local path for user-facing Markdown links."""
+        try:
+            resolved = Path(filepath).expanduser().resolve(strict=False)
+            home = Path.home().resolve(strict=False)
+            if resolved.is_relative_to(home):
+                rel_path = resolved.relative_to(home)
+                rel_text = rel_path.as_posix()
+                return f"~/{rel_text}" if rel_text else "~"
+            return str(resolved)
+        except Exception:
+            return filepath
+
+    @classmethod
+    def _format_write_tool_output(cls, tool_output_str: str, metadata: Dict[str, Any]) -> str:
+        """Append a clickable local-file Markdown link for write results."""
+        filepath = metadata.get("filepath")
+        if not isinstance(filepath, str) or not filepath.strip():
+            return tool_output_str
+
+        try:
+            resolved = Path(filepath).expanduser().resolve(strict=False)
+            file_uri = resolved.as_uri()
+        except Exception:
+            return tool_output_str
+
+        if file_uri in tool_output_str:
+            return tool_output_str
+
+        display_path = cls._display_file_path(str(resolved))
+        prefix = tool_output_str.rstrip() if tool_output_str else "Wrote file successfully."
+        return f"{prefix}\n\nSaved file:\n[`{display_path}`]({file_uri})"
+
     def _build_tool_output_text(self, part: Any, tool_name: str, ctx_window_tokens: int) -> Tuple[str, bool, bool]:
         state = getattr(part, "state", None)
         metadata = dict(getattr(state, "metadata", None) or {}) if state is not None else {}
@@ -1913,6 +1948,9 @@ class SessionRunner:
                     tool_output_str = json.dumps(tool_output, ensure_ascii=False, indent=2)
                 except (TypeError, ValueError):
                     tool_output_str = str(tool_output)
+
+        if tool_name == "write":
+            tool_output_str = self._format_write_tool_output(tool_output_str, metadata)
 
         from flocks.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
         already_truncated = (

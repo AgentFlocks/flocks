@@ -22,6 +22,7 @@ from flocks.session.message import (
     PartTime,
     ReasoningPart,
     ToolPart,
+    ToolStateCompleted,
     ToolStateRunning,
     UserMessageInfo,
 )
@@ -1993,6 +1994,53 @@ def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     assert "interleaved=" in capability_key
     assert '"field": "reasoning_content"' in capability_key
     assert '"cross_provider_policy": "placeholder"' in capability_key
+
+
+def test_build_tool_output_text_formats_write_result_with_clickable_link(tmp_path):
+    runner = _make_runner("ses_runner_write_tool_link")
+    output_file = (tmp_path / "Flocks+AI安全运营报告.md").resolve()
+    state = ToolStateCompleted(
+        input={"filePath": str(output_file)},
+        output="Wrote file successfully.",
+        title=str(output_file),
+        metadata={"filepath": str(output_file)},
+        time={"start": 1, "end": 2},
+    )
+    part = SimpleNamespace(state=state)
+
+    tool_output_str, was_dyn_truncated, persisted_placeholder = runner._build_tool_output_text(
+        part,
+        "write",
+        128_000,
+    )
+
+    assert "Wrote file successfully." in tool_output_str
+    assert f"[`{output_file}`]({output_file.as_uri()})" in tool_output_str
+    assert was_dyn_truncated is False
+    assert persisted_placeholder is False
+
+
+def test_build_tool_output_text_does_not_add_link_for_non_write_tool(tmp_path):
+    runner = _make_runner("ses_runner_non_write_tool_link")
+    output_file = (tmp_path / "note.md").resolve()
+    state = ToolStateCompleted(
+        input={"path": str(output_file)},
+        output="Tool finished.",
+        title="task",
+        metadata={"filepath": str(output_file)},
+        time={"start": 1, "end": 2},
+    )
+    part = SimpleNamespace(state=state)
+
+    tool_output_str, was_dyn_truncated, persisted_placeholder = runner._build_tool_output_text(
+        part,
+        "task",
+        128_000,
+    )
+
+    assert tool_output_str == "Tool finished."
+    assert was_dyn_truncated is False
+    assert persisted_placeholder is False
 
 
 @pytest.mark.asyncio

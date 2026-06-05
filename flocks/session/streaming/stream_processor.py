@@ -343,7 +343,7 @@ class StreamProcessor:
         """Handle reasoning block end"""
         if event.id in self.reasoning_parts:
             part = self.reasoning_parts[event.id]
-            part.text = part.text.rstrip()
+            part.text = part.text.strip()
             
             if event.metadata:
                 self._merge_reasoning_metadata(part, event.metadata)

@@ -726,8 +726,9 @@ class TestRunWorkflowToolResultFormatting:
             assert "Run ID: run-format" in output
             assert "Steps executed: 3" in output
             assert "Last node: node-3" in output
-            assert "Outputs:" in output
-            assert "Execution History" in output
+            assert "Final Outputs:" in output
+            assert "Execution History" not in output
+            assert result.metadata["history"] == fake.history
     
     @pytest.mark.anyio
     async def test_run_workflow_result_with_error(self, tool_context_with_permission, simple_workflow):
