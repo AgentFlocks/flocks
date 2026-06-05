@@ -165,7 +165,7 @@ export default function RightPanel({
         )}
         {activeTab === 'integration' && (
           <TabErrorBoundary>
-            <IntegrationTab workflow={workflow} />
+            <IntegrationTab workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
           </TabErrorBoundary>
         )}
       </div>

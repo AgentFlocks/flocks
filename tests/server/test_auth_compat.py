@@ -305,6 +305,10 @@ class TestAuthMiddlewareExempt:
         assert auth_module.auth_middleware_exempt("/api/channel/wecom/webhook") is True
         assert auth_module.auth_middleware_exempt("/api/channel/feishu/webhook/") is True
 
+    def test_workflow_webhook_is_exempt_via_regex(self):
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default") is True
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default/") is True
+
     def test_other_channel_subpaths_are_still_protected(self):
         # Only ``/webhook`` is public; ``/bind``, ``/restart``, ``/status``
         # and friends still require auth.
@@ -315,6 +319,7 @@ class TestAuthMiddlewareExempt:
         # Defense-in-depth: a malicious caller must not hide a protected path
         # behind a fake ``webhook`` segment.
         assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/webhook/extra") is False
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default/extra") is False
 
 
 @pytest.mark.asyncio
@@ -339,6 +344,26 @@ async def test_apply_auth_for_request_channel_webhook_passes_without_credentials
     try:
         assert blocked is None
         # Public paths intentionally do not synthesize an auth user.
+        assert user is None
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_workflow_webhook_passes_without_credentials(monkeypatch):
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+    request = _make_request(
+        headers={"user-agent": "Alertmanager-Webhook"},
+        client_host="203.0.113.20",
+        path="/webhook/workflows/wf-1/hook-default",
+    )
+    blocked, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert blocked is None
         assert user is None
     finally:
         auth_module.clear_auth_context(token)

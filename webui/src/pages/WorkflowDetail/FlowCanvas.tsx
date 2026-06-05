@@ -27,6 +27,7 @@ import {
   type WorkflowGraphEdgeRoute,
   type WorkflowGraphOutputHandle,
 } from '@/utils/workflowGraphLayout';
+import { WorkflowTrigger } from '@/api/workflow';
 
 // ─────────────────────────────────────────────
 // Node type config
@@ -106,6 +107,78 @@ const TYPE_CONFIG: Record<string, NodeStyle> = {
     accentBg: 'bg-orange-50',
     dot: 'bg-orange-400',
   },
+  schedule: {
+    bg: 'bg-white',
+    border: 'border-sky-400',
+    text: 'text-sky-600',
+    handleColor: '!bg-sky-400',
+    accentBg: 'bg-sky-50',
+    dot: 'bg-sky-400',
+  },
+  webhook: {
+    bg: 'bg-white',
+    border: 'border-cyan-400',
+    text: 'text-cyan-700',
+    handleColor: '!bg-cyan-400',
+    accentBg: 'bg-cyan-50',
+    dot: 'bg-cyan-400',
+  },
+  custom_webhook: {
+    bg: 'bg-white',
+    border: 'border-cyan-400',
+    text: 'text-cyan-700',
+    handleColor: '!bg-cyan-400',
+    accentBg: 'bg-cyan-50',
+    dot: 'bg-cyan-400',
+  },
+  kafka: {
+    bg: 'bg-white',
+    border: 'border-indigo-400',
+    text: 'text-indigo-700',
+    handleColor: '!bg-indigo-400',
+    accentBg: 'bg-indigo-50',
+    dot: 'bg-indigo-400',
+  },
+  syslog: {
+    bg: 'bg-white',
+    border: 'border-lime-400',
+    text: 'text-lime-700',
+    handleColor: '!bg-lime-400',
+    accentBg: 'bg-lime-50',
+    dot: 'bg-lime-400',
+  },
+  internal_event: {
+    bg: 'bg-white',
+    border: 'border-blue-400',
+    text: 'text-blue-700',
+    handleColor: '!bg-blue-400',
+    accentBg: 'bg-blue-50',
+    dot: 'bg-blue-400',
+  },
+  custom_adapter: {
+    bg: 'bg-white',
+    border: 'border-fuchsia-400',
+    text: 'text-fuchsia-700',
+    handleColor: '!bg-fuchsia-400',
+    accentBg: 'bg-fuchsia-50',
+    dot: 'bg-fuchsia-400',
+  },
+  manual: {
+    bg: 'bg-white',
+    border: 'border-slate-400',
+    text: 'text-slate-700',
+    handleColor: '!bg-slate-400',
+    accentBg: 'bg-slate-50',
+    dot: 'bg-slate-400',
+  },
+  plugin: {
+    bg: 'bg-white',
+    border: 'border-fuchsia-400',
+    text: 'text-fuchsia-700',
+    handleColor: '!bg-fuchsia-400',
+    accentBg: 'bg-fuchsia-50',
+    dot: 'bg-fuchsia-400',
+  },
 };
 
 const TYPE_ICONS: Record<string, React.ReactNode> = {
@@ -117,6 +190,15 @@ const TYPE_ICONS: Record<string, React.ReactNode> = {
   llm: <Sparkles className="w-3.5 h-3.5" />,
   http_request: <Globe className="w-3.5 h-3.5" />,
   subworkflow: <Workflow className="w-3.5 h-3.5" />,
+  schedule: <RotateCw className="w-3.5 h-3.5" />,
+  webhook: <Globe className="w-3.5 h-3.5" />,
+  custom_webhook: <Globe className="w-3.5 h-3.5" />,
+  kafka: <Workflow className="w-3.5 h-3.5" />,
+  syslog: <Zap className="w-3.5 h-3.5" />,
+  internal_event: <Sparkles className="w-3.5 h-3.5" />,
+  custom_adapter: <Wrench className="w-3.5 h-3.5" />,
+  manual: <Code2 className="w-3.5 h-3.5" />,
+  plugin: <Wrench className="w-3.5 h-3.5" />,
 };
 
 const TYPE_LABELS: Record<string, string> = {
@@ -128,7 +210,35 @@ const TYPE_LABELS: Record<string, string> = {
   llm: 'LLM',
   http_request: 'HTTP',
   subworkflow: 'SubWorkflow',
+  schedule: 'Schedule',
+  webhook: 'Webhook',
+  custom_webhook: 'Custom Webhook',
+  kafka: 'Kafka',
+  syslog: 'Syslog',
+  internal_event: 'Internal Event',
+  custom_adapter: 'Custom Adapter',
+  manual: 'Manual',
+  plugin: 'Plugin',
 };
+
+function summarizeTrigger(trigger: WorkflowTrigger): string {
+  const source = trigger?.source ?? {};
+  switch (trigger?.type) {
+    case 'schedule':
+      return source.cron ? `Cron ${source.cron}` : `Every ${source.intervalSeconds ?? 300}s`;
+    case 'kafka':
+      return `${source.inputTopic ?? '-'} @ ${source.inputBroker ?? '-'}`;
+    case 'syslog':
+      return `${source.protocol ?? 'udp'}://${source.host ?? '0.0.0.0'}:${source.port ?? 5140}`;
+    case 'webhook':
+    case 'custom_webhook':
+      return `${source.method ?? 'POST'} /webhook/workflows/.../${trigger?.id ?? ''}`;
+    case 'custom_adapter':
+      return source.adapterId || source.pluginId || 'Custom adapter';
+    default:
+      return trigger?.description || TYPE_LABELS[trigger?.type ?? ''] || String(trigger?.type ?? 'Trigger');
+  }
+}
 
 // ─────────────────────────────────────────────
 // Compact view node
@@ -139,6 +249,7 @@ interface ViewNodeData {
   nodeType: string;
   description?: string;
   isStart?: boolean;
+  isTrigger?: boolean;
   join?: boolean;
   joinMode?: string;
   outputHandles?: WorkflowGraphOutputHandle[];
@@ -164,7 +275,9 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
         transition-all duration-150
         ${selected ? 'shadow-md ring-2 ring-offset-1 ring-red-300' : 'hover:shadow-md'}
       `}
-      onClick={() => d.onNodeClick?.(d.label)}
+      onClick={() => {
+        if (!d.isTrigger) d.onNodeClick?.(d.label);
+      }}
     >
       <Handle
         type="target"
@@ -179,6 +292,11 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
         {d.isStart && (
           <span className="ml-auto text-xs bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded-full font-medium leading-none">
             {t('detail.flow.startBadge')}
+          </span>
+        )}
+        {d.isTrigger && (
+          <span className="ml-auto text-xs bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded-full font-medium leading-none">
+            Trigger
           </span>
         )}
       </div>
@@ -203,11 +321,13 @@ const ViewNode = memo(function ViewNode({ data, selected }: NodeProps) {
       </div>
 
       {/* Click hint */}
-      <div className="px-3 pb-2 flex items-center justify-end">
-        <span className="text-xs text-gray-300 flex items-center gap-0.5">
-          {t('detail.flow.details')} <ChevronRight className="w-3 h-3" />
-        </span>
-      </div>
+      {!d.isTrigger && (
+        <div className="px-3 pb-2 flex items-center justify-end">
+          <span className="text-xs text-gray-300 flex items-center gap-0.5">
+            {t('detail.flow.details')} <ChevronRight className="w-3 h-3" />
+          </span>
+        </div>
+      )}
 
       {outputHandles.map((handle) => (
         <Handle
@@ -392,6 +512,7 @@ function buildLayout(
 ): { nodes: Node[]; edges: Edge[] } {
   const diagram = buildWorkflowGraphLayout(workflowJson);
   const startId = workflowJson.start || workflowJson.nodes[0]?.id;
+  const triggerRowOffset = WORKFLOW_GRAPH_NODE_WIDTH - 30;
 
   const nodes: Node[] = workflowJson.nodes.map((node) => ({
     id: node.id,
@@ -405,6 +526,7 @@ function buildLayout(
       join: node.join,
       joinMode: node.join_mode,
       outputHandles: diagram.outputHandles[node.id],
+      isTrigger: false,
       onNodeClick,
     },
     style: { width: WORKFLOW_GRAPH_NODE_WIDTH },
@@ -441,6 +563,45 @@ function buildLayout(
       data: { order: edge.order, mapping: edge.mapping, const: edge.const },
     };
   });
+
+  const workflowTriggers = workflowJson.triggers ?? [];
+  const startPosition = startId ? diagram.positions[startId] ?? { x: 0, y: 0 } : { x: 0, y: 0 };
+  const triggerNodeWidth = WORKFLOW_GRAPH_NODE_WIDTH;
+  const triggerGap = 36;
+  if (workflowTriggers.length > 0) {
+    const totalWidth = workflowTriggers.length * triggerNodeWidth + Math.max(0, workflowTriggers.length - 1) * triggerGap;
+    const anchorY = startId ? startPosition.y - triggerRowOffset : 0;
+    const startX = (startId ? startPosition.x : 0) - totalWidth / 2 + triggerNodeWidth / 2;
+    workflowTriggers.forEach((trigger, idx) => {
+      const triggerNodeId = `trigger:${trigger.id}`;
+      nodes.push({
+        id: triggerNodeId,
+        type: 'view',
+        position: {
+          x: startX + idx * (triggerNodeWidth + triggerGap),
+          y: anchorY,
+        },
+        data: {
+          label: trigger.name || trigger.id,
+          nodeType: trigger.type,
+          description: trigger.description || summarizeTrigger(trigger),
+          isTrigger: true,
+        },
+        style: { width: WORKFLOW_GRAPH_NODE_WIDTH },
+      });
+      if (startId) {
+        edges.push({
+          id: `e-${triggerNodeId}-${startId}`,
+          source: triggerNodeId,
+          target: startId,
+          type: 'smoothstep',
+          animated: Boolean(trigger.enabled),
+          markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
+          style: { stroke: '#7dd3fc', strokeWidth: 1.5, strokeDasharray: '5 4' },
+        });
+      }
+    });
+  }
 
   return { nodes, edges };
 }

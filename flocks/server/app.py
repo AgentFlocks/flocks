@@ -407,62 +407,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
-    # Start syslog listeners for workflows with syslog enabled.
-    # Use a background task with a short delay so the main startup path is not
-    # blocked and to break the crash-restart loop where an immediate syslog
-    # flood would bring the server back down before it is fully ready.
+    # Start the unified workflow trigger runtime after the server is ready.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        async def _delayed_syslog_start() -> None:
-            # Wait for storage and tool registry to be fully initialised before
-            # resuming syslog listeners.
+        async def _delayed_trigger_runtime_start() -> None:
             await asyncio.sleep(3)
             try:
-                await default_syslog_manager.start_all()
-                log.info("syslog.manager.started")
+                await default_trigger_runtime.start_all()
+                log.info("workflow.trigger_runtime.started")
             except Exception as exc:
-                log.warning("syslog.manager.start_failed", {"error": str(exc)})
+                log.warning("workflow.trigger_runtime.start_failed", {"error": str(exc)})
 
-        _schedule_startup_phase(app, log, "syslog.manager.start", _delayed_syslog_start)
+        _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
-        log.warning("syslog.manager.start_failed", {"error": str(e)})
-
-    # Start Kafka consumers for workflows with kafka input enabled.
-    # Mirrors the syslog startup: a short delayed background task keeps the main
-    # startup path unblocked and avoids a crash-restart loop if a broker is down.
-    try:
-        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
-
-        async def _delayed_kafka_start() -> None:
-            await asyncio.sleep(3)
-            try:
-                await default_kafka_manager.start_all()
-                log.info("kafka.manager.started")
-            except Exception as exc:
-                log.warning("kafka.manager.start_failed", {"error": str(exc)})
-
-        _schedule_startup_phase(app, log, "kafka.manager.start", _delayed_kafka_start)
-    except Exception as e:
-        log.warning("kafka.manager.start_failed", {"error": str(e)})
-
-    # Start workflow pollers for workflows with poller enabled.
-    # Mirrors Kafka/syslog startup so persistent slow-path workflows resume
-    # automatically without delaying server readiness.
-    try:
-        from flocks.workflow.poller_manager import default_manager as default_poller_manager
-
-        async def _delayed_poller_start() -> None:
-            await asyncio.sleep(3)
-            try:
-                await default_poller_manager.start_all()
-                log.info("workflow.poller.started")
-            except Exception as exc:
-                log.warning("workflow.poller.start_failed", {"error": str(exc)})
-
-        _schedule_startup_phase(app, log, "workflow.poller.start", _delayed_poller_start)
-    except Exception as e:
-        log.warning("workflow.poller.start_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
     try:
         from flocks.updater.updater import recover_upgrade_state
@@ -527,23 +486,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.stop_failed", {"error": str(e)})
 
-    # Stop syslog listeners
+    # Stop the unified workflow trigger runtime.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        await default_syslog_manager.stop_all()
-        log.info("syslog.manager.stopped")
+        await default_trigger_runtime.stop_all()
+        log.info("workflow.trigger_runtime.stopped")
     except Exception as e:
-        log.warning("syslog.manager.stop_failed", {"error": str(e)})
-
-    # Stop Kafka consumers
-    try:
-        from flocks.ingest.kafka.manager import default_manager as default_kafka_manager
-
-        await default_kafka_manager.stop_all()
-        log.info("kafka.manager.stopped")
-    except Exception as e:
-        log.warning("kafka.manager.stop_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:
@@ -1000,7 +950,7 @@ from flocks.server.routes.question import router as question_router
 # P3: TUI control routes for remote TUI control
 from flocks.server.routes.tui import router as tui_router
 # WebUI: Workflow routes
-from flocks.server.routes.workflow import router as workflow_router
+from flocks.server.routes.workflow import router as workflow_router, webhook_router as workflow_webhook_router
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
@@ -1050,6 +1000,7 @@ app.include_router(lsp_router, prefix="/api/lsp", tags=["LSP"])
 app.include_router(mcp_router, prefix="/api/mcp", tags=["MCP"])
 # WebUI: Workflow routes
 app.include_router(workflow_router, prefix="/api", tags=["Workflow"])
+app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 # WebUI: Skill & Command routes
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
