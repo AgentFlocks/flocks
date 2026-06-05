@@ -75,6 +75,7 @@
     "providerType": "Provider 类型",
     "baseUrl": "Base URL",
     "baseUrlOptional": "（可选，留空用默认）",
+    "baseUrlRequired": "请填写 Base URL",
     "apiKey": "API Key",
     "ollamaNoKey": "（Ollama 通常不需要）",
     "apiKeyOptional": "（可选，无鉴权网关可留空）",

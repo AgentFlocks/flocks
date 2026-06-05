@@ -108,7 +108,8 @@ export function buildCustomDeviceSessionContext(mode: CustomDeviceAccessMode): s
     ].join('\n');
   }
   return [
-    '本次是 Syslog 引导，不需要创建 device 插件。',
+    '本次是 Workflow 接入引导，不需要创建 device 插件。',
+    '请引导用户前往工作流集成页面，根据实际场景选择 Syslog、Kafka 或 Webhook。',
   ].join('\n');
 }
 
@@ -119,7 +120,7 @@ export function buildCustomDeviceWelcomeMessage(mode: CustomDeviceAccessMode): s
   if (mode === 'webcli') {
     return '请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果是安全设备接入，再额外生成 device 插件。默认使用 cookie/auth-state，并可选配置 username/password 供认证恢复使用。';
   }
-  return 'Syslog 方式不在这里创建插件，请前往工作流集成页面配置。';
+  return 'Workflow 接入不在这里创建插件，请前往工作流集成页面，根据需要配置 Syslog、Kafka 或 Webhook。';
 }
 
 export function buildCustomDevicePrompt(

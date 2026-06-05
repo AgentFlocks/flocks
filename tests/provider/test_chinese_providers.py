@@ -208,12 +208,23 @@ class TestCuratedCatalogModels:
     def test_minimax_catalog(self):
         models = get_provider_model_definitions("minimax")
         assert {m.id for m in models} == {
+            "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
         }
+        m3 = next(m for m in models if m.id == "minimax-m3")
+        assert m3.capabilities.supports_reasoning is True
+        assert m3.capabilities.interleaved["field"] == "reasoning_details"
+        assert m3.limits.context_window == 512000
+        assert m3.limits.max_output_tokens == 512000
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.supports_reasoning is True
         assert m27.capabilities.interleaved["field"] == "reasoning_details"
+        assert m27.limits.context_window == 196608
+        assert m27.limits.max_output_tokens == 128000
+        m25 = next(m for m in models if m.id == "minimax-m2.5")
+        assert m25.limits.context_window == 196608
+        assert m25.limits.max_output_tokens == 128000
 
     def test_stepfun_catalog(self):
         models = get_provider_model_definitions("stepfun")

@@ -4,10 +4,12 @@ Update routes — check version and apply self-upgrade via SSE stream
 
 import asyncio
 import json
+from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import StreamingResponse
 
+from flocks.server.auth import require_admin
 from flocks.updater import check_update, perform_update, detect_deploy_mode
 from flocks.updater.models import VersionInfo
 from flocks.utils.log import Log
@@ -22,12 +24,19 @@ log = Log.create(service="update-routes")
     summary="Check for new version",
 )
 async def check_version(
+    request: Request,
     locale: str | None = Query(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
+    edition: Literal["flocks", "flockspro"] = Query(
+        default="flocks",
+        description="Version channel to check. flockspro checks the Console Pro bundle manifest.",
+    ),
 ) -> VersionInfo:
-    return await check_update(locale=locale)
+    if edition == "flockspro":
+        require_admin(request)
+    return await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
 
 
 @router.post(
@@ -41,6 +50,7 @@ async def check_version(
     ),
 )
 async def apply_update(
+    request: Request,
     target_version: str | None = Query(
         default=None,
         description="Target version (e.g. 2026.03.24). Omit to auto-detect the latest.",
@@ -49,6 +59,10 @@ async def apply_update(
         default=None,
         description="Optional UI locale hint used to choose region-appropriate upgrade mirrors.",
     ),
+    edition: Literal["flocks", "flockspro"] = Query(
+        default="flocks",
+        description="Version channel to apply. flockspro applies the Console Pro bundle.",
+    ),
 ):
     """
     Stream upgrade progress as Server-Sent Events (text/event-stream).
@@ -56,6 +70,8 @@ async def apply_update(
     Each event is a JSON-serialised UpdateProgress object:
         data: {"stage": "fetching", "message": "...", "success": null}
     """
+
+    require_admin(request)
 
     async def _error(msg: str):
         yield f"data: {json.dumps({'stage': 'error', 'message': msg, 'success': False})}\n\n"
@@ -71,11 +87,13 @@ async def apply_update(
 
     zipball_url: str | None = None
     tarball_url: str | None = None
+    bundle_sha256: str | None = None
+    bundle_format: str | None = None
 
     if target_version:
         version_to_apply = target_version
     else:
-        info = await check_update(locale=locale)
+        info = await check_update(locale=locale, force_console_manifest=(edition == "flockspro"))
         if info.error:
             return StreamingResponse(_error(info.error), media_type="text/event-stream")
         if not info.has_update or not info.latest_version:
@@ -85,6 +103,8 @@ async def apply_update(
         version_to_apply = info.latest_version
         zipball_url = info.zipball_url
         tarball_url = info.tarball_url
+        bundle_sha256 = info.bundle_sha256
+        bundle_format = info.bundle_format
 
     log.info("update.apply.start", {"target": version_to_apply})
 
@@ -93,7 +113,10 @@ async def apply_update(
             version_to_apply,
             zipball_url=zipball_url,
             tarball_url=tarball_url,
+            bundle_sha256=bundle_sha256,
+            bundle_format=bundle_format,
             locale=locale,
+            force_console_manifest=(edition == "flockspro"),
         )
         try:
             async for progress in gen:

@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot } from 'lucide-react';
 import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -29,12 +29,14 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
-import { sessionApi } from '@/api/session';
+import { sessionApi, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
 import { commandAPI, type Command } from '@/api/skill';
+import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
+import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -105,6 +107,8 @@ export interface SessionChatProps {
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
+  /** Agents available for one-turn @mention routing. */
+  mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
   display?: SessionChatDisplay;
   /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
@@ -130,7 +134,7 @@ export interface SessionChatProps {
    * session id) directly without an empty ``async (..) => { await ... }``
    * shim.
    */
-  onCreateAndSend?: (text: string, imageParts?: ImagePartData[]) => Promise<unknown> | unknown;
+  onCreateAndSend?: (text: string, imageParts?: ImagePartData[], agentOverride?: string) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
   /**
@@ -154,6 +158,59 @@ interface ComposerAttachment {
   /** True if this attachment is an image file */
   isImage?: boolean;
   error?: string;
+}
+
+type UploadedDocumentAttachmentLike = {
+  id?: string;
+  status?: AttachmentStatus;
+  workspacePath?: string;
+  isImage?: boolean;
+};
+
+function isSuccessfulUploadedDocumentAttachment(
+  attachment: UploadedDocumentAttachmentLike,
+): attachment is UploadedDocumentAttachmentLike & { status: 'success'; workspacePath: string; isImage?: false } {
+  return (
+    attachment.status === 'success'
+    && !attachment.isImage
+    && typeof attachment.workspacePath === 'string'
+    && attachment.workspacePath.length > 0
+  );
+}
+
+export function dedupeUploadedDocumentAttachments<T extends UploadedDocumentAttachmentLike>(items: T[]): T[] {
+  const latestIndexByPath = new Map<string, number>();
+
+  items.forEach((attachment, index) => {
+    if (isSuccessfulUploadedDocumentAttachment(attachment)) {
+      latestIndexByPath.set(attachment.workspacePath, index);
+    }
+  });
+
+  return items.filter((attachment, index) => {
+    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
+      return true;
+    }
+    return latestIndexByPath.get(attachment.workspacePath) === index;
+  });
+}
+
+export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[]): string[] {
+  const seen = new Set<string>();
+  const paths: string[] = [];
+
+  items.forEach((attachment) => {
+    if (!isSuccessfulUploadedDocumentAttachment(attachment)) {
+      return;
+    }
+    if (seen.has(attachment.workspacePath)) {
+      return;
+    }
+    seen.add(attachment.workspacePath);
+    paths.push(attachment.workspacePath);
+  });
+
+  return paths;
 }
 
 // Composer drafts are persisted to ``localStorage`` so navigating away from
@@ -365,6 +422,82 @@ export function getUserAvatarSpacerClassName(compact: boolean): string {
   return compact ? 'h-3.5' : 'h-4';
 }
 
+function areToolStatesRenderEqual(
+  prevState?: ToolState,
+  nextState?: ToolState,
+): boolean {
+  if (prevState === nextState) return true;
+  if (
+    prevState?.status !== nextState?.status ||
+    prevState?.title !== nextState?.title ||
+    prevState?.error !== nextState?.error ||
+    prevState?.time?.start !== nextState?.time?.start ||
+    prevState?.time?.end !== nextState?.time?.end
+  ) {
+    return false;
+  }
+
+  return (
+    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
+    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
+    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
+  );
+}
+
+function areLegacyToolPayloadsRenderEqual(
+  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
+): boolean {
+  if (prevPayload === nextPayload) return true;
+  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
+}
+
+export function areChatMessagePartsRenderEqual(
+  prevParts?: MessagePart[],
+  nextParts?: MessagePart[],
+): boolean {
+  if (prevParts === nextParts) return true;
+  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
+
+  const total = prevParts?.length ?? 0;
+  for (let i = 0; i < total; i++) {
+    const prevPart = prevParts?.[i];
+    const nextPart = nextParts?.[i];
+
+    if (prevPart === nextPart) continue;
+    if (!prevPart || !nextPart) return false;
+
+    if (
+      prevPart.id !== nextPart.id ||
+      prevPart.type !== nextPart.type ||
+      prevPart.text !== nextPart.text ||
+      prevPart.thinking !== nextPart.thinking ||
+      prevPart.synthetic !== nextPart.synthetic ||
+      prevPart.ignored !== nextPart.ignored ||
+      prevPart.tool !== nextPart.tool ||
+      prevPart.callID !== nextPart.callID ||
+      prevPart.mime !== nextPart.mime ||
+      prevPart.filename !== nextPart.filename ||
+      prevPart.url !== nextPart.url ||
+      prevPart.image?.url !== nextPart.image?.url ||
+      prevPart.image?.alt !== nextPart.image?.alt
+    ) {
+      return false;
+    }
+
+    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
+      return false;
+    }
+    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 // ============================================================================
 // Main component
@@ -385,40 +518,165 @@ function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
 }
 
-function isUploadedDocumentAttachment<T extends {
-  status: string;
-  workspacePath?: string;
-  isImage?: boolean;
-}>(
-  attachment: T,
-): attachment is T & { workspacePath: string } {
-  return attachment.status === 'success' && !attachment.isImage && Boolean(attachment.workspacePath);
+function getQueuedPromptText(item: QueuedPrompt): string {
+  const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
+  return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
-export function dedupeUploadedDocumentAttachments<T extends {
-  status: string;
-  workspacePath?: string;
-  isImage?: boolean;
-}>(items: T[]): T[] {
-  const latestIndexByPath = new Map<string, number>();
-  items.forEach((item, index) => {
-    if (isUploadedDocumentAttachment(item)) {
-      latestIndexByPath.set(item.workspacePath, index);
-    }
-  });
-  return items.filter((item, index) => (
-    !isUploadedDocumentAttachment(item) || latestIndexByPath.get(item.workspacePath) === index
-  ));
+interface QueuedPromptPanelProps {
+  items: QueuedPrompt[];
+  expanded: boolean;
+  editingId: string | null;
+  editingText: string;
+  actionId: string | null;
+  t: ReturnType<typeof useTranslation>['t'];
+  onToggle: () => void;
+  onEditStart: (item: QueuedPrompt) => void;
+  onEditChange: (text: string) => void;
+  onEditCancel: () => void;
+  onEditSave: (item: QueuedPrompt) => void;
+  onRemove: (item: QueuedPrompt) => void;
+  onRunNow: (item: QueuedPrompt) => void;
 }
 
-export function listUploadedDocumentPaths<T extends {
-  status: string;
-  workspacePath?: string;
-  isImage?: boolean;
-}>(items: T[]): string[] {
-  return dedupeUploadedDocumentAttachments(items)
-    .filter(isUploadedDocumentAttachment)
-    .map((item) => item.workspacePath);
+function QueuedPromptPanel({
+  items,
+  expanded,
+  editingId,
+  editingText,
+  actionId,
+  t,
+  onToggle,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onRemove,
+  onRunNow,
+}: QueuedPromptPanelProps) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 hover:bg-zinc-100/70 transition-colors"
+      >
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <span>{t('chat.queue.count', { count: items.length })}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-40 overflow-y-auto border-t border-zinc-200">
+          {items.map((item) => {
+            const isEditing = editingId === item.id;
+            const isBusy = actionId === item.id || item.status === 'executing';
+            const text = getQueuedPromptText(item);
+            return (
+              <div key={item.id} className="flex items-start gap-2 px-3 py-2 border-b border-zinc-100 last:border-b-0">
+                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  {isEditing ? (
+                    <textarea
+                      value={editingText}
+                      onChange={(event) => onEditChange(event.target.value)}
+                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100"
+                      rows={2}
+                    />
+                  ) : (
+                    <div className="line-clamp-2 text-xs text-zinc-700">{text || t('chat.queue.attachmentOnly')}</div>
+                  )}
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  {isEditing ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditSave(item)}
+                        disabled={isBusy || !editingText.trim()}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.save')}
+                      >
+                        <Save className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onEditCancel}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.cancel')}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditStart(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.queue.edit')}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRunNow(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40"
+                        title={t('chat.queue.runNow')}
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemove(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"
+                        title={t('chat.queue.remove')}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatAgentName(name: string): string {
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findMentionTrigger(text: string, cursor: number): { start: number; end: number; query: string } | null {
+  const beforeCursor = text.slice(0, cursor);
+  const match = beforeCursor.match(/(^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  const query = match[2] ?? '';
+  return {
+    start: beforeCursor.length - query.length - 1,
+    end: cursor,
+    query,
+  };
+}
+
+function resolveMentionAgentName(text: string, agents: Agent[]): string | null {
+  const sorted = [...agents].sort((a, b) => b.name.length - a.name.length);
+  for (const agent of sorted) {
+    const pattern = new RegExp(`(^|\\s)@${escapeRegExp(agent.name)}(?=$|\\s|[,.!?;:，。！？；：])`, 'i');
+    if (pattern.test(text)) return agent.name;
+  }
+  return null;
 }
 
 export default function SessionChat({
@@ -444,8 +702,9 @@ export default function SessionChat({
   onInitialMessageConsumed,
   supportsVision,
   toolbarSlot,
+  mentionAgents = [],
 }: SessionChatProps) {
-  const { t } = useTranslation('session');
+  const { t, i18n } = useTranslation('session');
   const toast = useToast();
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
@@ -466,6 +725,11 @@ export default function SessionChat({
   const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
+  const [queueExpanded, setQueueExpanded] = useState(true);
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
+  const [editingQueueText, setEditingQueueText] = useState('');
+  const [queueActionId, setQueueActionId] = useState<string | null>(null);
   // Live compaction progress, populated by ``session.compaction_progress`` SSE
   // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
   // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
@@ -555,6 +819,10 @@ export default function SessionChat({
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const commandsLoadedRef = useRef(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const [pendingAgentName, setPendingAgentName] = useState(agentName || 'rex');
   const successfulDocAttachments = useMemo(
     () => attachments.filter((a) => a.status === 'success' && a.workspacePath && !a.isImage),
     [attachments],
@@ -569,8 +837,14 @@ export default function SessionChat({
     [successfulDocAttachments, successfulImageAttachments],
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
-  const canSend = !sending && !isStreaming && !hasUploadingFiles &&
+  const canSend = !sending && !hasUploadingFiles &&
     (!!input.trim() || successfulDocAttachments.length > 0 || successfulImageAttachments.length > 0);
+  const filteredMentionAgents = useMemo(() => {
+    const q = mentionQuery.trim().toLowerCase();
+    return mentionAgents
+      .filter((agent) => !q || agent.name.toLowerCase().startsWith(q))
+      .slice(0, 12);
+  }, [mentionAgents, mentionQuery]);
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
@@ -613,6 +887,19 @@ export default function SessionChat({
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
+  const fetchPromptQueue = useCallback(async () => {
+    if (!sessionId) {
+      setQueuedPrompts([]);
+      return;
+    }
+    try {
+      const response = await sessionApi.listPromptQueue(sessionId);
+      setQueuedPrompts(response.items ?? []);
+    } catch (err) {
+      console.warn('[SessionChat] Failed to fetch prompt queue:', err);
+    }
+  }, [sessionId]);
+
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       const { type, properties } = event;
@@ -623,7 +910,12 @@ export default function SessionChat({
 
       if (!properties || !sessionId) return;
 
-      if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
+      if (type === 'session.cleared' && properties.sessionID === sessionId) {
+        abortingRef.current = false;
+        abortedMessageIdRef.current = null;
+        setIsStreaming(false);
+        refetch();
+      } else if (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle') {
         setIsStreaming(false);
         const lastAsstMsg = [...messagesRef.current].reverse().find(
           (message) => message.role === 'assistant' && !message.finish,
@@ -708,6 +1000,10 @@ export default function SessionChat({
           }
           return [...prev, { stage, data, ts: Date.now() }];
         });
+      } else if (type === 'session.prompt_queue.updated' && properties.sessionID === sessionId) {
+        const items = Array.isArray(properties.items) ? properties.items : [];
+        setQueuedPrompts(items as QueuedPrompt[]);
+        if (items.length > 0) setQueueExpanded(true);
       } else if (type === 'session.error' && properties.sessionID === sessionId) {
         setIsStreaming(false);
         setIsCompacting(false);
@@ -758,6 +1054,7 @@ export default function SessionChat({
     onReconnect: () => {
       if (!sessionId) return;
       refetch();
+      fetchPromptQueue();
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
       });
@@ -785,6 +1082,12 @@ export default function SessionChat({
   }, [compact]);
   useEffect(() => { autoResize(); }, [input, autoResize]);
 
+  useEffect(() => {
+    if (!sending && !isStreaming) {
+      setPendingAgentName(agentName || 'rex');
+    }
+  }, [agentName, sending, isStreaming]);
+
   // Reset state on session change
   useEffect(() => {
     setIsStreaming(false);
@@ -793,6 +1096,14 @@ export default function SessionChat({
     setIsCompacting(false);
     setCompactingMessage('');
     setCompactionStages([]);
+    setQueuedPrompts([]);
+    setEditingQueueId(null);
+    setEditingQueueText('');
+    setQueueActionId(null);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     statusCheckedRef.current = null;
@@ -802,7 +1113,11 @@ export default function SessionChat({
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
     setInput(readChatDraft(sessionId));
-  }, [sessionId, clearPendingQuestions]);
+  }, [sessionId, agentName, clearPendingQuestions]);
+
+  useEffect(() => {
+    fetchPromptQueue();
+  }, [fetchPromptQueue]);
 
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
@@ -852,11 +1167,14 @@ export default function SessionChat({
   useEffect(() => {
     if (!sessionId) return;
     const handler = () => {
-      if (document.visibilityState === 'visible') refetch();
+      if (document.visibilityState === 'visible') {
+        refetch();
+        fetchPromptQueue();
+      }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch]);
+  }, [sessionId, refetch, fetchPromptQueue]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -1171,14 +1489,16 @@ export default function SessionChat({
   };
 
   /** Core send logic */
-  const sendText = async (text: string, imageParts: ImagePartData[] = []) => {
+  const sendText = async (text: string, imageParts: ImagePartData[] = [], agentOverride?: string) => {
     if (!sessionId) return;
+    const effectiveAgent = agentOverride || agentName;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     // Force scroll to bottom when user sends a new message
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
+    setPendingAgentName(effectiveAgent || 'rex');
 
     const tempId = `temp-${Date.now()}`;
     const tempParts: MessagePart[] = [];
@@ -1193,13 +1513,14 @@ export default function SessionChat({
       role: 'user',
       parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text }],
       timestamp: Date.now(),
+      agent: effectiveAgent,
     } as Message);
 
     try {
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
-      if (agentName) payload.agent = agentName;
+      if (effectiveAgent) payload.agent = effectiveAgent;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
@@ -1216,18 +1537,45 @@ export default function SessionChat({
     }
   };
 
+  const enqueueText = async (
+    text: string,
+    imageParts: ImagePartData[] = [],
+    agentOverride?: string,
+  ) => {
+    if (!sessionId) return;
+    const effectiveAgent = agentOverride || agentName;
+    try {
+      await sessionApi.enqueuePrompt(sessionId, {
+        parts: buildPromptParts(text, imageParts),
+        ...(effectiveAgent ? { agent: effectiveAgent } : {}),
+      });
+      await fetchPromptQueue();
+      setQueueExpanded(true);
+    } catch (err: any) {
+      const statusCode = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const message = statusCode === 409
+        ? t('chat.queue.full')
+        : detail || err?.message || t('chat.queue.enqueueFailed');
+      toast.error(message);
+      throw err;
+    }
+  };
+
   const handleSend = async () => {
     if (!canSend) return;
     const rawText = input.trim();
     const docAttachmentsToSend = [...successfulDocAttachments];
     const imageAttachmentsToSend = [...successfulImageAttachments];
     const text = buildMessageText(rawText, docAttachmentsToSend);
+    const mentionedAgent = resolveMentionAgentName(rawText, mentionAgents);
 
     // Need either text content or image attachments
     if (!text && imageAttachmentsToSend.length === 0) return;
 
     setInput('');
     setShowCommandDropdown(false);
+    setMentionRange(null);
 
     const imageParts: ImagePartData[] = imageAttachmentsToSend.map((a) => ({
       url: a.dataUrl!,
@@ -1235,18 +1583,29 @@ export default function SessionChat({
       filename: a.name,
     }));
 
-    // Route slash commands through the command API (requires an active session, no images)
+    // Keep client-side commands local even while Rex is streaming.
     const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
       ? parseSlashCommand(rawText) : null;
-    if (parsed) {
-      // Handle /new command locally: create a new session
-      if (parsed.command === 'new') {
-        if (onCreateNewSession) {
-          await onCreateNewSession();
-        }
-        return;
+    if (parsed?.command === 'new') {
+      if (onCreateNewSession) {
+        await onCreateNewSession();
       }
+      return;
+    }
 
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(text, imageParts, mentionedAgent || undefined);
+        setAttachments([]);
+      } catch {
+        setInput(rawText);
+        setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
+      }
+      return;
+    }
+
+    // Route slash commands through the command API (requires an active session, no images)
+    if (parsed) {
       if (!sessionId) {
         // Slash commands need an existing session; restore input and do nothing
         setInput(rawText);
@@ -1264,7 +1623,8 @@ export default function SessionChat({
       if (onCreateAndSend) {
         setSending(true);
         try {
-          await onCreateAndSend(text, imageParts);
+          setPendingAgentName(mentionedAgent || 'rex');
+          await onCreateAndSend(text, imageParts, mentionedAgent || undefined);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can
@@ -1280,7 +1640,7 @@ export default function SessionChat({
     }
 
     try {
-      await sendText(text, imageParts);
+      await sendText(text, imageParts, mentionedAgent || undefined);
       setAttachments([]);
     } catch {
       setInput(rawText);
@@ -1300,7 +1660,57 @@ export default function SessionChat({
     onInitialMessageConsumed?.();
   }, [initialMessage, sessionId]);
 
+  const insertMention = useCallback((name: string) => {
+    const currentValue = textareaRef.current?.value ?? input;
+    const cursorPos = textareaRef.current?.selectionStart ?? currentValue.length;
+    const currentRange = findMentionTrigger(currentValue, cursorPos) ?? mentionRange;
+    if (!currentRange) return;
+    const next = `${currentValue.slice(0, currentRange.start)}@${name} ${currentValue.slice(currentRange.end)}`;
+    const cursor = currentRange.start + name.length + 2;
+    setInput(next);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(cursor, cursor);
+    });
+  }, [input, mentionRange]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    const currentValue = e.currentTarget instanceof HTMLTextAreaElement ? e.currentTarget.value : input;
+    const activeMention = mentionRange
+      ? findMentionTrigger(currentValue, textareaRef.current?.selectionStart ?? currentValue.length)
+      : null;
+    if (mentionRange && !activeMention) {
+      setMentionRange(null);
+    }
+    if (activeMention && filteredMentionAgents.length > 0) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionRange(null);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => (i - 1 + filteredMentionAgents.length) % filteredMentionAgents.length);
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => (i + 1) % filteredMentionAgents.length);
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current)) {
+        e.preventDefault();
+        const chosen = filteredMentionAgents[selectedMentionIndex] ?? filteredMentionAgents[0];
+        if (chosen) {
+          insertMention(chosen.name);
+        }
+        return;
+      }
+    }
+
     if (showCommandDropdown) {
       const filtered = commands.filter(
         (cmd) => !cmd.hidden && (commandQuery === '' || cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase()))
@@ -1366,6 +1776,61 @@ export default function SessionChat({
       abortedMessageIdRef.current = null;
     }
   }, [markMessageStopped, sessionId]);
+
+  const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
+    setEditingQueueId(item.id);
+    setEditingQueueText(getQueuedPromptText(item));
+  }, []);
+
+  const handleQueuedEditCancel = useCallback(() => {
+    setEditingQueueId(null);
+    setEditingQueueText('');
+  }, []);
+
+  const handleQueuedEditSave = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    const text = editingQueueText.trim();
+    if (!text) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.updateQueuedPrompt(sessionId, item.id, text);
+      handleQueuedEditCancel();
+      await fetchPromptQueue();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueText, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+
+  const handleQueuedRemove = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.removeQueuedPrompt(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+
+  const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    if (!sessionId) return;
+    setQueueActionId(item.id);
+    try {
+      await sessionApi.runQueuedPromptNow(sessionId, item.id);
+      if (editingQueueId === item.id) handleQueuedEditCancel();
+      await fetchPromptQueue();
+      setIsStreaming(true);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
+    } finally {
+      setQueueActionId(null);
+    }
+  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
 
   // Fire onStreamingDone when isStreaming transitions true → false
   useEffect(() => {
@@ -1654,11 +2119,11 @@ export default function SessionChat({
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     }`}
                   >
-                    R
+                    {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700">Rex</span>
+                      <span className="text-xs font-semibold text-zinc-700">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={`${compact ? 'max-w-[90%] px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200`}>
@@ -1712,11 +2177,11 @@ export default function SessionChat({
                       compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm'
                     }`}
                   >
-                    R
+                    {formatAgentName(pendingAgentName).charAt(0).toUpperCase()}
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700">Rex</span>
+                      <span className="text-xs font-semibold text-zinc-700">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
@@ -1763,6 +2228,21 @@ export default function SessionChat({
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'}`}>
           <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pr-8 pl-[58px]' : ''}`}>
+            <QueuedPromptPanel
+              items={queuedPrompts}
+              expanded={queueExpanded}
+              editingId={editingQueueId}
+              editingText={editingQueueText}
+              actionId={queueActionId}
+              t={t}
+              onToggle={() => setQueueExpanded((value) => !value)}
+              onEditStart={handleQueuedEditStart}
+              onEditChange={setEditingQueueText}
+              onEditCancel={handleQueuedEditCancel}
+              onEditSave={handleQueuedEditSave}
+              onRemove={handleQueuedRemove}
+              onRunNow={handleQueuedRunNow}
+            />
             <input
               ref={fileInputRef}
               type="file"
@@ -1784,6 +2264,13 @@ export default function SessionChat({
                 setShowCommandDropdown(false);
                 textareaRef.current?.focus();
               }}
+            />
+            <AgentMentionDropdown
+              visible={Boolean(mentionRange) && filteredMentionAgents.length > 0}
+              agents={filteredMentionAgents}
+              selectedIndex={selectedMentionIndex}
+              displayLang={i18n.language}
+              onSelect={(agent) => insertMention(agent.name)}
             />
             <div
               onDragOver={handleComposerDragOver}
@@ -1925,18 +2412,27 @@ export default function SessionChat({
                     onChange={(e) => {
                       const val = e.target.value;
                       setInput(val);
+                      const cursor = e.target.selectionStart ?? val.length;
+                      const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
-                      if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                      if (mention && !trimmed.startsWith('/')) {
+                        setMentionRange({ start: mention.start, end: mention.end });
+                        setMentionQuery(mention.query);
+                        setSelectedMentionIndex(0);
+                        setShowCommandDropdown(false);
+                      } else if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
                         void loadCommandsIfNeeded();
                         const q = trimmed.slice(1);
                         setCommandQuery(q);
                         setSelectedCommandIndex(0);
                         setShowCommandDropdown(true);
+                        setMentionRange(null);
                       } else {
                         setShowCommandDropdown(false);
+                        setMentionRange(null);
                       }
                     }}
-                    onBlur={() => { setTimeout(() => setShowCommandDropdown(false), 100); }}
+                    onBlur={() => { setTimeout(() => { setShowCommandDropdown(false); setMentionRange(null); }, 100); }}
                     onCompositionStart={() => { isComposingRef.current = true; }}
                     onCompositionEnd={() => { isComposingRef.current = false; }}
                     onPaste={handleComposerPaste}
@@ -1945,16 +2441,16 @@ export default function SessionChat({
                       isCompacting
                         ? t('chat.placeholderCompacting')
                         : isStreaming
-                          ? t('chat.placeholderStreaming')
+                          ? t('chat.queue.placeholderStreaming')
                           : nodeRef
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
                     className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
-                      isStreaming ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
+                      sending ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
                     }`}
                     style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
-                    disabled={sending || isStreaming}
+                    disabled={sending}
                     rows={1}
                   />
                 </div>
@@ -1964,7 +2460,7 @@ export default function SessionChat({
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
-                    disabled={sending || isStreaming}
+                    disabled={sending}
                     title={t('chat.upload.selectWithImage')}
                     className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                   >
@@ -1982,13 +2478,27 @@ export default function SessionChat({
                   <div className="flex-1" />
 
                   {isStreaming ? (
-                    <button
-                      onClick={handleAbort}
-                      title={t('chat.stopTitle')}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
-                    >
-                      <Square className="w-3 h-3 fill-current" />
-                    </button>
+                    <>
+                      <button
+                        onClick={handleSend}
+                        disabled={!canSend}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
+                          canSend
+                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
+                            : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
+                        }`}
+                      >
+                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                      </button>
+                      <button
+                        onClick={handleAbort}
+                        title={t('chat.stopTitle')}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-zinc-800 text-white hover:bg-zinc-900 shadow-sm transition-all"
+                      >
+                        <Square className="w-3 h-3 fill-current" />
+                      </button>
+                    </>
                   ) : (
                     <button
                       onClick={handleSend}
@@ -2015,6 +2525,65 @@ export default function SessionChat({
           onClose={() => setComposerPreview(null)}
         />
       )}
+    </div>
+  );
+}
+
+function AgentMentionDropdown({
+  visible,
+  agents,
+  selectedIndex,
+  displayLang,
+  onSelect,
+}: {
+  visible: boolean;
+  agents: Agent[];
+  selectedIndex: number;
+  displayLang: string;
+  onSelect: (agent: Agent) => void;
+}) {
+  const { t } = useTranslation('session');
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const item = listRef.current?.children[selectedIndex] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: 'nearest' });
+  }, [selectedIndex]);
+
+  if (!visible) return null;
+
+  return (
+    <div
+      className="absolute bottom-full left-0 right-0 mb-1 z-50 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-lg"
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+        {t('chat.mention.title')}
+      </div>
+      <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
+        {agents.map((agent, idx) => {
+          const desc = getAgentDisplayDescription(agent, displayLang) || t('smartAssistant');
+          return (
+            <button
+              key={agent.name}
+              type="button"
+              onClick={() => onSelect(agent)}
+              onMouseDown={(e) => e.preventDefault()}
+              className={`flex w-full min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
+                idx === selectedIndex ? 'bg-sky-50 text-sky-800' : 'text-gray-800 hover:bg-gray-50'
+              }`}
+            >
+              <Bot className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+              <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
+              <span className="min-w-0 truncate text-xs text-gray-500">{desc}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex gap-3 border-t border-gray-100 bg-gray-50 px-3 py-1 text-[10px] text-gray-400">
+        <span><kbd className="font-mono">↑↓</kbd> {t('chat.mention.navigate')}</span>
+        <span><kbd className="font-mono">Enter</kbd>/<kbd className="font-mono">Tab</kbd> {t('chat.mention.select')}</span>
+      </div>
     </div>
   );
 }
@@ -2714,9 +3283,9 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
 /**
  * Memoized export of ChatMessageBubble.
  *
- * Fast path (O(1) field checks, aligned with Open WebUI's approach):
+ * Fast path:
  * - structural props: isActive, role, finish, parts.length
- * - content probe: last part's text/thinking field
+ * - per-part render probe with early exits and ref equality reuse
  *
  * Only triggers a re-render when something actually visible has changed,
  * avoiding unnecessary reconciliation during high-frequency streaming.
@@ -2733,14 +3302,7 @@ export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
   const nextParts = next.message.parts as any[] | undefined;
   if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
   if (prev.pendingQuestions !== next.pendingQuestions) return false;
-  // O(1) content probe on the last part — covers the streaming delta case
-  const prevLast = prevParts?.[prevParts.length - 1];
-  const nextLast = nextParts?.[nextParts.length - 1];
-  return (
-    prevLast?.text === nextLast?.text &&
-    prevLast?.thinking === nextLast?.thinking &&
-    prevLast?.state?.status === nextLast?.state?.status &&
-    JSON.stringify(prevLast?.state?.metadata) ===
-      JSON.stringify(nextLast?.state?.metadata)
-  );
+  // Text placeholders can now be created before later tool parts arrive.
+  // Compare each rendered part so mid-array text streaming still repaints.
+  return areChatMessagePartsRenderEqual(prev.message.parts, next.message.parts);
 });

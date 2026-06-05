@@ -15,7 +15,7 @@ import NodeInfoPanel from './NodeInfoPanel';
 type CanvasTab = 'flow' | 'md' | 'json';
 
 const PANEL_MIN = 240;
-const PANEL_RATIO = 0.30; // 初始占可用宽度的 30%
+const PANEL_RATIO = 0.40; // 初始占可用宽度的 40%
 
 function getInitialPanelWidth() {
   // 可用宽度 = 视口宽度 - 侧边导航栏（lg 以上为 256px）

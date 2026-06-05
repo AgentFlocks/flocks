@@ -14,6 +14,7 @@ from flocks.updater.updater import (
     get_current_version,
     get_latest_release,
     perform_update,
+    perform_pro_bundle_install,
 )
 
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "get_current_version",
     "get_latest_release",
     "perform_update",
+    "perform_pro_bundle_install",
 ]

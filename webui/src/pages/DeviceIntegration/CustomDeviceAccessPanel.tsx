@@ -93,18 +93,18 @@ export default function CustomDeviceAccessPanel({
 }) {
   const navigate = useNavigate();
   const toast = useToast();
-  const isSyslog = mode === 'syslog';
-  const [view, setView] = useState<PanelView>(isSyslog ? 'guide' : 'details');
+  const isWorkflow = mode === 'workflow';
+  const [view, setView] = useState<PanelView>(isWorkflow ? 'guide' : 'details');
   const [apiDraft, setApiDraft] = useState<CustomDeviceApiDraft>(EMPTY_API_DRAFT);
   const [webcliDraft, setWebcliDraft] = useState<CustomDeviceWebCliDraft>(EMPTY_WEBCLI_DRAFT);
   const [submitting, setSubmitting] = useState(false);
 
   const draft = mode === 'api' ? apiDraft : mode === 'webcli' ? webcliDraft : null;
-  const isRexView = !isSyslog && view === 'rex';
+  const isRexView = !isWorkflow && view === 'rex';
   const title = useMemo(() => {
     if (mode === 'api') return '自定义设备 API 接入';
     if (mode === 'webcli') return '自定义设备 WebCLI 接入';
-    return '自定义设备 Syslog 接入';
+    return '自定义设备 Workflow 接入';
   }, [mode]);
 
   const { sessionId, createAndSend, reset } = useSessionChat({
@@ -291,18 +291,18 @@ export default function CustomDeviceAccessPanel({
               <ChevronLeft className="w-4 h-4" />
             </button>
             <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
-              isSyslog ? 'bg-emerald-50' : 'bg-blue-50'
+              isWorkflow ? 'bg-emerald-50' : 'bg-blue-50'
             }`}>
               {mode === 'api' ? <MessageSquare className="w-4 h-4 text-blue-500" /> : null}
               {mode === 'webcli' ? <Route className="w-4 h-4 text-blue-500" /> : null}
-              {mode === 'syslog' ? <Workflow className="w-4 h-4 text-emerald-600" /> : null}
+              {mode === 'workflow' ? <Workflow className="w-4 h-4 text-emerald-600" /> : null}
             </div>
             <div className="min-w-0">
               <h3 className="text-sm font-semibold text-zinc-900 truncate">{title}</h3>
               <p className="text-xs text-zinc-400 mt-0.5">
                 {mode === 'api' && '提供 API 文档，生成可复用的 device 插件'}
                 {mode === 'webcli' && '提供产品 URL 和目标接口，生成可在设备页使用的 WebCLI device 插件'}
-                {mode === 'syslog' && 'Syslog 仅支持在工作流集成页面配置'}
+                {mode === 'workflow' && 'Syslog、Kafka、Webhook 统一在工作流集成页面配置'}
               </p>
             </div>
           </div>
@@ -312,22 +312,22 @@ export default function CustomDeviceAccessPanel({
         </div>
 
         <div className={isRexView ? 'flex-1 min-h-0 overflow-hidden' : 'flex-1 min-h-0 overflow-y-auto px-5 py-4'}>
-          {isSyslog ? (
+          {isWorkflow ? (
             <div className="space-y-4">
               <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3">
-                <p className="text-sm font-medium text-emerald-800">Syslog 目前只能在工作流中使用</p>
+                <p className="text-sm font-medium text-emerald-800">Workflow 接入目前支持 Syslog、Kafka、Webhook</p>
                 <p className="text-xs text-emerald-700 mt-1.5 leading-relaxed">
-                  你可以在工作流详情页的 Integration 标签中配置监听协议、主机、端口、日志格式和 inputKey，
-                  然后让设备把日志转发到对应地址。
+                  你可以在工作流详情页的 Integration 标签中，按实际场景选择 Syslog、Kafka 或 Webhook，
+                  然后把设备或外部系统的数据推送到对应入口。
                 </p>
               </div>
 
               <div className="rounded-xl border border-zinc-100 px-4 py-3 space-y-2">
                 <p className="text-xs font-semibold text-zinc-400 uppercase tracking-wide">配置要求</p>
                 <ul className="text-sm text-zinc-600 space-y-1.5 list-disc pl-5">
-                  <li>选择 UDP 或 TCP 协议，并确认工作流监听地址可从设备侧访问。</li>
-                  <li>设置监听端口、日志格式和输入键名，确保工作流节点能消费 `syslog_message` 或自定义 inputKey。</li>
-                  <li>在设备上配置 Syslog 转发地址后，再到工作流执行历史中确认是否收到数据。</li>
+                  <li>根据数据来源选择接入方式：日志转发选 Syslog，消息队列选 Kafka，HTTP 回调选 Webhook。</li>
+                  <li>确认工作流监听地址、Topic 或 Webhook URL 能从设备侧或上游系统访问，并正确映射输入字段。</li>
+                  <li>配置完成后，到工作流执行历史中确认是否已经收到并消费对应输入数据。</li>
                 </ul>
               </div>
             </div>
@@ -366,7 +366,7 @@ export default function CustomDeviceAccessPanel({
         </div>
 
         <div className="border-t border-zinc-100 px-4 py-2.5 flex-shrink-0">
-          {isSyslog ? (
+          {isWorkflow ? (
             <div className="flex items-center justify-between gap-2">
               <button
                 onClick={onBack}

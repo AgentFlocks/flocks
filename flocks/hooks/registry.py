@@ -5,13 +5,17 @@ Manages registration, unregistration, and triggering of hooks.
 Based on OpenClaw's internal-hooks.ts design.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
+import time
 
+from flocks.extensions import FailPolicy, normalize_fail_policy, normalize_timeout
 from flocks.hooks.types import HookEvent, AsyncHookHandler
 from flocks.utils.log import Log
 
 log = Log.create(service="hooks.registry")
+
+DEFAULT_EVENT_HOOK_TIMEOUT_SECONDS = 10.0
 
 
 class HookRegistry:
@@ -67,17 +71,53 @@ class HookRegistry:
         """
         if event_key not in self._handlers:
             self._handlers[event_key] = []
-        
-        self._handlers[event_key].append(handler)
-        
+        handlers = self._handlers[event_key]
+        metadata = dict(metadata or {})
+        handler_id = self._handler_id(event_key, handler)
+        hook_name = metadata.get("name")
+
+        if hook_name:
+            for idx, existing in enumerate(list(handlers)):
+                existing_id = self._handler_id(event_key, existing)
+                existing_meta = self._metadata.get(existing_id, {})
+                if existing_meta.get("name") == hook_name:
+                    handlers[idx] = handler
+                    self._metadata.pop(existing_id, None)
+                    self._metadata[handler_id] = metadata
+                    self._sort_handlers(event_key)
+                    log.info("hooks.registered", {
+                        "event_key": event_key,
+                        "handler": self._handler_name(handler),
+                        "name": hook_name,
+                        "replaced": True,
+                        "total_handlers": len(handlers),
+                    })
+                    return
+
+        if handler in handlers:
+            if metadata:
+                self._metadata[handler_id] = metadata
+                self._sort_handlers(event_key)
+            log.debug("hooks.register_skipped_duplicate", {
+                "event_key": event_key,
+                "handler": self._handler_name(handler),
+                "name": hook_name,
+                "total_handlers": len(handlers),
+            })
+            return
+
+        handlers.append(handler)
+
         # Save metadata
         if metadata:
-            handler_id = f"{event_key}:{id(handler)}"
             self._metadata[handler_id] = metadata
+
+        self._sort_handlers(event_key)
         
         log.info("hooks.registered", {
             "event_key": event_key,
-            "handler": handler.__name__ if hasattr(handler, '__name__') else str(handler),
+            "handler": self._handler_name(handler),
+            "name": hook_name,
             "total_handlers": len(self._handlers[event_key]),
         })
     
@@ -108,9 +148,7 @@ class HookRegistry:
                 del self._handlers[event_key]
             
             # Clean up metadata
-            handler_id = f"{event_key}:{id(handler)}"
-            if handler_id in self._metadata:
-                del self._metadata[handler_id]
+            self._metadata.pop(self._handler_id(event_key, handler), None)
             
             log.info("hooks.unregistered", {"event_key": event_key})
             return True
@@ -127,6 +165,8 @@ class HookRegistry:
         """
         if event_key:
             if event_key in self._handlers:
+                for handler in self._handlers[event_key]:
+                    self._metadata.pop(self._handler_id(event_key, handler), None)
                 del self._handlers[event_key]
                 log.info("hooks.cleared", {"event_key": event_key})
         else:
@@ -178,21 +218,50 @@ class HookRegistry:
         
         # Execute all handlers
         for handler in all_handlers:
+            meta = self._metadata_for(type_key, specific_key, handler)
+            hook_name = str(meta.get("name") or self._handler_name(handler))
+            fail_policy = normalize_fail_policy(
+                meta.get("fail_policy"),
+                critical=bool(meta.get("critical", False)),
+            )
+            if "timeout_seconds" in meta:
+                timeout_seconds = normalize_timeout(meta.get("timeout_seconds"))
+            else:
+                timeout_seconds = DEFAULT_EVENT_HOOK_TIMEOUT_SECONDS
+            started_at = time.perf_counter()
             try:
                 # Check if coroutine function
-                if asyncio.iscoroutinefunction(handler):
-                    await handler(event)
+                if timeout_seconds is not None:
+                    await asyncio.wait_for(
+                        self._invoke_handler(handler, event),
+                        timeout=timeout_seconds,
+                    )
                 else:
-                    # Run sync function in thread pool
-                    await asyncio.to_thread(handler, event)
-                    
+                    await self._invoke_handler(handler, event)
+            except asyncio.TimeoutError:
+                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                log.warning("hooks.handler_timeout", {
+                    "type": event.type,
+                    "action": event.action,
+                    "handler": self._handler_name(handler),
+                    "hook_name": hook_name,
+                    "duration_ms": duration_ms,
+                    "timeout_ms": int((timeout_seconds or 0) * 1000),
+                    "fail_policy": fail_policy.value,
+                })
+                if fail_policy != FailPolicy.ISOLATE:
+                    raise
             except Exception as e:
                 log.error("hooks.handler_error", {
                     "type": event.type,
                     "action": event.action,
-                    "handler": handler.__name__ if hasattr(handler, '__name__') else str(handler),
+                    "handler": self._handler_name(handler),
+                    "hook_name": hook_name,
                     "error": str(e),
+                    "fail_policy": fail_policy.value,
                 })
+                if fail_policy != FailPolicy.ISOLATE:
+                    raise
     
     def get_stats(self) -> Dict:
         """Get hook system statistics"""
@@ -212,6 +281,40 @@ class HookRegistry:
             }
         
         return stats
+
+    @staticmethod
+    def _handler_id(event_key: str, handler: AsyncHookHandler) -> str:
+        return f"{event_key}:{id(handler)}"
+
+    @staticmethod
+    def _handler_name(handler: AsyncHookHandler) -> str:
+        return handler.__name__ if hasattr(handler, "__name__") else str(handler)
+
+    async def _invoke_handler(self, handler: AsyncHookHandler, event: HookEvent) -> None:
+        if asyncio.iscoroutinefunction(handler):
+            await handler(event)
+        else:
+            await asyncio.to_thread(handler, event)
+
+    def _sort_handlers(self, event_key: str) -> None:
+        self._handlers[event_key].sort(
+            key=lambda handler: self._metadata.get(
+                self._handler_id(event_key, handler),
+                {},
+            ).get("priority", 100)
+        )
+
+    def _metadata_for(
+        self,
+        type_key: str,
+        specific_key: str,
+        handler: AsyncHookHandler,
+    ) -> Dict[str, Any]:
+        return (
+            self._metadata.get(self._handler_id(type_key, handler))
+            or self._metadata.get(self._handler_id(specific_key, handler))
+            or {}
+        )
 
 
 # Convenience functions

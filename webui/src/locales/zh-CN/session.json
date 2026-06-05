@@ -14,6 +14,12 @@
   "renameEmpty": "会话名称不能为空",
   "downloadJson": "下载 JSON",
   "downloadFailed": "下载失败",
+  "sharedTag": "已共享",
+  "shareAction": "本地共享",
+  "unshareAction": "取消共享",
+  "shareEnabled": "会话已共享给本地账号（只读）",
+  "shareDisabled": "已取消会话共享",
+  "shareUpdateFailed": "更新共享状态失败",
   "moreActions": "更多操作",
   "selectMode": "批量选择",
   "cancelSelect": "取消",
@@ -33,6 +39,20 @@
   "loading": "加载中...",
   "noAgents": "暂无可用的Agent",
   "smartAssistant": "智能AI助手",
+  "agentPicker": {
+    "title": "选择对话 Agent",
+    "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",
+    "filter": {
+      "all": "全部",
+      "builtin": "内置",
+      "custom": "自定义"
+    },
+    "badge": {
+      "primary": "主 Agent",
+      "builtin": "内置",
+      "custom": "自定义"
+    }
+  },
   "welcome": {
     "title": "开始新的对话",
     "description": "AI 原生的安全运营助手，帮您进行威胁分析、应急响应、安全编排等任务",
@@ -67,6 +87,20 @@
     "contextCompressed": "上下文已压缩",
     "historyMessages": "{{count}} 条历史消息",
     "compacting": "正在压缩上下文…",
+    "queue": {
+      "count": "{{count}} 个排队任务",
+      "enqueue": "加入队列",
+      "edit": "编辑排队任务",
+      "remove": "撤销排队任务",
+      "runNow": "立即执行",
+      "full": "最多只能排队 50 个任务",
+      "enqueueFailed": "加入队列失败",
+      "updateFailed": "更新排队任务失败",
+      "removeFailed": "撤销排队任务失败",
+      "runNowFailed": "立即执行失败",
+      "attachmentOnly": "附件消息",
+      "placeholderStreaming": "Rex 正在处理中，发送后将加入队列…"
+    },
     "compactionStage": {
       "load": "加载消息（{{count}} 条）",
       "strategyGeneric": "选择压缩策略",
@@ -80,6 +114,11 @@
       "mergeFailed": "合并失败",
       "summarizeDone": "生成摘要 {{chars}} 字",
       "complete": "压缩完成"
+    },
+    "mention": {
+      "title": "选择 Agent",
+      "navigate": "导航",
+      "select": "选择"
     },
     "removeNodeRef": "移除节点引用",
     "errors": {

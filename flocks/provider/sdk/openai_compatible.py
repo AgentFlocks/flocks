@@ -42,10 +42,6 @@ log = Log.create(service="provider.openai_compatible")
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI Compatible API provider"""
 
-    _MINIMAX_EMPTY_RESPONSE_TARGETS = {
-        "minimax-m2.5",
-        "minimax-m2.7",
-    }
     _MINIMAX_EMPTY_RESPONSE_RETRY_DELAY_SECONDS = 3
     
     def __init__(self):
@@ -143,7 +139,7 @@ class OpenAICompatibleProvider(BaseProvider):
     @classmethod
     def _is_minimax_empty_response_target(cls, model_id: str) -> bool:
         normalized = cls._normalize_model_id(model_id)
-        return any(target in normalized for target in cls._MINIMAX_EMPTY_RESPONSE_TARGETS)
+        return "minimax" in normalized
 
     @staticmethod
     def _has_non_empty_text_content(content: Any) -> bool:

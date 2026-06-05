@@ -816,6 +816,27 @@ class ToolRegistry:
             device_id = resolved_device_id
 
         if device_id:
+            # Per-device tool enable gate: an individual device instance may
+            # have its own enabled=False override independent of the shared
+            # global tool_settings.  This prevents toggling a tool "for
+            # Device A" from affecting Device B when both share the same
+            # storage_key (same plugin version, different names).
+            try:
+                from flocks.tool.device.store import get_device_tool_enabled
+                per_device_enabled = await get_device_tool_enabled(device_id, tool_name)
+                if per_device_enabled is False:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"工具 {tool_name!r} 在设备 {device_id!r} 上已禁用。"
+                            "如需启用，请在设备管理页面打开对应工具开关。"
+                        ),
+                    )
+            except Exception as _gate_err:
+                log.debug("tool.device.per_device_gate_error", {
+                    "tool": tool_name, "device_id": device_id, "error": str(_gate_err),
+                })
+
             from flocks.tool.credential_context import activate_device_credentials
             async with activate_device_credentials(device_id) as activated:
                 if not activated:

@@ -79,13 +79,6 @@ _PROMOTE_REASONING_CONTENT_TOKENS = (
     "trinity-large-thinking",
 )
 
-_PROMOTE_REASONING_DETAILS_TOKENS = (
-    "minimax",
-    "gemini-3",
-    "gemini-3.1",
-)
-
-
 def _lower(value: Optional[str]) -> str:
     return value.lower() if isinstance(value, str) else ""
 
@@ -110,7 +103,7 @@ def infer_interleaved_capability(
     mid = _lower(model_id)
     burl = _lower(base_url)
 
-    if _matches_any(mid, *_PROMOTE_REASONING_DETAILS_TOKENS) or pid == "minimax":
+    if "minimax" in mid or pid == "minimax":
         return dict(_PROMOTE_REASONING_DETAILS)
 
     if "claude" in mid or "anthropic" in pid or "anthropic.com" in burl:

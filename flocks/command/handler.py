@@ -11,6 +11,7 @@ from flocks.command.direct import run_direct_command
 SendText = Callable[[str], Awaitable[None]]
 SendPrompt = Callable[[str], Awaitable[None]]
 ClearScreen = Callable[[], Awaitable[None]]
+ClearHistory = Callable[[], Awaitable[None]]
 
 
 async def handle_slash_command(
@@ -19,6 +20,7 @@ async def handle_slash_command(
     send_text: SendText,
     send_prompt: SendPrompt,
     clear_screen: Optional[ClearScreen] = None,
+    clear_history: Optional[ClearHistory] = None,
     surface: Optional[CommandSurface] = None,
 ) -> bool:
     """
@@ -53,6 +55,13 @@ async def handle_slash_command(
             await clear_screen()
         else:
             await send_text(result.text or "Screen cleared.")
+        return True
+
+    if result.clear_history:
+        if clear_history:
+            await clear_history()
+        else:
+            await send_text(result.text or "Conversation history could not be cleared on this surface.")
         return True
 
     await send_text(result.text or "")

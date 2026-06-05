@@ -121,7 +121,11 @@ def test_tool_registry_api_service_sync_logs_at_debug(monkeypatch) -> None:
     assert tool.info.enabled is False
     event, payload = logger.debug.call_args.args
     assert event == "tool_registry.api_service_sync"
-    assert payload == {"disabled_tools": 1, "disabled_providers": ["svc"]}
+    assert payload == {
+        "disabled_tools": 1,
+        "disabled_providers": ["svc"],
+        "restored_tools": 0,
+    }
     logger.info.assert_not_called()
 
 

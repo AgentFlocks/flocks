@@ -7,7 +7,7 @@ import CreateTopBar from './CreateTopBar';
 import CreateRightPanel from './CreateRightPanel';
 
 const PANEL_MIN = 240;
-const PANEL_RATIO = 0.30;
+const PANEL_RATIO = 0.40;
 
 const EMPTY_WORKFLOW_JSON: WorkflowJSON = {
   start: '',

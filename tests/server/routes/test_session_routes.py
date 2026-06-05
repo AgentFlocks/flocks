@@ -12,6 +12,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,6 +20,15 @@ import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import AuthUser
+from flocks.session.core.status import SessionStatus, SessionStatusBusy
+from flocks.session.message import (
+    Message,
+    MessageRole,
+    ToolPart,
+    ToolStateError,
+    ToolStateRunning,
+)
+from flocks.session.orphan_tools import INTERRUPTED_TOOL_ERROR
 from flocks.session.session import Session
 
 # ===========================================================================
@@ -177,6 +187,90 @@ class TestSessionMessages:
             for m in messages
         )
 
+    @pytest.mark.asyncio
+    async def test_list_messages_keeps_running_tool_when_session_busy(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_busy_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_busy_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        SessionStatus.set(session_id, SessionStatusBusy())
+        try:
+            resp = await client.get(f"/api/session/{session_id}/message")
+        finally:
+            SessionStatus.clear(session_id)
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        running_part = next(p for p in parts if p.id == "part_busy_running")
+        assert running_part.state.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_list_messages_recovers_orphan_running_tool_when_session_idle(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ToolPart(
+            id="part_idle_running",
+            sessionID=session_id,
+            messageID=msg.id,
+            callID="call_idle_running",
+            tool="bash",
+            state=ToolStateRunning(
+                input={"cmd": "sleep 60"},
+                metadata={"sessionId": "ses_child"},
+                time={"start": 1000},
+            ),
+        )
+        await Message.store_part(session_id, msg.id, part)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        parts = await Message.parts(msg.id, session_id)
+        repaired_part = next(p for p in parts if p.id == "part_idle_running")
+        assert isinstance(repaired_part.state, ToolStateError)
+        assert repaired_part.state.status == "error"
+        assert repaired_part.state.error == INTERRUPTED_TOOL_ERROR
+        assert repaired_part.state.metadata == {"sessionId": "ses_child"}
+        assert repaired_part.state.time["start"] == 1000
+        assert repaired_part.state.time["end"] >= 1000
+
+    @pytest.mark.asyncio
+    async def test_list_messages_uses_preloaded_orphan_recovery_path(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session import orphan_tools
+
+        preloaded_recovery = AsyncMock(return_value=0)
+        legacy_recovery = AsyncMock(side_effect=AssertionError("legacy recovery should not be called"))
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts_in_messages", preloaded_recovery)
+        monkeypatch.setattr(orphan_tools, "abort_orphan_running_parts", legacy_recovery)
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_200_OK
+        preloaded_recovery.assert_awaited_once()
+        legacy_recovery.assert_not_called()
+
 
 # ===========================================================================
 # Delete permissions (single-admin model)
@@ -184,7 +278,7 @@ class TestSessionMessages:
 
 class TestSessionDeletePermissions:
     @pytest.mark.asyncio
-    async def test_owner_and_admin_can_delete_but_not_other_member(
+    async def test_only_owner_can_delete(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -208,8 +302,68 @@ class TestSessionDeletePermissions:
         assert forbidden.status_code == status.HTTP_403_FORBIDDEN
 
         monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
-        admin_ok = await client.delete(f"/api/session/{session.id}")
-        assert admin_ok.status_code == status.HTTP_200_OK
+        admin_forbidden = await client.delete(f"/api/session/{session.id}")
+        assert admin_forbidden.status_code == status.HTTP_403_FORBIDDEN
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        owner_ok = await client.delete(f"/api/session/{session.id}")
+        assert owner_ok.status_code == status.HTTP_200_OK
+
+
+class TestSessionLocalSharing:
+    @pytest.mark.asyncio
+    async def test_owner_can_share_and_unshare_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        create_resp = await client.post("/api/session", json={"title": "share-session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+
+        share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert share_resp.status_code == status.HTTP_200_OK
+        assert share_resp.json()["isShared"] is True
+
+        unshare_resp = await client.post(f"/api/session/{session_id}/unshare-local")
+        assert unshare_resp.status_code == status.HTTP_200_OK
+        assert unshare_resp.json()["isShared"] is False
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_change_share_or_continue_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        owner = AuthUser(id="usr_owner", username="owner", role="member", status="active")
+        viewer = AuthUser(id="usr_viewer", username="viewer", role="member", status="active")
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: owner)
+        create_resp = await client.post("/api/session", json={"title": "share-session-2"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        owner_share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert owner_share_resp.status_code == status.HTTP_200_OK
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+
+        share_resp = await client.post(f"/api/session/{session_id}/share-local")
+        assert share_resp.status_code in (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND)
+
+        unshare_resp = await client.post(f"/api/session/{session_id}/unshare-local")
+        assert unshare_resp.status_code == status.HTTP_403_FORBIDDEN
+
+        prompt_resp = await client.post(
+            f"/api/session/{session_id}/prompt_async",
+            json={"parts": [{"type": "text", "text": "blocked"}]},
+        )
+        assert prompt_resp.status_code == status.HTTP_403_FORBIDDEN
 
 
 class TestSessionMessagesRemaining:
@@ -798,6 +952,90 @@ class TestSessionUtilities:
         assert clear_resp.status_code == status.HTTP_200_OK
 
         # Messages should be gone
+        list_resp = await client.get(f"/api/session/{session_id}/message")
+        assert list_resp.json() == []
+
+    @pytest.mark.asyncio
+    async def test_clear_session_clears_prompt_queue(self, client: AsyncClient, session_id: str):
+        """POST /api/session/{id}/clear also drops queued prompts."""
+        from flocks.session.interaction_queue import InteractionQueue
+
+        await InteractionQueue.clear(session_id)
+        await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "queued after current reply"}],
+        )
+
+        clear_resp = await client.post(f"/api/session/{session_id}/clear")
+
+        assert clear_resp.status_code == status.HTTP_200_OK
+        assert await InteractionQueue.list(session_id) == []
+
+    @pytest.mark.asyncio
+    async def test_clear_session_waits_for_idle_before_clearing_messages(self, monkeypatch):
+        """History is cleared only after abort drains the active session loop."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.interaction_queue import InteractionQueue
+
+        session_id = "ses_clear_waits_for_idle"
+        await InteractionQueue.clear(session_id)
+        await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "queued prompt"}],
+        )
+        order: list[str] = []
+
+        async def fake_abort_session(_session_id: str) -> bool:
+            order.append("abort")
+            return True
+
+        async def fake_wait_for_session_idle(_session_id: str) -> None:
+            order.append("wait")
+            assert await InteractionQueue.list(session_id) == []
+
+        async def fake_message_clear(_session_id: str) -> int:
+            order.append("message_clear")
+            return 2
+
+        async def fake_publish_event(_event: str, _payload: dict) -> None:
+            return None
+
+        monkeypatch.setattr(
+            session_routes.Session,
+            "get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+        )
+        monkeypatch.setattr(session_routes, "abort_session", fake_abort_session)
+        monkeypatch.setattr(session_routes, "_wait_for_session_idle", fake_wait_for_session_idle)
+        monkeypatch.setattr("flocks.session.message.Message.clear", fake_message_clear)
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", fake_publish_event)
+
+        deleted = await session_routes._clear_session_history(session_id)
+
+        assert deleted == 2
+        assert order == ["abort", "wait", "message_clear"]
+        assert await InteractionQueue.list(session_id) == []
+
+    @pytest.mark.asyncio
+    async def test_clear_command_removes_messages(self, client: AsyncClient, session_id: str):
+        """Command route /clear removes messages via the dispatcher task."""
+        from flocks.server.routes import session as session_routes
+
+        await client.post(
+            f"/api/session/{session_id}/message",
+            json={"parts": [{"type": "text", "text": "msg"}], "noReply": True},
+        )
+
+        clear_resp = await session_routes.send_session_command(
+            session_id,
+            session_routes.CommandRequest(command="clear"),
+        )
+        assert clear_resp["status"] == "accepted"
+
+        pending = list(getattr(session_routes.router, "_pending_tasks", set()))
+        assert pending
+        await asyncio.gather(*pending)
+
         list_resp = await client.get(f"/api/session/{session_id}/message")
         assert list_resp.json() == []
 

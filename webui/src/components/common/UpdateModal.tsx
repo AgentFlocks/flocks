@@ -15,7 +15,7 @@ import {
   BellOff,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress } from '@/api/update';
+import { checkUpdate, applyUpdate, VersionInfo, UpdateProgress, type UpdateEdition } from '@/api/update';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 
 // ------------------------------------------------------------------ //
@@ -26,13 +26,21 @@ const HEALTH_POLL_TIMEOUT = 5 * 60 * 1000;
 
 export const UPDATE_DISMISSED_KEY = 'flocks-update-dismissed';
 
+function formatUpdateVersion(version?: string | null): string {
+  const raw = (version || '').trim();
+  if (!raw) return '—';
+  return /^(pro-)?v/i.test(raw) ? raw : `v${raw}`;
+}
+
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
+  edition?: UpdateEdition;
+  canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateModalProps) {
+export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrade = true, onClose, onDismiss }: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -42,6 +50,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
   const [restarting, setRestarting] = useState(false);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const localizedReleaseNotes = getLocalizedReleaseNotes(info?.release_notes, i18n.language);
+  const modalTitle = edition === 'flockspro' ? t('proTitle') : t('title');
   // useRef avoids stale closure: the `restarting` value inside async callbacks
   // always reflects the latest state even after re-renders.
   const restartingRef = useRef(false);
@@ -54,7 +63,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language);
+      const data = await checkUpdate(i18n.language, edition);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -62,7 +71,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     } finally {
       setChecking(false);
     }
-  }, [i18n.language, t]);
+  }, [edition, i18n.language, t]);
 
   useEffect(() => {
     if (!initialInfo) {
@@ -92,7 +101,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
           setRestartingSync(true);
           pollUntilReady();
         }
-      }, i18n.language);
+      }, i18n.language, edition);
     } catch (e: any) {
       // Use the ref to avoid stale closure — restarting may have been set
       // to true by the progress callback before this catch fires.
@@ -101,7 +110,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
         setUpgrading(false);
       }
     }
-  }, [i18n.language, info, t]);
+  }, [edition, i18n.language, info, t]);
 
   const isBusy = upgrading || restarting;
   const showProgressDialog = upgrading || restarting || steps.length > 0;
@@ -147,6 +156,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
     const label = t(`stageLabels.${step.stage}`, { defaultValue: step.stage });
     const isError = step.stage === 'error';
     const isSpinning = step.stage === 'restarting';
+    const detail = step.pro_component_filename || step.bundle_filename || step.message;
     return (
       <div key={index} className="flex items-center gap-2.5 py-1 text-sm">
         {isError
@@ -157,7 +167,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
         }
         <span className={isError ? 'text-red-600' : 'text-gray-700'}>{label}</span>
         {!isError && !isSpinning && (
-          <span className="text-gray-400 text-xs truncate">{step.message}</span>
+          <span className="text-gray-400 text-xs truncate">{detail}</span>
         )}
       </div>
     );
@@ -179,7 +189,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
               <div className="flex items-center gap-2">
                 <Sparkles className="w-4 h-4 text-gray-500" />
-                <span className="text-sm font-semibold text-gray-800">{t('title')}</span>
+                <span className="text-sm font-semibold text-gray-800">{modalTitle}</span>
               </div>
               <button
                 onClick={safeClose}
@@ -202,7 +212,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
                     </div>
                     {info?.latest_version && (
                       <div className="mt-1 text-2xl font-bold text-amber-900">
-                        v{info.latest_version}
+                        {formatUpdateVersion(info.latest_version)}
                       </div>
                     )}
                     <p className="mt-2 text-sm leading-6 text-amber-800">
@@ -273,10 +283,10 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
               </span>
               <div>
                 <div className="text-sm font-semibold text-amber-950">
-                  {info?.has_update ? t('newVersionTitle') : t('title')}
+                  {info?.has_update ? t('newVersionTitle') : modalTitle}
                 </div>
                 {info?.latest_version && (
-                  <div className="text-xs text-amber-700">v{info.latest_version}</div>
+                  <div className="text-xs text-amber-700">{formatUpdateVersion(info.latest_version)}</div>
                 )}
               </div>
             </div>
@@ -292,7 +302,9 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
             {info?.has_update ? (
               <>
                 <div className="rounded-xl border border-amber-100 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
-                  <div className="font-medium">{t('confirmUpgrade', { version: info.latest_version })}</div>
+                  <div className="font-medium">
+                    {t('confirmUpgrade', { version: formatUpdateVersion(info.latest_version) })}
+                  </div>
                   <div className="mt-1 leading-5">{t('newVersionDesc')}</div>
                 </div>
                 {info.update_allowed === false && (
@@ -318,7 +330,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
           <div className="px-4 pb-3 space-y-3">
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('currentVersion')}</span>
-              <span className="font-medium text-gray-700">{info ? `v${info.current_version}` : '—'}</span>
+              <span className="font-medium text-gray-700">{formatUpdateVersion(info?.current_version)}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-gray-400">{t('latestVersion')}</span>
@@ -327,7 +339,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
                   <Loader2 className="w-3 h-3 text-gray-400 animate-spin" />
                 ) : info?.latest_version ? (
                   <>
-                    <span className="font-medium text-gray-700">v{info.latest_version}</span>
+                    <span className="font-medium text-gray-700">{formatUpdateVersion(info.latest_version)}</span>
                     {info.has_update ? (
                       <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">{t('hasUpdate')}</span>
                     ) : (
@@ -409,7 +421,7 @@ export default function UpdateModal({ initialInfo, onClose, onDismiss }: UpdateM
               </button>
             )}
 
-            {info?.has_update && info.update_allowed !== false && (
+            {canUpgrade && info?.has_update && info.update_allowed !== false && (
               <button
                 onClick={handleUpgrade}
                 className="ml-auto flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-amber-500 hover:bg-amber-600 rounded-lg shadow-sm transition-colors"

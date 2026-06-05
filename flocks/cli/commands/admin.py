@@ -16,6 +16,7 @@ from flocks.auth.service import AuthService, TEMP_PASSWORD_TTL_HOURS
 from flocks.config.config import Config
 from flocks.security import get_secret_manager
 from flocks.server.auth import API_TOKEN_SECRET_ID
+from flocks.workspace.manager import WorkspaceManager
 
 admin_app = typer.Typer(help="Admin account and security maintenance commands")
 console = Console()
@@ -189,3 +190,24 @@ def generate_one_time_password(
         f"(valid for {TEMP_PASSWORD_TTL_HOURS} hours, password change required on first login)[/yellow]"
     )
     console.print(f"[bold]{temp_password}[/bold]")
+
+
+@admin_app.command("migrate-workspace-to-user")
+def migrate_workspace_to_user(
+    admin_user_id: str = typer.Option(..., "--admin-user-id", help="目标管理员 user_id"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="仅预览，不实际迁移"),
+):
+    """
+    将历史单用户 workspace 目录迁移到 users/shared 双区布局。
+    """
+    try:
+        manager = WorkspaceManager.get_instance()
+        result = manager.migrate_root_workspace_to_user(admin_user_id=admin_user_id, dry_run=dry_run)
+    except Exception as exc:
+        console.print(f"[red]Workspace migrate failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    mode = " (dry-run)" if dry_run else ""
+    console.print(f"[green]Workspace migration summary{mode}[/green]")
+    console.print(f"- moved_outputs: {result['moved_outputs']}")
+    console.print(f"- moved_knowledge: {result['moved_knowledge']}")

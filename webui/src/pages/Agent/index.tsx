@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap } from 'lucide-react';
+import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Color helpers
@@ -52,6 +52,7 @@ export default function AgentPage() {
   const { t, i18n } = useTranslation('agent');
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [showCreateSheet, setShowCreateSheet] = useState(false);
+  const [togglingAgents, setTogglingAgents] = useState<Record<string, boolean>>({});
 
   const { agents, loading, error, refetch } = useAgents();
   const [refreshing, setRefreshing] = useState(false);
@@ -87,6 +88,22 @@ export default function AgentPage() {
       refetch();
     } catch (err: any) {
       alert(`${t('deleteFailed')}: ${err.message}`);
+    }
+  };
+
+  const handleToggleDelegatable = async (agent: Agent, delegatable: boolean) => {
+    if (togglingAgents[agent.name]) return;
+    setTogglingAgents((prev) => ({ ...prev, [agent.name]: true }));
+    try {
+      const response = await agentAPI.setDelegatable(agent.name, delegatable);
+      if (editingAgent?.name === agent.name) {
+        setEditingAgent(response.data);
+      }
+      await refetch(false);
+    } catch (err: any) {
+      alert(t('error.updateFailed', { detail: err.response?.data?.detail ?? err.message }));
+    } finally {
+      setTogglingAgents((prev) => ({ ...prev, [agent.name]: false }));
     }
   };
 
@@ -181,6 +198,8 @@ export default function AgentPage() {
                 selectedAgent={editingAgent}
                 onSelect={setEditingAgent}
                 onDelete={handleDelete}
+                togglingAgents={togglingAgents}
+                onToggleDelegatable={handleToggleDelegatable}
               />
             )}
             {subAgents.length > 0 && (
@@ -195,6 +214,8 @@ export default function AgentPage() {
                 onDelete={handleDelete}
                 showSourceFilter
                 paginate
+                togglingAgents={togglingAgents}
+                onToggleDelegatable={handleToggleDelegatable}
               />
             )}
           </>
@@ -308,6 +329,8 @@ interface AgentSectionProps {
   selectedAgent: Agent | null;
   onSelect: (agent: Agent) => void;
   onDelete: (name: string) => void;
+  togglingAgents: Record<string, boolean>;
+  onToggleDelegatable: (agent: Agent, delegatable: boolean) => void;
   showSourceFilter?: boolean;
   paginate?: boolean;
 }
@@ -321,6 +344,8 @@ function AgentSection({
   selectedAgent,
   onSelect,
   onDelete,
+  togglingAgents,
+  onToggleDelegatable,
   showSourceFilter = false,
   paginate = false,
 }: AgentSectionProps) {
@@ -434,6 +459,8 @@ function AgentSection({
                 isSelected={selectedAgent?.name === agent.name}
                 onClick={() => onSelect(agent)}
                 onDelete={onDelete}
+                toggling={!!togglingAgents[agent.name]}
+                onToggleDelegatable={onToggleDelegatable}
               />
             ))}
           </div>
@@ -463,12 +490,23 @@ interface AgentCardProps {
   isSelected: boolean;
   onClick: () => void;
   onDelete: (name: string) => void;
+  toggling: boolean;
+  onToggleDelegatable: (agent: Agent, delegatable: boolean) => void;
 }
 
-function AgentCard({ agent, displayLang, isSelected, onClick, onDelete }: AgentCardProps) {
+function AgentCard({
+  agent,
+  displayLang,
+  isSelected,
+  onClick,
+  onDelete,
+  toggling,
+  onToggleDelegatable,
+}: AgentCardProps) {
   const { t } = useTranslation('agent');
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
   const color = resolveAgentColor(agent);
+  const showDelegatableToggle = agent.mode === 'subagent';
 
   return (
     <div
@@ -546,7 +584,7 @@ function AgentCard({ agent, displayLang, isSelected, onClick, onDelete }: AgentC
         )}
       </div>
 
-      {/* Footer — edit + delete buttons */}
+      {/* Footer — delete / enable / edit */}
       <div
         className="border-t border-gray-100 px-3 py-1.5 flex items-center justify-between"
         onClick={(e) => e.stopPropagation()}
@@ -576,18 +614,68 @@ function AgentCard({ agent, displayLang, isSelected, onClick, onDelete }: AgentC
           </button>
         )}
 
-        <button
-          type="button"
-          onClick={onClick}
-          title={t('badge.edit')}
-          aria-label={t('badge.edit')}
-          className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-400
-                     hover:text-slate-700 hover:bg-gray-50 transition-colors"
-        >
-          <Pencil className="w-3 h-3" />
-          {t('badge.edit')}
-        </button>
+        <div className="flex items-center gap-2">
+          {showDelegatableToggle && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-gray-400">
+                {t('form.enabled')}
+              </span>
+              <ToggleSwitch
+                enabled={!!agent.delegatable}
+                loading={toggling}
+                title={agent.delegatable ? t('form.enabledTip') : t('form.disabledTip')}
+                onChange={(e) => {
+                  e.stopPropagation();
+                  onToggleDelegatable(agent, !agent.delegatable);
+                }}
+              />
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={onClick}
+            title={t('badge.edit')}
+            aria-label={t('badge.edit')}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-gray-400
+                       hover:text-slate-700 hover:bg-gray-50 transition-colors"
+          >
+            <Pencil className="w-3 h-3" />
+            {t('badge.edit')}
+          </button>
+        </div>
       </div>
     </div>
+  );
+}
+
+function ToggleSwitch({ enabled, loading, title, onChange }: {
+  enabled: boolean;
+  loading: boolean;
+  title?: string;
+  onChange: (e: React.MouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={enabled}
+      onClick={onChange}
+      disabled={loading}
+      title={title}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent
+        transition-colors duration-150 focus:outline-none disabled:cursor-wait
+        ${enabled ? 'bg-slate-500' : 'bg-gray-200'}`}
+    >
+      {loading
+        ? <Loader2 className="absolute inset-0 m-auto w-3 h-3 text-white animate-spin" />
+        : (
+          <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow
+            transform transition-transform duration-150
+            ${enabled ? 'translate-x-4' : 'translate-x-0'}`}
+          />
+        )
+      }
+    </button>
   );
 }

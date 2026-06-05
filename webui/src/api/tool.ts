@@ -41,8 +41,12 @@ export const toolAPI = {
   getStatistics: (name: string) =>
     client.get<ToolStatistics>(`/api/tools/${name}/statistics`),
 
-  setEnabled: (name: string, enabled: boolean) =>
-    client.patch<Tool>(`/api/tools/${name}`, { enabled }),
+  setEnabled: (name: string, enabled: boolean, options?: { device_id?: string }) =>
+    client.patch<Tool>(
+      `/api/tools/${name}`,
+      { enabled },
+      options?.device_id ? { params: { device_id: options.device_id } } : undefined,
+    ),
 
   /**
    * Remove the user-level setting and restore the YAML/registration default

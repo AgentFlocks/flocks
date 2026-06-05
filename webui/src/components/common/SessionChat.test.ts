@@ -1,10 +1,12 @@
 import React from 'react';
-import { render, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
+  areChatMessagePartsRenderEqual,
   buildTodoWriteSummary,
   dedupeUploadedDocumentAttachments,
   default as SessionChat,
@@ -22,6 +24,14 @@ import {
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
+const sessionApiListPromptQueueMock = vi.fn();
+const sessionApiEnqueuePromptMock = vi.fn();
+const sessionApiUpdateQueuedPromptMock = vi.fn();
+const sessionApiRemoveQueuedPromptMock = vi.fn();
+const sessionApiRunQueuedPromptNowMock = vi.fn();
+const sessionApiUpdateMessagePartMock = vi.fn();
+const sessionApiResendMessageMock = vi.fn();
+const sessionApiRegenerateMessageMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const tMock = (key: string) => ({
   'chat.placeholder': '请输入消息',
@@ -30,6 +40,10 @@ const tMock = (key: string) => ({
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.compacting': '压缩中...',
+  'chat.mention.title': '选择 Agent',
+  'chat.mention.navigate': '导航',
+  'chat.mention.select': '选择',
+  'smartAssistant': '智能助手',
 }[key] ?? key);
 const pendingQuestionsHookMock = {
   pendingQuestions: {},
@@ -49,6 +63,7 @@ const toastMock = {
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: tMock,
+    i18n: { language: 'zh-CN' },
   }),
 }));
 
@@ -85,14 +100,36 @@ vi.mock('@/api/client', () => ({
   getApiBase: () => '',
 }));
 
+vi.mock('@/api/session', () => ({
+  sessionApi: {
+    listPromptQueue: (...args: unknown[]) => sessionApiListPromptQueueMock(...args),
+    enqueuePrompt: (...args: unknown[]) => sessionApiEnqueuePromptMock(...args),
+    updateQueuedPrompt: (...args: unknown[]) => sessionApiUpdateQueuedPromptMock(...args),
+    removeQueuedPrompt: (...args: unknown[]) => sessionApiRemoveQueuedPromptMock(...args),
+    runQueuedPromptNow: (...args: unknown[]) => sessionApiRunQueuedPromptNowMock(...args),
+    updateMessagePart: (...args: unknown[]) => sessionApiUpdateMessagePartMock(...args),
+    resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
+    regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
+  },
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
+  localStorage.clear();
   Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
     configurable: true,
     value: vi.fn(),
   });
   clientGetMock.mockResolvedValue({ data: {} });
   clientPostMock.mockResolvedValue({ data: {} });
+  sessionApiListPromptQueueMock.mockResolvedValue({ items: [] });
+  sessionApiEnqueuePromptMock.mockResolvedValue({});
+  sessionApiUpdateQueuedPromptMock.mockResolvedValue({});
+  sessionApiRemoveQueuedPromptMock.mockResolvedValue({});
+  sessionApiRunQueuedPromptNowMock.mockResolvedValue({});
+  sessionApiUpdateMessagePartMock.mockResolvedValue({});
+  sessionApiResendMessageMock.mockResolvedValue({});
+  sessionApiRegenerateMessageMock.mockResolvedValue({});
   pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
   useSessionMessagesMock.mockReturnValue({
     messages: [],
@@ -304,6 +341,126 @@ describe('SessionChat standalone thinking indicator', () => {
   });
 });
 
+describe('SessionChat agent mentions', () => {
+  const mentionAgents = [
+    {
+      name: 'rex',
+      description: 'Main orchestrator',
+      descriptionCn: '主编排 Agent',
+      mode: 'primary',
+      permission: [],
+      options: {},
+      skills: [],
+      tools: [],
+    },
+    {
+      name: 'explore',
+      description: 'Explore the codebase',
+      descriptionCn: '探索代码库',
+      mode: 'subagent',
+      native: true,
+      permission: [],
+      options: {},
+      skills: [],
+      tools: [],
+    },
+  ];
+
+  it('shows matching agents when typing @', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      mentionAgents,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '@ex');
+
+    expect(screen.getByText('@explore')).toBeInTheDocument();
+    expect(screen.getByText('探索代码库')).toBeInTheDocument();
+  });
+
+  it('routes one message to the mentioned agent without changing the default agent', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '@explore summarize this file{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          agent: 'explore',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+
+  it('queues streaming messages to the mentioned agent', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+      initialMessage: 'start streaming',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    sessionApiEnqueuePromptMock.mockClear();
+    await user.type(screen.getByRole('textbox'), '@explore queued message{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(
+        'sess-1',
+        expect.objectContaining({
+          agent: 'explore',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+
+  it('queues streaming messages to the default agent when no mention is provided', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+      initialMessage: 'start streaming',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    sessionApiEnqueuePromptMock.mockClear();
+    await user.type(screen.getByRole('textbox'), 'queued message{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(
+        'sess-1',
+        expect.objectContaining({
+          agent: 'rex',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+});
+
 describe('truncateToolDisplayText', () => {
   it('returns short text unchanged', () => {
     expect(truncateToolDisplayText('bash')).toBe('bash');
@@ -380,5 +537,75 @@ describe('shouldRefetchFinishedMessage', () => {
       finishedMessageId: 'assistant-2',
       abortedMessageId: 'assistant-1',
     })).toBe(true);
+  });
+});
+
+describe('areChatMessagePartsRenderEqual', () => {
+  it('detects streamed text updates even when a later tool part exists', () => {
+    const sharedToolPart = {
+      id: 'tool-1',
+      type: 'tool',
+      tool: 'todowrite',
+      state: { status: 'running', metadata: { step: 1 } },
+    } as Message['parts'][number];
+
+    expect(areChatMessagePartsRenderEqual(
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 wor' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 workflow.json' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+    )).toBe(false);
+  });
+
+  it('keeps skipping rerenders when semantically identical parts are recreated', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+    )).toBe(true);
+  });
+
+  it('detects legacy tool payload updates that still drive the UI', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'first' },
+          },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'updated' },
+          },
+        } as Message['parts'][number],
+      ],
+    )).toBe(false);
   });
 });

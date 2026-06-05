@@ -68,8 +68,24 @@ vi.mock('@/components/common/LoadingSpinner', () => ({
 
 vi.mock('@/components/common/SessionChat', () => ({
   __esModule: true,
-  default: ({ sessionId }: { sessionId?: string | null }) => (
-    <div data-testid="session-chat">{sessionId ?? 'no-session'}</div>
+  default: ({
+    sessionId,
+    mentionAgents,
+    toolbarSlot,
+    onCreateAndSend,
+  }: {
+    sessionId?: string | null;
+    mentionAgents?: Array<{ name: string }>;
+    toolbarSlot?: React.ReactNode;
+    onCreateAndSend?: (text: string, imageParts?: unknown[], agentOverride?: string) => Promise<unknown> | unknown;
+  }) => (
+    <div data-testid="session-chat" data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}>
+      {sessionId ?? 'no-session'}
+      {toolbarSlot}
+      <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session')}>
+        mock-create-and-send
+      </button>
+    </div>
   ),
 }));
 
@@ -328,5 +344,142 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-2');
     });
+  });
+
+  it('lists the same visible agents as the Agent page selector logic', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'hidden-system',
+          description: 'System',
+          mode: 'subagent',
+          tags: ['system'],
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-mention-agents', 'rex,explore');
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /hidden-system/i })).not.toBeInTheDocument();
+  });
+
+  it('resets the chat agent to Rex when creating a new session', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+
+    await waitFor(() => {
+      expect(addSession).toHaveBeenCalledWith(secondSession);
+    });
+    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
+  });
+
+  it('uses Rex for the first message when an empty session is created by sending', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ agent: 'rex' }),
+      );
+    });
+    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
   });
 });

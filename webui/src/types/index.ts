@@ -19,7 +19,9 @@ export interface Session {
   category?: string;
   ownerUserID?: string;
   ownerUsername?: string;
+  canWrite?: boolean;
   canDelete?: boolean;
+  isShared?: boolean;
 }
 
 export interface SessionTime {
@@ -262,7 +264,7 @@ export interface APIServiceMetadata {
   verify_ssl?: boolean;
 }
 
-export type CustomDeviceAccessMode = 'api' | 'webcli' | 'syslog';
+export type CustomDeviceAccessMode = 'api' | 'webcli' | 'workflow';
 
 export interface CustomDeviceBaseDraft {
   accessMode: CustomDeviceAccessMode;

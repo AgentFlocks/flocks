@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download,
+  MoreHorizontal, PencilLine, Download, Share2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -13,6 +13,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { sessionApi } from '@/api/session';
+import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import client from '@/api/client';
@@ -31,6 +32,19 @@ function sanitizeSessionExportName(value: string) {
 }
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
+type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+
+function formatAgentName(name: string): string {
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
+
+function getAgentSecondaryDescription(agent: Agent, language: string): string {
+  const isZh = language.toLowerCase().replace('_', '-').startsWith('zh');
+  const primary = (isZh ? agent.descriptionCn : agent.description)?.trim();
+  const secondary = (isZh ? agent.description : agent.descriptionCn)?.trim();
+  if (primary && secondary && primary !== secondary) return secondary;
+  return '';
+}
 
 function readLastSelectedSessionId(): string | null {
   try {
@@ -73,13 +87,31 @@ export default function SessionPage() {
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
   const [searchQuery, setSearchQuery] = useState('');
+  const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
 
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
-  const rexAgents = useMemo(() => agents.filter(a => a.name.toLowerCase() === 'rex'), [agents]);
+  const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary'), [agents]);
+  const subAgents = useMemo(
+    () => agents.filter((a) => a.mode !== 'primary' && !(a.tags ?? []).includes('system')),
+    [agents],
+  );
+  const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
+  const filteredChatAgents = useMemo(
+    () => chatAgents.filter((agent) => {
+      if (agentSourceFilter === 'builtin') return agent.native;
+      if (agentSourceFilter === 'custom') return !agent.native;
+      return true;
+    }),
+    [chatAgents, agentSourceFilter],
+  );
+  const selectedAgentInfo = useMemo(
+    () => chatAgents.find((agent) => agent.name === selectedAgent),
+    [chatAgents, selectedAgent],
+  );
   const selectedSession = useMemo(
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
@@ -221,6 +253,7 @@ export default function SessionPage() {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       addSession(response.data);
+      setSelectedAgent('rex');
       setSelectedSessionId(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
@@ -260,25 +293,28 @@ export default function SessionPage() {
   const handleCreateAndSend = useCallback(async (
     text: string,
     imageParts?: ImagePartData[],
+    agentOverride?: string,
   ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
       const newSessionId = response.data.id;
 
       addSession(response.data);
+      setSelectedAgent('rex');
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
-      if (selectedAgent) payload.agent = selectedAgent;
+      const effectiveAgent = agentOverride || 'rex';
+      if (effectiveAgent) payload.agent = effectiveAgent;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       });
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, selectedAgent, toast, t]);
+  }, [addSession, toast, t]);
 
   const handleDeleteSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
@@ -365,6 +401,21 @@ export default function SessionPage() {
       setDownloadingSessionId(null);
     }
   }, [t, toast]);
+
+  const handleShareSession = useCallback(async (sessionId: string, nextShared: boolean) => {
+    try {
+      if (nextShared) {
+        await sessionApi.shareLocal(sessionId);
+        toast.success(t('shareEnabled'));
+      } else {
+        await sessionApi.unshareLocal(sessionId);
+        toast.success(t('shareDisabled'));
+      }
+      await refetchSessions();
+    } catch (err: any) {
+      toast.error(t('shareUpdateFailed'), err.message);
+    }
+  }, [refetchSessions, t, toast]);
 
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
@@ -542,7 +593,14 @@ export default function SessionPage() {
                           data-session-rename-input
                         />
                       ) : (
-                        <span className="truncate text-sm font-medium text-gray-800">{session.title}</span>
+                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5">
+                          <span className="truncate">{session.title}</span>
+                          {session.isShared && (
+                            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                              {t('sharedTag')}
+                            </span>
+                          )}
+                        </h3>
                       )}
                     </div>
                     {/* Timestamp row */}
@@ -671,8 +729,10 @@ export default function SessionPage() {
           key={selectedSessionId ?? 'empty-session'}
           sessionId={selectedSessionId}
           live={Boolean(selectedSessionId)}
+          hideInput={selectedSession?.canWrite === false}
           display={{ compact: false, showActions: true, showTimestamp: true }}
           agentName={selectedAgent}
+          mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
           onInitialMessageConsumed={() => setPendingInitialMessage(null)}
@@ -690,43 +750,81 @@ export default function SessionPage() {
             <div className="relative" data-agent-selector>
               <button
                 onClick={() => setShowAgentOptions(!showAgentOptions)}
-                className="flex items-center gap-1.5 h-8 px-2 rounded-lg text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 transition-colors text-sm"
+                className="flex items-center gap-1.5 h-8 max-w-[220px] px-2 rounded-lg text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 transition-colors text-sm"
               >
                 <Bot className="w-4 h-4 flex-shrink-0" />
-                <span className="font-medium">
-                  {selectedAgent.charAt(0).toUpperCase() + selectedAgent.slice(1)}
+                <span className="font-medium truncate">
+                  {formatAgentName(selectedAgentInfo?.name ?? selectedAgent)}
                 </span>
                 <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute left-0 bottom-full mb-2 w-72 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
-                  <div className="p-1.5 space-y-0.5 max-h-72 overflow-y-auto">
+                <div className="absolute left-0 bottom-full mb-2 w-[34rem] max-w-[calc(100vw-2rem)] bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                  <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2">
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-700">{t('agentPicker.title')}</div>
+                      <div className="text-[11px] text-zinc-400">{t('agentPicker.hint')}</div>
+                    </div>
+                    <div className="inline-flex shrink-0 items-center rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-[11px]">
+                      {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                        <button
+                          key={filter}
+                          type="button"
+                          onClick={() => setAgentSourceFilter(filter)}
+                          className={`rounded-md px-2 py-1 transition-colors ${
+                            agentSourceFilter === filter
+                              ? 'bg-zinc-800 text-white'
+                              : 'text-zinc-500 hover:bg-white hover:text-zinc-800'
+                          }`}
+                        >
+                          {t(`agentPicker.filter.${filter}`)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="p-1.5 space-y-0.5 max-h-80 overflow-y-auto">
                     {loadingAgents ? (
                       <div className="p-4 text-center text-sm text-zinc-500">{t('loading')}</div>
-                    ) : rexAgents.length > 0 ? (
-                      rexAgents.map((agent) => (
+                    ) : filteredChatAgents.length > 0 ? (
+                      filteredChatAgents.map((agent) => {
+                        const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
+                        const secondaryDesc = getAgentSecondaryDescription(agent, i18n.language);
+                        return (
                         <button
                           key={agent.name}
                           onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                          className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
+                          className={`w-full min-w-0 text-left px-3 py-2 rounded-lg transition-colors ${
                             selectedAgent === agent.name
                               ? 'bg-zinc-100 text-zinc-900'
                               : 'hover:bg-zinc-50 text-zinc-700'
                           }`}
                         >
-                          <div className="flex items-center gap-2">
-                            <Bot className="w-4 h-4 text-zinc-500 flex-shrink-0" />
-                            <div className="flex-1 min-w-0">
-                              <div className="font-medium text-sm">
-                                {agent.name.charAt(0).toUpperCase() + agent.name.slice(1)}
-                              </div>
-                              <div className="text-xs text-zinc-400 mt-0.5 leading-snug whitespace-normal break-words">
-                                {getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant')}
-                              </div>
-                            </div>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Bot className="w-4 h-4 text-zinc-500 shrink-0" />
+                            <span className="w-32 shrink-0 truncate text-sm font-semibold text-zinc-900">
+                              {formatAgentName(agent.name)}
+                            </span>
+                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                              agent.mode === 'primary'
+                                ? 'bg-slate-100 text-slate-600'
+                                : agent.native
+                                  ? 'bg-blue-50 text-blue-600'
+                                  : 'bg-teal-50 text-teal-600'
+                            }`}>
+                              {agent.mode === 'primary'
+                                ? t('agentPicker.badge.primary')
+                                : agent.native
+                                  ? t('agentPicker.badge.builtin')
+                                  : t('agentPicker.badge.custom')}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">
+                              {primaryDesc}
+                              {secondaryDesc ? <span className="text-zinc-400"> / {secondaryDesc}</span> : null}
+                            </span>
                           </div>
                         </button>
-                      ))
+                        );
+                      })
                     ) : (
                       <div className="p-4 text-center text-sm text-zinc-500">{t('noAgents')}</div>
                     )}
@@ -764,6 +862,14 @@ export default function SessionPage() {
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
+              disabled={session.canWrite === false}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
             <div className="mx-2.5 my-1 border-t border-gray-100" />
             <button

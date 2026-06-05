@@ -1,0 +1,115 @@
+name: hw_waf_event
+description: >
+  Huawei Cloud WAF protection event management tool. Use the `action`
+  parameter to query attack events, export event logs, and analyze threat
+  distributions.
+description_cn: >
+  华为云 WAF 防护事件管理工具。通过 `action` 参数查询攻击事件列表、事件详情、
+  攻击分布分析和事件日志导出等接口。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huaweicloud_waf_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        防护事件管理动作名，可选值：
+        - event_list
+          用途: 查询攻击事件列表（分页）
+          必填: 无
+          常用: `from`、`to`、`hosts`、`attacks`、`action`、`page`、`pagesize`
+          风险提示: 只读查询接口；建议传 from/to 缩小范围
+          是否任务型: 否
+        - event_show
+          用途: 查询指定攻击事件详情
+          必填: `eventid`
+          常用: `eventid`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - event_log_download
+          用途: 查询事件日志下载链接（按日期）
+          必填: 无
+          常用: `from`、`to`
+          风险提示: 只读查询接口；返回 URL 有效期较短
+          是否任务型: 否
+        - event_export_job
+          用途: 下发自定义导出攻击事件的异步任务
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`、`attacks`、`action`
+          风险提示: 写操作（下发异步任务）；任务完成后可通过 `event_log_download` 获取结果
+          是否任务型: 是
+        - threat_distribution
+          用途: 查询攻击事件分布类型（Top 攻击类型）
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - top_url
+          用途: 查询事件日志中的 Top 被攻击 URL
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`、`top`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - top_source_ip
+          用途: 查询 Top 攻击源 IP
+          必填: `from`、`to`
+          常用: `from`、`to`、`hosts`、`top`
+          风险提示: 只读查询接口
+          是否任务型: 否
+      enum:
+        - event_list
+        - event_show
+        - event_log_download
+        - event_export_job
+        - threat_distribution
+        - top_url
+        - top_source_ip
+    eventid:
+      type: string
+      description: 攻击事件 ID
+    from:
+      type: integer
+      description: >
+        查询开始时间，Unix 毫秒级时间戳。
+        可使用 Python datetime 动态计算，例如：
+        int(datetime.now().timestamp() * 1000) - 3600000（最近 1 小时）
+    to:
+      type: integer
+      description: 查询结束时间，Unix 毫秒级时间戳，必须大于 from
+    hosts:
+      type: array
+      items:
+        type: string
+      description: 防护域名 ID 列表（过滤用）
+    attacks:
+      type: array
+      items:
+        type: string
+      description: 攻击类型列表（如 `sqli`、`xss`、`cmdi`、`cc` 等）
+    action:
+      type: string
+      description: 防护动作筛选，`block`（拦截）或 `log`（仅记录）
+    top:
+      type: integer
+      description: 返回 Top N 条数，默认 5
+      default: 5
+    page:
+      type: integer
+      description: 页码，从 1 开始
+      default: 1
+    pagesize:
+      type: integer
+      description: 每页数量，最大 100
+      default: 10
+    enterprise_project_id:
+      type: string
+      description: 企业项目 ID（可选）
+  required:
+    - action
+handler:
+  type: script
+  script_file: hw_waf.handler.py
+  function: event

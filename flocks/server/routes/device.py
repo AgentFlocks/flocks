@@ -31,15 +31,18 @@ from flocks.tool.device.secrets import delete_secrets, persist_fields, resolve_f
 from flocks.tool.device.store import (
     create_group,
     delete_device_row,
+    delete_device_tool_setting,
     delete_group,
     fetch_device,
     get_group,
     group_exists,
     insert_device,
+    list_device_tool_settings,
     list_devices,
     list_groups,
     record_test_result,
     row_to_device,
+    set_device_tool_enabled,
     storage_key_to_service_id,
     update_device_row,
     update_group,
@@ -230,7 +233,137 @@ async def route_delete_device(device_id: str):
 
     delete_secrets(device_id, db_fields)
     await delete_device_row(device_id)
+    # Per-device tool settings are cleaned up automatically via
+    # ON DELETE CASCADE on the device_tool_settings table.
     await sync_service_tool_state(service_id, deleted_storage_keys=[storage_key])
+
+
+# ===========================================================================
+# Per-device tool settings routes
+# ===========================================================================
+
+class DeviceToolInfo(BaseModel):
+    """Tool information with per-device enabled state."""
+    name: str
+    description: str
+    description_cn: Optional[str] = None
+    enabled_global: bool = Field(
+        ...,
+        description="全局工具开关状态（影响所有同版本设备）",
+    )
+    enabled_device: Optional[bool] = Field(
+        None,
+        description=(
+            "本设备的工具开关覆盖值。null 表示未设置覆盖，遵从全局状态；"
+            "true/false 表示该设备有独立的启用/禁用设置。"
+        ),
+    )
+    enabled_effective: bool = Field(
+        ...,
+        description="最终生效状态（per-device 覆盖 > 全局 > 出厂默认）",
+    )
+
+
+class DeviceToolUpdateRequest(BaseModel):
+    enabled: bool = Field(..., description="启用或禁用此设备上的工具")
+
+
+@router.get("/{device_id}/tools", response_model=List[DeviceToolInfo])
+async def route_list_device_tools(device_id: str):
+    """列出设备对应插件的所有工具，并附带该设备的独立开关状态。
+
+    返回的 ``enabled_effective`` 字段反映实际执行时的生效状态：
+    - 若存在 per-device 覆盖（enabled_device 非 null），以它为准；
+    - 否则沿用全局 tool_settings（enabled_global）。
+    """
+    row = await fetch_device(device_id)
+    if row is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found"
+        )
+
+    from flocks.tool.registry import ToolRegistry
+
+    storage_key: str = row["storage_key"]
+    ToolRegistry.init()
+
+    # Collect tools that belong to this device's plugin (matching provider).
+    device_tools = [
+        t for t in ToolRegistry.list_tools()
+        if t.provider == storage_key and t.source == "device"
+    ]
+
+    # Read per-device overrides once: {tool_name: enabled_bool}.
+    per_device = await list_device_tool_settings(device_id)
+
+    result: List[DeviceToolInfo] = []
+    for t in device_tools:
+        enabled_device: Optional[bool] = per_device.get(t.name)
+
+        enabled_global = t.enabled
+        enabled_effective = (
+            enabled_device if enabled_device is not None else enabled_global
+        )
+        result.append(
+            DeviceToolInfo(
+                name=t.name,
+                description=t.description,
+                description_cn=t.description_cn,
+                enabled_global=enabled_global,
+                enabled_device=enabled_device,
+                enabled_effective=enabled_effective,
+            )
+        )
+
+    return result
+
+
+@router.patch("/{device_id}/tools/{tool_name}", response_model=DeviceToolInfo)
+async def route_update_device_tool(
+    device_id: str, tool_name: str, body: DeviceToolUpdateRequest
+):
+    """设置或清除某工具在指定设备上的独立开关。
+
+    - ``enabled=false`` → 仅在该设备上禁用工具，不影响同版本其他设备；
+    - ``enabled=true``  → 移除 per-device 覆盖，恢复遵从全局工具开关。
+    """
+    row = await fetch_device(device_id)
+    if row is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found"
+        )
+
+    from flocks.tool.registry import ToolRegistry
+
+    ToolRegistry.init()
+    storage_key: str = row["storage_key"]
+    tool = ToolRegistry.get(tool_name)
+    if tool is None or tool.info.provider != storage_key:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail=f"Tool '{tool_name}' does not belong to this device",
+        )
+
+    if body.enabled:
+        # Removing the override restores global behaviour.
+        await delete_device_tool_setting(device_id, tool_name)
+        enabled_device = None
+    else:
+        await set_device_tool_enabled(device_id, tool_name, False)
+        enabled_device = False
+
+    enabled_global = tool.info.enabled
+    enabled_effective = (
+        enabled_device if enabled_device is not None else enabled_global
+    )
+    return DeviceToolInfo(
+        name=tool_name,
+        description=tool.info.description,
+        description_cn=tool.info.description_cn,
+        enabled_global=enabled_global,
+        enabled_device=enabled_device,
+        enabled_effective=enabled_effective,
+    )
 
 
 class DeviceTestRequest(BaseModel):

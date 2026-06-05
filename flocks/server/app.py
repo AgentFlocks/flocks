@@ -8,6 +8,7 @@ import asyncio
 import inspect
 import os
 import time
+from dataclasses import dataclass
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -23,6 +24,7 @@ from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
+from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 
 # Load .env file at startup
@@ -179,6 +181,20 @@ async def lifespan(app: FastAPI):
     # Initialize storage
     await _run_startup_phase(log, "storage.init", Storage.init)
     log.info("storage.initialized")
+
+    async def _recover_orphan_tool_parts() -> None:
+        from flocks.session.orphan_tools import abort_all_orphan_running_parts
+
+        repaired = await abort_all_orphan_running_parts()
+        if repaired:
+            log.info("session.orphan_tools.recovered", {"count": repaired})
+
+    _schedule_startup_phase(
+        app,
+        log,
+        "session.recover_orphan_tools",
+        _recover_orphan_tool_parts,
+    )
 
     # Ensure default device room exists, then migrate legacy device API
     # configs from flocks.json → device_integrations table.
@@ -391,26 +407,21 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.start_failed", {"error": str(e)})
 
-    # Start syslog listeners for workflows with syslog enabled.
-    # Use a background task with a short delay so the main startup path is not
-    # blocked and to break the crash-restart loop where an immediate syslog
-    # flood would bring the server back down before it is fully ready.
+    # Start the unified workflow trigger runtime after the server is ready.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        async def _delayed_syslog_start() -> None:
-            # Wait for storage and tool registry to be fully initialised before
-            # resuming syslog listeners.
+        async def _delayed_trigger_runtime_start() -> None:
             await asyncio.sleep(3)
             try:
-                await default_syslog_manager.start_all()
-                log.info("syslog.manager.started")
+                await default_trigger_runtime.start_all()
+                log.info("workflow.trigger_runtime.started")
             except Exception as exc:
-                log.warning("syslog.manager.start_failed", {"error": str(exc)})
+                log.warning("workflow.trigger_runtime.start_failed", {"error": str(exc)})
 
-        _schedule_startup_phase(app, log, "syslog.manager.start", _delayed_syslog_start)
+        _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
-        log.warning("syslog.manager.start_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
 
     try:
         from flocks.updater.updater import recover_upgrade_state
@@ -475,14 +486,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("channel.gateway.stop_failed", {"error": str(e)})
 
-    # Stop syslog listeners
+    # Stop the unified workflow trigger runtime.
     try:
-        from flocks.ingest.syslog.manager import default_manager as default_syslog_manager
+        from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 
-        await default_syslog_manager.stop_all()
-        log.info("syslog.manager.stopped")
+        await default_trigger_runtime.stop_all()
+        log.info("workflow.trigger_runtime.stopped")
     except Exception as e:
-        log.warning("syslog.manager.stop_failed", {"error": str(e)})
+        log.warning("workflow.trigger_runtime.stop_failed", {"error": str(e)})
 
     # Stop Task Center
     try:
@@ -548,6 +559,60 @@ app = FastAPI(
 
 # Logger
 log = Log.create(service="server")
+
+
+@dataclass
+class _HTTPMiddlewareHook:
+    hook: Callable[..., Any]
+    options: ExtensionOptions
+
+
+_http_middleware_hooks: list[_HTTPMiddlewareHook] = []
+
+
+def register_http_middleware(
+    hook: Callable[..., Any],
+    *,
+    name: Optional[str] = None,
+    priority: int = 100,
+    timeout_seconds: Optional[float] = None,
+    fail_policy: Any = None,
+    critical: bool = False,
+) -> None:
+    """Register an extension hook that can inspect HTTP requests."""
+    options = ExtensionOptions(
+        name=handler_name(hook, name),
+        priority=priority,
+        timeout_seconds=normalize_timeout(timeout_seconds),
+        fail_policy=normalize_fail_policy(fail_policy, critical=critical),
+    )
+    registration = _HTTPMiddlewareHook(hook=hook, options=options)
+
+    _http_middleware_hooks[:] = [
+        existing for existing in _http_middleware_hooks
+        if existing.options.name != options.name
+    ]
+    _http_middleware_hooks.append(registration)
+    _http_middleware_hooks.sort(key=lambda item: (item.options.priority, item.options.name))
+
+
+async def _run_http_middleware_hooks(request: Request, context: dict[str, Any]) -> None:
+    for registration in list(_http_middleware_hooks):
+        try:
+            result = registration.hook(request, context)
+            if registration.options.timeout_seconds is not None:
+                await asyncio.wait_for(_maybe_await(result), timeout=registration.options.timeout_seconds)
+            else:
+                await _maybe_await(result)
+        except Exception as exc:
+            log.warning("http.middleware_hook.failed", {
+                "name": registration.options.name,
+                "stage": context.get("stage"),
+                "fail_policy": registration.options.fail_policy.value,
+                "error": repr(exc),
+            })
+            if registration.options.critical:
+                raise
 
 
 _REQUEST_LOG_SKIP_EXACT = frozenset({
@@ -769,6 +834,7 @@ async def log_requests(request: Request, call_next):
 async def auth_guard_middleware(request: Request, call_next):
     """Guard requests with local account auth, except public endpoints."""
     try:
+        await _run_http_middleware_hooks(request, {"stage": "before_auth"})
         _blocked, token, _user = await apply_auth_for_request(request)
     except StarletteHTTPException as exc:
         return JSONResponse(
@@ -884,7 +950,7 @@ from flocks.server.routes.question import router as question_router
 # P3: TUI control routes for remote TUI control
 from flocks.server.routes.tui import router as tui_router
 # WebUI: Workflow routes
-from flocks.server.routes.workflow import router as workflow_router
+from flocks.server.routes.workflow import router as workflow_router, webhook_router as workflow_webhook_router
 # WebUI: Skill & Command routes
 from flocks.server.routes.skill import router as skill_router
 from flocks.server.routes.hub import router as hub_router
@@ -912,6 +978,7 @@ from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
 from flocks.server.routes.device import router as device_router
+from flocks.server.routes.console_upgrade import router as console_upgrade_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -933,6 +1000,7 @@ app.include_router(lsp_router, prefix="/api/lsp", tags=["LSP"])
 app.include_router(mcp_router, prefix="/api/mcp", tags=["MCP"])
 # WebUI: Workflow routes
 app.include_router(workflow_router, prefix="/api", tags=["Workflow"])
+app.include_router(workflow_webhook_router, tags=["WorkflowWebhook"])
 # WebUI: Skill & Command routes
 app.include_router(skill_router, prefix="/api", tags=["Skill"])
 # WebUI: Hub routes
@@ -969,6 +1037,7 @@ app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 # Device integration (named instances, SQL-backed)
 app.include_router(device_router, prefix="/api/devices", tags=["Device"])
+app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)
@@ -1031,6 +1100,20 @@ app.include_router(question_router, prefix="/question", tags=["Question"])
 app.include_router(tui_router, prefix="/tui", tags=["TUI"])
 app.include_router(auth_router, prefix="/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
+
+
+def _load_installed_package_plugins() -> None:
+    """Load package entry-point plugins before the app starts serving requests."""
+    try:
+        from flocks.plugin import PluginLoader
+
+        PluginLoader.load_all(project_dir=Path.cwd())
+        log.info("plugins.installed.loaded")
+    except Exception as e:
+        log.warning("plugins.installed.load_failed", {"error": str(e)})
+
+
+_load_installed_package_plugins()
 
 
 @app.get("/", tags=["Root"])

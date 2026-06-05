@@ -93,6 +93,22 @@ export interface DeviceTestRequest {
   verify_ssl?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Per-device tool settings
+// ---------------------------------------------------------------------------
+
+export interface DeviceToolInfo {
+  name: string;
+  description: string;
+  description_cn?: string | null;
+  /** 全局工具开关（影响所有同版本设备） */
+  enabled_global: boolean;
+  /** 本设备的独立覆盖值；null = 未设置，遵从全局 */
+  enabled_device: boolean | null;
+  /** 最终生效状态 */
+  enabled_effective: boolean;
+}
+
 export const deviceAPI = {
   // groups
   listGroups: () =>
@@ -128,4 +144,11 @@ export const deviceAPI = {
 
   test: (id: string, body?: DeviceTestRequest) =>
     client.post<DeviceTestResult>(`/api/devices/${id}/test`, body ?? {}),
+
+  // per-device tool settings
+  listDeviceTools: (device_id: string) =>
+    client.get<DeviceToolInfo[]>(`/api/devices/${device_id}/tools`),
+
+  updateDeviceTool: (device_id: string, tool_name: string, enabled: boolean) =>
+    client.patch<DeviceToolInfo>(`/api/devices/${device_id}/tools/${tool_name}`, { enabled }),
 };

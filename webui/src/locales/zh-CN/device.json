@@ -1,0 +1,125 @@
+{
+  "pageTitle": "设备接入",
+  "pageDescription": "配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备",
+
+  "status": {
+    "disabled": "已禁用",
+    "connected": "已连接",
+    "error": "连接失败",
+    "unknown": "未检测"
+  },
+
+  "vendor": {
+    "unspecified": "未指定厂商"
+  },
+
+  "sidebar": {
+    "heading": "机房",
+    "addRoom": "新建机房",
+    "allRooms": "全部机房",
+    "rename": "重命名",
+    "deleteRoom": "删除机房",
+    "deleteDisabled": "有 {{count}} 台设备，无法删除",
+    "roomNamePlaceholder": "机房名称...",
+    "deleteHasDevices": "机房「{{name}}」还有 {{count}} 台设备，请先转移或删除后再操作"
+  },
+
+  "toolbar": {
+    "refresh": "刷新",
+    "addDevice": "添加设备",
+    "collapseAll": "折叠全部",
+    "expandAll": "展开全部"
+  },
+
+  "header": {
+    "allRooms": "全部机房",
+    "deviceCount": "{{count}} 台设备 · {{rooms}} 个机房",
+    "connected": "{{count}} 已连接",
+    "failed": "{{count}} 失败",
+    "devices": "{{count}} 台设备"
+  },
+
+  "empty": {
+    "noDevices": "暂无已接入的设备",
+    "noDevicesHint": "添加设备后，Flocks Agent 即可调用对应工具",
+    "addNow": "立即添加设备",
+    "roomEmpty": "此机房暂无设备",
+    "roomEmptyHint": "点击「添加设备」将设备接入此机房"
+  },
+
+  "section": {
+    "activeDevices": "已接入设备",
+    "ungrouped": "未分组设备",
+    "ungroupedHint": "所属机房不存在，请编辑后重新指定"
+  },
+
+  "wizard": {
+    "title": "添加设备",
+    "closeAriaLabel": "关闭添加设备面板",
+    "step1": "1 选择厂商",
+    "step2": "2 选择设备",
+    "step3": "3 填写配置",
+    "selectVendorTitle": "选择 {{vendor}} 设备",
+    "vendorHint": "选择设备所属厂商，共 {{count}} 家",
+    "productCount": "{{count}} 种设备",
+    "instanceCount": "已接入 {{count}} 台",
+    "productHint": "共 {{count}} 款设备，同款设备可多次接入"
+  },
+
+  "config": {
+    "closeAriaLabel": "关闭设备配置面板",
+    "newDeviceTitle": "填写配置",
+    "tabConfig": "配置",
+    "tabTools": "工具",
+    "tabToolsCount": "工具 ({{count}})",
+    "tabOverview": "概览",
+    "nameLabel": "设备名称",
+    "namePlaceholder": "例如：总部 AF 防火墙",
+    "roomLabel": "所属机房",
+    "connectionParams": "连接参数",
+    "secretConfigured": "已配置 · 保持不变请勿修改，清空则删除",
+    "sslLabel": "SSL 验证",
+    "sslHint": "关闭可访问自签名证书的内网设备",
+    "enabledLabel": "启用设备",
+    "enabledHint": "关闭后 Agent 不会调用此设备的工具",
+    "testBtn": "连通测试",
+    "saveBtn": "保存配置",
+    "addBtn": "确认接入",
+    "deleteBtn": "删除设备",
+    "confirmDelete": "确认删除此设备配置？"
+  },
+
+  "tools": {
+    "empty": "暂无关联工具",
+    "colName": "工具名称",
+    "colDesc": "描述",
+    "colStatus": "状态",
+    "colAction": "操作",
+    "detail": "测试 / 详情"
+  },
+
+  "overview": {
+    "serviceName": "服务名称",
+    "version": "版本",
+    "toolCount": "工具数量",
+    "vendor": "厂商",
+    "serviceDesc": "服务简介",
+    "viewDocs": "查看 API 文档"
+  },
+
+  "toast": {
+    "loadFailed": "加载失败",
+    "nameRequired": "请填写设备名称",
+    "saveDone": "配置已保存",
+    "addDone": "设备已添加",
+    "saveFailed": "保存失败",
+    "sslOn": "已开启 SSL 验证",
+    "sslOff": "已关闭 SSL 验证",
+    "rollback": "保存失败，已回滚",
+    "enabledOn": "设备已启用",
+    "enabledOff": "设备已停用",
+    "deleteDone": "已删除设备",
+    "deleteFailed": "删除失败",
+    "actionFailed": "操作失败"
+  }
+}

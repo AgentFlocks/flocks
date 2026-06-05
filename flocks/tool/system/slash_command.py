@@ -153,7 +153,7 @@ async def run_slash_command_tool(
     result = await run_direct_command(command, args=normalized_args)
     if not result.handled:
         return ToolResult(success=False, error=f"Unhandled slash command: {command}")
-    if result.prompt is not None or result.clear_screen:
+    if result.prompt is not None or result.clear_screen or result.clear_history:
         return ToolResult(
             success=False,
             error=f"Slash command /{command} is not agent-safe in this context.",

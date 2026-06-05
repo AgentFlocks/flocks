@@ -15,12 +15,16 @@ const mocks = vi.hoisted(() => ({
   listDevices: vi.fn(),
   getDevice: vi.fn(),
   listGroups: vi.fn(),
+  createGroup: vi.fn(),
   updateGroup: vi.fn(),
+  deleteGroup: vi.fn(),
   createDevice: vi.fn(),
   updateDevice: vi.fn(),
   deleteDevice: vi.fn(),
   testDevice: vi.fn(),
   getDeviceCredentials: vi.fn(),
+  listDeviceTools: vi.fn(),
+  updateDeviceTool: vi.fn(),
   listApiServices: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
@@ -30,6 +34,25 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('react-router-dom', () => ({
   useNavigate: () => mocks.navigate,
+}));
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, params?: Record<string, unknown>) => {
+      const translations: Record<string, string> = {
+        pageTitle: '设备接入',
+        pageDescription: '配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备',
+        'toolbar.refresh': '刷新',
+        'toolbar.addDevice': '立即添加设备',
+        'empty.addNow': '立即添加设备',
+        'config.closeAriaLabel': '关闭设备配置面板',
+        'wizard.selectVendorTitle': `选择 ${String(params?.vendor ?? '')} 设备`,
+      };
+
+      return translations[key] ?? key;
+    },
+    i18n: { language: 'zh-CN' },
+  }),
 }));
 
 vi.mock('@/components/common/Toast', () => ({
@@ -91,11 +114,15 @@ vi.mock('@/api/device', () => ({
     get: (...args: unknown[]) => mocks.getDevice(...args),
     getCredentials: (...args: unknown[]) => mocks.getDeviceCredentials(...args),
     listGroups: (...args: unknown[]) => mocks.listGroups(...args),
+    createGroup: (...args: unknown[]) => mocks.createGroup(...args),
     updateGroup: (...args: unknown[]) => mocks.updateGroup(...args),
+    deleteGroup: (...args: unknown[]) => mocks.deleteGroup(...args),
     create: (...args: unknown[]) => mocks.createDevice(...args),
     update: (...args: unknown[]) => mocks.updateDevice(...args),
     delete: (...args: unknown[]) => mocks.deleteDevice(...args),
     test: (...args: unknown[]) => mocks.testDevice(...args),
+    listDeviceTools: (...args: unknown[]) => mocks.listDeviceTools(...args),
+    updateDeviceTool: (...args: unknown[]) => mocks.updateDeviceTool(...args),
   },
 }));
 
@@ -156,6 +183,8 @@ describe('DeviceIntegrationPage', () => {
     mocks.getDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
     mocks.setToolEnabled.mockResolvedValue({ data: {} });
+    mocks.listDeviceTools.mockResolvedValue({ data: [] });
+    mocks.updateDeviceTool.mockResolvedValue({ data: {} });
     mocks.refreshTools.mockResolvedValue({ data: { ok: true } });
   });
 
@@ -168,7 +197,7 @@ describe('DeviceIntegrationPage', () => {
 
     expect(screen.getByText('API 接入')).toBeInTheDocument();
     expect(screen.getByText('WebCLI 接入')).toBeInTheDocument();
-    expect(screen.getByText('Syslog 接入')).toBeInTheDocument();
+    expect(screen.getByText('Workflow 接入')).toBeInTheDocument();
   });
 
   it('submits api draft to Rex with device plugin prompt', async () => {
@@ -235,7 +264,7 @@ describe('DeviceIntegrationPage', () => {
     expect(arg.text).toContain('references/cli-in-skill.md');
     expect(arg.text).toContain('integration_type: device');
     expect(arg.text).toContain('~/.flocks/plugins/tools/device/<plugin_id>/');
-    expect(arg.text).toContain('默认认证方式为 `auth-state`');
+    expect(arg.text).toContain('默认认证方式为 `cookie/auth-state`');
     expect(await screen.findByText('SessionChat:session-1')).toBeInTheDocument();
   });
 
@@ -275,13 +304,13 @@ describe('DeviceIntegrationPage', () => {
     expect(mocks.navigate).toHaveBeenCalledWith('/sessions?session=session-1');
   });
 
-  it('redirects syslog flow to workflows page', async () => {
+  it('redirects workflow integration flow to workflows page', async () => {
     const user = userEvent.setup();
     render(<DeviceIntegrationPage />);
 
     await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
     await user.click(screen.getByRole('button', { name: /自定义设备/ }));
-    await user.click(screen.getByRole('button', { name: /Syslog 接入/ }));
+    await user.click(screen.getByRole('button', { name: /Workflow 接入/ }));
     expect(screen.queryByRole('button', { name: /新建工作流/ })).toBeNull();
     await user.click(screen.getByRole('button', { name: /前往工作流列表/ }));
 

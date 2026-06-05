@@ -13,6 +13,7 @@ import yaml
 from flocks.tool.tool_loader import (
     _build_execution_handler,
     _build_http_handler,
+    _build_tcp_connector,
     _extract_response,
     _json_schema_to_params,
     _merge_provider_defaults,
@@ -1131,6 +1132,80 @@ class TestHttpHandler:
 
         assert result.success is True
         assert result.output == [1, 2]
+
+
+class TestTcpConnector:
+    """Regression tests for CLOSE_WAIT socket accumulation under rapid tool calls."""
+
+    def test_connector_forces_socket_close(self):
+        """force_close must be True so per-request sockets don't linger in CLOSE_WAIT."""
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector):
+            _build_tcp_connector(verify_ssl=False)
+
+        assert captured["force_close"] is True
+        assert captured["ssl"] is False
+
+    def test_connector_enables_cleanup_closed_only_on_affected_python(self):
+        """enable_cleanup_closed is only meaningful before the CPython 3.12.7 SSL fix."""
+        import sys as _sys
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector):
+            _build_tcp_connector(verify_ssl=True)
+
+        if _sys.version_info < (3, 12, 7):
+            assert captured.get("enable_cleanup_closed") is True
+        else:
+            assert "enable_cleanup_closed" not in captured
+
+    @pytest.mark.asyncio
+    async def test_http_handler_uses_hardened_connector(self):
+        """The declarative HTTP handler must build its session with the hardened connector."""
+        cfg = {
+            "type": "http",
+            "method": "GET",
+            "url": "https://appliance.example.com/api",
+            "timeout": 10,
+        }
+        handler = _build_http_handler(cfg)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"ok": True})
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        ctx = ToolContext(session_id="test", message_id="test")
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector), patch(
+            "aiohttp.ClientSession", return_value=mock_session
+        ):
+            result = await handler(ctx)
+
+        assert result.success is True
+        assert captured["force_close"] is True
 
 
 class TestExecutionHandler:

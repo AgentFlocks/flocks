@@ -158,10 +158,7 @@ def _sanitize_stem(path: Path) -> str:
 
 def _default_output_path(input_file: Path) -> Path:
     workspace = WorkspaceManager.get_instance()
-    workspace.ensure_dirs()
-    today = dt.date.today().isoformat()
-    output_dir = workspace.get_workspace_dir() / "outputs" / today
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = workspace.get_default_outputs_dir()
     suffix = input_file.suffix.lower().lstrip(".") or "file"
     return output_dir / f"{_sanitize_stem(input_file)}_{suffix}.md"
 

@@ -44,25 +44,88 @@ class SessionPolicy:
     def is_admin(user: Optional["AuthUser"]) -> bool:
         return bool(user and user.role == "admin")
 
+    @staticmethod
+    def is_local_shared(session: "SessionInfo") -> bool:
+        metadata = getattr(session, "metadata", None)
+        if not isinstance(metadata, dict):
+            return False
+        return bool(metadata.get("shared_local"))
+
+    @staticmethod
+    def _has_no_owner(session: "SessionInfo") -> bool:
+        return not session.owner_user_id and not session.owner_username
+
+    @classmethod
+    def is_shared(cls, session: "SessionInfo") -> bool:
+        """Whether the session is explicitly shared to all local users.
+
+        Ownerless sessions are a legacy / unauthenticated compatibility state,
+        not a sharing state. The UI badge should only reflect explicit sharing.
+        """
+        return cls.is_local_shared(session)
+
+    @staticmethod
+    def _shared_read_user_ids(session: "SessionInfo") -> set[str]:
+        metadata = getattr(session, "metadata", None)
+        if not isinstance(metadata, dict):
+            return set()
+        raw = metadata.get("shared_read_access_user_ids", [])
+        if not isinstance(raw, list):
+            return set()
+        return {str(item) for item in raw if item}
+
+    @classmethod
+    def is_shared_read_only(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
+        if user is None:
+            return False
+        if cls.is_owner(session, user):
+            return False
+        if cls.is_local_shared(session):
+            return True
+        return user.id in cls._shared_read_user_ids(session)
+
     @classmethod
     def can_read(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
         """
         Whether the session should be visible in listings / fetch.
 
         - No auth context (CLI/internal runtime): keep legacy permissive behaviour.
-        - Admin: sees everything.
-        - Otherwise: owner only.
+        - Logged-in users: owner, local-shared readers, shared readers, or admins
+          managing ownerless legacy/channel sessions.
         """
         resolved = cls._resolve_user(user)
         if resolved is None:
             return True
-        if cls.is_admin(resolved):
+        if cls.is_owner(session, resolved):
             return True
-        return cls.is_owner(session, resolved)
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return cls.is_shared_read_only(session, resolved)
+
+    @classmethod
+    def can_write(cls, session: "SessionInfo", user: Optional["AuthUser"] = None) -> bool:
+        """
+        Session write permission.
+
+        Owner can always write. Admins may repair/manage ownerless sessions
+        accumulated before local ownership was available.
+        """
+        resolved = cls._resolve_user(user)
+        if resolved is None:
+            return False
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return False
 
     @classmethod
     def can_delete(cls, session: "SessionInfo", user: Optional["AuthUser"]) -> bool:
         resolved = cls._resolve_user(user)
         if resolved is None:
             return False
-        return cls.is_admin(resolved) or cls.is_owner(session, resolved)
+        if cls.is_owner(session, resolved):
+            return True
+        if cls._has_no_owner(session) and cls.is_admin(resolved):
+            return True
+        return False

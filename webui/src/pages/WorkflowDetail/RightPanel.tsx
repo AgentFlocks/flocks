@@ -71,6 +71,7 @@ interface RightPanelProps {
   onExecutionSettled?: () => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
+  onSessionChange?: (sessionId: string | null) => void;
   /** Currently selected node — passed to ChatTab to show reference chip in input */
   selectedNode?: WorkflowNode | null;
   onDeselectNode?: () => void;
@@ -83,6 +84,7 @@ export default function RightPanel({
   onExecutionSettled,
   onWorkflowUpdated,
   onFirstMessageSent,
+  onSessionChange,
   selectedNode, onDeselectNode,
   onDelete,
 }: RightPanelProps) {
@@ -145,6 +147,7 @@ export default function RightPanel({
             onLatestExecutionChange={onLatestExecutionChange}
             onWorkflowUpdated={onWorkflowUpdated}
             onFirstMessageSent={onFirstMessageSent}
+            onSessionChange={onSessionChange}
             selectedNode={selectedNode}
             onNodeRefDismiss={onDeselectNode}
           />
@@ -162,14 +165,14 @@ export default function RightPanel({
         )}
         {activeTab === 'integration' && (
           <TabErrorBoundary>
-            <IntegrationTab workflow={workflow} />
+            <IntegrationTab workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
           </TabErrorBoundary>
         )}
       </div>
 
       {/* 底部删除按钮 */}
       {onDelete && (
-        <div className="flex justify-end px-4 py-3 border-t border-gray-100 flex-shrink-0">
+        <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-100 flex-shrink-0">
           <button
             onClick={handleDelete}
             disabled={deleting}

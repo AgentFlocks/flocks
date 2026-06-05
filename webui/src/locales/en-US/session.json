@@ -14,6 +14,12 @@
   "renameEmpty": "Session name cannot be empty",
   "downloadJson": "Download JSON",
   "downloadFailed": "Download failed",
+  "sharedTag": "Shared",
+  "shareAction": "Share Locally",
+  "unshareAction": "Cancel Sharing",
+  "shareEnabled": "Session is shared to all local accounts as read-only",
+  "shareDisabled": "Session sharing canceled",
+  "shareUpdateFailed": "Failed to update sharing status",
   "moreActions": "More actions",
   "selectMode": "Batch select",
   "cancelSelect": "Cancel",
@@ -33,6 +39,20 @@
   "loading": "Loading...",
   "noAgents": "No agents available",
   "smartAssistant": "AI Smart Assistant",
+  "agentPicker": {
+    "title": "Choose Chat Agent",
+    "hint": "New chats start with Rex; type @Agent to route one message",
+    "filter": {
+      "all": "All",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    },
+    "badge": {
+      "primary": "Primary",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    }
+  },
   "welcome": {
     "title": "Start a new conversation",
     "description": "AI-native security operations assistant — threat analysis, incident response, and security orchestration",
@@ -67,6 +87,20 @@
     "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
+    "queue": {
+      "count": "{{count}} Queued",
+      "enqueue": "Add to queue",
+      "edit": "Edit queued prompt",
+      "remove": "Remove queued prompt",
+      "runNow": "Run now",
+      "full": "You can queue up to 50 prompts",
+      "enqueueFailed": "Failed to add to queue",
+      "updateFailed": "Failed to update queued prompt",
+      "removeFailed": "Failed to remove queued prompt",
+      "runNowFailed": "Failed to run queued prompt",
+      "attachmentOnly": "Attachment message",
+      "placeholderStreaming": "Rex is working. Send to add this to the queue…"
+    },
     "compactionStage": {
       "load": "Loaded {{count}} messages",
       "strategyGeneric": "Picked compaction strategy",
@@ -80,6 +114,11 @@
       "mergeFailed": "Merge failed",
       "summarizeDone": "Summary written ({{chars}} chars)",
       "complete": "Compaction complete"
+    },
+    "mention": {
+      "title": "Choose Agent",
+      "navigate": "Navigate",
+      "select": "Select"
     },
     "removeNodeRef": "Remove node reference",
     "errors": {

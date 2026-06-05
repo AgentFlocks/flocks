@@ -5,7 +5,7 @@ Tool routes - API endpoints for tool management and execution
 import asyncio
 import time
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from flocks.server.auth import require_admin
@@ -506,18 +506,34 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
-async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object = Depends(require_admin)):
+async def update_tool(
+    tool_name: str,
+    request: ToolUpdateRequest,
+    device_id: Optional[str] = Query(
+        None,
+        description=(
+            "设备实例 UUID。提供时仅修改该设备的工具开关（per-device 覆盖），"
+            "不影响其他同版本设备；省略时修改全局 tool_settings（影响所有设备）。"
+        ),
+    ),
+    _admin: object = Depends(require_admin),
+):
     """
     Update tool settings (e.g., enable or disable).
 
-    The ``enabled`` flag is persisted to the user-level overlay in
-    ``flocks.json`` (``tool_settings.<tool_name>.enabled``) instead of
-    mutating the YAML plugin file.  This keeps project-level YAML files
-    (which may be tracked by git and overwritten on upgrade) clean and
-    treats the YAML's ``enabled:`` field as the factory default that the
-    overlay can selectively customise.
+    **Global mode** (``device_id`` omitted):
+    Persists to ``flocks.json`` → ``tool_settings.<tool_name>.enabled``.
+    Affects all device instances that share this tool.
 
-    Two behaviours of note:
+    **Per-device mode** (``device_id`` provided):
+    Persists to the SQLite ``device_tool_settings`` table (one row per
+    device_id × tool_name).  Only affects tool execution when ``device_id``
+    is explicitly targeted, allowing Device A and Device B (same plugin
+    version, different names) to carry independent tool enabled/disabled
+    states.  Rows are removed automatically via ON DELETE CASCADE when the
+    parent device row is deleted.
+
+    Two behaviours of note (global mode only):
 
     * If ``request.enabled`` matches the registration-time default we
       *delete* the overlay entry instead of writing one — the tool is
@@ -538,6 +554,34 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest, _admin: object
         )
 
     desired = bool(request.enabled)
+
+    # --- Per-device mode ---
+    if device_id:
+        from flocks.tool.device.store import (
+            delete_device_tool_setting,
+            set_device_tool_enabled,
+        )
+        if desired:
+            # "Enable" in per-device mode means removing the per-device
+            # override so the global/factory default takes effect again.
+            removed = await delete_device_tool_setting(device_id, tool_name)
+            log.info("tool.device.updated.reset_to_global", {
+                "name": tool_name,
+                "device_id": device_id,
+                "removed_override": removed,
+            })
+        else:
+            await set_device_tool_enabled(device_id, tool_name, False)
+            log.info("tool.device.updated", {
+                "name": tool_name,
+                "device_id": device_id,
+                "enabled": False,
+            })
+        # The in-memory ToolInfo.enabled is NOT changed; it reflects global
+        # state.  Per-device gating happens at ToolRegistry.execute time.
+        return _build_tool_response(tool.info)
+
+    # --- Global mode (original behaviour) ---
     default = _get_default_enabled(tool.info)
     # Service gate: only matters when the user is trying to enable.
     # Disabling is always honoured.

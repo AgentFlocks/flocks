@@ -134,6 +134,21 @@ def test_get_stats(registry):
     assert "command:new" in stats["event_keys"]
 
 
+def test_register_builtin_hooks_is_idempotent():
+    from flocks.hooks.builtin import register_builtin_hooks
+
+    HookRegistry.reset_instance()
+    try:
+        register_builtin_hooks()
+        register_builtin_hooks()
+
+        stats = HookRegistry.get_instance().get_stats()
+        assert stats["event_keys"]["command:new"]["handler_count"] == 1
+    finally:
+        HookRegistry.get_instance().clear()
+        HookRegistry.reset_instance()
+
+
 @pytest.mark.asyncio
 async def test_sync_handler(registry):
     """Test that sync handlers also work"""
@@ -148,3 +163,77 @@ async def test_sync_handler(registry):
     await registry.trigger(event)
     
     assert results == ["sync"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_handler_registration_is_idempotent(registry):
+    """Registering the same handler twice should not duplicate side effects."""
+    results = []
+
+    async def handler(event):
+        results.append(event.action)
+
+    registry.register("command:new", handler)
+    registry.register("command:new", handler)
+
+    event = create_command_event("new", "test_session")
+    await registry.trigger(event)
+
+    assert results == ["new"]
+    assert registry.get_stats()["total_handlers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_named_handler_registration_replaces_previous_handler(registry):
+    results = []
+
+    async def old_handler(event):
+        results.append("old")
+
+    async def new_handler(event):
+        results.append("new")
+
+    registry.register("command:new", old_handler, {"name": "session-memory"})
+    registry.register("command:new", new_handler, {"name": "session-memory"})
+
+    event = create_command_event("new", "test_session")
+    await registry.trigger(event)
+
+    assert results == ["new"]
+    assert registry.get_stats()["total_handlers"] == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_timeout_isolated_by_default(registry):
+    results = []
+
+    async def slow_handler(event):
+        await asyncio.sleep(0.05)
+        results.append("slow")
+
+    async def success_handler(event):
+        results.append("success")
+
+    registry.register("command", slow_handler, {"name": "slow", "timeout_seconds": 0.01})
+    registry.register("command", success_handler)
+
+    event = create_command_event("test", "test_session")
+    await registry.trigger(event)
+
+    assert results == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_handler_timeout_can_propagate(registry):
+    async def slow_handler(event):
+        await asyncio.sleep(0.05)
+
+    registry.register(
+        "command",
+        slow_handler,
+        {"name": "critical-slow", "timeout_seconds": 0.01, "fail_policy": "propagate"},
+    )
+
+    event = create_command_event("test", "test_session")
+    with pytest.raises(asyncio.TimeoutError):
+        await registry.trigger(event)
