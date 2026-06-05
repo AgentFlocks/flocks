@@ -99,6 +99,32 @@ _DESCRIPTION_CACHE_AT: float = 0.0
 _DESCRIPTION_CACHE_TTL: float = 60.0  # seconds
 
 
+def _resolve_workflow_display_name_and_total_nodes(
+    workflow_source: Union[Dict[str, Any], Path],
+) -> tuple[str, Optional[int]]:
+    """Return a friendly workflow name and node count when cheaply available."""
+    if isinstance(workflow_source, dict):
+        workflow_name = str(workflow_source.get("name") or "").strip() or "unnamed workflow"
+        nodes = workflow_source.get("nodes")
+        total_nodes = len(nodes) if isinstance(nodes, list) else None
+        return workflow_name, total_nodes
+
+    workflow_name = workflow_source.stem or workflow_source.name
+    try:
+        raw = json.loads(workflow_source.read_text(encoding="utf-8"))
+    except Exception:
+        return workflow_name, None
+
+    if isinstance(raw, dict):
+        loaded_name = str(raw.get("name") or "").strip()
+        if loaded_name:
+            workflow_name = loaded_name
+        nodes = raw.get("nodes")
+        if isinstance(nodes, list):
+            return workflow_name, len(nodes)
+    return workflow_name, None
+
+
 def _create_nested_tool_context(ctx: ToolContext) -> ToolContext:
     """Create an isolated child ToolContext for workflow node tools.
 
@@ -461,13 +487,12 @@ async def run_workflow_tool(
         )
 
     # Request permission (workflow execution can run arbitrary code)
+    workflow_name, workflow_total_nodes = _resolve_workflow_display_name_and_total_nodes(workflow_source)
+
     if isinstance(workflow_source, dict):
-        workflow_name = workflow_source.get("name", "unnamed workflow")
         # Use id if available, otherwise use name or generate a fallback
         workflow_id = workflow_source.get("id") or workflow_source.get("name") or "unknown"
     else:
-        # workflow_source is a Path object here; Path.name gives the filename.
-        workflow_name = workflow_source.name
         workflow_id = str(workflow_source)
 
     workflow_inputs = inputs or {}
@@ -519,6 +544,8 @@ async def run_workflow_tool(
             "title": f"Running workflow: {workflow_name}",
             "metadata": {
                 "workflow_id": display_workflow_id,
+                "workflow_name": workflow_name,
+                "total_nodes": workflow_total_nodes,
                 "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                 "run_id": run_id,
                 "status": "running",
@@ -549,6 +576,8 @@ async def run_workflow_tool(
             "title": f"Running workflow: {workflow_name}",
             "metadata": {
                 "workflow_id": display_workflow_id,
+                "workflow_name": workflow_name,
+                "total_nodes": workflow_total_nodes,
                 "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                 "status": "running",
                 "phase": "running",
@@ -583,6 +612,8 @@ async def run_workflow_tool(
         "title": f"Running workflow: {workflow_name}",
         "metadata": {
             "workflow_id": display_workflow_id,
+            "workflow_name": workflow_name,
+            "total_nodes": workflow_total_nodes,
             "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
             "status": "running",
             "phase": "queued",
@@ -615,6 +646,7 @@ async def run_workflow_tool(
         # Backward-compatibility: older runtimes may not accept `use_llm`.
         supports_use_llm = False
         supports_step_start = False
+        supports_cancel = False
         try:
             sig = inspect.signature(_run_workflow_fn)
             supports_use_llm = (
@@ -625,16 +657,23 @@ async def run_workflow_tool(
                 "on_step_start" in sig.parameters
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
             )
+            supports_cancel = (
+                "cancel" in sig.parameters
+                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            )
         except Exception:
             # Best-effort: assume supported.
             supports_use_llm = True
             supports_step_start = True
+            supports_cancel = True
 
         if supports_use_llm:
             call_kwargs["use_llm"] = use_llm
         if supports_step_start:
             call_kwargs["on_step_start"] = _on_step_start
         call_kwargs["on_step_complete"] = _on_step_complete
+        if supports_cancel:
+            call_kwargs["cancel"] = ctx.abort.is_set
 
         try:
             result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
@@ -645,6 +684,9 @@ async def run_workflow_tool(
                 result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
             elif supports_step_start and "on_step_start" in str(te):
                 call_kwargs.pop("on_step_start", None)
+                result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
+            elif supports_cancel and "cancel" in str(te):
+                call_kwargs.pop("cancel", None)
                 result = await asyncio.to_thread(_run_workflow_fn, **call_kwargs)
             else:
                 raise
@@ -704,6 +746,8 @@ async def run_workflow_tool(
                 "title": f"Workflow: {workflow_name}",
                 "metadata": {
                     "workflow_id": canonical_workflow_id,
+                    "workflow_name": workflow_name,
+                    "total_nodes": workflow_total_nodes,
                     "workflow_execution_id": tracked_execution["id"],
                     "run_id": result_dict.get("run_id"),
                     "status": status_value,
@@ -725,6 +769,8 @@ async def run_workflow_tool(
                 title=f"Workflow: {workflow_name}",
                 metadata={
                     "workflow_id": display_workflow_id,
+                    "workflow_name": workflow_name,
+                    "total_nodes": workflow_total_nodes,
                     "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                     "status": status_value,
                     "steps": result_dict.get("steps", 0),
@@ -741,6 +787,8 @@ async def run_workflow_tool(
             title=f"Workflow: {workflow_name}",
             metadata={
                 "workflow_id": display_workflow_id,
+                "workflow_name": workflow_name,
+                "total_nodes": workflow_total_nodes,
                 "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                 "status": status_value,
                 "steps": result_dict.get("steps", 0),
@@ -776,6 +824,8 @@ async def run_workflow_tool(
                 "title": f"Workflow: {workflow_name}",
                 "metadata": {
                     "workflow_id": canonical_workflow_id,
+                    "workflow_name": workflow_name,
+                    "total_nodes": workflow_total_nodes,
                     "workflow_execution_id": tracked_execution["id"],
                     "status": "error",
                     "phase": "error",
@@ -789,6 +839,8 @@ async def run_workflow_tool(
             title=f"Workflow: {workflow_name}",
             metadata={
                 "workflow_id": display_workflow_id,
+                "workflow_name": workflow_name,
+                "total_nodes": workflow_total_nodes,
                 "workflow_execution_id": tracked_execution["id"] if tracked_execution else None,
                 "status": "FAILED",
             }

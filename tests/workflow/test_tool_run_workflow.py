@@ -615,6 +615,35 @@ class TestRunWorkflowToolExecution:
             assert call_kwargs.get("use_llm") is True
 
     @pytest.mark.anyio
+    async def test_run_workflow_passes_cancel_callback(self, tool_context_with_permission, simple_workflow):
+        """Session abort should be forwarded to workflow runtime cancellation."""
+        fake = FakeRunWorkflowResult(**{
+            "status": "SUCCEEDED",
+            "run_id": "run-cancel",
+            "steps": 1,
+            "last_node_id": "node-1",
+            "outputs": {},
+            "history": [],
+            "error": None,
+        })
+        mock_run = Mock(name="run_workflow", return_value=fake)
+        with patch.object(run_workflow_module, "_get_workflow_runtime", return_value=_runtime_tuple(run_fn=mock_run)):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={},
+            )
+
+            assert result.success is True
+            call_kwargs = mock_run.call_args[1]
+            cancel = call_kwargs.get("cancel")
+            assert callable(cancel)
+            assert cancel() is False
+            tool_context_with_permission.abort.set()
+            assert cancel() is True
+
+    @pytest.mark.anyio
     async def test_run_workflow_disable_llm(self, tool_context_with_permission, simple_workflow):
         """Test workflow execution with use_llm disabled"""
         fake = FakeRunWorkflowResult(**{
