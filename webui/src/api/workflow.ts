@@ -18,6 +18,8 @@ export interface WorkflowNode {
   select_key?: string;
   join?: boolean;
   join_mode?: 'flat' | 'namespace';
+  join_conflict?: 'overwrite' | 'error';
+  join_namespace_key?: string;
   // tool node
   tool_name?: string;
   tool_args?: Record<string, unknown>;

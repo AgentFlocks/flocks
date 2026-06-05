@@ -7,7 +7,7 @@ import yaml
 from flocks.tool.registry import ToolContext
 from flocks.tool.tool_loader import yaml_to_tool
 
-BASE = Path.cwd() / ".flocks" / "plugins" / "tools" / "api" / "tdp_v3_3_10"
+BASE = Path.cwd() / ".flocks" / "plugins" / "tools" / "device" / "tdp_v3_3_10"
 
 
 def _load_tool(yaml_name: str):
@@ -97,6 +97,34 @@ async def test_tdp_dashboard_status_uses_combined_credentials_and_signs_request(
     assert request_kwargs["params"]["api_key"] == "demo-api"
     assert request_kwargs["params"]["auth_timestamp"].isdigit()
     assert request_kwargs["params"]["sign"]
+
+
+@pytest.mark.asyncio
+async def test_tdp_dashboard_status_strips_config_api_from_base_url():
+    tool = _load_tool("tdp_dashboard_status.yaml")
+    fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": {"agent_count": 6}})])
+
+    with (
+        patch(
+            "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={
+                "apiKey": "{secret:tdp_api_key}",
+                "secret": "{secret:tdp_secret}",
+                "base_url": "https://tdp.local/config/api",
+            },
+        ),
+        patch(
+            "flocks.security.get_secret_manager",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=lambda key: {"tdp_api_key": "demo-api", "tdp_secret": "demo-secret"}.get(key))
+            ),
+        ),
+        patch("aiohttp.ClientSession", return_value=fake_session),
+    ):
+        result = await tool.handler(ToolContext(session_id="test", message_id="test"))
+
+    assert result.success is True
+    assert fake_session.calls[0][1] == "https://tdp.local/api/v1/dashboard/status"
 
 
 @pytest.mark.asyncio
@@ -384,10 +412,10 @@ async def test_tdp_log_search_search_uses_default_sql_and_size():
     assert request_kwargs["json"]["size"] == 10
 
 
-def test_tdp_log_search_schema_marks_sql_as_required():
+def test_tdp_log_search_schema_keeps_sql_optional_with_default():
     tool = _load_tool("tdp_log_search.yaml")
 
-    assert "sql" in tool.info.get_schema().required
+    assert "sql" not in tool.info.get_schema().required
     assert tool.info.get_schema().properties["sql"]["default"] == "threat.level = 'attack'"
 
 

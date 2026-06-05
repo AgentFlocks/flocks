@@ -105,6 +105,16 @@ def _resolve_ref(value: Any) -> str | None:
     return value
 
 
+def _normalize_base_url(base_url: str) -> str:
+    """Return the TDP service origin, not a UI/API page path."""
+    normalized = base_url.strip().rstrip("/")
+    for suffix in ("/config/api", "/api/v1"):
+        if normalized.lower().endswith(suffix):
+            normalized = normalized[: -len(suffix)].rstrip("/")
+            break
+    return normalized
+
+
 def _service_config() -> dict[str, Any]:
     raw = ConfigWriter.get_api_service_raw(SERVICE_ID)
     return raw if isinstance(raw, dict) else {}
@@ -136,7 +146,7 @@ def _resolve_runtime_config() -> RuntimeConfig:
         or DEFAULT_BASE_URL
     )
     if base_url:
-        base_url = base_url.strip().rstrip("/")
+        base_url = _normalize_base_url(base_url)
         if not base_url.startswith(("http://", "https://")):
             base_url = f"https://{base_url}"
 

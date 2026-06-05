@@ -47,44 +47,70 @@ export namespace Log {
   }
 
   let logpath = ""
+  let errorLogpath = ""
+  let logDate = ""
   export function file() {
     return logpath
   }
-  let write = (msg: any) => {
+  let write = async (msg: any, error = false) => {
     process.stderr.write(msg)
     return msg.length
   }
 
   export async function init(options: Options) {
     if (options.level) level = options.level
-    cleanup(Global.Path.log)
+    await cleanup(Global.Path.log)
     if (options.print) return
-    logpath = path.join(
-      Global.Path.log,
-      options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
-    )
-    const logfile = Bun.file(logpath)
-    await fs.truncate(logpath).catch(() => {})
-    const writer = logfile.writer()
-    write = async (msg: any) => {
-      const num = writer.write(msg)
-      writer.flush()
-      return num
+    await openDailyLogs()
+    write = async (msg: any, error = false) => {
+      await ensureCurrentDay()
+      await fs.appendFile(logpath, msg)
+      if (error) await fs.appendFile(errorLogpath, msg)
+      return msg.length
     }
   }
 
+  function todayString() {
+    return new Date().toISOString().split("T")[0]
+  }
+
+  async function openDailyLogs() {
+    logDate = todayString()
+    const dir = path.join(Global.Path.log, logDate)
+    await fs.mkdir(dir, { recursive: true })
+    logpath = path.join(dir, "flocks.log")
+    errorLogpath = path.join(dir, "errors.log")
+  }
+
+  async function ensureCurrentDay() {
+    if (logDate === todayString()) return
+    await openDailyLogs()
+    await cleanup(Global.Path.log)
+  }
+
   async function cleanup(dir: string) {
-    const glob = new Bun.Glob("????-??-??T??????.log")
-    const files = await Array.fromAsync(
-      glob.scan({
-        cwd: dir,
-        absolute: true,
+    const retentionDays = Number.parseInt(process.env.FLOCKS_LOG_RETENTION_DAYS || "30", 10)
+    if (!Number.isFinite(retentionDays) || retentionDays <= 0) return
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000
+    const cutoffDay = new Date(cutoff).toISOString().split("T")[0]
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+    await Promise.all(
+      entries.map(async (entry) => {
+        const target = path.join(dir, entry.name)
+        if (entry.isDirectory() && /^\d{4}-\d{2}-\d{2}$/.test(entry.name)) {
+          if (entry.name < cutoffDay) {
+            await fs.rm(target, { recursive: true, force: true }).catch(() => {})
+          }
+          return
+        }
+        if (entry.isFile() && /^\d{4}-\d{2}-\d{2}T\d{6}\.log(\.\d+)?$/.test(entry.name)) {
+          const stamp = entry.name.split(".log")[0]
+          if (new Date(stamp.replace(/T(\d{2})(\d{2})(\d{2})$/, "T$1:$2:$3")).getTime() < cutoff) {
+            await fs.unlink(target).catch(() => {})
+          }
+        }
       }),
     )
-    if (files.length <= 5) return
-
-    const filesToDelete = files.slice(0, -10)
-    await Promise.all(filesToDelete.map((file) => fs.unlink(file).catch(() => {})))
   }
 
   function formatError(error: Error, depth = 0): string {
@@ -137,12 +163,12 @@ export namespace Log {
       },
       error(message?: any, extra?: Record<string, any>) {
         if (shouldLog("ERROR")) {
-          write("ERROR " + build(message, extra))
+          write("ERROR " + build(message, extra), true)
         }
       },
       warn(message?: any, extra?: Record<string, any>) {
         if (shouldLog("WARN")) {
-          write("WARN  " + build(message, extra))
+          write("WARN  " + build(message, extra), true)
         }
       },
       tag(key: string, value: string) {

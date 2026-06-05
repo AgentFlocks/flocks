@@ -151,6 +151,7 @@ class TestIsTextFile:
         ("notes.txt", True),
         ("server.log", True),
         ("config.json", True),
+        ("events.jsonl", True),
         ("settings.yaml", True),
         ("settings.yml", True),
         ("pyproject.toml", True),

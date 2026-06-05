@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+from datetime import date
 
 from flocks.utils.log import append_upgrade_text_log
 
@@ -10,8 +11,9 @@ def test_append_upgrade_text_log_writes_timestamped_lines(monkeypatch, tmp_path:
     monkeypatch.setenv("FLOCKS_LOG_DIR", str(tmp_path))
     append_upgrade_text_log("first line")
     append_upgrade_text_log("a\nb")
-    text = (tmp_path / "update.log").read_text(encoding="utf-8")
+    text = (tmp_path / date.today().isoformat() / "errors.log").read_text(encoding="utf-8")
     lines = text.strip().splitlines()
+    assert not (tmp_path / "update.log").exists()
     assert len(lines) == 3
     assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| first line$", lines[0])
     assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| a$", lines[1])

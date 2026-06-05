@@ -26,6 +26,7 @@
     "close": "Close",
     "uploading": "Uploading...",
     "binaryPreview": "Binary files cannot be previewed",
+    "truncatedPreview": "This file is large, so only the first {{limit}} is previewed. Inline editing is disabled to avoid saving truncated content; download the file for the full contents.",
     "downloadFile": "Download File",
     "toast": {
       "loadDirFailed": "Failed to load directory",

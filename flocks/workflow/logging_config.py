@@ -1,15 +1,12 @@
 """Logging configuration for flocks.workflow.
 
-Workflow logs go to stderr and, when file logging is enabled, to
-~/.flocks/logs/workflow.log (or FLOCKS_LOG_DIR/workflow.log).
+Workflow logs go to stderr. File logging is intentionally disabled so the
+Flocks log directory only contains backend.log, webui.log, and date folders.
 """
 
 import logging
 import sys
-from logging.handlers import RotatingFileHandler
 from typing import Optional
-
-from flocks.utils.log import get_log_backup_count, get_log_dir, get_log_max_bytes
 
 
 def setup_workflow_logging(
@@ -18,13 +15,13 @@ def setup_workflow_logging(
     stream=None,
     file: bool = True,
 ) -> None:
-    """配置 flocks.workflow 的日志输出（控制台 + 可选文件）。
+    """配置 flocks.workflow 的日志输出（控制台）。
 
     Args:
         level: 日志级别，默认为 INFO
         format_string: 日志格式字符串，如果为 None 则使用默认格式
         stream: 输出流，默认为 sys.stderr
-        file: 是否同时写入 ~/.flocks/logs/workflow.log（与主 Log 同目录）
+        file: 兼容旧参数；当前不会创建 workflow.log 文件
 
     Example:
         >>> from flocks.workflow import setup_workflow_logging
@@ -49,22 +46,9 @@ def setup_workflow_logging(
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # File (same directory as flocks.utils.log)
-    if file:
-        try:
-            log_dir = get_log_dir()
-            log_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = RotatingFileHandler(
-                log_dir / "workflow.log",
-                maxBytes=get_log_max_bytes(),
-                backupCount=get_log_backup_count(),
-                encoding="utf-8",
-            )
-            file_handler.setLevel(level)
-            file_handler.setFormatter(formatter)
-            logger.addHandler(file_handler)
-        except OSError:
-            pass  # Do not break if log dir is read-only or missing
+    # Workflow file logging is intentionally disabled. Structured workflow
+    # activity should be emitted through ``flocks.utils.log`` so the log
+    # directory only contains backend.log, webui.log, and date folders.
 
     logger.propagate = False
 
