@@ -12,10 +12,10 @@ from flocks.storage.storage import Storage
 # Feature flags
 # ---------------------------------------------------------------------------
 
-#: Flip to True (or set env FLOCKS_DEVICE_MULTI_GROUP=1) to unlock multi-group
-#: routes. The data layer is already multi-group ready; this is UI/API gating only.
+#: Multi-group (多机房) is on by default. Set env FLOCKS_DEVICE_MULTI_GROUP=0
+#: to fall back to single-room mode.
 MULTI_GROUP_ENABLED: bool = (
-    os.environ.get("FLOCKS_DEVICE_MULTI_GROUP", "").lower() in {"1", "true", "yes"}
+    os.environ.get("FLOCKS_DEVICE_MULTI_GROUP", "1").lower() not in {"0", "false", "no"}
 )
 
 DEFAULT_GROUP_ID = "default-room"
