@@ -12,26 +12,34 @@ import { EnabledBadge } from './badges';
 interface ToolDetailModalProps {
   tool: Tool;
   initialSection?: 'info' | 'test';
+  /** When opening from a specific device's panel, pass the device UUID so
+   *  it is pre-filled as `device_id` in the test params template. */
+  deviceId?: string;
   onClose: () => void;
 }
 
-function buildParamsTemplate(tool: Tool): string {
-  if (!tool.parameters || tool.parameters.length === 0) return '{}';
-  const obj: Record<string, string> = {};
-  for (const p of tool.parameters) {
-    if (p.required) {
-      obj[p.name] = p.type === 'number' || p.type === 'integer' ? '0' as any
-        : p.type === 'boolean' ? 'false' as any
-        : '';
+function buildParamsTemplate(tool: Tool, deviceId?: string): string {
+  const obj: Record<string, any> = {};
+  if (deviceId) {
+    obj['device_id'] = deviceId;
+  }
+  if (tool.parameters && tool.parameters.length > 0) {
+    for (const p of tool.parameters) {
+      if (p.name === 'device_id' && deviceId) continue; // injected value above wins
+      if (p.required) {
+        obj[p.name] = p.type === 'number' || p.type === 'integer' ? 0
+          : p.type === 'boolean' ? false
+          : '';
+      }
     }
   }
   return JSON.stringify(obj, null, 2);
 }
 
-export default function ToolDetailModal({ tool, initialSection, onClose }: ToolDetailModalProps) {
+export default function ToolDetailModal({ tool, initialSection, deviceId, onClose }: ToolDetailModalProps) {
   const { t, i18n } = useTranslation('tool');
   const [section, setSection] = useState<'info' | 'test'>(initialSection || 'info');
-  const defaultParams = useMemo(() => buildParamsTemplate(tool), [tool]);
+  const defaultParams = useMemo(() => buildParamsTemplate(tool, deviceId), [tool, deviceId]);
   const [testParams, setTestParams] = useState(defaultParams);
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
@@ -240,6 +248,12 @@ export default function ToolDetailModal({ tool, initialSection, onClose }: ToolD
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
+                {deviceId && (
+                  <p className="text-xs text-blue-600 mb-1.5 flex items-center gap-1">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
+                    已自动填入当前设备 ID（<code className="font-mono">{deviceId}</code>）
+                  </p>
+                )}
                 <textarea
                   value={testParams}
                   onChange={(e) => setTestParams(e.target.value)}
