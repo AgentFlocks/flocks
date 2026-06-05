@@ -33,9 +33,18 @@ _config_override: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
     "device_config_override", default=None
 )
 
-# The service_id this config override belongs to (scoping guard)
+# The service_id this config override belongs to (scoping guard).
+# Matched by get_config_override() for the bare service_id alias.
 _config_override_service: ContextVar[Optional[str]] = ContextVar(
     "device_config_override_service", default=None
+)
+
+# The storage_key for the same override (versioned name, e.g. "sangfor_af_v8_0_48").
+# Many handlers set SERVICE_ID to the full storage_key, not the bare service_id,
+# so we keep both to avoid a key mismatch causing credential lookup to silently
+# fall back to the global default config (wrong IP, wrong credentials).
+_config_override_storage_key: ContextVar[Optional[str]] = ContextVar(
+    "device_config_override_storage_key", default=None
 )
 
 # The currently active device_id (for logging / introspection)
@@ -61,11 +70,22 @@ def get_secret_override(secret_id: str) -> Optional[str]:
 
 
 def get_config_override(service_id: str) -> Optional[Dict[str, Any]]:
-    """Return device-specific config dict if an override is active for *service_id*."""
-    expected = _config_override_service.get()
-    if expected is None or expected != service_id:
+    """Return device-specific config dict if an override is active for *service_id*.
+
+    Matches against both the bare service_id (e.g. ``"sangfor_af"``) stored by
+    :func:`activate_device_credentials` and the raw storage_key
+    (e.g. ``"sangfor_af_v8_0_48"``) so that handlers whose ``SERVICE_ID``
+    includes the version suffix still resolve the correct per-device config
+    rather than silently falling back to the global default.
+    """
+    override = _config_override.get()
+    if override is None:
         return None
-    return _config_override.get()
+    expected_service = _config_override_service.get()
+    expected_storage = _config_override_storage_key.get()
+    if service_id in (expected_service, expected_storage):
+        return override
+    return None
 
 
 def get_active_device_id() -> Optional[str]:
@@ -90,7 +110,7 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
     Yields ``True`` if activation succeeded, ``False`` if the device was not
     found / disabled (caller may still continue with default credentials).
     """
-    secret_ovr, config_ovr, service_id = await _build_overrides(device_id)
+    secret_ovr, config_ovr, service_id, storage_key = await _build_overrides(device_id)
     if secret_ovr is None and config_ovr is None or service_id is None:
         yield False
         return
@@ -105,6 +125,10 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
     # the previous coroutine's value visible).
     verify_ssl = bool((config_ovr or {}).get("verify_ssl", False))
     t5 = _verify_ssl_override.set(verify_ssl)
+    # Also store the raw storage_key so handlers whose SERVICE_ID includes the
+    # version suffix (e.g. "sangfor_af_v8_0_48") can still match the override
+    # via get_config_override() without re-querying the DB.
+    t6 = _config_override_storage_key.set(storage_key or None)
     try:
         yield True
     finally:
@@ -113,24 +137,29 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
         _config_override_service.reset(t3)
         _active_device_id.reset(t4)
         _verify_ssl_override.reset(t5)
+        _config_override_storage_key.reset(t6)
 
 
 async def _build_overrides(
     device_id: str,
-) -> tuple[Optional[Dict[str, str]], Optional[Dict[str, Any]], Optional[str]]:
+) -> tuple[Optional[Dict[str, str]], Optional[Dict[str, Any]], Optional[str], Optional[str]]:
     """Build secret and config override dicts for *device_id*.
 
-    Returns (None, None, None) when the device is not found or disabled.
-    Third element is the service_id used to scope the config override.
+    Returns ``(secret_ovr, config_ovr, service_id, storage_key)``.
+    All four are ``None`` when the device is not found or disabled.
+    ``service_id`` is the bare alias (e.g. ``"sangfor_af"``);
+    ``storage_key`` is the full versioned key (e.g. ``"sangfor_af_v8_0_48"``)
+    — both are stored in ContextVars so handlers that use either form as
+    their ``SERVICE_ID`` will still resolve the correct per-device config.
     """
     try:
         from flocks.tool.device.store import get_device_credentials
         creds = await get_device_credentials(device_id)
     except Exception:
-        return None, None, None
+        return None, None, None, None
 
     if creds is None:
-        return None, None, None
+        return None, None, None, None
 
     storage_key: str = creds.get("storage_key", "")
     service_id: str = creds.get("service_id", "")
@@ -182,7 +211,7 @@ async def _build_overrides(
     config_ovr["verify_ssl"] = verify_ssl
     config_ovr["ssl_verify"] = verify_ssl
 
-    return secret_ovr or None, config_ovr or None, service_id or None
+    return secret_ovr or None, config_ovr or None, service_id or None, storage_key or None
 
 
 def _load_credential_fields(storage_key: str) -> list[Dict[str, Any]]:
