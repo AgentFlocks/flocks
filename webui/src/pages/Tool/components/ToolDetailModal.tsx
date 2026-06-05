@@ -218,7 +218,10 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                             key={idx}
                             type="button"
                             onClick={() => {
-                              setTestParams(JSON.stringify(fx.params, null, 2));
+                              const merged = deviceId
+                                ? { device_id: deviceId, ...fx.params }
+                                : fx.params;
+                              setTestParams(JSON.stringify(merged, null, 2));
                               setFixturesOpen(false);
                             }}
                             className="w-full flex items-start gap-3 px-4 py-2.5 hover:bg-blue-100 transition-colors text-left"
