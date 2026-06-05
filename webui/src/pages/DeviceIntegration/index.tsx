@@ -879,7 +879,7 @@ function DeviceConfigPanel({
                               </td>
                               <td className="px-4 py-3 text-right">
                                 <button
-                                  onClick={() => setToolModal(tool)}
+                                  onClick={() => setToolModal({ ...tool, enabled: isOn })}
                                   className="text-xs text-blue-600 hover:text-blue-800 font-medium"
                                 >
                                   {t('tools.detail')}
