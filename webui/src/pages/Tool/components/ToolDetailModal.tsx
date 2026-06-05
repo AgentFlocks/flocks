@@ -219,7 +219,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
                             type="button"
                             onClick={() => {
                               const merged = deviceId
-                                ? { device_id: deviceId, ...fx.params }
+                                ? { ...fx.params, device_id: deviceId }
                                 : fx.params;
                               setTestParams(JSON.stringify(merged, null, 2));
                               setFixturesOpen(false);

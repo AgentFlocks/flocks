@@ -111,7 +111,7 @@ async def activate_device_credentials(device_id: str) -> AsyncIterator[bool]:
     found / disabled (caller may still continue with default credentials).
     """
     secret_ovr, config_ovr, service_id, storage_key = await _build_overrides(device_id)
-    if secret_ovr is None and config_ovr is None or service_id is None:
+    if (secret_ovr is None and config_ovr is None) or service_id is None:
         yield False
         return
 
