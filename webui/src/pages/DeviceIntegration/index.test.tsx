@@ -12,7 +12,11 @@ const mocks = vi.hoisted(() => ({
   deleteDevice: vi.fn(),
   testDevice: vi.fn(),
   listGroups: vi.fn(),
+  createGroup: vi.fn(),
   updateGroup: vi.fn(),
+  deleteGroup: vi.fn(),
+  listDeviceTools: vi.fn(),
+  updateDeviceTool: vi.fn(),
   listApiServices: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
@@ -30,7 +34,11 @@ vi.mock('@/api/device', () => ({
     delete: mocks.deleteDevice,
     test: mocks.testDevice,
     listGroups: mocks.listGroups,
+    createGroup: mocks.createGroup,
     updateGroup: mocks.updateGroup,
+    deleteGroup: mocks.deleteGroup,
+    listDeviceTools: mocks.listDeviceTools,
+    updateDeviceTool: mocks.updateDeviceTool,
   },
 }));
 
@@ -157,6 +165,8 @@ describe('DeviceIntegrationPage', () => {
     });
     mocks.listTools.mockResolvedValue({ data: [] });
     mocks.setToolEnabled.mockResolvedValue({ data: {} });
+    mocks.listDeviceTools.mockResolvedValue({ data: [] });
+    mocks.updateDeviceTool.mockResolvedValue({ data: {} });
   });
 
   it('clicking the blank backdrop closes the config panel', async () => {
