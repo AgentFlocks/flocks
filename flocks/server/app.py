@@ -962,6 +962,13 @@ from flocks.server.routes.usage import router as usage_router
 from flocks.server.routes.custom_provider import router as custom_provider_router
 # Engine management: pluggable agent loop engine list
 from flocks.server.routes.engine import router as engine_router
+# Raptor engine: register hermes-agent tui_gateway adapter (P2)
+# Importing this module triggers auto-registration in LoopEngineRegistry.
+# Remove or comment out this import to disable the Raptor engine entirely.
+try:
+    import flocks.engine.raptor  # noqa: F401
+except Exception:
+    pass  # hermes-agent not available; Raptor engine will not appear in /api/engine/list
 # Onboarding routes
 from flocks.server.routes.onboarding import router as onboarding_router
 # Task Center routes
