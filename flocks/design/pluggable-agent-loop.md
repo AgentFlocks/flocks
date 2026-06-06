@@ -1,9 +1,16 @@
 # 可插拔 Agent Loop 设计文档
 
-> 状态：**草稿 / RFC（v5，多 Agent 编排双轨隔离确认）**  
+> 状态：**草稿 / RFC（v6，安全护栏 + 进程生命周期定稿）**  
 > 作者：AI 辅助生成  
 > 日期：2026-06-06  
 > 分支：`feat/pluggable-agent-loop`
+
+> **v6 修订要点**（第四轮审阅 + 两项决策）：
+> 1. **修复 §4.5↔§5.4 字面冲突**：明确 hermes 可见工具集 = `桥接(Flocks 白名单叶子工具) ∪ {delegate_task}`。
+> 2. **决策：子 Agent 安全护栏强制**（§4.5.5 / §5.4）——hermes 派生子 Agent 复用同一 AgentBridge 配置；ToolBridge 作为唯一闸口对**所有**回调校验白名单 + tdp/onesec skill，杜绝借委派绕过。
+> 3. **决策：每-session 常驻 daemon**（§4.4）——子进程跨轮复用，保住 prompt cache / checkpoint / 跨轮压缩；中断只终止当前轮、daemon 保活。
+> 4. **收口跨轮历史增长**（§11 ④）：daemon 内 hermes 自管压缩；MessageBridge 只回写展示用历史。
+> 5. RPC 协议补 `approval.response` 回向消息；弱化 §1.2 "delegate_task 串行" 表述。
 
 > **v5 修订要点**（多 Agent 编排决策）：
 > 1. 重写 §5.4：raptor 集成 hermes **原生 `delegate_task`**（内存子 Agent、线程并行），与 Flocks 原生 `delegate_task`（子 session）**互不调用、彻底隔离**；**Flocks 原生路径与原有能力一字不变**。
@@ -57,7 +64,7 @@ SessionLoop._run_loop()
 | Checkpoint / 回滚 | 部分（SessionRevert） | ✅ 写文件/破坏性命令前自动快照 |
 | 中断 + 软注入 | abort（cancel task） | ✅ `interrupt()` 硬中断 + `steer()` 注入不中断 |
 | 多层 API 重试 | 空响应 + API 错误 | ✅ 429 / 压缩 / fallback provider / invalid JSON 四层恢复 |
-| Subagent 并行 | delegate_task（串行） | ✅ batch 并发 + 中断传播 |
+| Subagent 并行 | delegate_task（创建子 session，逐个委派） | ✅ batch 并发 + 中断传播（内存子 Agent） |
 
 ### 1.3 目标（核心诉求）
 
@@ -115,10 +122,10 @@ SessionLoop._run_loop()
                            ▼
             ┌──────────────────────────────────────┐
             │           RaptorEngine               │
-            │   (P2，子进程 / RPC 适配器)          │
-            │   监听 ctx.abort_event → 杀子进程     │
-            │   MessageBridge  ToolBridge          │
-            │   StreamBridge   subprocess(JSON-RPC)│
+            │   (P2，每-session 常驻 daemon/RPC)   │
+            │   监听 ctx.abort_event → 中断当前轮   │
+            │   AgentBridge MessageBridge ToolBridge│
+            │   StreamBridge  subprocess(JSON-RPC) │
             │   └─> hermes-agent run_conversation  │
             └──────────────────────────────────────┘
                             │
@@ -139,7 +146,7 @@ SessionLoop._run_loop()
 | `turn.started/continued/stopped` SSE 事件（驱动 WebUI 回合状态） | **必须复刻**——经 `callbacks.event_publish_callback` 发同样的 turn_state |
 | **queued 消息续跑**（`_detect_queued_user_message`：运行中用户追发消息要接续处理） | **必须复刻**——一轮 hermes 结束后检测 queued 消息并再启动一轮 |
 | 首轮 title 生成 | 复刻或复用 Flocks 既有 title 生成 |
-| compaction overflow 检查 | 交给 hermes 自身压缩（见 §11 / 问题：双压缩归属） |
+| compaction overflow 检查 | 交给 hermes 在常驻 daemon 内自管压缩（跨轮持久，见 §4.4 / §11 ④） |
 | 消息写回 Flocks 存储（assistant/tool parts） | 由 MessageBridge 负责（见 §4.4） |
 
 > 因此"引擎接口 = `_run_loop` 的替代"这一点要在实现中严格遵守：raptor 不只是"调 hermes 然后返回 LoopResult"，还要把 turn_state、queued 续跑这两项**会话语义**补齐，否则 WebUI 回合指示与中途追发消息会失效。
@@ -241,20 +248,30 @@ RaptorEngine 适配 hermes-agent 的 `run_conversation`（`run_agent.py` / `agen
 ```
 Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立 venv/sys.path)
   RaptorEngine.run(ctx, callbacks)       hermes-agent run_conversation()
-      │   spawn + JSON-RPC over stdio          │
+      │   (首轮)spawn daemon, 之后复用        │
       ├──> prompt.submit  ───────────────────> │ 执行 LLM + 工具循环
       │ <── tool.call.request ──────────────── │ (请求 Flocks 执行某工具)
       │     ToolRegistry.execute(...)          │
       │ ──> tool.call.result ────────────────> │
+      │ <── approval.request ────────────────  │ (破坏性操作需审批)
+      │ ──> approval.response ───────────────> │ (approve / deny 回送)
       │ <── message.delta / tool.progress ──── │ (流式增量)
       │ <── prompt.complete ────────────────── │
       │                                         │
-      │  ctx.abort_event 触发 → 杀子进程 ──────X │ (中断)
+      │  ctx.abort_event 触发 → 中断当前轮 ────X │ (中断；daemon 保活待下一轮)
 ```
+
+**进程生命周期：每 session 一个常驻 daemon（决策 v6）。** 子进程在 session 首轮 `run()` 时 spawn，**跨轮复用**，在 session 关闭 / 空闲超时 / 服务退出时回收。这样：
+
+- hermes **prompt cache 跨轮保留**（§1.2 / §4.4 note3 的核心优势成立）；
+- hermes 的 **checkpoint / compaction / 内存子 Agent 工作上下文跨轮持久**（活在 daemon 内）；
+- 因此跨轮历史增长由 hermes 在 daemon 内自管压缩收口（见 §11 ④），Flocks 侧只接收 MessageBridge 回写的展示用历史。
+
+> daemon 与 session 生命周期绑定：`RaptorEngine` 维护 `session_id -> 子进程` 映射；进程崩溃则下一轮重建并以 Flocks 存储的历史重放冷启动。中断（`ctx.abort_event`）只终止**当前轮**，不杀 daemon。
 
 子进程在 hermes-agent 自己的目录 + venv 下运行，彻底隔离命名空间与全局状态；Flocks 侧只通过 JSON-RPC 通信。
 
-**中断打通**：`RaptorEngine.run(ctx, ...)` 启动一个 watcher 协程 `await ctx.abort_event.wait()`，一旦 Flocks 既有的 `SessionLoop.abort(session_id)` / `abort_children()` 置位 `abort_event`，立即终止子进程并返回 `LoopResult(action="aborted")`。无需为 raptor 另造中断链路。
+**中断打通**：`RaptorEngine.run(ctx, ...)` 启动一个 watcher 协程 `await ctx.abort_event.wait()`，一旦 Flocks 既有的 `SessionLoop.abort(session_id)` / `abort_children()` 置位 `abort_event`，立即向 daemon 发 `interrupt` 终止当前轮并返回 `LoopResult(action="aborted")`（**daemon 保活**，待下一轮）。无需为 raptor 另造中断链路。
 
 #### MessageBridge
 
@@ -266,6 +283,7 @@ Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立
 #### ToolBridge
 
 - 子进程不直接持有 Flocks **叶子工具**，而是通过 `tool.call.request` RPC **回调 Flocks** 执行：Flocks 侧 `await ToolRegistry.execute(name, ctx, **kwargs)` 后把结果 `tool.call.result` 回传  
+- **ToolBridge 是唯一安全闸口**：所有回调（无论来自顶层 agent 还是 hermes 派生的子 Agent）一律在此校验 Flocks 白名单 + tdp/onesec skill 约束（§4.5.5），未授权工具直接拒绝——子 Agent 无法借委派绕过护栏  
 - 工具 schema 在 `prompt.submit` 时一次性下发，**会话内保持稳定**（避免破坏 hermes 的 prompt cache）  
 - 这样 Raptor 复用 Flocks 的 device/skill/MCP 工具，**无需重写工具层**
 - **`delegate_task` 例外（双轨隔离，见 §5.4）**：`delegate_task` 是 hermes 的 agent-loop 内置工具，**留在子进程内自治执行**（spawn 内存子 Agent），**不进桥接名单**、不转成 Flocks `delegate_task`。ToolBridge 只桥接叶子工具。
@@ -276,6 +294,7 @@ Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立
 子进程 message.delta   → publish_event("message.part.updated", {delta: ...})
 子进程 tool.progress   → publish_event("message.part.updated", {tool_part: ...})
 子进程 approval.request → publish_event("session.permission", {...})
+                         ← approval.response（approve/deny 经 RPC 回送子进程，子进程据此继续/中止该工具）
 ```
 
 #### ⚠️ P2 前置项：导入/集成可行性 Spike
@@ -298,11 +317,12 @@ Flocks 的 agent（rex / hephaestus 等）由 `agent.yaml` 定义自己的 **sys
 因此 AgentBridge 必须：
 
 1. **System prompt 注入**：用 `SessionPrompt.build_system_prompts(agent, ...)` 生成 Flocks agent 的 system prompt，作为 hermes `run_conversation(system_message=...)` 传入，**覆盖** hermes 默认 system prompt。
-2. **工具白名单同步**：用 `_build_callable_tool_schema(agent, ...)` 取该 agent 允许的工具集，**只把这些工具**通过 ToolBridge 暴露给 hermes（hermes 的并行/动态加载机制照常作用在这个受限集合上）。
+2. **工具集 = 桥接白名单 ∪ hermes 原生 delegate_task**（解决 §4.5 与 §5.4 的字面冲突）：用 `_build_callable_tool_schema(agent, ...)` 取该 agent 允许的 **Flocks 叶子工具**，通过 ToolBridge 暴露给 hermes；**再并上 hermes 的原生 `delegate_task`**（它不经桥接，留在子进程内，见 §5.4）。即 hermes 实际可见工具 = `桥接(Flocks 白名单叶子工具) ∪ {delegate_task}`。hermes 的并行/动态加载机制照常作用在这个集合上。
 3. **关闭 hermes 自带的 context/AGENTS.md 加载**：避免 hermes 注入与 Flocks 无关的上下文（`run_conversation` 提供 `skip_context_files` 等开关）。
-4. **保留 hermes 的"工具调用方式"**：并行执行、`tool_search` 折叠等机制**保留**——它们作用于第 2 步给定的 Flocks 工具集，不改变"能用哪些工具"，只改变"怎么调"。
+4. **保留 hermes 的"工具调用方式"**：并行执行、`tool_search` 折叠等机制**保留**——它们作用于第 2 步给定的工具集，不改变"能用哪些工具"，只改变"怎么调"。
+5. **子 Agent 同样套护栏（决策 v6，安全优先）**：hermes `delegate_task` 派生的子 Agent，其 system prompt 与可用工具集**必须复用同一份 AgentBridge 配置**（同样的 Flocks 白名单 + tdp/onesec skill 约束）。落地方式见 §5.4：在 daemon 内为子 Agent 注入相同的受限工具集，并在 **ToolBridge 这一统一闸口**对**所有**回调（无论来自顶层还是子 Agent）做白名单 + skill 校验——子 Agent 无法借委派绕过 Flocks 安全护栏。
 
-> 一句话：**AgentBridge 决定"agent 是谁、能用什么工具"（Flocks 说了算），hermes loop 决定"怎么循环、怎么调工具"（hermes 说了算）。**
+> 一句话：**AgentBridge 决定"agent 是谁、能用什么工具"（Flocks 说了算，顶层与子 Agent 一致），hermes loop 决定"怎么循环、怎么调工具、怎么并行委派"（hermes 说了算）。**
 
 ---
 
@@ -374,10 +394,14 @@ def _resolve_loop_engine(session) -> str:
 3. **ToolBridge 的 delegate 例外**：ToolBridge 只桥接**叶子工具**（bash、设备工具、skill 等）回 Flocks `ToolRegistry`；`delegate_task` 属于 hermes 的 agent-loop 内置工具，**留在 hermes 子进程内**，不进桥接名单。反向亦然——Flocks 的 `delegate_task` 不暴露给 hermes。
 4. **两套不交叉**：一个 Flocks session 永远只用其引擎对应的那一套 delegation；不存在"native 调 hermes 子 agent"或"hermes 调 Flocks 子 session"的路径。
 
+**安全护栏覆盖子 Agent（决策 v6）：** hermes `delegate_task` 派生的子 Agent **保留 hermes 的编排形态**（并行/角色/深度），但**不豁免 Flocks 安全护栏**：
+- 子 Agent 的 system prompt + 可用工具集复用同一份 AgentBridge 配置（§4.5.5）；
+- **所有**工具回调（顶层 + 子 Agent）统一经 ToolBridge 闸口校验白名单 + tdp/onesec skill；
+- 即"编排方式用 hermes 原生，安全边界用 Flocks 统一"——两者不冲突，前者管"怎么并行委派"，后者管"能碰哪些工具"。
+
 **连带影响：**
-- hermes 子 Agent 的并行/角色/深度能力（你要集成的"hermes 方式"）**完整保留**，活在 raptor 子进程内。
-- 代价：raptor 的子 Agent 对 Flocks **不可见、不落库**（这是 hermes 原生模型的固有特性，符合"集成 hermes 方式"的诉求）。
-- §4.5 AgentBridge 作用于 **raptor 的顶层 agent**（注入 Rex 的 system prompt + 工具白名单）；hermes 子进程内派生的子 Agent 遵循 hermes 自身的 leaf/orchestrator 模型（属于"hermes 原生方式"的一部分）。
+- hermes 子 Agent 的并行/角色/深度能力（你要集成的"hermes 方式"）**完整保留**，活在 raptor daemon 内。
+- 代价：raptor 的子 Agent 的中间推理对 Flocks **不可见、不落库**（hermes 内存模型固有特性）；但其工具调用因经 ToolBridge 执行，在 Flocks 侧**可见可审计**。
 
 ---
 
@@ -612,18 +636,19 @@ flocks/webui/src/
 
 ### P2 — RaptorEngine 适配器（子进程 / RPC）
 
-- [ ] **前置 Spike**：验证 hermes-agent 子进程 JSON-RPC 可行性（§4.4 末）
-- [ ] 子进程 RPC 协议定义（`prompt.submit` / `tool.call` / `message.delta` / `prompt.complete`）
-- [ ] `AgentBridge`：注入 Flocks agent system prompt + 工具白名单（§4.5，正确性前提）
-- [ ] `MessageBridge`：Flocks Parts ↔ OpenAI messages（回写原始历史，不回写 hermes 压缩结果）
-- [ ] `ToolBridge`：`tool.call` RPC → `ToolRegistry.execute`（仅叶子工具；`delegate_task` 不进桥接名单，留 hermes 子进程内自治，§5.4）
+- [ ] **前置 Spike**：验证 hermes-agent **常驻子进程** JSON-RPC 可行性 + 跨轮 prompt cache（§4.4 末）
+- [ ] **每-session daemon 生命周期管理**：`session_id→进程` 映射、spawn/复用/回收、崩溃冷重放（§4.4）
+- [ ] 子进程 RPC 协议定义（`prompt.submit` / `tool.call` / `approval.request`+`approval.response` / `message.delta` / `prompt.complete`）
+- [ ] `AgentBridge`：注入 Flocks agent system prompt + 工具白名单（§4.5）；**子 Agent 复用同一配置**（§4.5.5）
+- [ ] `MessageBridge`：Flocks Parts ↔ OpenAI messages（回写展示用历史；不回写 hermes 压缩态）
+- [ ] `ToolBridge`：`tool.call` RPC → `ToolRegistry.execute`（仅叶子工具；`delegate_task` 留 hermes daemon 内自治，§5.4）；**作为唯一闸口对所有回调校验白名单+skill**
 - [ ] `StreamBridge`：子进程 RPC event → publish_event SSE
 - [ ] **复刻 `_run_loop` 内层职责**：turn_state 事件（turn.started/continued/stopped）+ queued 消息续跑（§3.2）
 - [ ] **多 Agent 双轨隔离**：raptor 启用 hermes 原生 `delegate_task`（内存子 Agent，子进程内）；确保不创建 Flocks 子 session、不调用 Flocks `delegate_task`（§5.4）
 - [ ] `engine/raptor/engine.py` 主适配器，注册进 LoopEngineRegistry
 - [ ] 启用 WebUI 引擎下拉（此时出现两个选项）
 
-**验收**：选 Raptor + Rex 时，Rex 的 system prompt/工具白名单/安全 skill 生效；工具并行执行；`delegate_task` 走 hermes 原生内存子 Agent（不建 Flocks 子 session）；native 引擎下 Flocks 原生 `delegate_task` 行为与改前一字不变；turn_state 与 queued 续跑正常；SSE 与 WebUI 渲染一致；子进程崩溃优雅降级。
+**验收**：选 Raptor + Rex 时，Rex 的 system prompt/工具白名单/安全 skill 生效；工具并行执行；`delegate_task` 走 hermes 原生内存子 Agent（不建 Flocks 子 session）；**子 Agent 的工具回调同样受白名单+skill 校验**；native 引擎下 Flocks 原生 `delegate_task` 行为与改前一字不变；daemon 跨轮复用且中断只终止当前轮；turn_state 与 queued 续跑正常；SSE 与 WebUI 渲染一致；子进程崩溃后冷重放重建。
 
 ### P3 — 高级能力对接
 
@@ -640,11 +665,13 @@ flocks/webui/src/
 | 风险 | 等级 | 缓解 |
 |---|---|---|
 | **丢失 Flocks agent 身份与安全 skill 约束**（tdp/onesec 等被绕过） | 高 | §4.5 AgentBridge 注入 agent system prompt + 工具白名单，作为 P2 正确性前提 |
+| **子 Agent 借委派绕过白名单/skill 护栏** | 高 | 决策 v6：子 Agent 复用同一 AgentBridge 配置；ToolBridge 作为唯一闸口对**所有**回调（顶层+子 Agent）校验白名单+skill（§4.5.5 / §5.4） |
 | **raptor 未复刻 `_run_loop` 内层职责**（turn_state 事件 / queued 续跑丢失） | 高 | §3.2：引擎须经 callbacks 发 turn_state、一轮结束后检测 queued 并续跑 |
 | hermes-agent 无法安全进程内 import（扁平模块 + 进程全局状态 + 命名空间冲突） | 高 | P2 改用**子进程 + JSON-RPC** 彻底隔离；正式开发前先做可行性 spike |
 | 子进程崩溃 / RPC 超时 / 僵尸进程 | 高 | 超时与心跳、进程生命周期绑定 session、崩溃时优雅降级并 `on_error` 上报 |
 | Flocks `MessageInfo/Parts` ↔ OpenAI messages 格式映射不完整 | 高 | P2 需完整映射全部 Part 类型；先只支持 TextPart + ToolPart |
-| **双压缩归属**：raptor 下 Flocks 压缩不触发，由 hermes 自管 | 中 | MessageBridge 回写 Flocks **原始历史**（hermes 压缩只活在子进程内）；如需 UI 一致，StreamBridge 把 hermes 压缩事件映射为 `context.compacted` |
+| **双压缩归属 + 跨轮历史增长**：raptor 下 Flocks 压缩不触发 | 中 | **每-session 常驻 daemon（v6）**解决：hermes 在 daemon 内跨轮自管 compaction、收口上下文增长；MessageBridge 仅向 Flocks 回写**展示用历史**（不回写 hermes 压缩态）；如需 UI 一致，StreamBridge 把压缩事件映射为 `context.compacted` |
+| **子进程僵尸/历史无界**（若误用每-prompt 起停） | 中 | 明确采用每-session daemon（§4.4）：进程与 session 生命周期绑定，崩溃后以 Flocks 历史冷重放重建 |
 | 工具回调 RPC 往返延迟累积 | 中 | spike 实测延迟；必要时批量/并行回调 |
 | **双轨编排串味**（native 误调 hermes 子 agent，或 hermes 子 agent 落成 Flocks 子 session） | 高 | §5.4 双轨隔离：`delegate_task` 不进 ToolBridge 名单；native 路径零改动；两套由引擎决定、互不交叉 |
 | raptor 内多 Agent 嵌套深度失控（hermes orchestrator 套 orchestrator） | 中 | 由 hermes 原生 `max_spawn_depth` / `max_concurrent_children` 管控（子进程内自治） |
