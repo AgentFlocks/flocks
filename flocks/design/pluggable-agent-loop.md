@@ -85,7 +85,7 @@ SessionLoop._run_loop()
 
 ## 4. 详细接口设计
 
-### 4.1 `AgentLoopEngine` 协议（`session/engine/base.py`）
+### 4.1 `AgentLoopEngine` 协议（`engine/base.py`）
 
 ```python
 from typing import Optional, Any, Protocol, runtime_checkable
@@ -109,7 +109,7 @@ class AgentLoopEngine(Protocol):
 
 > `LoopResult` 与 `LoopCallbacks` 复用 `session_loop.py` 的现有定义，HermesEngine 需返回格式相同的 `LoopResult`。
 
-### 4.2 `LoopEngineRegistry`（`session/engine/registry.py`）
+### 4.2 `LoopEngineRegistry`（`engine/registry.py`）
 
 ```python
 class LoopEngineRegistry:
@@ -129,7 +129,7 @@ class LoopEngineRegistry:
         ...
 ```
 
-### 4.3 `FlocksNativeEngine`（`session/engine/native.py`）
+### 4.3 `FlocksNativeEngine`（`engine/native.py`）
 
 ```python
 class FlocksNativeEngine:
@@ -145,7 +145,7 @@ class FlocksNativeEngine:
         )
 ```
 
-### 4.4 `HermesEngine`（`session/engine/hermes.py`，P2 实现）
+### 4.4 `HermesEngine`（`engine/hermes/engine.py`，P2 实现）
 
 HermesEngine 是适配器，需要三个 Bridge：
 
@@ -284,7 +284,7 @@ result = await SessionLoop.run(
 )
 
 # 改后
-from flocks.session.engine import LoopEngineRegistry
+    from flocks.engine import LoopEngineRegistry
 from flocks.session.session_loop import LoopCallbacks
 engine = LoopEngineRegistry.get(_resolve_loop_engine(session, request))
 result = await engine.run(
@@ -369,18 +369,27 @@ const payload: PromptRequest = {
 
 ## 9. 目录结构（完成后）
 
+`engine/` 与 `session/`、`tool/`、`provider/` **同层**，作为独立的横切编排模块。
+这样 `engine/hermes.py` 可以自由 import `session/`、`tool/`、`provider/` 而不产生循环依赖。
+
 ```
-flocks/flocks/session/
-├── engine/                         ← 新增目录
-│   ├── __init__.py                 # 导出 LoopEngineRegistry + 触发 native 自注册
+flocks/flocks/
+├── engine/                         ← 新增目录（与 session/ tool/ provider/ 同层）
+│   ├── __init__.py                 # 导出 LoopEngineRegistry，触发 native 自注册
 │   ├── base.py                     # AgentLoopEngine Protocol
 │   ├── registry.py                 # LoopEngineRegistry
-│   ├── native.py                   # FlocksNativeEngine（P0）
-│   └── hermes.py                   # HermesEngine（P2）
-│       ├── message_bridge.py
-│       ├── tool_bridge.py
-│       └── stream_bridge.py
-├── session_loop.py                 # 不变（被 native.py 包装）
+│   ├── native.py                   # FlocksNativeEngine（P0，包装 session/session_loop）
+│   └── hermes/                     # HermesEngine（P2）
+│       ├── __init__.py
+│       ├── engine.py               # HermesEngine 主适配器
+│       ├── message_bridge.py       # Flocks Parts ↔ OpenAI messages
+│       ├── tool_bridge.py          # Flocks ToolRegistry ↔ Hermes registry
+│       └── stream_bridge.py        # Hermes callbacks → publish_event SSE
+├── session/
+│   ├── session_loop.py             # 不变（被 native.py 包装）
+│   └── ...
+├── tool/                           # 不变
+├── provider/                       # 不变
 └── ...
 
 flocks/flocks/server/routes/
