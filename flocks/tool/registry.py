@@ -1473,7 +1473,13 @@ class ToolRegistry:
         # This is done in bulk here so individual @register_function call
         # sites don't need to pass native=True, and user plugin files using
         # the same decorator won't be misclassified.
-        builtin_native_exceptions = {"lsp", "task"}
+        builtin_native_exceptions = {
+            "lsp",
+            "task",
+            "list_providers",
+            "add_provider",
+            "add_model",
+        }
         for name in set(cls._tools.keys()) - before:
             if name in builtin_native_exceptions:
                 cls._tools[name].info.native = False

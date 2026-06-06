@@ -148,22 +148,25 @@ def check_status(
         expand=False,
     ))
 
-    if not_ready:
-        console.print("\n[yellow bold]Skills with missing dependencies:[/yellow bold]")
-        table = Table(show_header=True, header_style="bold yellow", box=None, pad_edge=False)
+    if skills:
+        table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
         table.add_column("Name", min_width=20)
-        table.add_column("Missing", min_width=40)
-        table.add_column("Install with")
-        for s in not_ready:
-            missing_str = ", ".join(s.missing or [])
+        table.add_column("Status", min_width=16)
+        table.add_column("Details", min_width=30)
+        for s in sorted(skills, key=lambda item: item.name):
             install_hint = ""
             if s.install_specs:
-                spec = s.install_specs[0]
-                if spec.kind == "brew" and spec.formula:
-                    install_hint = f"flocks skills install-deps {s.name}"
-                elif spec.kind in ("npm", "uv", "pip") and spec.package:
-                    install_hint = f"flocks skills install-deps {s.name}"
-            table.add_row(s.name, missing_str, install_hint or "—")
+                install_hint = f"flocks skills install-deps {s.name}"
+            if s.eligible is False:
+                status = "[yellow]missing deps[/yellow]"
+                details = ", ".join(s.missing or []) or install_hint or "—"
+            elif s.requires:
+                status = "[green]ready[/green]"
+                details = install_hint or "requirements satisfied"
+            else:
+                status = "[dim]no requirements[/dim]"
+                details = "—"
+            table.add_row(s.name, status, details)
         console.print(table)
 
 
@@ -575,7 +578,7 @@ def install_deps(
 
     all_ok = True
     for r in results:
-        cmd_str = " ".join(r.command) if r.command else "—"
+        cmd_str = " ".join(r.command) if r.command else (r.message or "—")
         if r.success:
             console.print(f"[green]✓[/green] {cmd_str}")
             if r.stdout.strip():

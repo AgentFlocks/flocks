@@ -446,7 +446,7 @@ Check your system prompt for a `## Current IM Channel Context` block:
 | No such block | User is chatting via **Flocks Web UI** — this is NOT an IM session. You do NOT have a target session ID yet. | Proceed to Step 2 |
 
 #### Step 2 — Discover sessions (only if Step 1 found nothing)
-Call `session_list(category="user", status="active")`.
+Call `session_manage(action="list", category="user", status="active")`.
 Filter results to sessions whose `title` starts with `[Wecom]`, `[Feishu]`, or `[Dingtalk]`.
 
 If no IM sessions found → stop and tell the user:

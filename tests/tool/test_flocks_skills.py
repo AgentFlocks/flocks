@@ -139,6 +139,24 @@ async def test_find_passes_args():
 
 
 @pytest.mark.asyncio
+async def test_remove_appends_yes_for_non_interactive_tool_calls():
+    from flocks.tool.skill.flocks_skills import flocks_skills
+
+    ctx = make_ctx()
+    proc = make_proc(stdout=b"removed\n", returncode=0)
+    with (
+        patch("flocks.tool.skill.flocks_skills._flocks_executable", return_value="/usr/bin/flocks"),
+        patch("flocks.tool.skill.flocks_skills.asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+    ):
+        result = await flocks_skills(ctx, subcommand="remove", args="old-skill")
+
+    assert result.success is True
+    cmd_args = mock_exec.call_args[0]
+    assert cmd_args == ("/usr/bin/flocks", "skills", "remove", "old-skill", "--yes")
+    ctx.ask.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_nonzero_exit_returns_failure():
     from flocks.tool.skill.flocks_skills import flocks_skills
 

@@ -319,18 +319,24 @@ class TestInstallFromSource:
     async def test_url_success(self, tmp_skills_dir: Path):
         mock_content = "---\nname: url-skill\ndescription: From URL\n---\n"
 
-        mock_resp = AsyncMock()
-        mock_resp.status_code = 200
-        mock_resp.text = mock_content
+        class Resp:
+            status_code = 200
+            text = mock_content
+            headers = {}
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.get = AsyncMock(return_value=mock_resp)
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, _url: str):
+                return Resp()
 
         with (
             patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
-            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("httpx.AsyncClient", return_value=Client()),
         ):
             result = await SkillInstaller.install_from_source(
                 "https://example.com/SKILL.md"
@@ -341,22 +347,72 @@ class TestInstallFromSource:
 
     @pytest.mark.asyncio
     async def test_url_http_error(self, tmp_skills_dir: Path):
-        mock_resp = AsyncMock()
-        mock_resp.status_code = 404
+        class Resp:
+            status_code = 404
 
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=None)
-        mock_client.get = AsyncMock(return_value=mock_resp)
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, _url: str):
+                return Resp()
 
         with (
             patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
-            patch("httpx.AsyncClient", return_value=mock_client),
+            patch("httpx.AsyncClient", return_value=Client()),
         ):
             result = await SkillInstaller.install_from_source("https://example.com/SKILL.md")
 
         assert result.success is False
         assert "404" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_github_api_403_falls_back_to_raw_skill_md(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: web-design-guidelines\n"
+            "description: Web design review\n"
+            "---\n"
+            "# Web Interface Guidelines\n"
+        )
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = ""):
+                self.status_code = status_code
+                self.text = text
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if url.endswith("/main/skills/web-design-guidelines/SKILL.md"):
+                    return Resp(200, skill_content)
+                if "api.github.com" in url:
+                    return Resp(403, "rate limited")
+                return Resp(404, "not found")
+
+        with (
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "github:vercel-labs/agent-skills/web-design-guidelines"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "web-design-guidelines"
+        assert "raw GitHub SKILL.md fallback" in result.message
+        assert (tmp_skills_dir / "web-design-guidelines" / "SKILL.md").exists()
 
 
 # ---------------------------------------------------------------------------

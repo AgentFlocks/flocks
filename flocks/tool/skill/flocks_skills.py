@@ -73,7 +73,8 @@ Do not use this tool when a dedicated tool is a better fit:
   Example: flocks_skills(subcommand="install-deps", args="find-ioc")
 
 **remove <skill-name>**
-  Uninstall a user-managed skill from ~/.flocks.
+  Uninstall a user-managed skill from ~/.flocks. The tool adds --yes
+  automatically so non-interactive agent calls do not hang on confirmation.
   Example: flocks_skills(subcommand="remove", args="old-skill")
 """
 
@@ -153,6 +154,8 @@ async def flocks_skills(
     if args.strip():
         # shlex.split preserves quoted tokens (e.g. paths with spaces).
         cmd += shlex.split(args.strip())
+    if subcommand == "remove" and "--yes" not in cmd and "-y" not in cmd:
+        cmd.append("--yes")
 
     log.info("flocks_skills.run", {"cmd": cmd})
 

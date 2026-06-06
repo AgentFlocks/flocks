@@ -28,3 +28,12 @@ def test_lsp_remains_non_native_by_default() -> None:
 
     assert tool is not None
     assert tool.info.native is False
+
+
+def test_model_config_tools_remain_non_native_by_default() -> None:
+    ToolRegistry.init()
+
+    for name in ("list_providers", "add_provider", "add_model"):
+        tool = ToolRegistry.get(name)
+        assert tool is not None
+        assert tool.info.native is False

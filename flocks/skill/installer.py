@@ -599,6 +599,7 @@ class SkillInstaller:
         else:
             candidate_paths = [""]
 
+        errors: List[str] = []
         async with httpx.AsyncClient(
             timeout=30,
             follow_redirects=True,
@@ -611,11 +612,64 @@ class SkillInstaller:
                     )
                     if result.success:
                         return result
+                    if result.error:
+                        errors.append(result.error)
 
+            # Unauthenticated GitHub Contents API can return 403 rate-limit
+            # errors while raw.githubusercontent.com still works. In that case
+            # install the SKILL.md directly instead of reporting a misleading
+            # "directory not found" error.
+            for branch in ("main", "master"):
+                for dir_path in candidate_paths:
+                    result = await cls._download_github_skill_md_raw(
+                        client, owner, repo, branch, dir_path, scope
+                    )
+                    if result.success:
+                        return result
+                    if result.error:
+                        errors.append(result.error)
+
+        if errors and any("GitHub API 403" in error for error in errors):
+            return SkillInstallResult(
+                success=False,
+                error=(
+                    f"GitHub API returned 403 for {owner}/{repo}. "
+                    "This is usually an unauthenticated API rate-limit or access issue, "
+                    "and raw SKILL.md fallback also failed. "
+                    f"Last error: {errors[-1]}"
+                ),
+            )
         return SkillInstallResult(
             success=False,
             error=f"Could not find a skill directory in GitHub repo: {owner}/{repo}",
         )
+
+    @classmethod
+    async def _download_github_skill_md_raw(
+        cls,
+        client: Any,
+        owner: str,
+        repo: str,
+        branch: str,
+        dir_path: str,
+        scope: str,
+    ) -> SkillInstallResult:
+        """Download SKILL.md through raw.githubusercontent.com as API fallback."""
+        raw_path = f"{dir_path.strip('/')}/SKILL.md" if dir_path else "SKILL.md"
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{raw_path}"
+        resp = await client.get(url)
+        if resp.status_code != 200:
+            return SkillInstallResult(
+                success=False,
+                error=f"Raw GitHub HTTP {resp.status_code} for {url}",
+            )
+        hint = Path(dir_path).name if dir_path else repo
+        result = cls._save_skill_content(resp.text, scope, skill_name_hint=hint)
+        if result.success:
+            result.message = (
+                f"{result.message} (installed from raw GitHub SKILL.md fallback)"
+            )
+        return result
 
     @classmethod
     async def _download_github_dir(
