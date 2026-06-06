@@ -22,18 +22,26 @@ export function isDelegateTool(toolName: string): boolean {
 }
 
 export function shouldRenderDelegateTaskCard(part: MessagePart): boolean {
+  // 1. Explicit delegate tool: render the card.
   if (part.tool && isDelegateTool(part.tool)) {
     return true;
   }
 
   const state: Partial<ToolState> = part.state || {};
   const input = state.input || {};
-  if (typeof input.subagent_type === 'string' && input.subagent_type.trim()) {
-    return true;
-  }
 
-  const output = typeof state.output === 'string' ? state.output : undefined;
+  // 2. Unknown/missing tool: only upgrade if the part *also* carries
+  //    delegate-shaped input. This prevents MCP tools (e.g. wecom_mcp,
+  //    threatbook_mcp) from being misclassified just because their output
+  //    happens to contain a `<task_metadata>` block.
   if (!part.tool || part.tool === 'unknown') {
+    const hasDelegateInput =
+      (typeof input.subagent_type === 'string' && input.subagent_type.trim()) ||
+      (typeof input.category === 'string' && input.category.trim());
+    if (!hasDelegateInput) {
+      return false;
+    }
+    const output = typeof state.output === 'string' ? state.output : undefined;
     return !!extractSessionId(state.metadata, output);
   }
   return false;
@@ -43,16 +51,6 @@ interface ActivityStep {
   tool: string;
   title: string;
   status: 'running' | 'completed' | 'error';
-}
-
-interface DelegateChildInfo {
-  index: number;
-  description: string;
-  status: string;
-  sessionId?: string;
-  error?: string;
-  output?: string;
-  metadata?: Record<string, any>;
 }
 
 interface DelegateInfo {
@@ -68,18 +66,19 @@ interface DelegateInfo {
   stepCount: number;
   currentText: string;
   elapsed: number;
-  children: DelegateChildInfo[];
 }
 
 function extractSessionId(
   meta: Record<string, any> | undefined,
   output: string | undefined,
 ): string | undefined {
+  // Top-level meta only trusts the canonical `sessionId` key. Variant
+  // casings (sessionID / session_id) are accepted only in the nested
+  // `metadata` envelope to avoid matching arbitrary tool metadata that
+  // happens to use snake_case or PascalCase.
   const innerMeta = meta?.metadata as Record<string, any> | undefined;
   const sessionId =
     meta?.sessionId ??
-    meta?.sessionID ??
-    meta?.session_id ??
     innerMeta?.sessionId ??
     innerMeta?.sessionID ??
     innerMeta?.session_id;
@@ -119,22 +118,10 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
   const innerMeta = meta?.metadata as Record<string, any> | undefined;
 
   const childSessionId = extractSessionId(meta, typeof state.output === 'string' ? state.output : undefined);
-  const children = ((meta?.children ?? innerMeta?.children ?? []) as any[])
-    .filter((child) => child && typeof child === 'object')
-    .map((child, index) => ({
-      index: typeof child.index === 'number' ? child.index : index,
-      description: String(child.description || `subtask ${index + 1}`),
-      status: String(child.status || 'pending'),
-      sessionId: typeof child.sessionId === 'string' ? child.sessionId : undefined,
-      error: typeof child.error === 'string' ? child.error : undefined,
-      output: typeof child.output === 'string' ? child.output : undefined,
-      metadata: child.metadata,
-    }));
   const steps = (meta?.steps ?? innerMeta?.steps ?? []) as ActivityStep[];
   const stepCount = (meta?.stepCount ?? innerMeta?.stepCount ?? 0) as number;
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
   const elapsed = (meta?.elapsed ?? innerMeta?.elapsed ?? 0) as number;
-  const isParallel = children.length > 0 || Boolean(meta?.parallel ?? innerMeta?.parallel);
   const isBackground = !!input.run_in_background || Boolean(meta?.background ?? innerMeta?.background);
   const runtimeStatus = meta?.status ?? innerMeta?.status;
   const backgroundStatus = isBackground
@@ -144,18 +131,13 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
         ? 'running'
         : undefined)
     : undefined;
-  const runningChildren = children.filter((child) => child.status === 'running').length;
-  const errorChildren = children.filter((child) => child.status === 'error').length;
-  const completedChildren = children.filter((child) => child.status === 'completed').length;
 
   return {
     agentName,
-    description: isParallel
-      ? `${completedChildren}/${children.length} completed${runningChildren ? ` · ${runningChildren} running` : ''}${errorChildren ? ` · ${errorChildren} error` : ''}`
-      : input.description || subTaskLabel,
+    description: input.description || subTaskLabel,
     isBackground,
     childSessionId,
-    status: isParallel && runningChildren > 0 ? 'running' : backgroundStatus || state.status || 'pending',
+    status: backgroundStatus || state.status || 'pending',
     error: state.error,
     output,
     durationMs,
@@ -163,7 +145,6 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
     stepCount,
     currentText,
     elapsed,
-    children,
   };
 }
 
@@ -253,13 +234,11 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
       stepCount: 0,
       currentText: '',
       elapsed: 0,
-      children: [],
     };
   }
   const cfg = STATUS_STYLE[info.status] ?? STATUS_STYLE.pending;
 
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [selectedChild, setSelectedChild] = useState<DelegateChildInfo | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(info.durationMs);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -348,35 +327,6 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
             </div>
           )}
 
-          {info.children.length > 0 && (
-            <div className="mt-2 space-y-1.5 rounded-md bg-white/60 border border-gray-100 p-2">
-              {info.children.map((child) => {
-                const childCfg = STATUS_STYLE[child.status] ?? STATUS_STYLE.pending;
-                return (
-                  <div key={child.index} className="flex items-center gap-2 text-[11px]">
-                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${childCfg.barColor} ${child.status === 'running' ? 'animate-pulse' : ''}`} />
-                    <span className="flex-1 min-w-0 truncate text-gray-600">{child.description}</span>
-                    <span className={`px-1.5 py-0.5 rounded-full leading-none ${childCfg.badgeBg}`}>
-                      {t(`delegate.${child.status}`, { defaultValue: child.status })}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!child.sessionId) return;
-                        setSelectedChild(child);
-                        setSheetOpen(true);
-                      }}
-                      disabled={!child.sessionId}
-                      className={child.sessionId ? 'text-red-600 hover:text-red-800' : 'text-gray-300 cursor-not-allowed'}
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
           {/* Error */}
           {info.status === 'error' && info.error && (
             <div className="mt-2 flex items-start gap-1.5 p-2 rounded-md bg-red-100/80 text-red-700 text-[11px]">
@@ -401,7 +351,6 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
           <button
             onClick={() => {
               if (!info.childSessionId) return;
-              setSelectedChild(null);
               setSheetOpen(true);
             }}
             disabled={!info.childSessionId}
@@ -419,14 +368,14 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
       </div>
 
       {/* Detail sheet */}
-      {(selectedChild?.sessionId || info.childSessionId) && (
+      {info.childSessionId && (
         <DelegateDetailSheet
           open={sheetOpen}
           onClose={() => setSheetOpen(false)}
-          sessionId={(selectedChild?.sessionId || info.childSessionId)!}
+          sessionId={info.childSessionId}
           agentName={info.agentName}
-          description={selectedChild?.description || info.description}
-          status={selectedChild?.status || info.status}
+          description={info.description}
+          status={info.status}
         />
       )}
     </>

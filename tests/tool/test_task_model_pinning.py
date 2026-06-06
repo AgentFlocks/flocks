@@ -15,6 +15,8 @@ class TestTaskCompatibilityAlias:
         schema = ToolRegistry.get_schema("task")
         assert schema is not None
         assert "run_in_background" not in schema.properties
+        # Legacy batch shape is gone.
+        assert "tasks" not in schema.properties
 
     @pytest.mark.asyncio
     async def test_task_tool_rejects_background_execution_when_called_directly(self):
@@ -57,32 +59,3 @@ class TestTaskCompatibilityAlias:
         assert kwargs["subagent_type"] == "explore"
         assert kwargs["run_in_background"] is False
         assert kwargs["model"] == "openai/gpt-5"
-
-    @pytest.mark.asyncio
-    async def test_task_tool_forwards_batch_to_delegate_task(self):
-        delegate_result = ToolResult(
-            success=True,
-            output="batch launched",
-            metadata={"parallel": True},
-        )
-        tasks = [
-            {
-                "description": "inspect api",
-                "prompt": "Inspect API routes",
-                "subagent_type": "explore",
-            }
-        ]
-
-        with patch(
-            "flocks.tool.agent.task.delegate_task_tool",
-            AsyncMock(return_value=delegate_result),
-        ) as delegate:
-            result = await task_tool(
-                _make_ctx(),
-                tasks=tasks,
-                run_in_background=False,
-            )
-
-        assert result is delegate_result
-        delegate.assert_awaited_once()
-        assert delegate.await_args.kwargs["tasks"] == tasks

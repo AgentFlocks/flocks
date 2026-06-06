@@ -14,10 +14,12 @@ class TestDelegateTaskTolerance:
     def test_delegate_task_schema_allows_omitting_optional_fields(self):
         schema = ToolRegistry.get_schema("delegate_task")
         assert schema is not None
-        assert "prompt" not in schema.required
+        assert "prompt" in schema.required
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
         assert "run_in_background" not in schema.properties
+        # Legacy batch shape is gone: tasks=[...] is no longer a public option.
+        assert "tasks" not in schema.properties
 
     @pytest.mark.asyncio
     async def test_delegate_task_derives_description_and_ignores_blank_skills(self):
@@ -104,6 +106,9 @@ class TestDelegateTaskTolerance:
 
     @pytest.mark.asyncio
     async def test_delegate_task_rejects_background_execution(self):
+        # run_in_background is not in the public schema, so the registry
+        # rejects it with an "unknown parameters" error before the function
+        # body runs. This guards the schema-level ban.
         result = await ToolRegistry.execute(
             "delegate_task",
             ctx=_make_ctx(),
@@ -114,6 +119,35 @@ class TestDelegateTaskTolerance:
 
         assert result.success is False
         assert "unknown parameters: run_in_background" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_function_body_guard_rejects_background(self):
+        # Direct (in-process) callers that bypass the registry still hit the
+        # function-body guard. This is the second line of defense.
+        from flocks.tool.agent.delegate_task import delegate_task_tool
+
+        result = await delegate_task_tool(
+            _make_ctx(),
+            subagent_type="asset-survey",
+            prompt="Investigate threatbook.cn assets",
+            run_in_background=True,
+        )
+
+        assert result.success is False
+        assert "Background subagent execution is disabled" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_rejects_legacy_batch_tasks_param(self):
+        # tasks=[...] has been removed from the schema; passing it now
+        # surfaces a schema-level "unknown parameters" error.
+        result = await ToolRegistry.execute(
+            "delegate_task",
+            ctx=_make_ctx(),
+            tasks=[{"prompt": "x", "subagent_type": "explore"}],
+        )
+
+        assert result.success is False
+        assert "unknown parameters: tasks" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
@@ -141,4 +175,3 @@ class TestDelegateTaskTolerance:
         assert result.metadata["sessionId"] == "ses-child"
         assert result.metadata["emptyOutput"] is True
         assert "without producing a final assistant message" in (result.output or "")
-

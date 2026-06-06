@@ -1335,10 +1335,6 @@ class StreamProcessor:
         tool_input = event.input if isinstance(event.input, dict) else {}
         if tool_input.get("run_in_background") is True:
             return False
-        # A single delegate_task(tasks=[...]) already manages child concurrency
-        # and should remain one aggregate card.
-        if isinstance(tool_input.get("tasks"), list) and tool_input.get("tasks"):
-            return False
         return bool(
             tool_input.get("subagent_type")
             or tool_input.get("category")

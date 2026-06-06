@@ -2,11 +2,13 @@
 
 The runtime keeps ``task`` as a registered tool name for workflow/backward
 compatibility, but all scheduling behavior lives in ``delegate_task``.
+Background subagent execution is disabled; run synchronously and emit
+multiple sibling tool calls in one assistant turn for parallel work.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from flocks.tool.agent.delegate_task import delegate_task_tool
 from flocks.tool.registry import (
@@ -22,9 +24,9 @@ from flocks.tool.registry import (
 DESCRIPTION = """Compatibility alias for delegate_task.
 
 Use delegate_task directly for new prompts. Workflows may continue using task;
-it accepts the same single-subagent and tasks[] batch shapes and forwards them
-to delegate_task. Background subagent execution is disabled; run synchronously
-and emit multiple sibling tool calls in one assistant turn for parallel work.
+it accepts the same single-subagent shape and forwards it to delegate_task.
+Background subagent execution is disabled; run synchronously and emit multiple
+sibling tool calls in one assistant turn for parallel work.
 """
 
 
@@ -42,8 +44,8 @@ and emit multiple sibling tool calls in one assistant turn for parallel work.
         ToolParameter(
             name="prompt",
             type=ParameterType.STRING,
-            description="Detailed prompt for the subagent. Required unless tasks is provided.",
-            required=False,
+            description="Detailed prompt for the subagent.",
+            required=True,
         ),
         ToolParameter(
             name="subagent_type",
@@ -56,33 +58,6 @@ and emit multiple sibling tool calls in one assistant turn for parallel work.
             type=ParameterType.STRING,
             description="Delegate category. Mutually exclusive with subagent_type.",
             required=False,
-        ),
-        ToolParameter(
-            name="tasks",
-            type=ParameterType.ARRAY,
-            description="Optional batch of independent subagent tasks.",
-            required=False,
-            json_schema={
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string"},
-                        "description": {"type": "string"},
-                        "category": {"type": "string"},
-                        "subagent_type": {"type": "string"},
-                        "session_id": {"type": "string"},
-                        "command": {"type": "string"},
-                        "load_skills": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "model": {"type": "string"},
-                    },
-                    "additionalProperties": False,
-                },
-                "minItems": 1,
-            },
         ),
         ToolParameter(
             name="load_skills",
@@ -117,9 +92,8 @@ async def task_tool(
     prompt: Optional[str] = None,
     subagent_type: Optional[str] = None,
     category: Optional[str] = None,
-    tasks: Optional[List[Dict[str, Any]]] = None,
-    load_skills: Optional[List[str]] = None,
-    run_in_background: Optional[bool] = False,
+    load_skills: Optional[list] = None,
+    run_in_background: bool = False,
     session_id: Optional[str] = None,
     command: Optional[str] = None,
     model: Optional[str] = None,
@@ -128,7 +102,6 @@ async def task_tool(
     return await delegate_task_tool(
         ctx=ctx,
         prompt=prompt,
-        tasks=tasks,
         load_skills=load_skills,
         description=description,
         run_in_background=run_in_background,
