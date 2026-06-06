@@ -22,11 +22,11 @@ SessionLoop._run_loop()
 
 整条链路 async 原生、与 SSE/SQLite 深度集成，适合多会话并发的 server 场景。
 
-### 1.2 Hermes-Agent 的高价值能力
+### 1.2 hermes-agent 的高价值能力（Raptor 引擎来源）
 
 通过对 `open_source/hermes-agent` 的深度分析，发现其 agent loop（`agent/conversation_loop.py`）在**单任务执行质量**上有以下优势：
 
-| 能力 | Flocks 现状 | Hermes |
+| 能力 | Flocks 现状 | Raptor（移植自 hermes-agent） |
 |---|---|---|
 | 工具并行执行 | ❌ 串行 await | ✅ ThreadPool 8 并发，智能判定路径冲突后降级串行 |
 | 动态工具加载 | ❌ 全量 schema 传模型 | ✅ `tool_search`/`tool_describe`/`tool_call` 三桥接，按需折叠省 token |
@@ -37,7 +37,7 @@ SessionLoop._run_loop()
 
 ### 1.3 目标
 
-将 Hermes 的 agent loop 以**可插拔**方式集成到 Flocks，让用户在 WebUI 中选择使用哪个引擎，而无需改动会话管理、SSE 推送、工具注册、压缩等基础设施。
+将 hermes-agent 的 agent loop 以 **Raptor 引擎**的形式**可插拔**地集成到 Flocks，让用户在 WebUI 中选择使用哪个引擎，而无需改动会话管理、SSE 推送、工具注册、压缩等基础设施。
 
 ---
 
@@ -46,7 +46,7 @@ SessionLoop._run_loop()
 1. **最小侵入**：现有 `SessionLoop.run()` 调用链仅改一行，行为不变。  
 2. **向后兼容**：默认引擎 `native`，不传 `loop_engine` 等同现在。  
 3. **SSE 透明**：引擎内部事件仍经 `LoopCallbacks.event_publish_callback` 推送，WebUI 无感。  
-4. **分阶段实施**：P0 建框架（零风险），P1 接 WebUI，P2 再接 Hermes 实现。
+4. **分阶段实施**：P0 建框架（零风险），P1 接 WebUI，P2 再接 Raptor 实现。
 
 ---
 
@@ -67,7 +67,7 @@ SessionLoop._run_loop()
             ┌───────┴────────┐
             ▼                ▼
   ┌──────────────────┐  ┌──────────────────────────────────┐
-  │ FlocksNativeEngine│  │        HermesEngine              │
+  │ FlocksNativeEngine│  │        RaptorEngine               │
   │  (零风险包装)     │  │      (P2 实现，适配器模式)        │
   │                  │  │                                  │
   │ SessionLoop.run()│  │  MessageBridge  ToolBridge        │
@@ -92,7 +92,7 @@ from typing import Optional, Any, Protocol, runtime_checkable
 
 @runtime_checkable
 class AgentLoopEngine(Protocol):
-    id: str           # 机器标识，如 "native" / "hermes"
+    id: str           # 机器标识，如 "native" / "raptor"
     display_name: str # WebUI 下拉显示名
     description: str  # WebUI tooltip
 
@@ -107,7 +107,7 @@ class AgentLoopEngine(Protocol):
         ...
 ```
 
-> `LoopResult` 与 `LoopCallbacks` 复用 `session_loop.py` 的现有定义，HermesEngine 需返回格式相同的 `LoopResult`。
+> `LoopResult` 与 `LoopCallbacks` 复用 `session_loop.py` 的现有定义，RaptorEngine 需返回格式相同的 `LoopResult`。
 
 ### 4.2 `LoopEngineRegistry`（`engine/registry.py`）
 
@@ -145,46 +145,46 @@ class FlocksNativeEngine:
         )
 ```
 
-### 4.4 `HermesEngine`（`engine/hermes/engine.py`，P2 实现）
+### 4.4 `RaptorEngine`（`engine/raptor/engine.py`，P2 实现）
 
-HermesEngine 是适配器，需要三个 Bridge：
+RaptorEngine 是适配器，移植自 hermes-agent 的 `agent/conversation_loop.py`，需要三个 Bridge：
 
 #### MessageBridge
 
-- **读**：`SessionContext.get_messages()` → Flocks `MessageInfo/Parts` → Hermes OpenAI `messages` 列表  
+- **读**：`SessionContext.get_messages()` → Flocks `MessageInfo/Parts` → OpenAI `messages` 列表  
   - `TextPart` → `{"role": "assistant", "content": "..."}`  
   - `ToolPart` → `{"role": "tool", "tool_call_id": ..., "content": ...}`  
-- **写**：Hermes 输出的 assistant/tool 消息 → `Message.create()` + `ToolPart` 写回 Flocks 存储，保证 WebUI 渲染一致
+- **写**：Raptor 输出的 assistant/tool 消息 → `Message.create()` + `ToolPart` 写回 Flocks 存储，保证 WebUI 渲染一致
 
 #### ToolBridge
 
-- 把 Flocks `ToolRegistry` 中当前 session 可用工具**动态注册**进 Hermes `tools/registry`  
+- 把 Flocks `ToolRegistry` 中当前 session 可用工具**动态注册**进 Raptor 内部的工具注册表  
 - handler 实现：`asyncio.run_coroutine_threadsafe(ToolRegistry.execute(name, ctx, **kwargs), loop)` 回主事件循环执行 Flocks 异步工具  
-- 这样 Hermes loop 复用 Flocks 的 device/skill/MCP 工具，**无需重写工具层**
+- 这样 Raptor loop 复用 Flocks 的 device/skill/MCP 工具，**无需重写工具层**
 
 #### StreamBridge（callbacks）
 
 ```
-Hermes stream_delta_callback
+Raptor stream_delta_callback
     → publish_event("message.part.updated", {delta: ...})
 
-Hermes tool_progress_callback  
+Raptor tool_progress_callback  
     → publish_event("message.part.updated", {tool_part: ...})
 
-Hermes approval_callback
+Raptor approval_callback
     → publish_event("session.permission", {...})
 ```
 
 #### 线程隔离
 
-Hermes 是同步+线程模型，必须与 Flocks asyncio 事件循环隔离：
+hermes-agent 是同步+线程模型，必须与 Flocks asyncio 事件循环隔离：
 
 ```python
 loop = asyncio.get_event_loop()
-await asyncio.to_thread(_run_hermes_sync, agent, user_message, bridge_callbacks)
+await asyncio.to_thread(_run_raptor_sync, agent, user_message, bridge_callbacks)
 ```
 
-`_run_hermes_sync` 在独立线程运行 `run_conversation(...)`，工具回调通过 `run_coroutine_threadsafe` 回主循环。
+`_run_raptor_sync` 在独立线程运行 `run_conversation(...)`，工具回调通过 `run_coroutine_threadsafe` 回主循环。
 
 ---
 
@@ -199,7 +199,7 @@ class PromptRequest(BaseModel):
     # ... 现有字段 ...
     loop_engine: Optional[str] = Field(
         None,
-        description="Agent loop engine id: 'native' (default) | 'hermes'. "
+        description="Agent loop engine id: 'native' (default) | 'raptor'. "
                     "Overrides session and global defaults for this request.",
     )
 ```
@@ -248,9 +248,9 @@ GET /api/loop-engines
     "description": "Flocks 原生 async loop，多会话并发优先"
   },
   {
-    "id": "hermes",
-    "name": "Hermes",
-    "description": "Hermes agent loop，并行工具 / 动态工具 / checkpoint"
+    "id": "raptor",
+    "name": "Raptor",
+    "description": "Raptor loop：并行工具 / 动态工具 / 自动 checkpoint"
   }
 ]
 ```
@@ -344,10 +344,10 @@ const payload: PromptRequest = {
 
 ### 8.4 Message badge（可选，P2 后启用）
 
-当引擎为 `hermes` 时，assistant 消息气泡右上角显示小 badge：
+当引擎为 `raptor` 时，assistant 消息气泡右上角显示小 badge：
 
 ```
-[Hermes ⚡]
+[Raptor ⚡]
 ```
 
 用于对比两个引擎的输出质量。
@@ -360,9 +360,9 @@ const payload: PromptRequest = {
 // session namespace 追加
 "loopEngine.label": "引擎",
 "loopEngine.native": "Flocks Native",
-"loopEngine.hermes": "Hermes",
+"loopEngine.raptor": "Raptor",
 "loopEngine.tooltip.native": "Flocks 原生异步循环，多会话并发优先",
-"loopEngine.tooltip.hermes": "Hermes loop：并行工具 / 动态工具 / 自动 checkpoint",
+"loopEngine.tooltip.raptor": "Raptor loop：并行工具 / 动态工具 / 自动 checkpoint",
 ```
 
 ---
@@ -370,7 +370,7 @@ const payload: PromptRequest = {
 ## 9. 目录结构（完成后）
 
 `engine/` 与 `session/`、`tool/`、`provider/` **同层**，作为独立的横切编排模块。
-这样 `engine/hermes.py` 可以自由 import `session/`、`tool/`、`provider/` 而不产生循环依赖。
+这样 `engine/raptor/` 可以自由 import `session/`、`tool/`、`provider/` 而不产生循环依赖。
 
 ```
 flocks/flocks/
@@ -379,12 +379,12 @@ flocks/flocks/
 │   ├── base.py                     # AgentLoopEngine Protocol
 │   ├── registry.py                 # LoopEngineRegistry
 │   ├── native.py                   # FlocksNativeEngine（P0，包装 session/session_loop）
-│   └── hermes/                     # HermesEngine（P2）
+│   └── raptor/                     # RaptorEngine（P2，移植自 hermes-agent）
 │       ├── __init__.py
-│       ├── engine.py               # HermesEngine 主适配器
+│       ├── engine.py               # RaptorEngine 主适配器
 │       ├── message_bridge.py       # Flocks Parts ↔ OpenAI messages
-│       ├── tool_bridge.py          # Flocks ToolRegistry ↔ Hermes registry
-│       └── stream_bridge.py        # Hermes callbacks → publish_event SSE
+│       ├── tool_bridge.py          # Flocks ToolRegistry ↔ raptor 内部注册表
+│       └── stream_bridge.py        # Raptor callbacks → publish_event SSE
 ├── session/
 │   ├── session_loop.py             # 不变（被 native.py 包装）
 │   └── ...
@@ -410,10 +410,10 @@ flocks/webui/src/
 
 ### P0 — 框架骨架（零风险重构）
 
-- [ ] 创建 `session/engine/base.py`（AgentLoopEngine Protocol）
-- [ ] 创建 `session/engine/registry.py`（LoopEngineRegistry）
-- [ ] 创建 `session/engine/native.py`（FlocksNativeEngine，包装 SessionLoop）
-- [ ] 创建 `session/engine/__init__.py`（注册 native，导出）
+- [ ] 创建 `engine/base.py`（AgentLoopEngine Protocol）
+- [ ] 创建 `engine/registry.py`（LoopEngineRegistry）
+- [ ] 创建 `engine/native.py`（FlocksNativeEngine，包装 SessionLoop）
+- [ ] 创建 `engine/__init__.py`（注册 native，导出）
 - [ ] 改 `routes/session.py` 两处调用站
 - [ ] 新增 `GET /api/loop-engines` 端点
 - [ ] `PromptRequest` + `SessionInfo` 增加 `loop_engine` 字段
@@ -429,16 +429,16 @@ flocks/webui/src/
 
 **验收**：引擎下拉暂时隐藏（只有 native），发送请求携带正确字段。
 
-### P2 — HermesEngine 适配器
+### P2 — RaptorEngine 适配器
 
 - [ ] `MessageBridge`：Flocks Parts ↔ OpenAI messages
-- [ ] `ToolBridge`：Flocks ToolRegistry ↔ Hermes registry（线程安全）
-- [ ] `StreamBridge`：Hermes callbacks → publish_event SSE
+- [ ] `ToolBridge`：Flocks ToolRegistry ↔ Raptor 内部注册表（线程安全）
+- [ ] `StreamBridge`：Raptor callbacks → publish_event SSE
 - [ ] 线程隔离：`asyncio.to_thread` + `run_coroutine_threadsafe`
-- [ ] `hermes.py` 主适配器，注册进 LoopEngineRegistry
+- [ ] `engine/raptor/engine.py` 主适配器，注册进 LoopEngineRegistry
 - [ ] 启用 WebUI 引擎下拉（此时出现两个选项）
 
-**验收**：选择 Hermes 引擎时，工具可并行执行，SSE 推送正常，WebUI 渲染一致。
+**验收**：选择 Raptor 引擎时，工具可并行执行，SSE 推送正常，WebUI 渲染一致。
 
 ### P3 — 高级能力对接
 
@@ -454,17 +454,17 @@ flocks/webui/src/
 
 | 风险 | 等级 | 缓解 |
 |---|---|---|
-| Hermes 同步线程模型阻塞 asyncio 事件循环 | 高 | `asyncio.to_thread` 强制隔离，工具回调用 `run_coroutine_threadsafe` |
+| hermes-agent 同步线程模型阻塞 asyncio 事件循环 | 高 | `asyncio.to_thread` 强制隔离，工具回调用 `run_coroutine_threadsafe` |
 | Flocks `MessageInfo/Parts` ↔ OpenAI messages 格式映射不完整 | 高 | P2 需完整映射全部 Part 类型；先只支持 TextPart + ToolPart |
-| Hermes 工具与 Flocks ToolRegistry 命名冲突 | 中 | ToolBridge 加命名空间前缀，如 `flocks__bash` |
-| 多会话并发下 Hermes `_last_resolved_tool_names` 全局状态 | 中 | ToolBridge 在线程局部变量中 save/restore |
+| Raptor 工具与 Flocks ToolRegistry 命名冲突 | 中 | ToolBridge 加命名空间前缀，如 `flocks__bash` |
+| 多会话并发下 `_last_resolved_tool_names` 全局状态 | 中 | ToolBridge 在线程局部变量中 save/restore |
 | `run_conversation` 内部直接读写磁盘（hermes home）| 低 | 配置 hermes_home 指向 flocks workspace 目录 |
 
 ---
 
 ## 12. 不做的事（Out of Scope）
 
-- 不替换 Flocks 的 Provider 层（Hermes 使用 Flocks ToolBridge 调工具，但 LLM 调用仍走 Hermes 的 `chat_completion_helpers`）
-- 不合并 Flocks 和 Hermes 的会话持久化（各自持久化，MessageBridge 负责同步）
-- 不把 Hermes 设为默认引擎（默认永远是 `native`）
+- 不替换 Flocks 的 Provider 层（Raptor 使用 Flocks ToolBridge 调工具，但 LLM 调用仍走 hermes-agent 的 `chat_completion_helpers`）
+- 不合并 Flocks 和 Raptor 的会话持久化（各自持久化，MessageBridge 负责同步）
+- 不把 Raptor 设为默认引擎（默认永远是 `native`）
 - trajectory_compressor（离线训练数据工具）不纳入集成范围
