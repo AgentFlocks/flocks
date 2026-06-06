@@ -7,6 +7,22 @@ One ``RaptorDaemon`` (= one tui_gateway subprocess) is kept alive per Flocks
 session_id so hermes's prompt cache, checkpoints, and compaction work across
 turns.
 
+Storage policy
+--------------
+Flocks is the single source of truth for all session data (messages, tool calls,
+results).  Hermes' own state directory is placed under Flocks' data root at
+  ``~/.flocks/data/raptor/<session_id>/``
+so hermes files (checkpoints, compaction cache) stay inside the Flocks home
+directory and are never scattered under ``~/.hermes``.  MessageBridge writes
+assistant responses back to Flocks SQLite after each turn.
+
+LLM credentials
+---------------
+API key and base_url are read from ``~/.flocks/config/`` (``flocks.json`` +
+``.secret.json``) and injected into the subprocess environment as standard
+OpenAI-compatible vars (``OPENAI_API_KEY``, ``OPENAI_BASE_URL``).  No
+credentials are stored inside the hermes home directory.
+
 Lifecycle
 ---------
 - Spawned lazily on the first ``RaptorEngine.run()`` for a session.
@@ -19,8 +35,8 @@ Environment
 -----------
 The daemon is spawned using the Python interpreter from the hermes-agent
 virtualenv (``RAPTOR_HERMES_VENV`` env-var → ``<venv>/bin/python``).  If that
-env-var is not set the subprocess falls back to ``sys.executable`` so that local
-development with a single virtualenv also works.
+env-var is not set the subprocess falls back to the hermes-agent's own
+``.venv/bin/python`` (auto-detected) or ``sys.executable``.
 
 The hermes-agent source directory is taken from ``RAPTOR_HERMES_PATH``
 (defaults to ``<this repo>/open_source/hermes-agent`` resolved relative to the
@@ -34,6 +50,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import Future
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from flocks.utils.log import Log
@@ -63,13 +80,146 @@ def _resolve_hermes_path() -> str:
     )
 
 
-def _resolve_python() -> str:
-    """Return the Python interpreter to use for the hermes-agent subprocess."""
+def _resolve_python(hermes_path: str) -> str:
+    """Return the Python interpreter to use for the hermes-agent subprocess.
+
+    Priority:
+    1. ``RAPTOR_HERMES_VENV`` env-var → ``<venv>/bin/python``
+    2. ``<hermes_path>/.venv/bin/python``  (uv-managed venv, ≥3.11 required)
+    3. ``sys.executable`` fallback (works in unified-venv dev setups)
+    """
     if venv := os.environ.get(_ENV_HERMES_VENV):
         py = os.path.join(venv, "bin", "python")
         if os.path.isfile(py):
             return py
+    # hermes-agent ships its own uv-managed venv
+    local_py = os.path.join(hermes_path, ".venv", "bin", "python")
+    if os.path.isfile(local_py):
+        return local_py
     return sys.executable
+
+
+# ── Flocks config helpers ──────────────────────────────────────────────────────
+
+def _flocks_config_dir() -> Path:
+    """Return ``~/.flocks/config`` (or override via FLOCKS_CONFIG_DIR)."""
+    default = Path.home() / ".flocks" / "config"
+    return Path(os.environ.get("FLOCKS_CONFIG_DIR", str(default)))
+
+
+def _read_flocks_json() -> Dict[str, Any]:
+    """Read ``~/.flocks/config/flocks.json``; return empty dict on any error."""
+    p = _flocks_config_dir() / "flocks.json"
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _read_flocks_secrets() -> Dict[str, str]:
+    """Read ``~/.flocks/config/.secret.json``; return empty dict on any error."""
+    p = _flocks_config_dir() / ".secret.json"
+    try:
+        with open(p, encoding="utf-8") as f:
+            raw = json.load(f)
+        return {k: v for k, v in raw.items() if isinstance(v, str)}
+    except Exception:
+        return {}
+
+
+def _resolve_secret_ref(value: str, secrets: Dict[str, str]) -> str:
+    """Expand ``{secret:KEY}`` placeholders using the flocks secret store."""
+    import re
+    def _sub(m: "re.Match[str]") -> str:
+        return secrets.get(m.group(1), "")
+    return re.sub(r"\{secret:([^}]+)\}", _sub, value)
+
+
+def _resolve_flocks_llm_config() -> Dict[str, str]:
+    """
+    Read Flocks config and return LLM credentials for the hermes subprocess.
+
+    Returns a dict with any of:
+        ``openai_api_key``  — API key for the default LLM provider
+        ``openai_base_url`` — Base URL (for OpenAI-compatible providers)
+        ``hermes_model``    — Model name to use as hermes default
+
+    Falls back gracefully: missing pieces are simply absent from the result.
+    """
+    cfg = _read_flocks_json()
+    secrets = _read_flocks_secrets()
+
+    result: Dict[str, str] = {}
+
+    # --- default LLM model -------------------------------------------------
+    default_models = cfg.get("default_models") or {}
+    llm_default = default_models.get("llm") or {}
+    if isinstance(llm_default, dict):
+        provider_id = llm_default.get("provider_id", "")
+        model_id = llm_default.get("model_id", "")
+    else:
+        provider_id = ""
+        model_id = ""
+
+    if model_id:
+        result["hermes_model"] = model_id
+
+    # --- provider options (base_url + api_key) -----------------------------
+    if provider_id:
+        providers = cfg.get("provider") or {}
+        pconf = providers.get(provider_id) if isinstance(providers, dict) else {}
+        if isinstance(pconf, dict):
+            opts = pconf.get("options") or {}
+            raw_url = opts.get("baseURL") or opts.get("base_url") or ""
+            raw_key = opts.get("apiKey") or opts.get("api_key") or ""
+            # Resolve {secret:...} references
+            base_url = _resolve_secret_ref(raw_url, secrets)
+            api_key = _resolve_secret_ref(raw_key, secrets)
+            if base_url:
+                result["openai_base_url"] = base_url
+            if api_key:
+                result["openai_api_key"] = api_key
+
+    # --- fallback: look for provider_id_llm_key in secrets -----------------
+    if not result.get("openai_api_key") and provider_id:
+        fallback_key = secrets.get(f"{provider_id}_llm_key") or secrets.get(
+            f"{provider_id}_api_key"
+        )
+        if fallback_key:
+            result["openai_api_key"] = fallback_key
+
+    return result
+
+
+def _prepare_hermes_home(flocks_session_id: str, hermes_model: str = "") -> str:
+    """
+    Create and return the per-session hermes home directory.
+
+    Path: ``~/.flocks/data/raptor/<session_id>/``
+
+    Writes a minimal ``config.yaml`` so hermes uses the correct model and
+    disables features that don't make sense in daemon mode (auto-title, TUI,
+    checkpoint broadcast, etc.).
+    """
+    data_root = Path.home() / ".flocks" / "data" / "raptor" / flocks_session_id
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    config_path = data_root / "config.yaml"
+    if not config_path.exists():
+        model_line = f"  default: {hermes_model}" if hermes_model else "  default: gpt-4o"
+        config_yaml = (
+            "# Auto-generated by Flocks Raptor engine — do not edit manually.\n"
+            "model:\n"
+            f"{model_line}\n"
+            "\n"
+            "# Disable TUI-only features in daemon mode.\n"
+            "auto_title: false\n"
+            "compact_threshold: 80\n"
+        )
+        config_path.write_text(config_yaml, encoding="utf-8")
+
+    return str(data_root)
 
 
 class RaptorDaemon:
@@ -111,18 +261,38 @@ class RaptorDaemon:
     def start(self) -> None:
         """Spawn the tui_gateway subprocess and start the reader thread."""
         hermes_path = _resolve_hermes_path()
-        python = _resolve_python()
+        python = _resolve_python(hermes_path)
         entry = os.path.join(hermes_path, "tui_gateway", "entry.py")
+
+        # --- Flocks LLM credentials (read once at spawn time) ---------------
+        llm_cfg = _resolve_flocks_llm_config()
+        hermes_model = llm_cfg.get("hermes_model", "")
+
+        # --- Per-session hermes home under ~/.flocks/data/raptor/ -----------
+        hermes_home = _prepare_hermes_home(self.flocks_session_id, hermes_model)
 
         env = os.environ.copy()
         env["HERMES_PYTHON_SRC_ROOT"] = hermes_path
+        # Redirect hermes state to Flocks-managed directory.
+        env["HERMES_HOME"] = hermes_home
+        # Inject LLM credentials as OpenAI-compatible env vars.
+        if api_key := llm_cfg.get("openai_api_key"):
+            env["OPENAI_API_KEY"] = api_key
+        if base_url := llm_cfg.get("openai_base_url"):
+            env["OPENAI_BASE_URL"] = base_url
         # Disable interactive/TUI features that assume a real terminal.
-        env.setdefault("HERMES_QUIET", "1")
-        env.setdefault("HERMES_NO_COLOR", "1")
+        env["HERMES_QUIET"] = "1"
+        env["HERMES_NO_COLOR"] = "1"
+        env["HERMES_NO_SOUND"] = "1"
+        env["HERMES_DAEMON"] = "1"  # hint to hermes it runs as a daemon
 
         log.info("raptor.daemon.start", {
             "session_id": self.flocks_session_id,
             "hermes_path": hermes_path,
+            "hermes_home": hermes_home,
+            "hermes_model": hermes_model or "(not set)",
+            "has_api_key": bool(llm_cfg.get("openai_api_key")),
+            "has_base_url": bool(llm_cfg.get("openai_base_url")),
             "entry": entry,
         })
 
