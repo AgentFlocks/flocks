@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -944,3 +945,383 @@ async def test_pairing_triggered_when_allow_from_empty_list(monkeypatch):
 
     assert len(pairing_calls) == 1, "Pairing should fire when allowFrom is an empty list"
     assert dispatched == [], "Message must not be dispatched to AI before pairing"
+
+
+# ------------------------------------------------------------------
+# Inbound media download (getFile + download)
+# ------------------------------------------------------------------
+
+class TestTelegramInboundMedia:
+    @pytest.mark.asyncio
+    async def test_parse_telegram_uri(self):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+        kind, file_id = mod._parse_telegram_uri("telegram://photo/AgAD-file")
+        assert kind == "photo"
+        assert file_id == "AgAD-file"
+
+    @pytest.mark.asyncio
+    async def test_invalid_uri_returns_none(self):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+        kind, file_id = mod._parse_telegram_uri("https://example.com/x.png")
+        assert kind is None
+        assert file_id is None
+
+    @pytest.mark.asyncio
+    async def test_get_file_then_download(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+
+        async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
+            return "documents/file_42.pdf", file_id
+
+        async def fake_download_file(*, bot_token, file_path, max_bytes, timeout):
+            return b"%PDF-1.4 hello"
+
+        monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
+        monkeypatch.setattr(mod, "_download_file", fake_download_file)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        from flocks.channel.base import ChatType, InboundMessage
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="telegram",
+                account_id="acc1",
+                message_id="m1",
+                sender_id="u1",
+                chat_id="c1",
+                chat_type=ChatType.DIRECT,
+                media_url="telegram://document/ABC",
+            ),
+            config={"botToken": "123:abc"},
+            max_bytes=1024,
+        )
+        assert media is not None
+        assert media.filename == "file_42.pdf"
+        assert media.mime == "application/pdf"
+        assert Path(media.url.removeprefix("file://")).read_bytes() == b"%PDF-1.4 hello"
+        assert media.source["file_id"] == "ABC"
+        assert media.source["kind"] == "document"
+
+    @pytest.mark.asyncio
+    async def test_too_large_returns_none(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+
+        async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
+            return "documents/big.bin", file_id
+
+        async def fake_download_file(*, bot_token, file_path, max_bytes, timeout):
+            raise mod.TelegramInboundMediaTooLarge("too large")
+
+        monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
+        monkeypatch.setattr(mod, "_download_file", fake_download_file)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        from flocks.channel.base import ChatType, InboundMessage
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="telegram", account_id="acc1",
+                message_id="m2", sender_id="u1", chat_id="c1",
+                chat_type=ChatType.DIRECT,
+                media_url="telegram://document/BIG",
+            ),
+            config={"botToken": "123:abc"},
+        )
+        assert media is None
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
+    async def test_no_token_returns_none(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+        from flocks.channel.base import ChatType, InboundMessage
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="telegram", account_id="acc1",
+                message_id="m3", sender_id="u1", chat_id="c1",
+                chat_type=ChatType.DIRECT,
+                media_url="telegram://photo/X",
+            ),
+            config={},
+        )
+        assert media is None
+
+
+# ------------------------------------------------------------------
+# Outbound media (prepare + send_media)
+# ------------------------------------------------------------------
+
+class TestTelegramSendMedia:
+    @pytest.mark.asyncio
+    async def test_prepare_local_image(self, tmp_path):
+        from flocks.channel.builtin.telegram.media import (
+            prepare_telegram_media,
+        )
+        path = tmp_path / "photo.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\nDATA")
+        prepared = await prepare_telegram_media(path.as_uri())
+        assert prepared.kind == "photo"
+        assert prepared.filename == "photo.png"
+        assert prepared.data == b"\x89PNG\r\n\x1a\nDATA"
+
+    @pytest.mark.asyncio
+    async def test_prepare_local_pdf_uses_document(self, tmp_path):
+        from flocks.channel.builtin.telegram.media import (
+            prepare_telegram_media,
+        )
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"%PDF-1.4 data")
+        prepared = await prepare_telegram_media(path.as_uri())
+        assert prepared.kind == "document"
+        assert prepared.mime == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_prepare_gif_uses_animation(self, tmp_path):
+        from flocks.channel.builtin.telegram.media import (
+            prepare_telegram_media,
+        )
+        path = tmp_path / "anim.gif"
+        path.write_bytes(b"GIF89a-data")
+        prepared = await prepare_telegram_media(path.as_uri())
+        assert prepared.kind == "animation"
+
+    @pytest.mark.asyncio
+    async def test_prepare_ogg_uses_voice(self, tmp_path):
+        from flocks.channel.builtin.telegram.media import (
+            prepare_telegram_media,
+        )
+        path = tmp_path / "clip.ogg"
+        path.write_bytes(b"OggS-data")
+        prepared = await prepare_telegram_media(path.as_uri())
+        assert prepared.kind == "voice"
+
+    @pytest.mark.asyncio
+    async def test_kind_override(self, tmp_path):
+        from flocks.channel.builtin.telegram.media import (
+            prepare_telegram_media,
+        )
+        path = tmp_path / "img.png"
+        path.write_bytes(b"\x89PNG")
+        prepared = await prepare_telegram_media(
+            path.as_uri(), kind_override="document",
+        )
+        assert prepared.kind == "document"
+
+    @pytest.mark.asyncio
+    async def test_send_media_routes_to_send_photo(self, tmp_path, monkeypatch):
+        from flocks.channel.builtin.telegram.channel import TelegramChannel
+        from flocks.channel.builtin.telegram import media as media_mod
+
+        path = tmp_path / "photo.jpg"
+        path.write_bytes(b"\xff\xd8\xff-data")
+
+        ch = TelegramChannel()
+        ch._config = {"botToken": "123:abc"}
+
+        async def fake_prepare(media_url, *, kind_override=None, **kwargs):
+            return media_mod.PreparedTelegramMedia(
+                data=b"\xff\xd8\xff-data", filename="photo.jpg",
+                mime="image/jpeg", kind="photo",
+            )
+
+        posted = []
+
+        class FakeResponse:
+            status_code = 200
+            is_success = True
+            def json(self):
+                return {"ok": True, "result": {"message_id": "111", "chat": {"id": "c1"}}}
+
+        class FakeClient:
+            async def post(self, url, *, data, timeout):
+                posted.append({"url": url, "data": data})
+                return FakeResponse()
+
+        from unittest.mock import AsyncMock
+        fake_client = FakeClient()
+        monkeypatch.setattr(
+            "flocks.channel.builtin.telegram.channel.get_http_client",
+            AsyncMock(return_value=fake_client),
+        )
+        monkeypatch.setattr(media_mod, "prepare_telegram_media", fake_prepare)
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="telegram", to="c1",
+                text="look", media_url=path.as_uri(),
+            )
+        )
+        assert result.success is True
+        assert result.message_id == "111"
+        assert posted[0]["url"].endswith("/sendPhoto")
+        assert "photo" in posted[0]["data"]
+        assert posted[0]["data"]["caption"] == "look"
+
+    @pytest.mark.asyncio
+    async def test_send_media_routes_to_send_document_for_pdf(
+        self, tmp_path, monkeypatch,
+    ):
+        from flocks.channel.builtin.telegram.channel import TelegramChannel
+        from flocks.channel.builtin.telegram import media as media_mod
+
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"%PDF-data")
+
+        ch = TelegramChannel()
+        ch._config = {"botToken": "123:abc"}
+
+        async def fake_prepare(media_url, *, kind_override=None, **kwargs):
+            return media_mod.PreparedTelegramMedia(
+                data=b"%PDF-data", filename="doc.pdf",
+                mime="application/pdf", kind="document",
+            )
+
+        posted = []
+
+        class FakeResponse:
+            status_code = 200
+            is_success = True
+            def json(self):
+                return {"ok": True, "result": {"message_id": "222", "chat": {"id": "c1"}}}
+
+        class FakeClient:
+            async def post(self, url, *, data, timeout):
+                posted.append({"url": url, "data": data})
+                return FakeResponse()
+
+        from unittest.mock import AsyncMock
+        fake_client = FakeClient()
+        monkeypatch.setattr(
+            "flocks.channel.builtin.telegram.channel.get_http_client",
+            AsyncMock(return_value=fake_client),
+        )
+        monkeypatch.setattr(media_mod, "prepare_telegram_media", fake_prepare)
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="telegram", to="c1",
+                media_url=path.as_uri(),
+            )
+        )
+        assert result.success is True
+        assert posted[0]["url"].endswith("/sendDocument")
+
+    @pytest.mark.asyncio
+    async def test_send_media_kind_override_prefix(
+        self, tmp_path, monkeypatch,
+    ):
+        from flocks.channel.builtin.telegram.channel import TelegramChannel
+        from flocks.channel.builtin.telegram import media as media_mod
+
+        path = tmp_path / "img.png"
+        path.write_bytes(b"x")
+
+        ch = TelegramChannel()
+        ch._config = {"botToken": "123:abc"}
+
+        captured = {}
+
+        async def fake_prepare(media_url, *, kind_override=None, **kwargs):
+            captured["kind"] = kind_override
+            captured["source"] = media_url
+            return media_mod.PreparedTelegramMedia(
+                data=b"x", filename="img.png", mime="image/png",
+                kind=kind_override or "photo",
+            )
+
+        class FakeResponse:
+            status_code = 200
+            is_success = True
+            def json(self):
+                return {"ok": True, "result": {"message_id": "333", "chat": {"id": "c1"}}}
+
+        class FakeClient:
+            async def post(self, url, *, data, timeout):
+                return FakeResponse()
+
+        from unittest.mock import AsyncMock
+        fake_client = FakeClient()
+        monkeypatch.setattr(
+            "flocks.channel.builtin.telegram.channel.get_http_client",
+            AsyncMock(return_value=fake_client),
+        )
+        monkeypatch.setattr(media_mod, "prepare_telegram_media", fake_prepare)
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="telegram", to="c1",
+                media_url=f"telegram:document:{path.as_uri()}",
+            )
+        )
+        assert result.success is True
+        assert captured["kind"] == "document"
+        # The prefix should be stripped before passing to the preparer.
+        assert captured["source"] == path.as_uri()
+
+    @pytest.mark.asyncio
+    async def test_send_media_api_error_returns_failure(
+        self, tmp_path, monkeypatch,
+    ):
+        from flocks.channel.builtin.telegram.channel import TelegramChannel
+        from flocks.channel.builtin.telegram import media as media_mod
+
+        path = tmp_path / "doc.pdf"
+        path.write_bytes(b"x")
+
+        ch = TelegramChannel()
+        ch._config = {"botToken": "123:abc"}
+
+        async def fake_prepare(media_url, *, kind_override=None, **kwargs):
+            return media_mod.PreparedTelegramMedia(
+                data=b"x", filename="doc.pdf",
+                mime="application/pdf", kind="document",
+            )
+
+        class FakeResponse:
+            status_code = 400
+            is_success = False
+            def json(self):
+                return {"ok": False, "description": "bad chat id"}
+
+        class FakeClient:
+            async def post(self, url, *, data, timeout):
+                return FakeResponse()
+
+        from unittest.mock import AsyncMock
+        fake_client = FakeClient()
+        monkeypatch.setattr(
+            "flocks.channel.builtin.telegram.channel.get_http_client",
+            AsyncMock(return_value=fake_client),
+        )
+        monkeypatch.setattr(media_mod, "prepare_telegram_media", fake_prepare)
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="telegram", to="c1",
+                media_url=path.as_uri(),
+            )
+        )
+        assert result.success is False
+        assert "bad chat id" in result.error
+
+    @pytest.mark.asyncio
+    async def test_send_media_missing_media_url_falls_back_to_text(
+        self, monkeypatch,
+    ):
+        from flocks.channel.builtin.telegram.channel import TelegramChannel
+
+        ch = TelegramChannel()
+        ch._config = {"botToken": "123:abc"}
+
+        async def fake_send_text(self, ctx):
+            from flocks.channel.base import DeliveryResult
+            return DeliveryResult(
+                channel_id="telegram", message_id="t1", success=True,
+            )
+
+        monkeypatch.setattr(
+            TelegramChannel, "send_text", fake_send_text,
+        )
+
+        result = await ch.send_media(
+            OutboundContext(channel_id="telegram", to="c1", text="hi"),
+        )
+        assert result.success is True
+        assert result.message_id == "t1"

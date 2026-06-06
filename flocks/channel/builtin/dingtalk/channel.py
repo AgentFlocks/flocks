@@ -127,6 +127,134 @@ class DingTalkChannel(ChannelPlugin):
                 retryable=retryable,
             )
 
+    async def send_media(self, ctx: OutboundContext) -> DeliveryResult:
+        """Send a media message via the DingTalk app-robot OAPI.
+
+        The OAPI ``msgKey=file`` path is the only one that supports
+        uploading a *local* file.  ``msgKey=image`` requires a public
+        ``photoURL`` reachable by DingTalk's servers — we fall back to
+        that path only when the inbound ``media_url`` is already a
+        reachable https URL.
+        """
+        from flocks.channel.builtin.dingtalk.client import DingTalkApiError
+        from flocks.channel.builtin.dingtalk.media import (
+            prepare_dingtalk_media,
+        )
+        from flocks.channel.builtin.dingtalk.config import (
+            resolve_target_kind,
+        )
+
+        if not ctx.to or not strip_target_prefix(ctx.to):
+            return DeliveryResult(
+                channel_id="dingtalk",
+                message_id="",
+                success=False,
+                error="DingTalk send_media requires 'to' (user:<staffId> or chat:<openConversationId>)",
+            )
+        if not ctx.media_url:
+            return await self.send_text(ctx)
+
+        try:
+            send_config = resolve_account_config(self._config or {}, ctx.account_id)
+            prepared = await prepare_dingtalk_media(
+                config=send_config,
+                account_id=ctx.account_id,
+                media_url=ctx.media_url,
+            )
+
+            if prepared.media_type == "image" and ctx.media_url.startswith(
+                ("http://", "https://")
+            ):
+                # Public image URL — use the inline image msgKey.
+                msg_key = "image"
+                msg_param = {"photoURL": ctx.media_url}
+            else:
+                # Local upload (any type) or non-image — go through the
+                # file msgKey with the upload's downloadCode.
+                msg_key = "file"
+                msg_param = {
+                    "downloadCode": prepared.download_code,
+                    "fileName": prepared.filename,
+                }
+
+            # DingTalk's file/image msgKey does not carry companion text.
+            # Send the attachment first, then send the caption as a
+            # follow-up markdown message — matches the wecom ordering.
+            target_kind = resolve_target_kind(ctx.to)
+            from flocks.channel.builtin.dingtalk.client import api_request_for_account
+            from flocks.channel.builtin.dingtalk.config import resolve_account_credentials
+            import json as _json
+
+            _, _, robot_code = resolve_account_credentials(
+                send_config, ctx.account_id,
+            )
+            bare = strip_target_prefix(ctx.to)
+            if target_kind == "group":
+                body = {
+                    "robotCode": robot_code,
+                    "openConversationId": bare,
+                    "msgKey": msg_key,
+                    "msgParam": _json.dumps(msg_param, ensure_ascii=False),
+                }
+                data = await api_request_for_account(
+                    "POST", "/v1.0/robot/groupMessages/send",
+                    config=send_config, account_id=ctx.account_id, json_body=body,
+                )
+            else:
+                body = {
+                    "robotCode": robot_code,
+                    "userIds": [bare],
+                    "msgKey": msg_key,
+                    "msgParam": _json.dumps(msg_param, ensure_ascii=False),
+                }
+                data = await api_request_for_account(
+                    "POST", "/v1.0/robot/oToMessages/batchSend",
+                    config=send_config, account_id=ctx.account_id, json_body=body,
+                )
+
+            if ctx.text:
+                from flocks.channel.builtin.dingtalk.send import send_message_app
+                await send_message_app(
+                    config=send_config,
+                    to=ctx.to,
+                    text=ctx.text,
+                    account_id=ctx.account_id,
+                )
+
+            self.record_message()
+            return DeliveryResult(
+                channel_id="dingtalk",
+                message_id=str(data.get("processQueryKey", "")),
+                chat_id=bare,
+            )
+        except DingTalkApiError as exc:
+            retryable = getattr(exc, "retryable", False)
+            log.warning("dingtalk.send_media.failed", {
+                "to": ctx.to, "error": str(exc), "retryable": retryable,
+            })
+            return DeliveryResult(
+                channel_id="dingtalk",
+                message_id="",
+                success=False,
+                error=str(exc),
+                retryable=retryable,
+            )
+        except Exception as exc:
+            retryable = False
+            msg = str(exc).lower()
+            if "rate limit" in msg or "timeout" in msg:
+                retryable = True
+            log.warning("dingtalk.send_media.failed", {
+                "to": ctx.to, "error": str(exc), "retryable": retryable,
+            })
+            return DeliveryResult(
+                channel_id="dingtalk",
+                message_id="",
+                success=False,
+                error=str(exc),
+                retryable=retryable,
+            )
+
     @property
     def text_chunk_limit(self) -> int:
         return int((self._config or {}).get("textChunkLimit", 4000))
