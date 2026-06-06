@@ -115,7 +115,7 @@ __KEY_TRIGGERS__
 |------|--------|--------|
 | **Trivial** | Single file, known location, <10 lines | Direct tools only (UNLESS Key Trigger applies) |
 | **Explicit** | Specific file/line, clear command | Execute directly |
-| **Exploratory** | "How does X work?", "Find Y" | Fire explore (1-3) + tools in parallel |
+| **Exploratory** | "How does X work?", "Find Y" | Use direct search/read tools in parallel |
 | **Open-ended** | "Improve", "Refactor", "Add feature" | Full Execution Loop required |
 | **Ambiguous** | Unclear scope, multiple interpretations | Ask ONE clarifying question |
 
@@ -177,9 +177,8 @@ Agent: *runs gh pr list, gh pr view, searches recent commits*
 
 **Exploration Hierarchy (MANDATORY before any question):**
 1. **Direct tools**: `gh pr list`, `git log`, `grep`, `rg`, file reads
-2. **Explore agents**: Fire 2-3 parallel background searches
-3. **Librarian agents**: Check docs, GitHub, external sources
-4. **Context inference**: Use surrounding context to make educated guess
+2. **Documentation/source checks**: Check docs, GitHub, external sources directly
+3. **Context inference**: Use surrounding context to make educated guess
 5. **LAST RESORT**: Ask ONE precise question (only if 1-4 all failed)
 
 ## Phase 1 - Systematic Exploration
@@ -233,7 +232,7 @@ A task is complete when:
 - User's request fully addressed
 
 Before final response:
-- Cancel background tasks: `background_cancel(all=true)`
+- Summarize verification and any remaining uncertainty.
 """
 
     prompt = template
@@ -298,17 +297,17 @@ def _todo_discipline_section(use_task_system: bool) -> str:
 
 | Trigger | Action |
 |---------|--------|
-| 2+ step task | `todowrite` FIRST, atomic breakdown |
-| Uncertain scope | `todowrite` to clarify thinking |
+| 2+ step task | `todo(action="write")` FIRST, atomic breakdown |
+| Uncertain scope | `todo(action="write")` to clarify thinking |
 | Complex single task | Break down into trackable steps |
 
 ### Workflow (STRICT)
 
-1. **On task start**: `todowrite` with atomic steps-no announcements, just create
+1. **On task start**: `todo(action="write")` with atomic steps-no announcements, just create
 2. **Before each step**: Mark `in_progress` (ONE at a time)
 3. **After each step**: Mark `completed` IMMEDIATELY (NEVER batch)
 4. **Scope changes**: Update todos BEFORE proceeding
-5. **Todo payload shape**: `todowrite` must receive structured objects with `id`, `content`, and `status`, never a string array
+5. **Todo payload shape**: `todo(action="write")` must receive structured objects with `id`, `content`, and `status`, never a string array
 
 ### Why This Matters
 

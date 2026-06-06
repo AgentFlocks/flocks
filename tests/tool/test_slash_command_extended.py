@@ -415,6 +415,6 @@ class TestHelpCommand:
         assert "Direct commands:" in result.output
         assert "Other commands (handled through the normal assistant/session flow):" in result.output
         assert "/clear" in result.output
-        assert "/plan" in result.output
+        assert "/bug" in result.output
         assert "/compact" in result.output
         assert "/model" not in result.output

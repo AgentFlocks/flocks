@@ -54,8 +54,7 @@ def _get_cli_callbacks() -> Optional['RunnerCallbacks']:
 
 # Tool display styles
 TOOL_STYLES: Dict[str, tuple] = {
-    "todowrite": ("Todo", "yellow bold"),
-    "todoread": ("Todo", "yellow bold"),
+    "todo": ("Todo", "yellow bold"),
     "bash": ("Bash", "red bold"),
     "edit": ("Edit", "green bold"),
     "write": ("Write", "green bold"),

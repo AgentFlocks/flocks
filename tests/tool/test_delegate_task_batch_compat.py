@@ -14,28 +14,40 @@ class TestDelegateTaskTolerance:
     def test_delegate_task_schema_allows_omitting_optional_fields(self):
         schema = ToolRegistry.get_schema("delegate_task")
         assert schema is not None
-        assert "prompt" in schema.required
+        assert "prompt" not in schema.required
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
+        assert "run_in_background" not in schema.properties
 
     @pytest.mark.asyncio
     async def test_delegate_task_derives_description_and_ignores_blank_skills(self):
-        manager = SimpleNamespace(
-            launch=AsyncMock(return_value=SimpleNamespace(
-                id="task-1",
-                description="Investigate threatbook.cn assets",
-                agent="asset-survey",
-                status="running",
-                session_id="ses-child",
-            ))
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
         )
-        with patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),              patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),              patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),              patch("flocks.tool.agent.delegate_task.get_background_manager", return_value=manager),              patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get:
+        child_session = SimpleNamespace(id="ses-child")
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get,
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                action="stop",
+                error=None,
+                last_message=None,
+            ))),
+        ):
             result = await ToolRegistry.execute(
                 "delegate_task",
                 ctx=_make_ctx(),
                 subagent_type="asset-survey",
                 prompt="Investigate threatbook.cn assets",
-                run_in_background=True,
                 load_skills=["", "   "],
             )
 
@@ -43,21 +55,17 @@ class TestDelegateTaskTolerance:
         assert result.title == "Investigate threatbook.cn assets"
         assert result.metadata["sessionId"] == "ses-child"
         skill_get.assert_not_awaited()
-        manager.launch.assert_awaited_once()
-        launch_input = manager.launch.await_args.args[0]
-        assert launch_input.description == "Investigate threatbook.cn assets"
 
     @pytest.mark.asyncio
     async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
-        manager = SimpleNamespace(
-            launch=AsyncMock(return_value=SimpleNamespace(
-                id="task-2",
-                description="quick task",
-                agent="rex-junior",
-                status="running",
-                session_id="ses-quick",
-            ))
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
         )
+        child_session = SimpleNamespace(id="ses-quick")
         cfg = SimpleNamespace(categories={
             "quick": {
                 "model": "anthropic/claude-haiku-4-5",
@@ -71,24 +79,41 @@ class TestDelegateTaskTolerance:
                  "providerID": "anthropic",
                  "modelID": "claude-haiku-4-5",
              }), \
-             patch("flocks.tool.agent.delegate_task.get_background_manager", return_value=manager):
+             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)), \
+             patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session, \
+             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()), \
+             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                 action="stop",
+                 error=None,
+                 last_message=None,
+             ))) as loop_run:
             result = await ToolRegistry.execute(
                 "delegate_task",
                 ctx=_make_ctx(),
                 category="quick",
                 prompt="Summarize the diff",
                 description="quick task",
-                run_in_background=True,
             )
 
         assert result.success is True
-        manager.launch.assert_awaited_once()
-        launch_input = manager.launch.await_args.args[0]
-        assert launch_input.model == {
-            "providerID": "anthropic",
-            "modelID": "claude-haiku-4-5",
-        }
-        assert launch_input.model_pinned is False
+        assert create_session.await_args.kwargs["provider"] == "anthropic"
+        assert create_session.await_args.kwargs["model"] == "claude-haiku-4-5"
+        assert create_session.await_args.kwargs["model_pinned"] is False
+        assert loop_run.await_args.kwargs["provider_id"] == "anthropic"
+        assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_rejects_background_execution(self):
+        result = await ToolRegistry.execute(
+            "delegate_task",
+            ctx=_make_ctx(),
+            subagent_type="asset-survey",
+            prompt="Investigate threatbook.cn assets",
+            run_in_background=True,
+        )
+
+        assert result.success is False
+        assert "unknown parameters: run_in_background" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):

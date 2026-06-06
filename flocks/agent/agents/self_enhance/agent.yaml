@@ -22,8 +22,6 @@ tools:
   - websearch
   - webfetch
   - skill_load
-  - background_output
-  - background_cancel
 prompt_metadata:
   category: self-enhancement
   cost: medium

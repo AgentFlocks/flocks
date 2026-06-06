@@ -4,14 +4,16 @@ Skill CLI commands
 Provides skill management commands:
   flocks skills list             – list all discovered skills
   flocks skills status           – show eligibility status (deps check)
-  flocks skills find <query>     – search installable skills (clawhub + GitHub)
-  flocks skills install <source> – install a skill from URL/GitHub/clawhub/local
+  flocks skills find <query>     – search installable skills
+  flocks skills install <source> – install a skill from URL/GitHub/clawhub/skills.sh/SafeSkill/local
   flocks skills remove <name>    – uninstall a user-managed skill
   flocks skills install-deps     – install a skill's declared tool dependencies
 """
 
 import asyncio
+import json
 import re
+import shutil
 from typing import Optional
 
 import typer
@@ -174,7 +176,7 @@ def find_skills(
     query: str = typer.Argument(..., help="Search keyword, e.g. 'threat intel' or 'github'"),
     json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
 ):
-    """Search installable skills from clawhub and installed skills."""
+    """Search installable skills from local, clawhub, skills.sh, SafeSkill, and GitHub."""
     results = asyncio.run(_search_skills(query))
 
     if json_output:
@@ -184,7 +186,7 @@ def find_skills(
 
     if not results:
         console.print(f"[dim]No skills found matching '{query}'.[/dim]")
-        console.print("\n[dim]Tip: try browsing https://clawhub.com for more skills.[/dim]")
+        console.print("\n[dim]Tip: try browsing https://skills.sh or https://safeskill.cn for more skills.[/dim]")
         return
 
     table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
@@ -211,7 +213,9 @@ async def _search_skills(query: str) -> list:
     Search for skills matching query from multiple sources:
     1. Already-installed local skills
     2. clawhub.com search API
-    3. Curated GitHub collections (Anthropic-Cybersecurity-Skills etc.)
+    3. skills.sh search API
+    4. SafeSkill CLI search
+    5. Curated GitHub collections (Anthropic-Cybersecurity-Skills etc.)
     """
     results = []
     query_lower = query.lower()
@@ -231,7 +235,13 @@ async def _search_skills(query: str) -> list:
     clawhub_results = await _search_clawhub(query)
     results.extend(clawhub_results)
 
-    # 3. Search curated GitHub skill collections
+    # 3. Search skills.sh
+    results.extend(await _search_skills_sh(query))
+
+    # 4. Search SafeSkill when the CLI is available
+    results.extend(await _search_safeskill(query))
+
+    # 5. Search curated GitHub skill collections
     github_results = await _search_github_collections(query)
     # Deduplicate by name
     existing_names = {r["name"] for r in results}
@@ -270,6 +280,119 @@ async def _search_clawhub(query: str) -> list:
     except Exception:
         pass
     return []
+
+
+async def _search_skills_sh(query: str) -> list:
+    """Query skills.sh search API."""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            resp = await client.get(
+                "https://skills.sh/api/search",
+                params={"q": query, "limit": 10},
+                headers={"Accept": "application/json"},
+            )
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+            skills = data.get("skills", []) if isinstance(data, dict) else []
+            results = []
+            for item in skills:
+                if not isinstance(item, dict):
+                    continue
+                identifier = item.get("id")
+                repo = item.get("source")
+                skill_id = item.get("skillId")
+                if not identifier and isinstance(repo, str) and isinstance(skill_id, str):
+                    identifier = f"{repo}/{skill_id}"
+                if not isinstance(identifier, str) or identifier.count("/") < 2:
+                    continue
+                parts = identifier.split("/", 2)
+                name = str(item.get("name") or parts[-1].split("/")[-1])
+                installs = item.get("installs")
+                installs_suffix = (
+                    f" · {installs:,} installs"
+                    if isinstance(installs, int)
+                    else ""
+                )
+                results.append({
+                    "name": name,
+                    "description": f"Indexed by skills.sh from {parts[0]}/{parts[1]}{installs_suffix}",
+                    "source": "skills.sh",
+                    "install_hint": f"skills-sh:{identifier}",
+                })
+            return results
+    except Exception:
+        return []
+
+
+async def _search_safeskill(query: str) -> list:
+    """Search SafeSkill through its npx CLI when available."""
+    npx = shutil.which("npx")
+    if not npx:
+        return []
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            npx,
+            "-y",
+            "@safeskill/cli",
+            "find",
+            query,
+            "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, _stderr_b = await asyncio.wait_for(proc.communicate(), timeout=20)
+        if proc.returncode != 0:
+            return []
+        text = stdout_b.decode(errors="replace").strip()
+        if not text:
+            return []
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return _parse_safeskill_text_results(text)
+        items = data if isinstance(data, list) else data.get("skills", data.get("results", []))
+        if not isinstance(items, list):
+            return []
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            source = item.get("source") or item.get("install") or item.get("url") or item.get("id")
+            name = item.get("name") or item.get("slug") or source
+            if not source or not name:
+                continue
+            results.append({
+                "name": str(name),
+                "description": str(item.get("description") or ""),
+                "source": "safeskill.cn",
+                "install_hint": f"safeskill:{source}",
+            })
+        return results
+    except Exception:
+        return []
+
+
+def _parse_safeskill_text_results(text: str) -> list:
+    """Best-effort parsing for SafeSkill CLI text output."""
+    results = []
+    for line in text.splitlines():
+        clean = line.strip(" -\t")
+        if not clean or clean.lower().startswith(("name", "found", "search")):
+            continue
+        match = re.search(r"(safeskill://\S+|https?://\S+|[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)", clean)
+        if not match:
+            continue
+        source = match.group(1).rstrip(",.;")
+        name = source.rstrip("/").split("/")[-1]
+        results.append({
+            "name": name,
+            "description": clean,
+            "source": "safeskill.cn",
+            "install_hint": f"safeskill:{source}",
+        })
+    return results
 
 
 async def _search_github_collections(query: str) -> list:
@@ -345,6 +468,8 @@ def install_skill(
         help=(
             "Install source:\n"
             "  clawhub:<name>        – clawhub.com registry\n"
+            "  skills-sh:<id>        – skills.sh identifier (owner/repo/skill)\n"
+            "  safeskill:<source>    – SafeSkill Hub/GitHub/local source via SafeSkill CLI\n"
             "  github:<owner>/<repo> – GitHub repository\n"
             "  <owner>/<repo>        – GitHub shorthand\n"
             "  https://...           – direct SKILL.md URL\n"
@@ -355,7 +480,7 @@ def install_skill(
         None,
         "--skill",
         "-s",
-        help="Skill subdirectory name within the source repo (e.g. --skill find-skills)",
+        help="Skill subdirectory name within the source repo (e.g. --skill code-review)",
     ),
     scope: str = typer.Option(
         "global",
@@ -365,8 +490,8 @@ def install_skill(
 ):
     """Install a skill from an external source."""
     # If --skill is provided, append it as a subpath to the source
-    # e.g. source=https://github.com/owner/repo --skill find-skills
-    #   → resolved as github:owner/repo/find-skills
+    # e.g. source=https://github.com/owner/repo --skill code-review
+    #   → resolved as github:owner/repo/code-review
     effective_source = source
     if skill:
         # Strip trailing slash from source and append skill subpath

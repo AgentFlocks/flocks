@@ -2813,6 +2813,11 @@ class SessionRunner:
         await processor.process_event(FinishEvent(
             finish_reason=processor.get_finish_reason()
         ))
+
+        # Foreground subagent tool-calls are launched concurrently during
+        # streaming so sibling subagents can start in the same assistant turn.
+        # Drain them here before exposing tool results to the next loop step.
+        await processor.drain_parallel_tool_calls()
         
         # Get processed content
         content = processor.get_text_content()

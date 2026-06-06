@@ -40,16 +40,13 @@ class PermissionConfig(BaseModel):
     bash: Optional[PermissionRule] = None
     task: Optional[PermissionRule] = None
     external_directory: Optional[PermissionRule] = None
-    todowrite: Optional[PermissionAction] = None
-    todoread: Optional[PermissionAction] = None
+    todo: Optional[PermissionAction] = None
     question: Optional[PermissionAction] = None
     webfetch: Optional[PermissionAction] = None
     websearch: Optional[PermissionAction] = None
     lsp: Optional[PermissionRule] = None
     doom_loop: Optional[PermissionAction] = None
     delegate_task: Optional[PermissionRule] = None
-    background_output: Optional[PermissionRule] = None
-    background_cancel: Optional[PermissionRule] = None
 
 
 # ==================== Agent Configuration ====================

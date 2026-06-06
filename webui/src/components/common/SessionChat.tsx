@@ -22,7 +22,7 @@ import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool } from './QuestionTool';
-import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { buildParallelDelegateGroupParts, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
@@ -2754,6 +2754,7 @@ function ChatMessageBubbleInner({
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file' && p.url);
           const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
+          const displayParts = buildParallelDelegateGroupParts(otherParts);
           return (
             <>
               {fileParts.length > 0 && (
@@ -2783,7 +2784,7 @@ function ChatMessageBubbleInner({
                   })}
                 </div>
               )}
-              {otherParts.map((part: MessagePart, i: number) => (
+              {displayParts.map((part: MessagePart, i: number) => (
                 // Spacing between consecutive parts is owned by this wrapper,
                 // not by individual part components. Each part used to set its
                 // own `mt-2 first:mt-0`, but since every part lives in its own
@@ -3058,7 +3059,11 @@ export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_
 
 function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
-    .map(([k, v]) => `${k}=${String(v)}`)
+    .map(([k, v]) => {
+      if (Array.isArray(v)) return `${k}=[${v.length} items]`;
+      if (v && typeof v === 'object') return `${k}=${JSON.stringify(v)}`;
+      return `${k}=${String(v)}`;
+    })
     .join(', ');
 }
 
@@ -3096,10 +3101,16 @@ function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
   return [];
 }
 
-export function buildTodoWriteSummary(state: Partial<ToolState>): string {
+function getTodoActionLabel(action: unknown): string {
+  if (action === 'read') return 'Read todos';
+  if (action === 'write') return 'Update todos';
+  return 'Todos';
+}
+
+export function buildTodoSummary(state: Partial<ToolState>): string {
   const metadata = state.metadata ?? {};
   const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
-  if (currentTodos.length === 0) return '';
+  if (currentTodos.length === 0) return getTodoActionLabel(state.input?.action);
   const totalCount = currentTodos.length;
   const terminalCount = currentTodos.filter(
     (todo) => todo.status === 'completed' || todo.status === 'cancelled',
@@ -3119,6 +3130,34 @@ export function buildTodoWriteSummary(state: Partial<ToolState>): string {
   }
 
   return summary;
+}
+
+function todoStatusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'completed';
+    case 'in_progress':
+      return 'in progress';
+    case 'cancelled':
+      return 'cancelled';
+    case 'pending':
+      return 'pending';
+    default:
+      return status || 'pending';
+  }
+}
+
+function todoStatusClass(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+    case 'in_progress':
+      return 'bg-sky-50 text-sky-700 border-sky-100';
+    case 'cancelled':
+      return 'bg-zinc-100 text-zinc-500 border-zinc-200';
+    default:
+      return 'bg-amber-50 text-amber-700 border-amber-100';
+  }
 }
 
 export interface ChatToolPartProps {
@@ -3186,13 +3225,16 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     }
     return JSON.stringify(output, null, 2);
   };
+  const todoEntries = toolName === 'todo'
+    ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
+    : [];
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
     ? truncateToolDisplayText(
-        toolName === 'todowrite'
-          ? (buildTodoWriteSummary(state) || buildToolInputSummary(state.input))
+        toolName === 'todo'
+          ? buildTodoSummary(state)
           : buildToolInputSummary(state.input),
       )
     : '';
@@ -3256,6 +3298,25 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
       </summary>
 
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
+        {toolName === 'todo' && todoEntries.length > 0 && (
+          <div className="rounded-md border border-zinc-200 bg-white/70 px-2 py-1.5">
+            <div className="mb-1.5 text-[11px] font-medium text-zinc-500">{t('chat.tool.todoStages')}</div>
+            <div className="space-y-1">
+              {todoEntries.map((todo, index) => (
+                <div key={todo.id || index} className="flex items-start gap-2 text-[11px]">
+                  <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-300" />
+                  <span className="min-w-0 flex-1 text-zinc-700">
+                    {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
+                  </span>
+                  <span className={`flex-shrink-0 rounded-full border px-1.5 py-0.5 leading-none ${todoStatusClass(todo.status)}`}>
+                    {todoStatusLabel(todo.status)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {state.input && (
           <details>
             <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">

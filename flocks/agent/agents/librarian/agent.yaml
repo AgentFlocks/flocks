@@ -28,5 +28,5 @@ prompt_metadata:
     - "Why does [external dependency] behave this way?"
     - Find examples of [library] usage
     - Working with unfamiliar npm/pip/cargo packages
-  key_trigger: "External library/source mentioned -> fire `librarian` background"
+  key_trigger: "External library/source mentioned -> delegate to `librarian`"
 # prompt injected by prompt_builder.py (year-aware)

@@ -22,6 +22,7 @@ from flocks.session.session import Session, SessionInfo as SessionModel
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
+from flocks.utils.monitor import get_monitor
 from flocks.server.auth import require_user
 
 router = APIRouter()
@@ -36,10 +37,6 @@ DEFAULT_AGENT = "rex"
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
-
-# Import monitor for metrics endpoint
-from flocks.utils.monitor import get_monitor
-
 
 # =============================================================================
 # Request/Response Models - API Compatible (camelCase)
@@ -434,6 +431,7 @@ class TodoInfo(BaseModel):
     
     id: str = Field(..., description="Todo ID")
     content: str = Field(..., description="Task description")
+    activeForm: Optional[str] = Field(None, description="Active/progressive task description")
     status: str = Field(..., description="Status: pending, in_progress, completed, cancelled")
     priority: str = Field("medium", description="Priority: high, medium, low")
 
@@ -446,7 +444,7 @@ class TodoInfo(BaseModel):
 )
 async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
     """Get session todos"""
-    from flocks.storage.storage import Storage
+    from flocks.session.features.todo import Todo
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -456,10 +454,8 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
         )
     _require_session_read_access(session, _current_user)
     try:
-        todos = await Storage.read(["todo", sessionID])
-        if todos is None:
-            return []
-        return [TodoInfo(**todo) for todo in todos]
+        todos = await Todo.get(sessionID)
+        return [TodoInfo(**todo.model_dump(exclude_none=True)) for todo in todos]
     except Exception as e:
         log.warn("session.todo.read_error", {"sessionID": sessionID, "error": str(e)})
         return []
@@ -473,8 +469,7 @@ async def get_session_todos(sessionID: str, request: Request) -> List[TodoInfo]:
 )
 async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: Request) -> List[TodoInfo]:
     """Update session todos"""
-    from flocks.storage.storage import Storage
-    from flocks.server.routes.event import publish_event
+    from flocks.session.features.todo import Todo, TodoInfo as SessionTodoInfo
     _current_user = require_user(request)
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -484,13 +479,10 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
         )
     _require_session_write_access(session, _current_user)
     try:
-        await Storage.write(["todo", sessionID], [t.model_dump() for t in todos])
-        
-        await publish_event("todo.updated", {
-            "sessionID": sessionID,
-            "todos": [t.model_dump() for t in todos],
-        })
-        
+        await Todo.update(
+            sessionID,
+            [SessionTodoInfo(**t.model_dump(exclude_none=True)) for t in todos],
+        )
         return todos
     except Exception as e:
         log.error("session.todo.write_error", {"sessionID": sessionID, "error": str(e)})
@@ -3370,7 +3362,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
 async def send_session_message_async(
     sessionID: str,
     request: PromptRequest,
-    http_request: Request,
+    http_request: Request = None,
 ):
     """Send message asynchronously - returns 202 immediately, response via SSE"""
     import os
@@ -3384,8 +3376,9 @@ async def send_session_message_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    current_user = require_user(http_request)
-    _require_session_write_access(session, current_user)
+    if http_request is not None:
+        current_user = require_user(http_request)
+        _require_session_write_access(session, current_user)
     
     working_directory = session.directory or os.getcwd()
     
@@ -3459,7 +3452,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
     Side-effecting direct commands like /clear run without creating a chat
     message and instead update session state via callbacks.
 
-    LLM-based commands (/plan, /ask, /init, /compact, ...) are routed through
+    LLM-based commands (/init, /compact, ...) are routed through
     the normal session-loop pipeline.
 
     In both cases the user message (showing the raw slash command text, e.g.

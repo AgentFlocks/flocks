@@ -45,6 +45,16 @@ interface ActivityStep {
   status: 'running' | 'completed' | 'error';
 }
 
+interface DelegateChildInfo {
+  index: number;
+  description: string;
+  status: string;
+  sessionId?: string;
+  error?: string;
+  output?: string;
+  metadata?: Record<string, any>;
+}
+
 interface DelegateInfo {
   agentName: string;
   description: string;
@@ -58,6 +68,7 @@ interface DelegateInfo {
   stepCount: number;
   currentText: string;
   elapsed: number;
+  children: DelegateChildInfo[];
 }
 
 function extractSessionId(
@@ -82,7 +93,7 @@ function extractSessionId(
   return match?.[1]?.trim() || undefined;
 }
 
-function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
+export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
   const input = state.input || {};
   const agentRaw = input.subagent_type || input.category || 'unknown';
   const agentName = typeof agentRaw === 'string'
@@ -108,17 +119,43 @@ function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): D
   const innerMeta = meta?.metadata as Record<string, any> | undefined;
 
   const childSessionId = extractSessionId(meta, typeof state.output === 'string' ? state.output : undefined);
+  const children = ((meta?.children ?? innerMeta?.children ?? []) as any[])
+    .filter((child) => child && typeof child === 'object')
+    .map((child, index) => ({
+      index: typeof child.index === 'number' ? child.index : index,
+      description: String(child.description || `subtask ${index + 1}`),
+      status: String(child.status || 'pending'),
+      sessionId: typeof child.sessionId === 'string' ? child.sessionId : undefined,
+      error: typeof child.error === 'string' ? child.error : undefined,
+      output: typeof child.output === 'string' ? child.output : undefined,
+      metadata: child.metadata,
+    }));
   const steps = (meta?.steps ?? innerMeta?.steps ?? []) as ActivityStep[];
   const stepCount = (meta?.stepCount ?? innerMeta?.stepCount ?? 0) as number;
   const currentText = (meta?.currentText ?? innerMeta?.currentText ?? '') as string;
   const elapsed = (meta?.elapsed ?? innerMeta?.elapsed ?? 0) as number;
+  const isParallel = children.length > 0 || Boolean(meta?.parallel ?? innerMeta?.parallel);
+  const isBackground = !!input.run_in_background || Boolean(meta?.background ?? innerMeta?.background);
+  const runtimeStatus = meta?.status ?? innerMeta?.status;
+  const backgroundStatus = isBackground
+    ? (typeof runtimeStatus === 'string' && runtimeStatus.trim()
+      ? runtimeStatus
+      : state.status === 'completed' && childSessionId
+        ? 'running'
+        : undefined)
+    : undefined;
+  const runningChildren = children.filter((child) => child.status === 'running').length;
+  const errorChildren = children.filter((child) => child.status === 'error').length;
+  const completedChildren = children.filter((child) => child.status === 'completed').length;
 
   return {
-    agentName,
-    description: input.description || subTaskLabel,
-    isBackground: !!input.run_in_background,
+    agentName: isParallel ? 'Parallel Agents' : agentName,
+    description: isParallel
+      ? `${completedChildren}/${children.length} completed${runningChildren ? ` · ${runningChildren} running` : ''}${errorChildren ? ` · ${errorChildren} error` : ''}`
+      : input.description || subTaskLabel,
+    isBackground,
     childSessionId,
-    status: state.status || 'pending',
+    status: isParallel && runningChildren > 0 ? 'running' : backgroundStatus || state.status || 'pending',
     error: state.error,
     output,
     durationMs,
@@ -126,7 +163,117 @@ function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): D
     stepCount,
     currentText,
     elapsed,
+    children,
   };
+}
+
+function isForegroundDelegateSiblingPart(part: MessagePart): boolean {
+  if (part.type !== 'tool' || !part.tool || !isDelegateTool(part.tool)) {
+    return false;
+  }
+
+  const state: Partial<ToolState> = part.state || {};
+  const input = state.input || {};
+  const meta = state.metadata || {};
+  const innerMeta = meta.metadata as Record<string, any> | undefined;
+
+  if (input.run_in_background || meta.background || innerMeta?.background) {
+    return false;
+  }
+  if (Array.isArray(input.tasks) && input.tasks.length > 0) {
+    return false;
+  }
+  if (meta.parallel || innerMeta?.parallel) {
+    return false;
+  }
+
+  return Boolean(input.subagent_type || input.category || input.session_id);
+}
+
+export function buildParallelDelegateGroupParts(
+  parts: MessagePart[],
+  subTaskLabel = 'Subtask',
+): MessagePart[] {
+  const delegateParts = parts.filter(isForegroundDelegateSiblingPart);
+  if (delegateParts.length <= 1) {
+    return parts;
+  }
+
+  const delegateIds = new Set(delegateParts.map((part) => part.id));
+  const children = delegateParts.map((part, index) => {
+    const state: Partial<ToolState> = part.state || {};
+    const input = state.input || {};
+    const info = extractDelegateInfo(state, subTaskLabel);
+    const description = String(
+      input.description
+      || state.title
+      || info.description
+      || `${subTaskLabel} ${index + 1}`,
+    );
+    return {
+      index,
+      description,
+      status: info.status || state.status || 'pending',
+      sessionId: info.childSessionId,
+      error: info.error,
+      output: info.output,
+      metadata: state.metadata,
+    };
+  });
+
+  const statuses = children.map((child) => child.status);
+  const groupStatus: ToolState['status'] = statuses.some((status) => status === 'running' || status === 'pending')
+    ? 'running'
+    : statuses.some((status) => status === 'error')
+      ? 'error'
+      : 'completed';
+
+  const times = delegateParts
+    .map((part) => part.state?.time)
+    .filter((time): time is NonNullable<ToolState['time']> => Boolean(time?.start));
+  const starts = times.map((time) => time.start);
+  const ends = times.map((time) => time.end).filter((end): end is number => typeof end === 'number');
+  const groupTime = starts.length > 0
+    ? {
+        start: Math.min(...starts),
+        ...(groupStatus === 'running' || ends.length === 0 ? {} : { end: Math.max(...ends) }),
+      }
+    : undefined;
+
+  const groupPart: MessagePart = {
+    id: `parallel-delegate-${delegateParts.map((part) => part.id).join('-')}`,
+    type: 'tool',
+    tool: 'delegate_task',
+    callID: `parallel-delegate-${delegateParts.map((part) => part.callID || part.id).join('-')}`,
+    state: {
+      status: groupStatus,
+      input: {
+        description: `${delegateParts.length} parallel subagents`,
+        subagent_type: 'parallel',
+      },
+      title: `${delegateParts.length} parallel subagents`,
+      metadata: {
+        parallel: true,
+        source: 'sibling-tool-calls',
+        children,
+      },
+      ...(groupTime ? { time: groupTime } : {}),
+    },
+  };
+
+  let inserted = false;
+  const grouped: MessagePart[] = [];
+  for (const part of parts) {
+    if (!delegateIds.has(part.id)) {
+      grouped.push(part);
+      continue;
+    }
+    if (!inserted) {
+      grouped.push(groupPart);
+      inserted = true;
+    }
+  }
+  return grouped;
 }
 
 function formatDuration(ms: number): string {
@@ -215,11 +362,13 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
       stepCount: 0,
       currentText: '',
       elapsed: 0,
+      children: [],
     };
   }
   const cfg = STATUS_STYLE[info.status] ?? STATUS_STYLE.pending;
 
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [selectedChild, setSelectedChild] = useState<DelegateChildInfo | null>(null);
   const [elapsed, setElapsed] = useState<number | null>(info.durationMs);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -308,6 +457,35 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
             </div>
           )}
 
+          {info.children.length > 0 && (
+            <div className="mt-2 space-y-1.5 rounded-md bg-white/60 border border-gray-100 p-2">
+              {info.children.map((child) => {
+                const childCfg = STATUS_STYLE[child.status] ?? STATUS_STYLE.pending;
+                return (
+                  <div key={child.index} className="flex items-center gap-2 text-[11px]">
+                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${childCfg.barColor} ${child.status === 'running' ? 'animate-pulse' : ''}`} />
+                    <span className="flex-1 min-w-0 truncate text-gray-600">{child.description}</span>
+                    <span className={`px-1.5 py-0.5 rounded-full leading-none ${childCfg.badgeBg}`}>
+                      {t(`delegate.${child.status}`, { defaultValue: child.status })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!child.sessionId) return;
+                        setSelectedChild(child);
+                        setSheetOpen(true);
+                      }}
+                      disabled={!child.sessionId}
+                      className={child.sessionId ? 'text-red-600 hover:text-red-800' : 'text-gray-300 cursor-not-allowed'}
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* Error */}
           {info.status === 'error' && info.error && (
             <div className="mt-2 flex items-start gap-1.5 p-2 rounded-md bg-red-100/80 text-red-700 text-[11px]">
@@ -330,7 +508,11 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
 
           {/* View detail button — always visible */}
           <button
-            onClick={() => info.childSessionId && setSheetOpen(true)}
+            onClick={() => {
+              if (!info.childSessionId) return;
+              setSelectedChild(null);
+              setSheetOpen(true);
+            }}
             disabled={!info.childSessionId}
             className={`mt-2 flex items-center gap-1 text-[11px] font-medium transition-colors group ${
               info.childSessionId
@@ -346,14 +528,14 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
       </div>
 
       {/* Detail sheet */}
-      {info.childSessionId && (
+      {(selectedChild?.sessionId || info.childSessionId) && (
         <DelegateDetailSheet
           open={sheetOpen}
           onClose={() => setSheetOpen(false)}
-          sessionId={info.childSessionId}
+          sessionId={(selectedChild?.sessionId || info.childSessionId)!}
           agentName={info.agentName}
-          description={info.description}
-          status={info.status}
+          description={selectedChild?.description || info.description}
+          status={selectedChild?.status || info.status}
         />
       )}
     </>

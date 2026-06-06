@@ -44,7 +44,8 @@ Do not use this tool when a dedicated tool is a better fit:
 ## Subcommands
 
 **find <query>**
-  Search the **external public skill registry** by keyword.
+  Search external public skill registries by keyword (local, clawhub, skills.sh,
+  SafeSkill when available, and curated GitHub collections).
   This does NOT show installed skills — it discovers skills that can be installed.
   → Use BEFORE telling the user "I can't do X".  A matching skill may exist.
   Example: flocks_skills(subcommand="find", args="malware phishing")
@@ -54,6 +55,8 @@ Do not use this tool when a dedicated tool is a better fit:
   Source formats:
     github:<owner>/<repo>/<skill-dir>   e.g. github:octocat/skills/find-ioc
     clawhub:<name>                      e.g. clawhub:ndr-alert-analysis
+    skills-sh:<owner>/<repo>/<skill>    e.g. skills-sh:owner/repo/code-review
+    safeskill:<source>                  e.g. safeskill:safeskill://official/acme/code-review
     https://...                         direct SKILL.md URL
   → After install, always call status to check if deps are missing.
   Example: flocks_skills(subcommand="install", args="github:owner/repo/skill-name")

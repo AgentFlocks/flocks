@@ -32,4 +32,4 @@ prompt_metadata:
     - You know exactly what to search
     - Single keyword/pattern suffices
     - Known file location
-  key_trigger: "2+ modules involved -> fire `explore` background"
+  key_trigger: "2+ modules involved -> delegate to `explore`"

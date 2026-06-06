@@ -300,7 +300,7 @@ export namespace ACP {
                   })
                 }
 
-                if (part.tool === "todowrite") {
+                if (part.tool === "todo") {
                   const parsedTodos = parseTodoWriteEntries(part.state.output, part.state.metadata)
                   if (parsedTodos) {
                     await this.connection
@@ -637,15 +637,15 @@ export namespace ACP {
                 })
               }
 
-              if (part.tool === "todowrite") {
-                const parsedTodos = z.array(Todo.Info).safeParse(JSON.parse(part.state.output))
-                if (parsedTodos.success) {
+              if (part.tool === "todo") {
+                const parsedTodos = parseTodoWriteEntries(part.state.output, part.state.metadata)
+                if (parsedTodos) {
                   await this.connection
                     .sessionUpdate({
                       sessionId,
                       update: {
                         sessionUpdate: "plan",
-                        entries: parsedTodos.data.map((todo) => {
+                        entries: parsedTodos.map((todo) => {
                           const status: PlanEntry["status"] =
                             todo.status === "cancelled" ? "completed" : (todo.status as PlanEntry["status"])
                           return {

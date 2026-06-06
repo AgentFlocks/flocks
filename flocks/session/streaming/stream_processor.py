@@ -156,6 +156,12 @@ class StreamProcessor:
         
         # Flag: model emitted text-embedded tool calls (<tool_use> XML) that were extracted and executed
         self._text_tool_calls_executed = False
+
+        # Foreground subagents are long-running but independent. Start them as
+        # soon as their tool-call arrives so later sibling tool-calls in the same
+        # model response can launch too; the runner drains these before the step
+        # returns.
+        self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
     
     async def process_event(self, event: StreamEvent) -> None:
         """
@@ -195,7 +201,10 @@ class StreamProcessor:
             pass  # Input is complete
         
         elif event_type == "tool-call":
-            await self._handle_tool_call(event)
+            if self._should_run_tool_call_parallel(event):
+                self._start_parallel_tool_call(event)
+            else:
+                await self._handle_tool_call(event)
         
         elif event_type == "text-start":
             await self._handle_text_start(event)
@@ -1292,7 +1301,7 @@ class StreamProcessor:
                     "session_id": self.session_id,
                     "reason": "found XML tool-call markup but could not parse any valid tool calls",
                 })
-            
+
             # Update time
             if self.current_text_part.time:
                 self.current_text_part.time.end = int(datetime.now().timestamp() * 1000)
@@ -1318,6 +1327,54 @@ class StreamProcessor:
             })
             
             self.current_text_part = None
+
+    def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
+        """Return true for independent foreground subagent tool-calls."""
+        if event.tool_name not in {"delegate_task", "task"}:
+            return False
+        tool_input = event.input if isinstance(event.input, dict) else {}
+        if tool_input.get("run_in_background") is True:
+            return False
+        # A single delegate_task(tasks=[...]) already manages child concurrency
+        # and should remain one aggregate card.
+        if isinstance(tool_input.get("tasks"), list) and tool_input.get("tasks"):
+            return False
+        return bool(
+            tool_input.get("subagent_type")
+            or tool_input.get("category")
+            or tool_input.get("session_id")
+        )
+
+    def _start_parallel_tool_call(self, event: ToolCallEvent) -> None:
+        if event.tool_call_id in self._parallel_tool_tasks:
+            return
+
+        async def _run() -> None:
+            await self._handle_tool_call(event)
+
+        task = asyncio.create_task(_run(), name=f"tool:{event.tool_name}:{event.tool_call_id}")
+        self._parallel_tool_tasks[event.tool_call_id] = task
+
+        def _cleanup(done_task: asyncio.Task[None]) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log.error("stream.parallel_tool_call.error", {
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_name,
+                    "error": str(exc),
+                })
+
+        task.add_done_callback(_cleanup)
+
+    async def drain_parallel_tool_calls(self) -> None:
+        """Wait for foreground parallel tool-calls before returning the step."""
+        if not self._parallel_tool_tasks:
+            return
+        tasks = list(self._parallel_tool_tasks.values())
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     def _compute_visible_delta(previous: str, current: str) -> str:

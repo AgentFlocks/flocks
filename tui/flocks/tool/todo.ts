@@ -1,6 +1,6 @@
 import z from "zod"
 import { Tool } from "./tool"
-import DESCRIPTION_WRITE from "./todowrite.txt"
+import DESCRIPTION from "./todo.txt"
 import { Todo } from "../session/todo"
 
 const ACTIVE_TODO_STATUSES = new Set(["pending", "in_progress"])
@@ -19,18 +19,35 @@ function verificationNudgeNeeded(todos: Todo.Info[]) {
   })
 }
 
-export const TodoWriteTool = Tool.define("todowrite", {
-  description: DESCRIPTION_WRITE,
+export const TodoTool = Tool.define("todo", {
+  description: DESCRIPTION,
   parameters: z.object({
-    todos: z.array(z.object(Todo.Info.shape)).describe("The updated todo list"),
+    action: z.enum(["read", "write"]).describe("Read the current todos or write the full todo list"),
+    todos: z.array(z.object(Todo.Info.shape)).optional().describe("For action=write: the updated todo list"),
   }),
   async execute(params, ctx) {
     await ctx.ask({
-      permission: "todowrite",
+      permission: "todo",
       patterns: ["*"],
       always: ["*"],
       metadata: {},
     })
+
+    if (params.action === "read") {
+      const todos = await Todo.get(ctx.sessionID)
+      return {
+        title: `${todos.filter((x) => x.status !== "completed").length} todos`,
+        metadata: {
+          action: "read",
+          todos,
+        },
+        output: JSON.stringify(todos, null, 2),
+      }
+    }
+
+    if (!params.todos) {
+      throw new Error("todos is required when action='write'")
+    }
 
     const oldTodos = await Todo.get(ctx.sessionID)
     const newTodos = params.todos.map((todo) => ({
@@ -53,33 +70,12 @@ export const TodoWriteTool = Tool.define("todowrite", {
       title: `${newTodos.filter((x) => ACTIVE_TODO_STATUSES.has(x.status)).length} todos`,
       output: JSON.stringify(output, null, 2),
       metadata: {
+        action: "write",
         todos: newTodos,
         oldTodos,
         newTodos,
         verificationNudgeNeeded: output.verificationNudgeNeeded,
       },
-    }
-  },
-})
-
-export const TodoReadTool = Tool.define("todoread", {
-  description: "Use this tool to read your todo list",
-  parameters: z.object({}),
-  async execute(_params, ctx) {
-    await ctx.ask({
-      permission: "todoread",
-      patterns: ["*"],
-      always: ["*"],
-      metadata: {},
-    })
-
-    const todos = await Todo.get(ctx.sessionID)
-    return {
-      title: `${todos.filter((x) => x.status !== "completed").length} todos`,
-      metadata: {
-        todos,
-      },
-      output: JSON.stringify(todos, null, 2),
     }
   },
 })

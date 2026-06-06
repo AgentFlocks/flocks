@@ -2,11 +2,13 @@
 Skill Installer
 
 Handles:
-1. Installing skills from external sources (GitHub, raw URL, local path, clawhub)
+1. Installing skills from external sources (GitHub, raw URL, local path, clawhub,
+   skills.sh, SafeSkill)
 2. Installing a skill's declared tool dependencies (brew, npm, uv, pip, go)
 
 Source scheme routing:
-  safeskill:<name>         → SafeSkill registry API (reserved for future)
+  safeskill:<source>       → SafeSkill CLI staging import
+  skills-sh:<id>           → skills.sh registry via GitHub source
   clawhub:<name>           → clawhub.com registry API
   github:<owner>/<repo>    → GitHub raw download
   https://...              → Direct HTTP download
@@ -80,7 +82,8 @@ def _resolve_source(source: str) -> dict:
     Parse source string into a typed dict with keys: kind, value.
 
     Supported kinds:
-      safeskill  – reserved, future SafeSkill registry
+      skills_sh  – skills.sh registry
+      safeskill  – SafeSkill CLI staging import
       clawhub    – clawhub.com registry
       github     – GitHub raw download
       url        – arbitrary HTTPS URL
@@ -88,8 +91,15 @@ def _resolve_source(source: str) -> dict:
     """
     source = source.strip()
 
+    if source.startswith(("skills-sh:", "skills.sh:")):
+        prefix = "skills-sh:" if source.startswith("skills-sh:") else "skills.sh:"
+        return {"kind": "skills_sh", "value": source[len(prefix):]}
+
     if source.startswith("safeskill:"):
         return {"kind": "safeskill", "value": source[len("safeskill:"):]}
+
+    if source.startswith("safeskill://"):
+        return {"kind": "safeskill", "value": source}
 
     if source.startswith("clawhub:"):
         return {"kind": "clawhub", "value": source[len("clawhub:"):]}
@@ -98,6 +108,13 @@ def _resolve_source(source: str) -> dict:
         return {"kind": "github", "value": source[len("github:"):]}
 
     if source.startswith(("http://", "https://")):
+        skills_sh_match = re.match(
+            r"https?://(?:www\.)?skills\.sh/?(?P<id>.*)$",
+            source,
+        )
+        if skills_sh_match:
+            return {"kind": "skills_sh", "value": skills_sh_match.group("id")}
+
         # Detect GitHub URLs and handle them specially
         gh_match = re.match(
             r"https?://github\.com/([^/]+/[^/]+)(?:/tree/[^/]+)?(/.*)?$",
@@ -153,7 +170,9 @@ class SkillInstaller:
 
         log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope})
 
-        if kind == "safeskill":
+        if kind == "skills_sh":
+            return await cls._install_from_skills_sh(value, scope)
+        elif kind == "safeskill":
             return await cls._install_from_safeskill(value, scope)
         elif kind == "clawhub":
             return await cls._install_from_clawhub(value, scope)
@@ -170,15 +189,259 @@ class SkillInstaller:
             )
 
     @classmethod
-    async def _install_from_safeskill(cls, name: str, scope: str) -> SkillInstallResult:
-        """Reserved for future SafeSkill registry integration."""
+    async def _install_from_skills_sh(cls, identifier: str, scope: str) -> SkillInstallResult:
+        """Install a skills.sh skill via npx staging, then GitHub fallback."""
+        normalized = cls._normalize_skills_sh_identifier(identifier)
+        if not normalized:
+            return SkillInstallResult(
+                success=False,
+                error="skills.sh skill identifier is required, e.g. skills-sh:owner/repo/skill",
+            )
+
+        staged = await cls._install_from_skills_sh_cli(normalized, scope)
+        if staged.success:
+            return staged
+
+        if normalized.count("/") >= 2:
+            result = await cls._install_from_github(normalized, scope)
+            if result.success:
+                return result
+
+        resolved = await cls._resolve_skills_sh_github_identifier(normalized)
+        if not resolved:
+            return SkillInstallResult(
+                success=False,
+                error=(
+                    f"Could not resolve skills.sh skill {identifier!r}. "
+                    "Use an identifier like skills-sh:owner/repo/skill-name."
+                ),
+            )
+        return await cls._install_from_github(resolved, scope)
+
+    @classmethod
+    async def _install_from_skills_sh_cli(cls, identifier: str, scope: str) -> SkillInstallResult:
+        """Run `npx skills add` in staging so default agent-dir installs are imported."""
+        npx = shutil.which("npx")
+        if not npx:
+            return SkillInstallResult(
+                success=False,
+                error="npx is not available for skills.sh CLI install",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="flocks-skills-sh-") as tmp:
+            staging = Path(tmp)
+            env = os.environ.copy()
+            env["HOME"] = str(staging)
+            env["XDG_CONFIG_HOME"] = str(staging / ".config")
+            cmd = [npx, "-y", "skills", "add", identifier]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(staging),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, stderr_b = await proc.communicate()
+            output = (
+                stdout_b.decode(errors="replace")
+                + stderr_b.decode(errors="replace")
+            ).strip()
+            if proc.returncode != 0:
+                return SkillInstallResult(
+                    success=False,
+                    error=output or f"skills.sh CLI failed with exit {proc.returncode}",
+                )
+
+            imported = cls._import_staged_skill_dirs(staging, scope)
+            if not imported:
+                return SkillInstallResult(
+                    success=False,
+                    error=(
+                        "skills.sh CLI completed but no SKILL.md files were found "
+                        "in staged agent skill directories."
+                    ),
+                )
+
+        Skill.clear_cache()
+        names = ", ".join(name for name, _ in imported)
         return SkillInstallResult(
-            success=False,
-            error=(
-                "SafeSkill registry is not yet available. "
-                "Use a GitHub URL or clawhub:<name> instead."
-            ),
+            success=True,
+            skill_name=imported[0][0],
+            location=str(imported[0][1]),
+            message=f"Imported skills.sh skill(s) into Flocks: {names}",
         )
+
+    @classmethod
+    async def _install_from_safeskill(cls, source: str, scope: str) -> SkillInstallResult:
+        """Run SafeSkill CLI in a staging directory and import its agent output."""
+        npx = shutil.which("npx")
+        if not npx:
+            return SkillInstallResult(
+                success=False,
+                error="npx is required for safeskill installs. Install Node.js/npm first.",
+            )
+
+        source = source.strip()
+        if not source:
+            return SkillInstallResult(
+                success=False,
+                error=(
+                    "safeskill source is required, e.g. "
+                    "safeskill:safeskill://official/acme/code-review"
+                ),
+            )
+
+        with tempfile.TemporaryDirectory(prefix="flocks-safeskill-") as tmp:
+            staging = Path(tmp)
+            cmd = [
+                npx,
+                "-y",
+                "@safeskill/cli",
+                "add",
+                source,
+                "--copy",
+                "-y",
+                "-a",
+                "universal",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=str(staging),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, stderr_b = await proc.communicate()
+            output = (
+                stdout_b.decode(errors="replace")
+                + stderr_b.decode(errors="replace")
+            ).strip()
+            if proc.returncode != 0:
+                return SkillInstallResult(
+                    success=False,
+                    error=output or f"SafeSkill CLI failed with exit {proc.returncode}",
+                )
+
+            imported = cls._import_staged_skill_dirs(staging, scope)
+            if not imported:
+                return SkillInstallResult(
+                    success=False,
+                    error=(
+                        "SafeSkill CLI completed but no SKILL.md files were found "
+                        "in the staging agent directories."
+                    ),
+                )
+
+        Skill.clear_cache()
+        names = ", ".join(name for name, _ in imported)
+        return SkillInstallResult(
+            success=True,
+            skill_name=imported[0][0],
+            location=str(imported[0][1]),
+            message=f"Imported SafeSkill skill(s) into Flocks: {names}",
+        )
+
+    @staticmethod
+    def _normalize_skills_sh_identifier(identifier: str) -> str:
+        """Normalize skills.sh prefixes and URLs to owner/repo/skill-path."""
+        value = identifier.strip().strip("/")
+        for prefix in ("skills-sh/", "skills.sh/", "skils-sh/", "skils.sh/"):
+            if value.startswith(prefix):
+                value = value[len(prefix):]
+                break
+        if value.startswith("https://www.skills.sh/"):
+            value = value[len("https://www.skills.sh/"):]
+        if value.startswith("http://www.skills.sh/"):
+            value = value[len("http://www.skills.sh/"):]
+        if value.startswith("https://skills.sh/"):
+            value = value[len("https://skills.sh/"):]
+        if value.startswith("http://skills.sh/"):
+            value = value[len("http://skills.sh/"):]
+        return value.strip("/")
+
+    @classmethod
+    async def _resolve_skills_sh_github_identifier(cls, identifier: str) -> Optional[str]:
+        """Resolve a skills.sh detail page to a GitHub owner/repo[/skill] path."""
+        try:
+            import httpx
+        except ImportError:
+            return None
+
+        normalized = cls._normalize_skills_sh_identifier(identifier)
+        if normalized.count("/") < 2:
+            return None
+
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                resp = await client.get(f"https://skills.sh/{normalized}")
+                if resp.status_code != 200:
+                    return None
+        except Exception:
+            return None
+
+        install_match = re.search(
+            r"npx\s+skills\s+add\s+(?P<repo>https?://github\.com/[^\s<]+|[^\s<]+)"
+            r"(?:\s+--skill\s+(?P<skill>[^\s<]+))?",
+            resp.text,
+            flags=re.IGNORECASE,
+        )
+        if install_match:
+            repo = install_match.group("repo").strip().strip("\"'")
+            skill = (install_match.group("skill") or "").strip().strip("\"'")
+            repo = cls._github_repo_slug(repo)
+            if repo:
+                return f"{repo}/{skill}" if skill else repo
+
+        parts = normalized.split("/", 2)
+        repo = f"{parts[0]}/{parts[1]}"
+        skill_path = parts[2]
+        return f"{repo}/{skill_path}"
+
+    @staticmethod
+    def _github_repo_slug(value: str) -> Optional[str]:
+        value = value.strip().strip("/")
+        if value.startswith("https://github.com/"):
+            value = value[len("https://github.com/"):]
+        elif value.startswith("http://github.com/"):
+            value = value[len("http://github.com/"):]
+        parts = value.split("/")
+        if len(parts) >= 2:
+            return f"{parts[0]}/{parts[1]}"
+        return None
+
+    @classmethod
+    def _import_staged_skill_dirs(cls, staging: Path, scope: str) -> List[tuple[str, Path]]:
+        """Copy staged SafeSkill agent directories into Flocks skill storage."""
+        install_root = _resolve_install_root(scope)
+        imported: List[tuple[str, Path]] = []
+        seen: set[Path] = set()
+        candidate_roots = [
+            staging / ".agents" / "skills",
+            staging / ".claude" / "skills",
+            staging / ".cursor" / "skills",
+            staging / "skills",
+        ]
+        for root in candidate_roots:
+            if not root.exists():
+                continue
+            for skill_md in root.rglob("SKILL.md"):
+                skill_dir = skill_md.parent.resolve()
+                if skill_dir in seen:
+                    continue
+                seen.add(skill_dir)
+                try:
+                    content = skill_md.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                data = Skill._parse_frontmatter(content)
+                name = (data.get("name") or skill_dir.name).strip()
+                if not name or not Skill._is_valid_name(name):
+                    continue
+                dest = install_root / name
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(skill_dir, dest)
+                imported.append((name, dest / "SKILL.md"))
+        return imported
 
     @classmethod
     async def _install_from_clawhub(cls, name: str, scope: str) -> SkillInstallResult:
@@ -211,7 +474,14 @@ class SkillInstaller:
                         success=False,
                         error=f"clawhub returned HTTP {resp.status_code} for skill '{name}'",
                     )
-                content_type = resp.headers.get("content-type", "")
+                content_type = ""
+                headers = getattr(resp, "headers", None)
+                if headers is not None:
+                    header_value = headers.get("content-type", "")
+                    if isinstance(header_value, str):
+                        content_type = header_value
+                    elif asyncio.iscoroutine(header_value):
+                        header_value.close()
                 if "text/html" in content_type:
                     return SkillInstallResult(
                         success=False,
@@ -320,7 +590,12 @@ class SkillInstaller:
 
         # Candidate directory paths to try (in order)
         if subpath:
-            candidate_paths = [subpath, f"skills/{subpath}"]
+            candidate_paths = [
+                subpath,
+                f"skills/{subpath}",
+                f".agents/skills/{subpath}",
+                f".claude/skills/{subpath}",
+            ]
         else:
             candidate_paths = [""]
 
@@ -497,7 +772,14 @@ class SkillInstaller:
                         success=False,
                         error=f"HTTP {resp.status_code} fetching {url}",
                     )
-                content_type = resp.headers.get("content-type", "")
+                content_type = ""
+                headers = getattr(resp, "headers", None)
+                if headers is not None:
+                    header_value = headers.get("content-type", "")
+                    if isinstance(header_value, str):
+                        content_type = header_value
+                    elif asyncio.iscoroutine(header_value):
+                        header_value.close()
                 if "text/html" in content_type:
                     return SkillInstallResult(
                         success=False,

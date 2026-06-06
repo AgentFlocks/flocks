@@ -13,9 +13,8 @@ Core Tools (P0):
 
 P1 Tools:
 - webfetch: Fetch web content
-- todoread/todowrite: TODO list management
+- todo: TODO list management
 - question: User interaction
-- plan_enter/plan_exit: Plan mode switching
 
 P2 Tools:
 - task: Subagent execution

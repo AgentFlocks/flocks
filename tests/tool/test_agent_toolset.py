@@ -92,8 +92,6 @@ def test_resolve_agent_initial_tools_keeps_empty_non_rex_tools_empty() -> None:
 def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
     available_tool_names = [
         "apply_patch",
-        "background_cancel",
-        "background_output",
         "bash",
         "channel_message",
         "delegate_task",
@@ -102,7 +100,6 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "grep",
         "lsp",
         "memory_search",
-        "plan_exit",
         "question",
         "read",
         "run_workflow",
@@ -110,8 +107,7 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "session_list",
         "skill_load",
         "task",
-        "todoread",
-        "todowrite",
+        "todo",
         "tool_search",
         "webfetch",
         "websearch",

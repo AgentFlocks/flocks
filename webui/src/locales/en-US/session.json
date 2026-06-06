@@ -145,6 +145,7 @@
       "error": "Failed",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
+      "todoStages": "Todo stages",
       "errorLabel": "Error",
       "elapsed": "Elapsed",
       "workflowStage": "Current stage: {{phase}}",

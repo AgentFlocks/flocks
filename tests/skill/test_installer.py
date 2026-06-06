@@ -98,6 +98,11 @@ class TestResolveSource:
         assert r["kind"] == "url"
         assert r["value"] == "https://example.com/SKILL.md"
 
+    def test_skills_sh_url(self):
+        r = _resolve_source("https://www.skills.sh/owner/repo/demo")
+        assert r["kind"] == "skills_sh"
+        assert r["value"] == "owner/repo/demo"
+
     def test_local_absolute(self):
         r = _resolve_source("/home/user/skills/my-skill")
         assert r["kind"] == "local"
@@ -253,10 +258,44 @@ class TestSaveSkillContent:
 
 class TestInstallFromSource:
     @pytest.mark.asyncio
-    async def test_safeskill_not_available(self, tmp_skills_dir):
-        result = await SkillInstaller.install_from_source("safeskill:test")
+    async def test_skills_sh_cli_staging_imports_agent_skill(self, tmp_skills_dir):
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"installed", b""
+
+        async def fake_create_subprocess_exec(*_cmd, **kwargs):
+            staged_skill = Path(kwargs["cwd"]) / ".agents" / "skills" / "demo"
+            staged_skill.mkdir(parents=True)
+            (staged_skill / "SKILL.md").write_text(
+                "---\nname: demo\ndescription: Demo\n---\n",
+                encoding="utf-8",
+            )
+            return Proc()
+
+        with (
+            patch("flocks.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch("flocks.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch(
+                "flocks.skill.installer.asyncio.create_subprocess_exec",
+                fake_create_subprocess_exec,
+            ),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "https://www.skills.sh/owner/repo/demo"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "demo"
+        assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_safeskill_requires_npx(self, tmp_skills_dir):
+        with patch("flocks.skill.installer.shutil.which", return_value=None):
+            result = await SkillInstaller.install_from_source("safeskill:test")
         assert result.success is False
-        assert "SafeSkill" in (result.error or "")
+        assert "npx is required" in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_local_file(self, tmp_path: Path, tmp_skills_dir: Path):
