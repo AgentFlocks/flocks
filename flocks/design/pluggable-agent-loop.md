@@ -1,11 +1,16 @@
 # 可插拔 Agent Loop 设计文档
 
-> 状态：**草稿 / RFC（v2，已按代码审阅修正）**  
+> 状态：**草稿 / RFC（v3，二轮代码审阅后定稿）**  
 > 作者：AI 辅助生成  
 > 日期：2026-06-06  
 > 分支：`feat/pluggable-agent-loop`
 
-> **v2 修订要点**（基于全仓库代码核对）：
+> **v3 修订要点**（二轮审阅，核对 `SessionLoop.run()` 生命周期）：
+> 1. 分派点由"session 加载后（L290）"再**下沉到 `_run_loop()` 调用处（L359）**——否则 raptor 路径会绕过 `_active_loops` 注册、busy/idle 状态、中断、orphan/finally 清理，导致**中断失效与重复执行**。
+> 2. 引擎接口由 `run(session_id, provider_id, model_id, agent_name, callbacks)` 改为 **`run(ctx: LoopContext, callbacks)`**——引擎接收已就绪的 `LoopContext`（含解析好的 model、`session_ctx`、`abort_event`），无需重新加载/解析。
+> 3. §4.3 递归纠结随之消失：native 直接走 `cls._run_loop(ctx, ...)`，registry 只装非原生引擎。
+>
+> **v2 修订要点**（一轮审阅，基于全仓库代码核对）：
 > 1. 注入点由"修改 14 处调用站"改为**在 `SessionLoop.run()` 内部单点分派**。
 > 2. 引擎解析只依赖已加载的 `session`，不依赖 `PromptRequest`（绝大多数调用站没有 request）。
 > 3. P2 集成方式由"进程内 import"改为**子进程 / RPC**（hermes-agent 是扁平模块包，无法安全进程内导入）。
@@ -59,32 +64,41 @@ SessionLoop._run_loop()
 
 ## 3. 整体架构
 
-### 3.1 关键决策：单点分派而非改调用站
+### 3.1 关键决策：在 `_run_loop()` 调用处单点分派
 
-全仓库共有 **14 处** `SessionLoop.run(...)` 调用（HTTP、CLI、channel、task、delegate_task、subagent、activity_forwarder 等），其中绝大多数只传 `session_id` + `callbacks`，**没有 `PromptRequest`**。因此引擎分派**不能**放在调用站，而必须放在 `SessionLoop.run()` 内部——它本身已经负责加载 session、解析 model、守卫 is_running，是唯一稳定的收敛点。
+全仓库共有 **14 处** `SessionLoop.run(...)` 调用（HTTP、CLI、channel、task、delegate_task、subagent、activity_forwarder 等），其中绝大多数只传 `session_id` + `callbacks`，**没有 `PromptRequest`**。因此引擎分派**不能**放在调用站。
+
+更关键的是：分派也**不能**放在 `SessionLoop.run()` 顶部（session 加载后立即 return engine），否则会**绕过 `run()` 内部的全部生命周期管理**——`_active_loops` 注册、busy/idle 状态、orphan 清理、`finally` 清理、错误处理都在 `_run_loop()` 调用的前后。绕过它们会导致 `is_running` 恒 False（**重复执行**）、`abort()` 失效（**中断失效**）。
+
+因此分派点必须**下沉到 `_run_loop()` 调用处**：共享脚手架全部复用，只替换"循环体"这一行。引擎接收**已就绪的 `LoopContext`**（含解析好的 model、`session_ctx`、`abort_event`）。
 
 ```
 14 处调用站（HTTP / CLI / channel / task / subagent ...）
         │   全部不变，只调 SessionLoop.run(session_id, ...)
         ▼
 ┌──────────────────────────────────────────────────────────┐
-│  SessionLoop.run()                                        │
-│   1. session = await Session.get_by_id(session_id)        │
-│   2. engine_id = _resolve_loop_engine(session)            │  ← 新增单点分派
-│   3. if engine_id != "native":                            │
-│         return await LoopEngineRegistry.get(engine_id)     │
-│                       .run(session_id, ...)               │
-│   4. else: 继续现有 inline 逻辑（_run_loop，零行为变化）   │
+│  SessionLoop.run()        （以下脚手架对所有引擎共享）     │
+│   is_running 守卫 → Session.get_by_id → _resolve_model    │
+│   → 构建 LoopContext(ctx) → _active_loops[sid]=ctx        │
+│   → SessionStatus.busy → orphan 清理                      │
+│   ┌──── try ────────────────────────────────────────────┐ │
+│   │ engine_id = _resolve_loop_engine(ctx.session)        │ │  ← 单点分派
+│   │ if engine_id != "native":                            │ │
+│   │     result = await Registry.get(engine_id).run(ctx)  │ │
+│   │ else:                                                │ │
+│   │     result = await cls._run_loop(ctx, callbacks)     │ │  ← 原逻辑零变化
+│   └──── finally: del _active_loops / idle / touch ───────┘ │
 └───────────────────────────┬──────────────────────────────┘
                             │ (engine_id != "native")
                             ▼
                 ┌───────────────────────┐
-                │   AgentLoopEngine     │  ← Protocol (base.py)
+                │   AgentLoopEngine     │  run(ctx, callbacks)
                 └──────────┬────────────┘
                            ▼
             ┌──────────────────────────────────────┐
             │           RaptorEngine               │
             │   (P2，子进程 / RPC 适配器)          │
+            │   监听 ctx.abort_event → 杀子进程     │
             │   MessageBridge  ToolBridge          │
             │   StreamBridge   subprocess(JSON-RPC)│
             │   └─> hermes-agent run_conversation  │
@@ -96,7 +110,7 @@ SessionLoop._run_loop()
      (publish_event)  (Message/Parts)  (ToolRegistry.execute)
 ```
 
-> 注意：`native` 引擎**不进 registry**，走 inline 路径，从而避免 `FlocksNativeEngine.run()` → `SessionLoop.run()` 的无限递归。registry 只装非原生引擎（如 raptor）。
+> 因为分派在 `_run_loop()` 调用处、native 直接调 `cls._run_loop(ctx, ...)`，registry 只装非原生引擎，**不存在 `run()` 自调用**，递归问题天然不存在。raptor 通过 `ctx.abort_event` 接入 Flocks 既有的 `abort()` / `abort_children()` 中断链路。
 
 ---
 
@@ -104,87 +118,80 @@ SessionLoop._run_loop()
 
 ### 4.1 `AgentLoopEngine` 协议（`engine/base.py`）
 
+引擎接收**已就绪的 `LoopContext`**（由 `SessionLoop.run()` 在分派前构建好），而非裸 `session_id`——这样引擎无需重新加载 session、重新解析 model，并能直接访问 `ctx.abort_event`（中断）、`ctx.session_ctx`（读写消息）、`ctx.provider_id/model_id/agent_name`。
+
 ```python
-from typing import Optional, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+# from flocks.session.session_loop import LoopContext, LoopCallbacks, LoopResult
 
 @runtime_checkable
 class AgentLoopEngine(Protocol):
-    id: str           # 机器标识，如 "native" / "raptor"
+    id: str           # 机器标识，如 "raptor"（native 不进 registry）
     display_name: str # WebUI 下拉显示名
     description: str  # WebUI tooltip
 
     async def run(
         self,
-        session_id: str,
-        provider_id: Optional[str] = None,
-        model_id: Optional[str] = None,
-        agent_name: Optional[str] = None,
-        callbacks: Optional[Any] = None,  # LoopCallbacks
-    ) -> Any:  # LoopResult
+        ctx: Any,                         # LoopContext（含 session/model/session_ctx/abort_event）
+        callbacks: Any = None,            # LoopCallbacks
+    ) -> Any:                             # LoopResult
         ...
 ```
 
-> `LoopResult` 与 `LoopCallbacks` 复用 `session_loop.py` 的现有定义，RaptorEngine 需返回格式相同的 `LoopResult`。
+> `LoopContext` / `LoopResult` / `LoopCallbacks` 复用 `session_loop.py` 的现有定义；引擎须返回格式相同的 `LoopResult`，由 `SessionLoop.run()` 的 `finally` 统一收尾。
+>
+> 接口与 `SessionLoop._run_loop(ctx, callbacks)` 的签名**完全对齐**——native 路径就是直接调 `_run_loop`，非原生引擎是 `_run_loop` 的可替换实现。
 
 ### 4.2 `LoopEngineRegistry`（`engine/registry.py`）
 
+> registry 只装**非原生**引擎（raptor 等）。`native` 不在其中——它由 `SessionLoop.run()` 走 inline `_run_loop`。
+
 ```python
 class LoopEngineRegistry:
-    _engines: Dict[str, AgentLoopEngine] = {}
+    _engines: Dict[str, AgentLoopEngine] = {}   # 仅非原生引擎
 
     @classmethod
     def register(cls, engine: AgentLoopEngine) -> None: ...
 
     @classmethod
-    def get(cls, engine_id: Optional[str]) -> AgentLoopEngine:
-        # 未知 id 或 None → 降级返回 "native"
+    def get(cls, engine_id: str) -> AgentLoopEngine:
+        # 仅在 engine_id != "native" 时调用；未知 id 抛错（调用方已先判过 native）
+        ...
+
+    @classmethod
+    def ids(cls) -> set[str]:
+        # 已注册的非原生引擎 id 集合，供 _resolve_loop_engine 校验
         ...
 
     @classmethod
     def list(cls) -> List[Dict[str, str]]:
-        # 返回 [{"id", "name", "description"}, ...]，供 /api/loop-engines 使用
+        # 非原生引擎元数据；/api/loop-engines 会在最前面拼上 NATIVE_ENGINE_META
         ...
 ```
 
-### 4.3 `FlocksNativeEngine`（`engine/native.py`）
+### 4.3 `native` 引擎 = 原 `_run_loop`（无需实体类，无递归）
 
-> ⚠️ **避免递归**：native 引擎不能简单地 `return await SessionLoop.run(...)`——因为分派逻辑就在 `SessionLoop.run()` 内部，那样会无限递归。
+由于分派点就在 `_run_loop()` 调用处，`native` 路径直接调用 `cls._run_loop(ctx, callbacks)`——**它本身就是原生引擎**，无需任何包装类，也**不存在 `run()` 自调用的递归问题**。
 
-两种实现方式，**推荐方式 A**：
-
-**方式 A（推荐）——native 不进 registry，由 `SessionLoop.run()` 直接走 inline 路径。**
-此时 `FlocksNativeEngine` 只作为"元数据载体"供 `/api/loop-engines` 列举，不参与实际执行：
+`native` **不注册进 registry**（registry 只装 raptor 等非原生引擎）。`/api/loop-engines` 列举时，把 `native` 作为**静态首项**拼到 registry 列表前即可：
 
 ```python
-class FlocksNativeEngine:
-    """仅提供元数据；实际执行走 SessionLoop.run() 的 inline 分支，不经过 .run()。"""
-    id = "native"
-    display_name = "Flocks Native"
-    description = "Flocks 原生 async loop，多会话并发优先"
-
-    # 注意：不实现 run()，或 run() 直接抛错——native 永远不应被 registry 分派。
+# engine/native.py —— 仅元数据，供 /api/loop-engines 列举
+NATIVE_ENGINE_META = {
+    "id": "native",
+    "name": "Flocks Native",
+    "description": "Flocks 原生 async loop，多会话并发优先",
+}
 ```
-
-**方式 B（备选）——保留 run()，但调内部 `_run_native` 而非公开 `run`。**
-需要把 `SessionLoop.run()` 现有主体（加载后到 `_run_loop` 的逻辑）抽成 `SessionLoop._run_native(...)`，`run()` 只负责加载 session + 分派：
 
 ```python
-# session_loop.py（重构后）
-class SessionLoop:
-    @classmethod
-    async def run(cls, session_id, ...):
-        session = await Session.get_by_id(session_id)
-        engine_id = cls._resolve_loop_engine(session)
-        if engine_id != "native":
-            return await LoopEngineRegistry.get(engine_id).run(session_id, ...)
-        return await cls._run_native(session, ...)   # 原 run 主体
-
-    @classmethod
-    async def _run_native(cls, session, ...):
-        # is_running 守卫、_resolve_model、_run_loop、finally 清理 …（原逻辑）
+# SessionLoop.run() 内，分派处
+engine_id = cls._resolve_loop_engine(ctx.session)
+if engine_id != "native":
+    result = await LoopEngineRegistry.get(engine_id).run(ctx, callbacks or LoopCallbacks())
+else:
+    result = await cls._run_loop(ctx, callbacks or LoopCallbacks())   # ← 原逻辑，零变化
 ```
-
-> P0 采用方式 A（改动最小：`run()` 顶部加一个分派分支即可，native 列举靠静态元数据）。方式 B 留待 P2 若需要更清晰的对称结构再重构。
 
 ### 4.4 `RaptorEngine`（`engine/raptor/engine.py`，P2 实现）
 
@@ -201,7 +208,7 @@ RaptorEngine 适配 hermes-agent 的 `run_conversation`（`run_agent.py` / `agen
 
 ```
 Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立 venv/sys.path)
-  RaptorEngine.run()                     hermes-agent run_conversation()
+  RaptorEngine.run(ctx, callbacks)       hermes-agent run_conversation()
       │   spawn + JSON-RPC over stdio          │
       ├──> prompt.submit  ───────────────────> │ 执行 LLM + 工具循环
       │ <── tool.call.request ──────────────── │ (请求 Flocks 执行某工具)
@@ -209,9 +216,13 @@ Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立
       │ ──> tool.call.result ────────────────> │
       │ <── message.delta / tool.progress ──── │ (流式增量)
       │ <── prompt.complete ────────────────── │
+      │                                         │
+      │  ctx.abort_event 触发 → 杀子进程 ──────X │ (中断)
 ```
 
 子进程在 hermes-agent 自己的目录 + venv 下运行，彻底隔离命名空间与全局状态；Flocks 侧只通过 JSON-RPC 通信。
+
+**中断打通**：`RaptorEngine.run(ctx, ...)` 启动一个 watcher 协程 `await ctx.abort_event.wait()`，一旦 Flocks 既有的 `SessionLoop.abort(session_id)` / `abort_children()` 置位 `abort_event`，立即终止子进程并返回 `LoopResult(action="aborted")`。无需为 raptor 另造中断链路。
 
 #### MessageBridge
 
@@ -347,20 +358,30 @@ GET /api/loop-engines
 >
 > **这些调用站全部不改**，只在 `SessionLoop.run()` 内部加分派。
 
-### 7.1 唯一的引擎改造点：`SessionLoop.run()` 顶部
+### 7.1 唯一的引擎改造点：`SessionLoop.run()` 内的 `_run_loop()` 调用处
+
+分派点必须在所有生命周期脚手架（`_active_loops` 注册、busy 状态、orphan 清理）**之后**、`finally` 清理**之前**，即原来调 `_run_loop()` 的那一行（约 L357-360）：
 
 ```python
-# session/session_loop.py，在 session = await Session.get_by_id(session_id) 之后插入
-from flocks.engine import LoopEngineRegistry
+# session/session_loop.py — 原代码
+        try:
+            result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
+            return result
 
-engine_id = cls._resolve_loop_engine(session)
-if engine_id != "native":
-    # 非原生引擎：交给 registry 中的引擎；注意 native 不进 registry，故不会递归
-    return await LoopEngineRegistry.get(engine_id).run(
-        session_id, provider_id, model_id, agent_name, callbacks,
-    )
-# engine_id == "native"：继续现有 inline 逻辑（_resolve_model → _run_loop → finally）
+# session/session_loop.py — 改后
+        try:
+            from flocks.engine import LoopEngineRegistry
+            engine_id = cls._resolve_loop_engine(ctx.session)
+            if engine_id != "native":
+                # raptor 等：复用同一个 ctx（含 _active_loops 注册 / abort_event / session_ctx）
+                result = await LoopEngineRegistry.get(engine_id).run(ctx, callbacks or LoopCallbacks())
+            else:
+                result = await cls._run_loop(ctx, callbacks or LoopCallbacks())  # 原逻辑零变化
+            return result
+        # except / finally 保持不变 —— 对所有引擎统一收尾
 ```
+
+**为什么必须在这一行而非 `run()` 顶部**：`is_running` 守卫、`_active_loops[sid]=ctx`、busy 状态、orphan 清理都在此行之前已执行；idle / touch / `del _active_loops` 在 `finally` 中统一收尾。在此处分派，raptor **自动继承**全部脚手架与中断链路；放到顶部则全部绕过 → 重复执行 + 中断失效。
 
 外加 `SessionLoop._resolve_loop_engine(session)` 辅助函数（见 §5.3）。
 
@@ -385,7 +406,7 @@ if request.loop_engine:
 
 | 改动 | 文件 | P0 |
 |---|---|---|
-| `SessionLoop.run()` 顶部加分派分支 | `session/session_loop.py` | ✅ |
+| 在 `_run_loop()` 调用处加分派分支（脚手架内、finally 前） | `session/session_loop.py` | ✅ |
 | 新增 `_resolve_loop_engine(session)` | `session/session_loop.py` | ✅ |
 | 2 个 HTTP 入口持久化 `loop_engine` | `server/routes/session.py` | ✅ |
 | 其余 12 处调用站 | — | **零改动** |
@@ -467,18 +488,18 @@ const payload: PromptRequest = {
 ```
 flocks/flocks/
 ├── engine/                         ← 新增目录（与 session/ tool/ provider/ 同层）
-│   ├── __init__.py                 # 导出 LoopEngineRegistry，触发 native 自注册
-│   ├── base.py                     # AgentLoopEngine Protocol
-│   ├── registry.py                 # LoopEngineRegistry
-│   ├── native.py                   # FlocksNativeEngine（P0，仅元数据，不参与执行）
+│   ├── __init__.py                 # 导出 LoopEngineRegistry（仅注册非原生引擎）
+│   ├── base.py                     # AgentLoopEngine Protocol（run(ctx, callbacks)）
+│   ├── registry.py                 # LoopEngineRegistry（不含 native）
+│   ├── native.py                   # NATIVE_ENGINE_META（仅元数据，原生执行=_run_loop）
 │   └── raptor/                     # RaptorEngine（P2，子进程/RPC 适配 hermes-agent）
 │       ├── __init__.py
-│       ├── engine.py               # RaptorEngine 主适配器（spawn 子进程 + JSON-RPC）
+│       ├── engine.py               # RaptorEngine.run(ctx)（spawn 子进程 + JSON-RPC）
 │       ├── message_bridge.py       # Flocks Parts ↔ OpenAI messages
 │       ├── tool_bridge.py          # tool.call RPC ↔ Flocks ToolRegistry.execute
 │       └── stream_bridge.py        # 子进程 RPC event → publish_event SSE
 ├── session/
-│   ├── session_loop.py             # run() 顶部加分派分支 + _resolve_loop_engine()
+│   ├── session_loop.py             # _run_loop() 调用处加分派 + _resolve_loop_engine()
 │   └── ...
 ├── tool/                           # 不变
 ├── provider/                       # 不变
@@ -503,11 +524,11 @@ flocks/webui/src/
 
 ### P0 — 框架骨架（零风险重构）
 
-- [ ] 创建 `engine/base.py`（AgentLoopEngine Protocol）
+- [ ] 创建 `engine/base.py`（AgentLoopEngine Protocol，`run(ctx, callbacks)`）
 - [ ] 创建 `engine/registry.py`（LoopEngineRegistry，native 不入 registry）
-- [ ] 创建 `engine/native.py`（FlocksNativeEngine，仅元数据供列举）
+- [ ] 创建 `engine/native.py`（`NATIVE_ENGINE_META`，仅元数据供列举）
 - [ ] 创建 `engine/__init__.py`（导出 LoopEngineRegistry）
-- [ ] `SessionLoop.run()` 顶部加分派分支 + `_resolve_loop_engine(session)`（§7.1）
+- [ ] 在 `SessionLoop` 的 `_run_loop()` 调用处加分派分支 + `_resolve_loop_engine(session)`（§7.1）
 - [ ] 2 个 HTTP 入口：把 `request.loop_engine` 持久化到 `session.metadata`（§7.2）
 - [ ] `PromptRequest` 增加 `loop_engine` 字段（`SessionInfo` 用 metadata，不加正式字段）
 - [ ] 新增 `GET /api/loop-engines` 端点
