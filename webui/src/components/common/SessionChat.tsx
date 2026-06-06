@@ -22,7 +22,7 @@ import { StreamingMarkdown } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool } from './QuestionTool';
-import DelegateTaskCard, { buildParallelDelegateGroupParts, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
@@ -2753,8 +2753,7 @@ function ChatMessageBubbleInner({
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file' && p.url);
-          const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
-          const displayParts = buildParallelDelegateGroupParts(otherParts);
+          const displayParts = parts.filter((p) => !(p.type === 'file' && p.url));
           return (
             <>
               {fileParts.length > 0 && (

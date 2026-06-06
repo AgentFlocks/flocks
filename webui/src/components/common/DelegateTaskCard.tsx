@@ -149,7 +149,7 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
   const completedChildren = children.filter((child) => child.status === 'completed').length;
 
   return {
-    agentName: isParallel ? 'Parallel Agents' : agentName,
+    agentName,
     description: isParallel
       ? `${completedChildren}/${children.length} completed${runningChildren ? ` · ${runningChildren} running` : ''}${errorChildren ? ` · ${errorChildren} error` : ''}`
       : input.description || subTaskLabel,
@@ -165,115 +165,6 @@ export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: str
     elapsed,
     children,
   };
-}
-
-function isForegroundDelegateSiblingPart(part: MessagePart): boolean {
-  if (part.type !== 'tool' || !part.tool || !isDelegateTool(part.tool)) {
-    return false;
-  }
-
-  const state: Partial<ToolState> = part.state || {};
-  const input = state.input || {};
-  const meta = state.metadata || {};
-  const innerMeta = meta.metadata as Record<string, any> | undefined;
-
-  if (input.run_in_background || meta.background || innerMeta?.background) {
-    return false;
-  }
-  if (Array.isArray(input.tasks) && input.tasks.length > 0) {
-    return false;
-  }
-  if (meta.parallel || innerMeta?.parallel) {
-    return false;
-  }
-
-  return Boolean(input.subagent_type || input.category || input.session_id);
-}
-
-export function buildParallelDelegateGroupParts(
-  parts: MessagePart[],
-  subTaskLabel = 'Subtask',
-): MessagePart[] {
-  const delegateParts = parts.filter(isForegroundDelegateSiblingPart);
-  if (delegateParts.length <= 1) {
-    return parts;
-  }
-
-  const delegateIds = new Set(delegateParts.map((part) => part.id));
-  const children = delegateParts.map((part, index) => {
-    const state: Partial<ToolState> = part.state || {};
-    const input = state.input || {};
-    const info = extractDelegateInfo(state, subTaskLabel);
-    const description = String(
-      input.description
-      || state.title
-      || info.description
-      || `${subTaskLabel} ${index + 1}`,
-    );
-    return {
-      index,
-      description,
-      status: info.status || state.status || 'pending',
-      sessionId: info.childSessionId,
-      error: info.error,
-      output: info.output,
-      metadata: state.metadata,
-    };
-  });
-
-  const statuses = children.map((child) => child.status);
-  const groupStatus: ToolState['status'] = statuses.some((status) => status === 'running' || status === 'pending')
-    ? 'running'
-    : statuses.some((status) => status === 'error')
-      ? 'error'
-      : 'completed';
-
-  const times = delegateParts
-    .map((part) => part.state?.time)
-    .filter((time): time is NonNullable<ToolState['time']> => Boolean(time?.start));
-  const starts = times.map((time) => time.start);
-  const ends = times.map((time) => time.end).filter((end): end is number => typeof end === 'number');
-  const groupTime = starts.length > 0
-    ? {
-        start: Math.min(...starts),
-        ...(groupStatus === 'running' || ends.length === 0 ? {} : { end: Math.max(...ends) }),
-      }
-    : undefined;
-
-  const groupPart: MessagePart = {
-    id: `parallel-delegate-${delegateParts.map((part) => part.id).join('-')}`,
-    type: 'tool',
-    tool: 'delegate_task',
-    callID: `parallel-delegate-${delegateParts.map((part) => part.callID || part.id).join('-')}`,
-    state: {
-      status: groupStatus,
-      input: {
-        description: `${delegateParts.length} parallel subagents`,
-        subagent_type: 'parallel',
-      },
-      title: `${delegateParts.length} parallel subagents`,
-      metadata: {
-        parallel: true,
-        source: 'sibling-tool-calls',
-        children,
-      },
-      ...(groupTime ? { time: groupTime } : {}),
-    },
-  };
-
-  let inserted = false;
-  const grouped: MessagePart[] = [];
-  for (const part of parts) {
-    if (!delegateIds.has(part.id)) {
-      grouped.push(part);
-      continue;
-    }
-    if (!inserted) {
-      grouped.push(groupPart);
-      inserted = true;
-    }
-  }
-  return grouped;
 }
 
 function formatDuration(ms: number): string {
