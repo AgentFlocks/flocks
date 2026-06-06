@@ -58,6 +58,8 @@ Do not use this tool when a dedicated tool is a better fit:
     skills-sh:<owner>/<repo>/<skill>    e.g. skills-sh:owner/repo/code-review
     safeskill:<source>                  e.g. safeskill:safeskill://official/acme/code-review
     https://...                         direct SKILL.md URL
+  The tool auto-adds --yes so non-interactive agent calls do not hang on
+  downstream CLI confirmation prompts (e.g. `skills add`).
   → After install, always call status to check if deps are missing.
   Example: flocks_skills(subcommand="install", args="github:owner/repo/skill-name")
 
@@ -154,7 +156,10 @@ async def flocks_skills(
     if args.strip():
         # shlex.split preserves quoted tokens (e.g. paths with spaces).
         cmd += shlex.split(args.strip())
-    if subcommand == "remove" and "--yes" not in cmd and "-y" not in cmd:
+    # `skills add` (downstream of install for skills-sh sources) and remove
+    # both prompt interactively. Auto-add --yes so non-interactive agent
+    # calls don't hang.
+    if subcommand in ("install", "remove") and "--yes" not in cmd and "-y" not in cmd:
         cmd.append("--yes")
 
     log.info("flocks_skills.run", {"cmd": cmd})

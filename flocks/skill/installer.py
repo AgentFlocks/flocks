@@ -152,6 +152,7 @@ class SkillInstaller:
         cls,
         source: str,
         scope: str = "global",
+        yes: bool = False,
     ) -> SkillInstallResult:
         """
         Install a skill from an external source.
@@ -160,6 +161,8 @@ class SkillInstaller:
             source: Source string (URL, GitHub, clawhub:<name>, local path …)
             scope:  "global" → ~/.flocks/plugins/skills/
                     "project" → .flocks/plugins/skills/ (cwd)
+            yes:    When True, pass -y to downstream CLIs (e.g. `skills add`)
+                    so installs can run non-interactively.
 
         Returns:
             SkillInstallResult
@@ -168,10 +171,10 @@ class SkillInstaller:
         kind = resolved["kind"]
         value = resolved["value"]
 
-        log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope})
+        log.info("skill.install.start", {"source": source, "kind": kind, "scope": scope, "yes": yes})
 
         if kind == "skills_sh":
-            return await cls._install_from_skills_sh(value, scope)
+            return await cls._install_from_skills_sh(value, scope, yes=yes)
         elif kind == "safeskill":
             return await cls._install_from_safeskill(value, scope)
         elif kind == "clawhub":
@@ -189,7 +192,12 @@ class SkillInstaller:
             )
 
     @classmethod
-    async def _install_from_skills_sh(cls, identifier: str, scope: str) -> SkillInstallResult:
+    async def _install_from_skills_sh(
+        cls,
+        identifier: str,
+        scope: str,
+        yes: bool = False,
+    ) -> SkillInstallResult:
         """Install a skills.sh skill via npx staging, then GitHub fallback."""
         normalized = cls._normalize_skills_sh_identifier(identifier)
         if not normalized:
@@ -198,7 +206,7 @@ class SkillInstaller:
                 error="skills.sh skill identifier is required, e.g. skills-sh:owner/repo/skill",
             )
 
-        staged = await cls._install_from_skills_sh_cli(normalized, scope)
+        staged = await cls._install_from_skills_sh_cli(normalized, scope, yes=yes)
         if staged.success:
             return staged
 
@@ -219,7 +227,12 @@ class SkillInstaller:
         return await cls._install_from_github(resolved, scope)
 
     @classmethod
-    async def _install_from_skills_sh_cli(cls, identifier: str, scope: str) -> SkillInstallResult:
+    async def _install_from_skills_sh_cli(
+        cls,
+        identifier: str,
+        scope: str,
+        yes: bool = False,
+    ) -> SkillInstallResult:
         """Run `npx skills add` in staging so default agent-dir installs are imported."""
         npx = shutil.which("npx")
         if not npx:
@@ -234,6 +247,8 @@ class SkillInstaller:
             env["HOME"] = str(staging)
             env["XDG_CONFIG_HOME"] = str(staging / ".config")
             cmd = [npx, "-y", "skills", "add", identifier]
+            if yes:
+                cmd.append("-y")
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(staging),

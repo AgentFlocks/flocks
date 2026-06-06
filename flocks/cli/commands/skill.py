@@ -490,6 +490,12 @@ def install_skill(
         "--scope",
         help="'global' (default) or 'project'",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation prompts from downstream CLIs (e.g. `skills add`) for non-interactive installs.",
+    ),
 ):
     """Install a skill from an external source."""
     # If --skill is provided, append it as a subpath to the source
@@ -502,7 +508,7 @@ def install_skill(
 
     with console.status(f"[bold cyan]Installing skill from {effective_source!r}...[/bold cyan]"):
         result = asyncio.run(
-            SkillInstaller.install_from_source(effective_source, scope=scope)
+            SkillInstaller.install_from_source(effective_source, scope=scope, yes=yes)
         )
 
     if result.success:
