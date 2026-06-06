@@ -107,6 +107,8 @@ export interface SessionChatProps {
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
+  /** Agent loop engine id (e.g. 'native' | 'raptor'). Persisted to session metadata. */
+  loopEngine?: string;
   /** Agents available for one-turn @mention routing. */
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
@@ -703,6 +705,7 @@ export default function SessionChat({
   supportsVision,
   toolbarSlot,
   mentionAgents = [],
+  loopEngine,
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
   const toast = useToast();
@@ -1521,6 +1524,7 @@ export default function SessionChat({
         parts: buildPromptParts(text, imageParts),
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
+      if (loopEngine) payload.loop_engine = loopEngine;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
