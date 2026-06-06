@@ -1053,6 +1053,15 @@ class PromptRequest(BaseModel):
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
     system: Optional[str] = Field(None, description="System prompt override")
     variant: Optional[str] = Field(None, description="Model variant")
+    loop_engine: Optional[str] = Field(
+        None,
+        description=(
+            "Agent loop engine id to use for this session: "
+            "'native' (default Flocks async loop) | 'raptor' (P2+). "
+            "Persisted to session.metadata and used for all subsequent turns "
+            "until explicitly changed."
+        ),
+    )
 
 
 class UserMessageInfo(BaseModel):
@@ -2537,6 +2546,28 @@ async def _process_session_message(
             "content": text_content,
             "finish": "stop",
         }
+
+    # ------------------------------------------------------------------
+    # 3b. Persist loop_engine selection to session metadata so
+    #     SessionLoop._resolve_loop_engine() can read it from session.
+    #     Done here (before SessionLoop.run) so even mid-stream switches
+    #     take effect on the very next turn.
+    # ------------------------------------------------------------------
+    if request.loop_engine:
+        _new_engine = request.loop_engine
+        _current_engine = (session.metadata or {}).get("loop_engine")
+        if _current_engine != _new_engine:
+            session.metadata = dict(session.metadata or {})
+            session.metadata["loop_engine"] = _new_engine
+            _updated = await Session.update(
+                session.project_id, sessionID, metadata=session.metadata
+            )
+            if _updated is not None:
+                session = _updated
+            log.info("session.loop_engine.set", {
+                "sessionID": sessionID,
+                "loop_engine": _new_engine,
+            })
 
     # ------------------------------------------------------------------
     # 4. Run unified SessionLoop (replaces ~700 lines of inline loop)

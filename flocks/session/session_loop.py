@@ -355,8 +355,18 @@ class SessionLoop:
             })
         
         try:
-            # Run loop iteration
-            result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
+            # Dispatch to the configured engine.
+            # 'native' runs _run_loop inline (zero overhead, zero change to existing
+            # behaviour). Non-native engines receive the fully-prepared LoopContext
+            # (abort_event wired, _active_loops registered, busy status set).
+            from flocks.engine import LoopEngineRegistry
+            _engine_id = cls._resolve_loop_engine(ctx.session)
+            if _engine_id != "native":
+                result = await LoopEngineRegistry.get(_engine_id).run(
+                    ctx, callbacks or LoopCallbacks()
+                )
+            else:
+                result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
             return result
         except Exception as e:
             log.error("loop.error", {"session_id": session_id, "error": str(e)})
@@ -396,6 +406,25 @@ class SessionLoop:
             except Exception as exc:
                 log.warn("loop.idle.event_error", {"error": str(exc)})
     
+    @staticmethod
+    def _resolve_loop_engine(session: Any) -> str:
+        """
+        Determine which agent loop engine to use for this session.
+
+        Resolution order (highest to lowest priority):
+          1. session.metadata["loop_engine"]   — persisted by HTTP handler when user picks an engine
+          2. "native"                           — hard-coded fallback (default behaviour)
+
+        Only returns an engine id that is either "native" or registered in
+        LoopEngineRegistry — unknown values fall back to "native" so stale
+        metadata never breaks a session.
+        """
+        from flocks.engine import LoopEngineRegistry
+        engine_id = (session.metadata or {}).get("loop_engine")
+        if engine_id and engine_id != "native" and engine_id in LoopEngineRegistry.ids():
+            return engine_id
+        return "native"
+
     @staticmethod
     async def _resolve_model(
         session: Any,

@@ -960,6 +960,8 @@ from flocks.server.routes.hooks import router as hooks_router
 from flocks.server.routes.default_model import router as default_model_router
 from flocks.server.routes.usage import router as usage_router
 from flocks.server.routes.custom_provider import router as custom_provider_router
+# Engine management: pluggable agent loop engine list
+from flocks.server.routes.engine import router as engine_router
 # Onboarding routes
 from flocks.server.routes.onboarding import router as onboarding_router
 # Task Center routes
@@ -1009,6 +1011,7 @@ app.include_router(hub_router, prefix="/api", tags=["Hub"])
 app.include_router(hooks_router, prefix="/api/hooks", tags=["Hooks"])
 # Model management: Default model routes
 app.include_router(default_model_router, prefix="/api/default-model", tags=["DefaultModel"])
+app.include_router(engine_router, prefix="/api/engine", tags=["Engine"])
 # Model management: Usage tracking routes
 app.include_router(usage_router, prefix="/api/usage", tags=["Usage"])
 # Custom provider and model management
