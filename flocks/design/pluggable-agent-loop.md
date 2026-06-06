@@ -1,9 +1,14 @@
 # 可插拔 Agent Loop 设计文档
 
-> 状态：**草稿 / RFC（v4，三轮代码审阅 + 核心诉求确认）**  
+> 状态：**草稿 / RFC（v5，多 Agent 编排双轨隔离确认）**  
 > 作者：AI 辅助生成  
 > 日期：2026-06-06  
 > 分支：`feat/pluggable-agent-loop`
+
+> **v5 修订要点**（多 Agent 编排决策）：
+> 1. 重写 §5.4：raptor 集成 hermes **原生 `delegate_task`**（内存子 Agent、线程并行），与 Flocks 原生 `delegate_task`（子 session）**互不调用、彻底隔离**；**Flocks 原生路径与原有能力一字不变**。
+> 2. §4.4 ToolBridge 增加 **`delegate_task` 例外**：它是 hermes agent-loop 内置工具，留在子进程内自治，不进桥接名单。
+> 3. §1.3 新增诉求 5：多 Agent 编排双轨隔离。
 
 > **v4 修订要点**（三轮深度审阅 + 用户核心诉求）：
 > 1. 明确核心诉求（§1.3）：native 与 raptor **两套循环并存可选**，raptor 集成 hermes 的循环**及其工具调用方式**，但**保留 Flocks agent 身份**。
@@ -62,6 +67,7 @@ SessionLoop._run_loop()
 2. **集成 Hermes 循环逻辑**（`raptor`）：把 hermes-agent 的循环**及其工具调用方式**（并行工具、动态工具加载/折叠、checkpoint、多层重试等）作为另一个可选引擎接入。
 3. **用户在 WebUI 中按会话选择用哪套**，切换对会话管理、SSE 推送、工具注册、存储等基础设施透明。
 4. **保留 Flocks 的 agent 身份**：即使在 raptor 引擎下，Flocks agent（如 Rex/hephaestus）的 system prompt、工具白名单、安全 skill 约束仍必须生效（见 §4.5 AgentBridge）——raptor 只替换"循环 + 工具调用机制"，不替换"agent 是谁、能用哪些工具"。
+5. **多 Agent 编排双轨隔离**：raptor 用 hermes 原生 `delegate_task`（内存子 Agent、线程并行）；它与 Flocks 原生 `delegate_task`（子 session）**互不调用、彻底隔离**，由引擎决定走哪套。**Flocks 原生路径与原有能力一字不变**（见 §5.4）。
 
 ---
 
@@ -259,9 +265,10 @@ Flocks (asyncio)                       Raptor 子进程 (同步 + 线程, 独立
 
 #### ToolBridge
 
-- 子进程不直接持有 Flocks 工具，而是通过 `tool.call.request` RPC **回调 Flocks** 执行：Flocks 侧 `await ToolRegistry.execute(name, ctx, **kwargs)` 后把结果 `tool.call.result` 回传  
+- 子进程不直接持有 Flocks **叶子工具**，而是通过 `tool.call.request` RPC **回调 Flocks** 执行：Flocks 侧 `await ToolRegistry.execute(name, ctx, **kwargs)` 后把结果 `tool.call.result` 回传  
 - 工具 schema 在 `prompt.submit` 时一次性下发，**会话内保持稳定**（避免破坏 hermes 的 prompt cache）  
 - 这样 Raptor 复用 Flocks 的 device/skill/MCP 工具，**无需重写工具层**
+- **`delegate_task` 例外（双轨隔离，见 §5.4）**：`delegate_task` 是 hermes 的 agent-loop 内置工具，**留在子进程内自治执行**（spawn 内存子 Agent），**不进桥接名单**、不转成 Flocks `delegate_task`。ToolBridge 只桥接叶子工具。
 
 #### StreamBridge（RPC event → SSE）
 
@@ -351,13 +358,26 @@ def _resolve_loop_engine(session) -> str:
     return "native"
 ```
 
-### 5.4 子 agent 引擎继承策略
+### 5.4 多 Agent 编排：双轨隔离（重要决策）
 
-`delegate_task` / `task` 会创建**子 session** 并递归调用 `SessionLoop.run()`。为避免 raptor 嵌套 raptor（子进程套子进程、复杂度与资源不可控），**子 session 默认 `native`**：
+> **决策**：raptor 集成 hermes 的**原生 `delegate_task`**（内存子 Agent、线程并行）。它与 Flocks 原生 `delegate_task`（子 session）是**两套互不调用、彻底隔离**的编排机制，由引擎决定走哪一套。**Flocks 原生路径与原有能力保持一字不变。**
 
-- 子 session 创建时**不写** `metadata["loop_engine"]` → `_resolve_loop_engine` 解析为 `native`
-- 仅当显式需求（未来）才允许子 session 指定非原生引擎
-- 即：引擎选择**不随父 session 自动继承**
+| 引擎 | 多 Agent 编排 | 子 Agent 载体 | 改动 |
+|---|---|---|---|
+| `native` | Flocks 原生 `delegate_task` / `task`（`tool/agent/*`） | Flocks 子 **session**（持久化、WebUI 可见） | **零改动** |
+| `raptor` | hermes 原生 `delegate_task`（`tools/delegate_tool.py`，子进程内） | hermes 内存 **AIAgent**（线程并行、leaf/orchestrator、depth 限制） | 随 hermes 子进程一并引入 |
+
+**隔离规则（必须严格遵守）：**
+
+1. **native 路径不感知 raptor**：Flocks `SessionLoop._run_loop` + Flocks `delegate_task` 完全不动；现有子 session 行为、`abort_children`、WebUI 可观测性全部保持。
+2. **raptor 的 hermes `delegate_task` 不桥接回 Flocks**：它在 raptor 子进程内自治执行（spawn 内存子 Agent），**不**创建 Flocks 子 session、**不**经 ToolBridge 转成 Flocks `delegate_task`。
+3. **ToolBridge 的 delegate 例外**：ToolBridge 只桥接**叶子工具**（bash、设备工具、skill 等）回 Flocks `ToolRegistry`；`delegate_task` 属于 hermes 的 agent-loop 内置工具，**留在 hermes 子进程内**，不进桥接名单。反向亦然——Flocks 的 `delegate_task` 不暴露给 hermes。
+4. **两套不交叉**：一个 Flocks session 永远只用其引擎对应的那一套 delegation；不存在"native 调 hermes 子 agent"或"hermes 调 Flocks 子 session"的路径。
+
+**连带影响：**
+- hermes 子 Agent 的并行/角色/深度能力（你要集成的"hermes 方式"）**完整保留**，活在 raptor 子进程内。
+- 代价：raptor 的子 Agent 对 Flocks **不可见、不落库**（这是 hermes 原生模型的固有特性，符合"集成 hermes 方式"的诉求）。
+- §4.5 AgentBridge 作用于 **raptor 的顶层 agent**（注入 Rex 的 system prompt + 工具白名单）；hermes 子进程内派生的子 Agent 遵循 hermes 自身的 leaf/orchestrator 模型（属于"hermes 原生方式"的一部分）。
 
 ---
 
@@ -596,13 +616,14 @@ flocks/webui/src/
 - [ ] 子进程 RPC 协议定义（`prompt.submit` / `tool.call` / `message.delta` / `prompt.complete`）
 - [ ] `AgentBridge`：注入 Flocks agent system prompt + 工具白名单（§4.5，正确性前提）
 - [ ] `MessageBridge`：Flocks Parts ↔ OpenAI messages（回写原始历史，不回写 hermes 压缩结果）
-- [ ] `ToolBridge`：`tool.call` RPC → `ToolRegistry.execute`（结果回传）
+- [ ] `ToolBridge`：`tool.call` RPC → `ToolRegistry.execute`（仅叶子工具；`delegate_task` 不进桥接名单，留 hermes 子进程内自治，§5.4）
 - [ ] `StreamBridge`：子进程 RPC event → publish_event SSE
 - [ ] **复刻 `_run_loop` 内层职责**：turn_state 事件（turn.started/continued/stopped）+ queued 消息续跑（§3.2）
+- [ ] **多 Agent 双轨隔离**：raptor 启用 hermes 原生 `delegate_task`（内存子 Agent，子进程内）；确保不创建 Flocks 子 session、不调用 Flocks `delegate_task`（§5.4）
 - [ ] `engine/raptor/engine.py` 主适配器，注册进 LoopEngineRegistry
 - [ ] 启用 WebUI 引擎下拉（此时出现两个选项）
 
-**验收**：选 Raptor + Rex 时，Rex 的 system prompt/工具白名单/安全 skill 生效；工具并行执行；turn_state 与 queued 续跑正常；SSE 与 WebUI 渲染一致；子进程崩溃优雅降级。
+**验收**：选 Raptor + Rex 时，Rex 的 system prompt/工具白名单/安全 skill 生效；工具并行执行；`delegate_task` 走 hermes 原生内存子 Agent（不建 Flocks 子 session）；native 引擎下 Flocks 原生 `delegate_task` 行为与改前一字不变；turn_state 与 queued 续跑正常；SSE 与 WebUI 渲染一致；子进程崩溃优雅降级。
 
 ### P3 — 高级能力对接
 
@@ -625,7 +646,9 @@ flocks/webui/src/
 | Flocks `MessageInfo/Parts` ↔ OpenAI messages 格式映射不完整 | 高 | P2 需完整映射全部 Part 类型；先只支持 TextPart + ToolPart |
 | **双压缩归属**：raptor 下 Flocks 压缩不触发，由 hermes 自管 | 中 | MessageBridge 回写 Flocks **原始历史**（hermes 压缩只活在子进程内）；如需 UI 一致，StreamBridge 把 hermes 压缩事件映射为 `context.compacted` |
 | 工具回调 RPC 往返延迟累积 | 中 | spike 实测延迟；必要时批量/并行回调 |
-| 子 agent 引擎嵌套（raptor 套 raptor） | 中 | 子 session 默认 native，引擎不随父继承（§5.4） |
+| **双轨编排串味**（native 误调 hermes 子 agent，或 hermes 子 agent 落成 Flocks 子 session） | 高 | §5.4 双轨隔离：`delegate_task` 不进 ToolBridge 名单；native 路径零改动；两套由引擎决定、互不交叉 |
+| raptor 内多 Agent 嵌套深度失控（hermes orchestrator 套 orchestrator） | 中 | 由 hermes 原生 `max_spawn_depth` / `max_concurrent_children` 管控（子进程内自治） |
+| raptor 子 Agent 对 Flocks 不可见/不落库 | 中 | hermes 原生模型固有特性，符合"集成 hermes 方式"诉求；如需可观测，StreamBridge 后续映射子 Agent 事件（非 P2 必须） |
 | 破坏 hermes prompt cache（mid-conversation 改 toolset/system） | 中 | 工具 schema 在 `prompt.submit` 时一次性下发，会话内保持稳定 |
 | `_last_resolved_tool_names` 等进程全局状态 | 低 | 子进程隔离后天然规避（各 session 独立子进程） |
 | hermes home / 凭证 / 模型配置映射 | 低 | spike 阶段确定映射；hermes_home 指向 flocks workspace 隔离目录 |
@@ -637,6 +660,6 @@ flocks/webui/src/
 - 不替换 Flocks 的 Provider 层（Raptor 子进程内 LLM 调用仍走 hermes-agent 自己的 provider 层）
 - 不合并 Flocks 和 Raptor 的会话持久化（Flocks 存储为准，MessageBridge 负责同步）
 - 不把 Raptor 设为默认引擎（默认永远是 `native`）
-- 引擎选择不随子 agent / 子 session 继承（子 session 默认 native，见 §5.4）
+- 不让两套 delegation 互通：Flocks 原生 `delegate_task`（子 session）与 hermes 原生 `delegate_task`（内存子 Agent）彻底隔离，由引擎决定（见 §5.4），Flocks 原生路径零改动
 - 不修改 14 处 `SessionLoop.run()` 调用站（分派统一在 run() 内部）
 - trajectory_compressor（离线训练数据工具）不纳入集成范围
