@@ -872,6 +872,20 @@ class OpenAIBaseProvider(BaseProvider):
                 f"{self.name} API returned choice with null message. "
                 f"model={model_id}, detail={err_detail}"
             )
+        raw_tcs = getattr(msg, "tool_calls", None)
+        tool_calls_list = None
+        if raw_tcs:
+            tool_calls_list = []
+            for tc in raw_tcs:
+                fn = getattr(tc, "function", None)
+                tool_calls_list.append({
+                    "id": getattr(tc, "id", "") or "",
+                    "type": "function",
+                    "function": {
+                        "name": getattr(fn, "name", "") or "",
+                        "arguments": getattr(fn, "arguments", "") or "",
+                    },
+                })
         return ChatResponse(
             id=response.id,
             model=response.model,
@@ -884,6 +898,7 @@ class OpenAIBaseProvider(BaseProvider):
                 ),
                 "total_tokens": response.usage.total_tokens if response.usage else 0,
             },
+            tool_calls=tool_calls_list,
         )
 
     async def chat_stream(

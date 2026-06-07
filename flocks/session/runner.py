@@ -52,6 +52,7 @@ from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
 from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.tool.catalog import (
+    annotate_tool_description_with_provider_version,
     get_always_load_tool_names,
     get_tool_catalog_metadata,
     list_tool_catalog_infos,
@@ -84,15 +85,7 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
 
     The original ``ToolInfo`` is never mutated — a new string is returned.
     """
-    base = description or ""
-    provider_version = getattr(tool_info, "provider_version", None)
-    if not provider_version:
-        return base
-    provider_label = getattr(tool_info, "provider", None) or "service"
-    note = f"[Provider: {provider_label} | Version: {provider_version}]"
-    if not base.strip():
-        return note
-    return f"{base.rstrip()}\n\n{note}"
+    return annotate_tool_description_with_provider_version(tool_info, description)
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
 

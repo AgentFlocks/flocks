@@ -16,6 +16,16 @@ Parallelisation rules (conservative by default):
   - _PATH_SCOPED_TOOLS may parallelize only when file paths don't overlap.
   - _PARALLEL_SAFE_TOOLS are always safe to run concurrently.
   - Everything else defaults to serial (unknown tools are treated as unsafe).
+
+Dynamic tool folding:
+  When a fold_catalog is supplied (via RaptorSessionRunner._make_stream_processor),
+  calls to raptor_tool_search / raptor_tool_describe are handled in-process without
+  hitting ToolRegistry, and raptor_tool_call is re-dispatched to the real tool.
+
+In-memory parallel delegates:
+  Multiple delegate_task calls in a single LLM response are executed concurrently
+  by execute_deferred_parallel().  The delegated agent loop is raptor-only and
+  keeps its chat history in memory instead of creating child sessions.
 """
 
 from __future__ import annotations
@@ -45,6 +55,12 @@ from flocks.tool.delegate_task_constants import (
     DELEGATE_ROLE_KEY,
     DELEGATE_ROLE_LEAF,
 )
+from flocks.engine.raptor.tool_fold import (
+    PROXY_TOOL_NAMES,
+    handle_tool_search,
+    handle_tool_describe,
+)
+from flocks.engine.raptor.memory_delegate import run_memory_delegate_task
 
 log = Log.create(service="engine.raptor.processor")
 
@@ -56,10 +72,9 @@ log = Log.create(service="engine.raptor.processor")
 # They carry session-level or global side-effects that make interleaving unsafe.
 _NEVER_PARALLEL_TOOLS: frozenset = frozenset()
 
-# Sub-agent delegation tools. Each delegation runs in an isolated Flocks
-# sub-session (independent session_id and state), so multiple delegations are
-# safe to run concurrently with each other and with read-only tools. This
-# realises the design's "Subagent batch concurrency" requirement (§5.4).
+# Sub-agent delegation tools. Raptor delegations run as isolated in-memory
+# provider loops, so multiple delegations are safe to run concurrently with
+# each other and with read-only tools.
 # Guard: delegation is NOT parallelised alongside file-mutating tools in the
 # same batch (see _MUTATING_PATH_TOOLS below).
 _DELEGATION_TOOLS: frozenset = frozenset({
@@ -95,6 +110,10 @@ _PARALLEL_SAFE_TOOLS: frozenset = frozenset({
     "doc_parser",
     "skill_load",
     "flocks_skills",
+    # Raptor proxy tools: resolved in-process, always safe.
+    "raptor_tool_search",
+    "raptor_tool_describe",
+    # raptor_tool_call: dispatches to a real tool, classified dynamically.
 })
 
 # Tools that mutate the file-system: a Git snapshot is taken before they run.
@@ -159,6 +178,20 @@ def _paths_overlap(a: str, b: str) -> bool:
     return a.startswith(b + "/") or b.startswith(a + "/")
 
 
+def _classification_target(
+    tool_name: str,
+    args: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """Return the real tool name/args used for safety classification."""
+    if tool_name != "raptor_tool_call":
+        return tool_name, args
+    real_name = str(args.get("name") or "").strip()
+    real_args = args.get("args") or {}
+    if real_name and isinstance(real_args, dict):
+        return real_name, real_args
+    return tool_name, args
+
+
 # ---------------------------------------------------------------------------
 # Batch-level parallelism decision
 # ---------------------------------------------------------------------------
@@ -172,7 +205,7 @@ def _should_parallelize_batch(
     Conservative policy:
       1. Single call: always serial (no benefit from gather).
       2. Any call in _NEVER_PARALLEL_TOOLS: entire batch is serial.
-      3. Delegation tools (_DELEGATION_TOOLS) run in isolated sub-sessions and
+      3. Delegation tools (_DELEGATION_TOOLS) run in isolated in-memory loops and
          are parallel-safe, except they must not be mixed with file-mutating
          tools in the same batch (a sub-agent may touch those files).
       4. Path-scoped tools are OK to parallelize as long as their file paths
@@ -183,7 +216,11 @@ def _should_parallelize_batch(
     if len(calls) <= 1:
         return False
 
-    names = [name for _, name, _ in calls]
+    normalized_calls = [
+        (call_id, *_classification_target(name, args))
+        for call_id, name, args in calls
+    ]
+    names = [name for _, name, _ in normalized_calls]
     has_delegation = any(n in _DELEGATION_TOOLS for n in names)
     has_mutation = any(n in _MUTATING_PATH_TOOLS for n in names)
 
@@ -193,12 +230,12 @@ def _should_parallelize_batch(
 
     reserved_paths: List[str] = []
 
-    for _, tool_name, args in calls:
+    for _, tool_name, args in normalized_calls:
         if tool_name in _NEVER_PARALLEL_TOOLS:
             return False
 
         if tool_name in _DELEGATION_TOOLS:
-            # Isolated sub-session: parallel-safe (guarded above).
+            # Isolated in-memory loop: parallel-safe (guarded above).
             continue
 
         if tool_name in _PATH_SCOPED_TOOLS:
@@ -245,12 +282,32 @@ class RaptorStreamProcessor(StreamProcessor):
       - execute_deferred_parallel() is called by RaptorSessionRunner.
       - Tool calls are grouped by file-path conflicts and executed concurrently
         with asyncio.gather within each parallel-safe batch.
+
+    Proxy-tool dispatch (dynamic tool folding):
+      When a fold_catalog is present, raptor_tool_search and raptor_tool_describe
+      are resolved in-process.  raptor_tool_call is dispatched to the real tool
+      via ToolRegistry.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        fold_catalog: Optional[List[Dict[str, Any]]] = None,
+        abort_event: Optional[asyncio.Event] = None,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         # Ordered list of (call_id, tool_name, tool_input) to execute
         self._deferred: List[Tuple[str, str, Dict[str, Any]]] = []
+        # Full tool catalog for proxy dispatch (None when folding is not active)
+        self._fold_catalog: Optional[List[Dict[str, Any]]] = fold_catalog
+        # Parent abort event for propagation to in-memory delegates.
+        self._abort_event: Optional[asyncio.Event] = abort_event
+        self._provider_id = provider_id
+        self._model_id = model_id
+        # Kept for abort-aware gather compatibility with older delegate results.
+        self._child_session_ids: List[str] = []
 
     async def _handle_tool_call(self, event: ToolCallEvent) -> None:
         """
@@ -343,8 +400,8 @@ class RaptorStreamProcessor(StreamProcessor):
         LLM response stream has been flushed.
 
         Decision:
-          _should_parallelize_batch() true: asyncio.gather (all concurrent)
-          _should_parallelize_batch() false: sequential loop
+          _should_parallelize_batch() true: abort-aware concurrent gather
+          _should_parallelize_batch() false: sequential loop (with abort checks)
         """
         if not self._deferred:
             return
@@ -360,13 +417,25 @@ class RaptorStreamProcessor(StreamProcessor):
         })
 
         if parallel:
-            await asyncio.gather(
-                *[self._execute_one_tool(cid, nm, inp)
-                  for cid, nm, inp in self._deferred],
-                return_exceptions=True,
+            from flocks.engine.raptor.delegate import abort_aware_gather
+            coros = [
+                self._execute_one_tool(cid, nm, inp)
+                for cid, nm, inp in self._deferred
+            ]
+            await abort_aware_gather(
+                coros,
+                abort_event=self._abort_event,
+                child_session_ids=self._child_session_ids,
             )
         else:
             for call_id, name, inp in self._deferred:
+                # Honour abort between serial steps.
+                if self._abort_event and self._abort_event.is_set():
+                    log.info("raptor.processor.serial_exec.aborted", {
+                        "session_id": self.session_id,
+                        "remaining": len(self._deferred),
+                    })
+                    break
                 await self._execute_one_tool(call_id, name, inp)
 
     async def _take_checkpoint_if_needed(
@@ -535,6 +604,278 @@ class RaptorStreamProcessor(StreamProcessor):
             "duration_ms": tool_end_time - tool_start_time,
         })
 
+    # ------------------------------------------------------------------
+    # Proxy tool dispatch (dynamic tool folding)
+    # ------------------------------------------------------------------
+
+    def _handle_proxy_tool(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> ToolResult:
+        """Resolve raptor_tool_search or raptor_tool_describe in-process.
+
+        Both tools query the in-memory fold catalog and return immediately without
+        going through ToolRegistry.  ``raptor_tool_call`` is handled separately
+        in ``_execute_one_tool`` via async ToolRegistry dispatch.
+        """
+        catalog = self._fold_catalog or []
+
+        if tool_name == "raptor_tool_search":
+            query = tool_input.get("query", "")
+            output = handle_tool_search(query, catalog)
+            return ToolResult(
+                success=True,
+                output=output,
+                title="raptor_tool_search",
+            )
+
+        if tool_name == "raptor_tool_describe":
+            name = tool_input.get("name", "")
+            output = handle_tool_describe(name, catalog)
+            return ToolResult(
+                success=True,
+                output=output,
+                title="raptor_tool_describe",
+            )
+
+        # Should not be reached for raptor_tool_call (handled in _execute_one_tool).
+        return ToolResult(
+            success=False,
+            error=f"_handle_proxy_tool: unexpected tool name '{tool_name}'.",
+        )
+
+    def _catalog_contains_tool(self, tool_name: str) -> bool:
+        """Return True when the folded catalog exposes ``tool_name``."""
+        if self._fold_catalog is None:
+            return True
+        return any(
+            item.get("function", {}).get("name") == tool_name
+            for item in self._fold_catalog
+        )
+
+    def _resolve_execution_target(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> Tuple[str, Dict[str, Any], Optional[ToolResult]]:
+        """Map a proxy call to its real execution target.
+
+        Returns ``(effective_tool_name, effective_input, early_result)``.  When
+        ``early_result`` is not None, the caller should persist it immediately
+        and skip hook/sandbox/registry execution.
+        """
+        if tool_name != "raptor_tool_call":
+            return tool_name, tool_input, None
+
+        real_name = str(tool_input.get("name") or "").strip()
+        real_args = tool_input.get("args") or {}
+        if not real_name:
+            return tool_name, tool_input, ToolResult(
+                success=False,
+                error="raptor_tool_call: 'name' argument is required.",
+            )
+        if not isinstance(real_args, dict):
+            return tool_name, tool_input, ToolResult(
+                success=False,
+                error="raptor_tool_call: 'args' must be an object.",
+            )
+        if not self._catalog_contains_tool(real_name):
+            return tool_name, tool_input, ToolResult(
+                success=False,
+                error=f"raptor_tool_call: tool '{real_name}' is not available.",
+            )
+        return real_name, real_args, None
+
+    def _make_metadata_callback(
+        self,
+        *,
+        part_id: str,
+        call_id: str,
+        display_tool_name: str,
+        display_input: Dict[str, Any],
+        start_time: int,
+        record_child_session: bool,
+    ) -> Any:
+        """Create a running-state metadata callback for long-lived tools."""
+        import copy
+
+        finished = [False]
+
+        def _callback(metadata: Dict[str, Any]) -> None:
+            if finished[0]:
+                return
+            snapshot = copy.deepcopy(metadata)
+            child_sid = snapshot.get("sessionId") or snapshot.get("session_id")
+            if record_child_session and child_sid and child_sid not in self._child_session_ids:
+                self._child_session_ids.append(str(child_sid))
+
+            state_dict: Dict[str, Any] = {
+                "status": "running",
+                "input": display_input,
+                "time": {"start": start_time},
+                "metadata": snapshot,
+            }
+            if snapshot.get("title"):
+                state_dict["title"] = snapshot["title"]
+
+            if self.event_publish_callback:
+                async def _publish() -> None:
+                    try:
+                        await self.event_publish_callback("message.part.updated", {
+                            "part": {
+                                "id": part_id,
+                                "messageID": self.assistant_message.id,
+                                "sessionID": self.session_id,
+                                "type": "tool",
+                                "callID": call_id,
+                                "tool": display_tool_name,
+                                "state": state_dict,
+                            }
+                        })
+                    except Exception as exc:
+                        log.debug("raptor.processor.metadata_publish.error", {
+                            "error": str(exc),
+                        })
+                asyncio.create_task(_publish())
+
+            async def _persist() -> None:
+                if finished[0]:
+                    return
+                try:
+                    running_state = ToolStateRunning(
+                        status="running",
+                        input=display_input,
+                        title=snapshot.get("title"),
+                        metadata=snapshot,
+                        time={"start": start_time},
+                    )
+                    part = ToolPart(
+                        id=part_id,
+                        sessionID=self.session_id,
+                        messageID=self.assistant_message.id,
+                        type="tool",
+                        callID=call_id,
+                        tool=display_tool_name,
+                        state=running_state,
+                    )
+                    await Message.store_part(self.session_id, self.assistant_message.id, part)
+                except Exception as exc:
+                    log.debug("raptor.processor.metadata_persist.error", {
+                        "error": str(exc),
+                    })
+            asyncio.create_task(_persist())
+
+        _callback.mark_finished = lambda: finished.__setitem__(0, True)
+        return _callback
+
+    async def _execute_memory_delegate_tool(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        call_id: str,
+        agent_name: str,
+        metadata_callback: Optional[Any] = None,
+    ) -> ToolResult:
+        """Execute an in-memory delegate tool through raptor's safety pipeline."""
+        await self._take_checkpoint_if_needed(tool_name, tool_input)
+
+        if self.tool_start_callback:
+            try:
+                await self.tool_start_callback(tool_name, tool_input)
+            except Exception as exc:
+                log.debug("raptor.memory_delegate.tool_start_cb.error", {
+                    "tool": tool_name,
+                    "error": str(exc),
+                })
+
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            hook_ctx = await HookPipeline.run_tool_before({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": agent_name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": call_id,
+                },
+            })
+            if hook_ctx and isinstance(hook_ctx.input, dict):
+                updated = hook_ctx.input.get("tool", {}).get("input")
+                if isinstance(updated, dict):
+                    tool_input = updated
+            if hook_ctx and bool(hook_ctx.output.get("skip")):
+                return ToolResult(success=False, error="Tool execution blocked by hook")
+        except Exception as exc:
+            log.debug("raptor.memory_delegate.tool_before_hook.error", {
+                "tool": tool_name,
+                "error": str(exc),
+            })
+
+        sandbox_meta = await self._resolve_sandbox_meta(tool_name)
+        if sandbox_meta.get("blocked"):
+            return ToolResult(
+                success=False,
+                error=sandbox_meta.get("error", "Sandbox blocked"),
+                metadata={"sandbox": True, "blocked_by_policy": True},
+            )
+
+        ctx = ToolContext(
+            session_id=self.session_id,
+            message_id=self.assistant_message.id,
+            agent=agent_name,
+            call_id=call_id,
+            abort_event=self._abort_event,
+            permission_callback=self.permission_callback,
+            metadata_callback=metadata_callback,
+            extra=sandbox_meta.get("extra", {}),
+            event_publish_callback=self.event_publish_callback,
+        )
+
+        try:
+            result = await ToolRegistry.execute(
+                tool_name=tool_name,
+                ctx=ctx,
+                **tool_input,
+            )
+        except Exception as exc:
+            result = ToolResult(success=False, error=str(exc))
+
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            hook_ctx = await HookPipeline.run_tool_after({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": agent_name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": call_id,
+                },
+                "result": result.model_dump(),
+            })
+            if hook_ctx and isinstance(hook_ctx.output, dict):
+                override = hook_ctx.output.get("result")
+                if isinstance(override, dict):
+                    result = ToolResult(**override)
+        except Exception as exc:
+            log.debug("raptor.memory_delegate.tool_after_hook.error", {
+                "tool": tool_name,
+                "error": str(exc),
+            })
+
+        if self.tool_end_callback:
+            try:
+                await self.tool_end_callback(tool_name, result)
+            except Exception as exc:
+                log.debug("raptor.memory_delegate.tool_end_cb.error", {
+                    "tool": tool_name,
+                    "error": str(exc),
+                })
+
+        return result
+
     async def _execute_one_tool(
         self,
         tool_call_id: str,
@@ -550,7 +891,49 @@ class RaptorStreamProcessor(StreamProcessor):
             return
 
         tool_start_time = int(datetime.now().timestamp() * 1000)
-        blocked_result = await self._blocked_delegate_result(tool_name)
+        if tool_name in ("raptor_tool_search", "raptor_tool_describe"):
+            if self._fold_catalog is None:
+                await self._persist_tool_result(
+                    tool_call_id,
+                    tool_name,
+                    tool_input,
+                    tool_state,
+                    ToolResult(
+                        success=False,
+                        error=(
+                            f"Proxy tool '{tool_name}' called without an "
+                            "available folded catalog."
+                        ),
+                    ),
+                    tool_start_time,
+                )
+                return
+            await self._persist_tool_result(
+                tool_call_id,
+                tool_name,
+                tool_input,
+                tool_state,
+                self._handle_proxy_tool(tool_name, tool_input),
+                tool_start_time,
+            )
+            return
+
+        effective_tool_name, effective_input, early_result = self._resolve_execution_target(
+            tool_name,
+            tool_input,
+        )
+        if early_result is not None:
+            await self._persist_tool_result(
+                tool_call_id,
+                tool_name,
+                tool_input,
+                tool_state,
+                early_result,
+                tool_start_time,
+            )
+            return
+
+        blocked_result = await self._blocked_delegate_result(effective_tool_name)
         if blocked_result is not None:
             await self._persist_tool_result(
                 tool_call_id,
@@ -563,7 +946,7 @@ class RaptorStreamProcessor(StreamProcessor):
             return
 
         # Take a Git snapshot before destructive writes so changes can be reverted
-        await self._take_checkpoint_if_needed(tool_name, tool_input)
+        await self._take_checkpoint_if_needed(effective_tool_name, effective_input)
 
         tool_state.status = "running"
 
@@ -607,7 +990,7 @@ class RaptorStreamProcessor(StreamProcessor):
         # Notify tool-start callback (CLI display)
         if self.tool_start_callback:
             try:
-                await self.tool_start_callback(tool_name, tool_input)
+                await self.tool_start_callback(effective_tool_name, effective_input)
             except Exception as exc:
                 log.debug("raptor.processor.tool_start_cb.error", {"error": str(exc)})
 
@@ -623,15 +1006,15 @@ class RaptorStreamProcessor(StreamProcessor):
                     "workspace": self._workspace_dir,
                     "agent": self.agent.name,
                     "tool": {
-                        "name": tool_name,
-                        "input": tool_input,
+                        "name": effective_tool_name,
+                        "input": effective_input,
                         "callID": tool_call_id,
                     },
                 })
                 if hook_ctx and isinstance(hook_ctx.input, dict):
                     updated = hook_ctx.input.get("tool", {}).get("input")
                     if isinstance(updated, dict):
-                        tool_input = updated
+                        effective_input = updated
                 hook_skip = bool(hook_ctx.output.get("skip")) if hook_ctx else False
             except Exception as exc:
                 log.debug("raptor.processor.tool_before_hook.error", {"error": str(exc)})
@@ -640,7 +1023,7 @@ class RaptorStreamProcessor(StreamProcessor):
                 result = ToolResult(success=False, error="Tool execution blocked by hook")
             else:
                 # Sandbox policy check
-                sandbox_meta = await self._resolve_sandbox_meta(tool_name)
+                sandbox_meta = await self._resolve_sandbox_meta(effective_tool_name)
                 if sandbox_meta.get("blocked"):
                     result = ToolResult(
                         success=False,
@@ -648,20 +1031,74 @@ class RaptorStreamProcessor(StreamProcessor):
                         metadata={"sandbox": True, "blocked_by_policy": True},
                     )
                 else:
+                    metadata_callback = self._make_metadata_callback(
+                        part_id=tool_state.part_id,
+                        call_id=tool_call_id,
+                        display_tool_name=tool_name,
+                        display_input=tool_input,
+                        start_time=tool_start_time,
+                        record_child_session=effective_tool_name == "delegate_task",
+                    )
                     ctx = ToolContext(
                         session_id=self.session_id,
                         message_id=self.assistant_message.id,
                         agent=self.agent.name,
                         call_id=tool_call_id,
+                        abort_event=self._abort_event,
                         permission_callback=self.permission_callback,
+                        metadata_callback=metadata_callback,
                         extra=sandbox_meta.get("extra", {}),
                         event_publish_callback=self.event_publish_callback,
                     )
-                    result = await ToolRegistry.execute(
-                        tool_name=tool_name,
-                        ctx=ctx,
-                        **tool_input,
-                    )
+                    if effective_tool_name == "delegate_task":
+                        prompt = str(effective_input.get("prompt") or "")
+                        if effective_input.get("session_id"):
+                            result = ToolResult(
+                                success=False,
+                                error="In-memory delegate_task does not support persistent session continuation.",
+                            )
+                        elif not prompt.strip():
+                            result = ToolResult(
+                                success=False,
+                                error="delegate_task requires a non-empty prompt.",
+                            )
+                        elif not self._provider_id or not self._model_id:
+                            result = ToolResult(
+                                success=False,
+                                error="Cannot run in-memory delegate without parent provider/model.",
+                            )
+                        else:
+                            if effective_input.get("run_in_background"):
+                                log.debug("raptor.processor.delegate.background_ignored", {
+                                    "agent": self.agent.name,
+                                    "description": effective_input.get("description"),
+                                })
+                            result = await run_memory_delegate_task(
+                                parent_agent=self.agent.name,
+                                provider_id=self._provider_id,
+                                model_id=self._model_id,
+                                prompt=prompt,
+                                description=effective_input.get("description"),
+                                category=effective_input.get("category"),
+                                subagent_type=effective_input.get("subagent_type"),
+                                load_skills=effective_input.get("load_skills"),
+                                abort_event=self._abort_event,
+                                metadata_callback=metadata_callback,
+                                tool_executor=self._execute_memory_delegate_tool,
+                            )
+                    else:
+                        result = await ToolRegistry.execute(
+                            tool_name=effective_tool_name,
+                            ctx=ctx,
+                            **effective_input,
+                        )
+                    if tool_name == "raptor_tool_call":
+                        log.info("raptor.processor.proxy_tool_call.dispatched", {
+                            "real_tool": effective_tool_name,
+                            "success": result.success,
+                        })
+                    if hasattr(metadata_callback, "mark_finished"):
+                        metadata_callback.mark_finished()
 
             # tool.execute.after hook
             try:
@@ -671,8 +1108,8 @@ class RaptorStreamProcessor(StreamProcessor):
                     "workspace": self._workspace_dir,
                     "agent": self.agent.name,
                     "tool": {
-                        "name": tool_name,
-                        "input": tool_input,
+                        "name": effective_tool_name,
+                        "input": effective_input,
                         "callID": tool_call_id,
                     },
                     "result": result.model_dump(),
@@ -695,6 +1132,21 @@ class RaptorStreamProcessor(StreamProcessor):
         # Persist completed/error state
         tool_end_time = int(datetime.now().timestamp() * 1000)
         assert result is not None
+
+        # Record child session IDs from delegate_task for abort propagation.
+        if effective_tool_name == "delegate_task" and result.success:
+            child_sid = None
+            if isinstance(result.metadata, dict):
+                child_sid = (
+                    result.metadata.get("sessionId")
+                    or result.metadata.get("session_id")
+                )
+            if child_sid and child_sid not in self._child_session_ids:
+                self._child_session_ids.append(str(child_sid))
+                log.debug("raptor.processor.child_session.recorded", {
+                    "child_session_id": child_sid,
+                    "total_children": len(self._child_session_ids),
+                })
 
         try:
             if result.success:
@@ -765,7 +1217,7 @@ class RaptorStreamProcessor(StreamProcessor):
         # Notify tool-end callback (CLI display)
         if self.tool_end_callback:
             try:
-                await self.tool_end_callback(tool_name, result)
+                await self.tool_end_callback(effective_tool_name, result)
             except Exception as exc:
                 log.debug("raptor.processor.tool_end_cb.error", {"error": str(exc)})
 

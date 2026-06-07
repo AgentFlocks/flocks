@@ -39,7 +39,7 @@ def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], i
     return tool_infos, enabled_count
 
 
-async def _resolve_dynamic_always_load_tool_names() -> Set[str]:
+async def resolve_dynamic_always_load_tool_names() -> Set[str]:
     """Return runtime-only always-load tools.
 
     Device discovery should be available without an extra ``tool_search`` hop
@@ -68,6 +68,11 @@ async def _resolve_dynamic_always_load_tool_names() -> Set[str]:
     return dynamic_names
 
 
+async def _resolve_dynamic_always_load_tool_names() -> Set[str]:
+    """Backward-compatible alias for older internal callers."""
+    return await resolve_dynamic_always_load_tool_names()
+
+
 async def list_session_callable_tool_infos(
     session_id: str,
     declared_tool_names: Optional[Iterable[str]] = None,
@@ -76,7 +81,7 @@ async def list_session_callable_tool_infos(
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
-    always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
+    always_load_names = get_always_load_tool_names() | await resolve_dynamic_always_load_tool_names()
 
     if not callable_tool_names:
         base_tools = list(declared_tool_names) if declared_tool_names is not None else []

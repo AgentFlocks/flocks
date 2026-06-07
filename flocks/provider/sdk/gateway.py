@@ -149,6 +149,18 @@ class GatewayProvider(BaseProvider):
         self._models_config = models
         log.info("gateway.models_configured", {"count": len(models)})
     
+    def _to_openai_messages(self, messages: List[ChatMessage]) -> List[Dict[str, Any]]:
+        """Convert ChatMessage list to OpenAI-compatible dicts."""
+        result = []
+        for msg in messages:
+            d: Dict[str, Any] = {"role": msg.role, "content": msg.content or ""}
+            if msg.tool_calls:
+                d["tool_calls"] = msg.tool_calls
+            if msg.tool_call_id:
+                d["tool_call_id"] = msg.tool_call_id
+            result.append(d)
+        return result
+
     async def chat(
         self,
         model_id: str,
@@ -157,12 +169,8 @@ class GatewayProvider(BaseProvider):
     ) -> ChatResponse:
         """Send chat completion request through gateway"""
         client = self._get_client()
-        
-        # Convert messages to OpenAI format
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
+
+        formatted_messages = self._to_openai_messages(messages)
         
         # Extract parameters
         temperature = kwargs.get("temperature", 0.7)
@@ -182,9 +190,27 @@ class GatewayProvider(BaseProvider):
             request_params["tools"] = tools
         
         response = await client.chat.completions.create(**request_params)
-        
+
         # Format response
+        if not response.choices:
+            raise ValueError(
+                f"Gateway API returned empty choices for model={model_id}"
+            )
         choice = response.choices[0]
+        raw_tcs = getattr(choice.message, "tool_calls", None)
+        tool_calls_list = None
+        if raw_tcs:
+            tool_calls_list = []
+            for tc in raw_tcs:
+                fn = getattr(tc, "function", None)
+                tool_calls_list.append({
+                    "id": getattr(tc, "id", "") or "",
+                    "type": "function",
+                    "function": {
+                        "name": getattr(fn, "name", "") or "",
+                        "arguments": getattr(fn, "arguments", "") or "",
+                    },
+                })
         return ChatResponse(
             id=response.id,
             model=response.model,
@@ -194,7 +220,8 @@ class GatewayProvider(BaseProvider):
                 "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
                 "completion_tokens": response.usage.completion_tokens if response.usage else 0,
                 "total_tokens": response.usage.total_tokens if response.usage else 0,
-            }
+            },
+            tool_calls=tool_calls_list,
         )
     
     async def chat_stream(
@@ -205,38 +232,69 @@ class GatewayProvider(BaseProvider):
     ) -> AsyncIterator[StreamChunk]:
         """Send streaming chat completion request through gateway"""
         client = self._get_client()
-        
-        # Convert messages to OpenAI format
-        formatted_messages = [
-            {"role": msg.role, "content": msg.content}
-            for msg in messages
-        ]
-        
-        # Extract parameters
+
+        formatted_messages = self._to_openai_messages(messages)
+
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens")
-        
-        # Make streaming request
-        request_params = {
+        tools = kwargs.get("tools")
+
+        request_params: Dict[str, Any] = {
             "model": model_id,
             "messages": formatted_messages,
             "temperature": temperature,
             "stream": True,
         }
-        
         if max_tokens:
             request_params["max_tokens"] = max_tokens
-        
+        if tools:
+            request_params["tools"] = tools
+
         stream = await client.chat.completions.create(**request_params)
-        
+
+        tool_calls: Dict[int, Dict[str, Any]] = {}
         async for chunk in stream:
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if choice.delta.content:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+
+            if getattr(delta, "content", None):
+                yield StreamChunk(delta=delta.content, finish_reason=None)
+
+            delta_tcs = getattr(delta, "tool_calls", None)
+            if delta_tcs:
+                for tc in delta_tcs:
+                    idx = tc.index
+                    if idx not in tool_calls:
+                        tool_calls[idx] = {
+                            "id": tc.id or "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    if tc.id:
+                        tool_calls[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls[idx]["function"]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_calls[idx]["function"]["arguments"] += (
+                                tc.function.arguments
+                            )
+
+            if choice.finish_reason:
+                if tool_calls:
+                    sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
+                    tool_calls.clear()
                     yield StreamChunk(
-                        delta=choice.delta.content,
+                        delta="",
                         finish_reason=choice.finish_reason,
+                        tool_calls=sorted_calls,
                     )
+                else:
+                    yield StreamChunk(delta="", finish_reason=choice.finish_reason)
     
     async def list_available_models(self) -> List[Dict[str, Any]]:
         """Query the gateway for available models"""
