@@ -9,10 +9,11 @@ Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
 so that provider rules are maintained in exactly one place.
 """
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from flocks.provider.interleaved import (
     REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+    REASONING_TRANSPORT_GENERIC_CHAT,
     resolve_interleaved_capability,
     resolve_reasoning_transport,
 )
@@ -26,62 +27,6 @@ log = Log.create(service="provider.options")
 # ---------------------------------------------------------------------------
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
-
-# ---------------------------------------------------------------------------
-# Per-provider thinking-params request shapes
-# ---------------------------------------------------------------------------
-# Each entry is a callable ``(model_id, reasoning_enabled) -> extra_body_dict``
-# that emits the wire-format fields the upstream API expects to enable
-# interleaved thinking.  The dispatch gate is the catalog's ``interleaved``
-# capability — a model must declare it for any shape to fire.  This makes the
-# catalog the single source of truth for "this model wants thinking-aware
-# streaming", and removes the fragile model-name-substring whitelist that
-# used to live below.
-#
-# To add a new provider: drop a Callable into ``_THINKING_REQUEST_SHAPES``
-# below.  No token list, no inner if/elif.
-# ---------------------------------------------------------------------------
-
-
-def _openai_base_thinking_shape(
-    model_id: str, reasoning_enabled: Optional[bool]
-) -> Dict[str, Any]:
-    """Standard OpenAI-compat-with-thinking shape: ``extra_body.enable_thinking``.
-
-    Used by Alibaba DashScope, ThreatBook (cn + io), Moonshot/Kimi, Zhipu/GLM,
-    MiniMax, Stepfun, and DeepSeek — every OpenAI-compatible endpoint that
-    exposes thinking as a single boolean in extra_body.  When the user disables
-    reasoning (``reasoning_enabled=False``) the value mirrors that toggle so
-    users can override per-model via flocks.json.
-
-    This shape is unconditional on the model name: the gate is the catalog's
-    ``interleaved`` capability, not the model id.  If ``deepseek-chat`` (V3)
-    is non-thinking, the catalog should not declare it as interleaved — and
-    indeed it does not (only ``deepseek-reasoner`` does).  Re-introducing a
-    model-name branch here would re-create the exact fragility the
-    catalog-driven dispatch was meant to eliminate.
-    """
-    return {"enable_thinking": True if reasoning_enabled is not False else False}
-
-
-_THINKING_REQUEST_SHAPES: Dict[
-    str, Callable[[str, Optional[bool]], Dict[str, Any]]
-] = {
-    "alibaba": _openai_base_thinking_shape,
-    "threatbook-cn-llm": _openai_base_thinking_shape,
-    "threatbook-io-llm": _openai_base_thinking_shape,
-    "zhipu": _openai_base_thinking_shape,
-    "minimax": _openai_base_thinking_shape,
-    "stepfun": _openai_base_thinking_shape,
-    "moonshot": _openai_base_thinking_shape,
-    "deepseek": _openai_base_thinking_shape,
-    # Generic openai-compatible user-configured endpoint.  When the model in
-    # the catalog declares ``interleaved``, this emits the same enable_thinking
-    # flag (DashScope / Moonshot style).  Endpoints that don't accept it will
-    # see a 4xx and the user can disable per-model via
-    # ``default_parameters.enable_thinking: false``.
-    "openai-compatible": _openai_base_thinking_shape,
-}
 
 
 def _coerce_optional_bool(value: Any) -> Optional[bool]:
@@ -307,28 +252,35 @@ def build_provider_options(
         if reasoning_enabled is not False:
             options["thinkingLevel"] = "high"
 
-    # -- Per-provider thinking-params shapes (catalog-driven) ----------------
-    # If the catalog declares the model has interleaved reasoning capability,
-    # look up the provider's request shape and emit the right extra_body
-    # fields.  Replaces the old token-substring dispatch that silently
-    # dropped GLM-5 / minimax / deepseek / stepfun because their model names
-    # didn't match any of the magic substrings.
+    # -- Generic-chat (OpenAI-compat) interleaved thinking --------------------
+    # The Anthropic branch above handles ``anthropic_messages`` transport.
+    # Everything else that exposes thinking as a single boolean in extra_body
+    # (Alibaba DashScope, ThreatBook, Moonshot, Zhipu/GLM, MiniMax, Stepfun,
+    # DeepSeek, generic openai-compatible user-configured endpoints) sits on
+    # the ``generic_chat`` transport, and the wire format is identical —
+    # ``extra_body.enable_thinking``.  No per-provider dispatch needed.
     #
-    # The shape fires whenever the catalog says interleaved, even when the
-    # caller passed ``reasoning_enabled=False`` — that produces
-    # ``enable_thinking: false`` so the upstream API gets an explicit opt-out
-    # (the prior token-matching branch did the same).
-    elif interleaved_enabled:
-        shape_fn = _THINKING_REQUEST_SHAPES.get(provider_id)
-        if shape_fn is not None:
-            extra_body = shape_fn(model_id, reasoning_enabled)
-            if extra_body:
-                options["extra_body"] = extra_body
-                log.debug("options.thinking_params.resolved", {
-                    "provider_id": provider_id,
-                    "model_id": model_id,
-                    "extra_body_keys": list(extra_body.keys()),
-                })
+    # The gate is the resolved ``interleaved_capability``: catalog explicit
+    # declaration wins, with the series-token inference in
+    # ``interleaved.infer_interleaved_capability`` as fallback.  This means a
+    # new model from a known family (qwen*, glm-*, kimi-k2*, deepseek-v4*,
+    # step-3.5*, minimax-m*, …) Just Works without anyone editing the
+    # dispatch — the prior hard-coded token whitelist that silently dropped
+    # GLM-5 / minimax / deepseek / stepfun is gone, and so is the
+    # provider-keyed shape registry that replaced it (every entry produced
+    # the same dict).
+    elif (
+        interleaved_enabled
+        and reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT
+    ):
+        options["extra_body"] = {
+            "enable_thinking": True if reasoning_enabled is not False else False,
+        }
+        log.debug("options.thinking_params.resolved", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "extra_body_keys": list(options["extra_body"].keys()),
+        })
 
     # -- max_tokens fallback from model config ------------------------------
     if resolve_max_tokens and "max_tokens" not in options:

@@ -1,5 +1,5 @@
 """
-Regression net for catalog-driven thinking-params dispatch.
+Regression net for transport-driven thinking-params dispatch.
 
 Background
 ----------
@@ -13,18 +13,30 @@ thinking flag, causing the upstream API to short-circuit with
 "agent stopped, please say 'continue'" symptom seen in
 ``ses_1628dfe6cffe1i5xZY9lv1u20m``.
 
-The new dispatch uses the catalog's ``interleaved`` capability as the single
-gate, and looks up a per-provider request shape.  These tests verify three
-properties of the new path:
+The new dispatch is transport-driven:
+
+  - ``reasoning_transport == anthropic_messages``  →  ``thinking={type: "enabled", budget_tokens:...}``
+  - ``reasoning_transport == generic_chat``        →  ``extra_body.enable_thinking: bool``
+
+The gate is the resolved ``interleaved_capability``: catalog explicit
+declaration wins, with the series-token inference in
+``interleaved.infer_interleaved_capability`` (qwen3 / glm-* / kimi-k2* /
+deepseek-v4* / step-3.5* / minimax-m* / …) as the fallback.  Adding a new
+provider or a new model from a known family needs zero dispatcher changes.
+
+These tests verify four properties of the new path:
 
 1. Every (provider, model) pair with ``interleaved != null`` in catalog.json
-   produces a non-empty ``extra_body`` (or its non-OpenAI-compat equivalent
-   like ``thinking``).  This is the systematic regression net — any new model
-   added to the catalog with interleaved thinking will be covered.
+   produces a non-empty thinking signal (extra_body or thinking=).  This is
+   the systematic regression net — any new model added to the catalog with
+   interleaved thinking will be covered.
 2. The specific GLM-5 / alibaba configuration that triggered the original
    trace bug now emits the right flag.
 3. The ``openai_compatible`` provider no longer swallows caller-supplied
    ``extra_body`` in its chat_stream() path.
+4. A model not in catalog but matching a known series token still gets the
+   flag — the series-token fallback closes the "I forgot to add the model
+   to catalog" gap.
 """
 
 from __future__ import annotations
@@ -67,29 +79,22 @@ def _iter_interleaved_catalog_entries() -> Iterator[Tuple[str, str]]:
                 yield provider_id, model_id
 
 
-# Catalog can grow between releases; skip providers that aren't wired into
-# ``_THINKING_REQUEST_SHAPES`` (e.g. legacy entries that pre-date the
-# catalog-driven dispatch).  The point of this test is to catch MISSING
-# entries, not to police old ones.
-_SHAPED_PROVIDER_IDS = frozenset(provider_options._THINKING_REQUEST_SHAPES.keys())
-
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
 
 class TestCatalogInterleavedCoverage:
-    """Property test: every interleaved catalog entry resolves to a thinking flag."""
+    """Property test: every interleaved catalog entry resolves to a thinking flag.
+
+    The dispatch is now transport-driven, not provider-driven — every
+    interleaved catalog entry should land in *some* thinking signal.  The
+    series-token fallback (in ``interleaved.infer_interleaved_capability``)
+    is exercised by a separate test below.
+    """
 
     @pytest.mark.parametrize("provider_id,model_id", list(_iter_interleaved_catalog_entries()))
     def test_interleaved_model_gets_thinking_flag(self, provider_id: str, model_id: str) -> None:
-        if provider_id not in _SHAPED_PROVIDER_IDS:
-            pytest.skip(
-                f"provider {provider_id!r} not in _THINKING_REQUEST_SHAPES — "
-                "add a shape entry or remove interleaved from this catalog entry"
-            )
-
         # Patch the interleaved capability so the dispatch gate fires
         # regardless of the test environment's catalog resolution path.
         original = provider_options._resolve_interleaved_capability
@@ -226,8 +231,16 @@ class TestGLM5TraceReplay:
         )
 
 
-class TestShapeRegistry:
-    """Sanity checks on the shapes dict itself."""
+class TestDispatchShape:
+    """Sanity checks on the dispatch itself now that the
+    provider-keyed shape registry is gone.
+
+    The dispatch is now transport-driven: ``anthropic_messages`` →
+    ``thinking={type: "enabled", ...}``; ``generic_chat`` →
+    ``extra_body.enable_thinking``.  Catalog explicit declaration wins,
+    with the series-token inference in ``interleaved.infer_interleaved_capability``
+    as fallback for any model the catalog forgot to declare.
+    """
 
     def test_no_legacy_token_constant(self) -> None:
         """The token-substring whitelist must be gone — that was the bug surface."""
@@ -238,39 +251,32 @@ class TestShapeRegistry:
             "interleaved field is now the only trigger"
         )
 
-    def test_all_thinking_providers_have_a_shape(self) -> None:
-        """Every provider that the audit flagged as having reasoning models
-        should have an entry in the shapes dict.
-
-        Catalog providers with interleaved models: alibaba, threatbook-cn-llm,
-        threatbook-io-llm, moonshot, zhipu, deepseek, minimax, stepfun, plus
-        the generic ``openai-compatible`` for user-configured endpoints.
+    def test_no_shape_registry(self) -> None:
+        """The provider-keyed shape registry is gone — every entry produced
+        the same dict, so the indirection wasn't earning its keep.  Wire format
+        is now decided by ``reasoning_transport`` alone.
         """
-        expected = {
-            "alibaba",
-            "threatbook-cn-llm",
-            "threatbook-io-llm",
-            "moonshot",
-            "zhipu",
-            "deepseek",
-            "minimax",
-            "stepfun",
-            "openai-compatible",
-        }
-        actual = set(provider_options._THINKING_REQUEST_SHAPES.keys())
-        missing = expected - actual
-        assert not missing, f"missing thinking shape for: {sorted(missing)}"
+        assert not hasattr(provider_options, "_THINKING_REQUEST_SHAPES"), (
+            "_THINKING_REQUEST_SHAPES should be removed; dispatch is now "
+            "transport-driven, not provider-driven"
+        )
+        assert not hasattr(provider_options, "_openai_base_thinking_shape"), (
+            "_openai_base_thinking_shape should be removed; generic_chat "
+            "interleaved just emits extra_body.enable_thinking inline"
+        )
 
     def test_deepseek_v3_is_not_a_thinking_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``deepseek-chat`` (V3) has no ``interleaved`` capability in the
         catalog and must not receive ``enable_thinking`` on the wire.
 
         This is the regression net for the prior
-        ``_deepseek_thinking_shape`` model-name branching.  Catalog is now
-        the only source of truth: V3 stays non-thinking because the catalog
-        says so, not because the dispatcher strips it.  If a future catalog
-        change adds ``interleaved`` to V3, this test should be removed and
-        the model will then exercise the regular positive path.
+        ``_deepseek_thinking_shape`` model-name branching.  Catalog is the
+        primary source of truth: V3 stays non-thinking because the catalog
+        says so, and the series-token inference in ``interleaved.py`` also
+        does not include V3 in its tokens (only ``deepseek-v4`` family and
+        ``deepseek-reasoner``/``deepseek-r1``).  If a future catalog change
+        adds ``interleaved`` to V3, this test should be removed and the
+        model will then exercise the regular positive path.
         """
         # Sanity-check the assumption: catalog must not declare V3 as interleaved.
         catalog = model_catalog.get_raw_catalog()
@@ -304,7 +310,7 @@ class TestShapeRegistry:
 
     def test_explicit_reasoning_toggle_propagates(self) -> None:
         """``reasoning_enabled=False`` should produce ``enable_thinking: false``
-        on a shaped provider, mirroring the old token-matching branch's
+        on a generic_chat transport, mirroring the old token-matching branch's
         behavior so the upstream API gets an explicit opt-out signal.
         """
         options = provider_options.build_provider_options(
@@ -314,6 +320,74 @@ class TestShapeRegistry:
             resolve_max_tokens=False,
         )
         assert options["extra_body"]["enable_thinking"] is False
+
+    def test_anthropic_transport_still_uses_thinking_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The Anthropic transport branch is unchanged: it must continue to
+        emit ``thinking={type: "enabled", ...}``, never ``extra_body``.
+
+        This pins the contract that the new generic_chat branch did not
+        regress the anthropic_messages path.
+        """
+        from flocks.provider.interleaved import REASONING_TRANSPORT_ANTHROPIC_MESSAGES
+
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args, **_kw: {
+                "field": "thinking",
+                "echo": "tool_calls",
+                "cross_provider_policy": "preserve",
+            },
+        )
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_reasoning_transport",
+            lambda *_args, **_kw: REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+        )
+        options = provider_options.build_provider_options(
+            "anthropic", "claude-sonnet-4-20250514", resolve_max_tokens=False,
+        )
+        assert "thinking" in options
+        assert options["thinking"]["type"] == "enabled"
+        assert "extra_body" not in options
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            # A model that is NOT in any catalog but matches a known series
+            # token in ``infer_interleaved_capability``.  Demonstrates that
+            # the series-token fallback (catalog → inference) still produces
+            # the right wire format.  Model ids here are constructed to
+            # embed a real token from ``_PROMOTE_REASONING_CONTENT_TOKENS`` /
+            # ``_STRICT_REASONING_CONTENT_TOKENS`` so the substring match
+            # fires regardless of where Flocks runs the test.
+            "qwen3-7b-uncatalogued",        # contains "qwen3"
+            "glm-5-uncatalogued",           # contains "glm-5"
+            "kimi-k2.6-uncatalogued",       # contains "kimi-k2.6"
+            "minimax-m4-uncatalogued",      # contains "minimax"
+            "step-3.5-flash-uncatalogued",  # contains "step-3.5-flash"
+        ],
+    )
+    def test_series_token_fallback_emits_enable_thinking(self, model_id: str) -> None:
+        """Models matching a known series token in
+        ``infer_interleaved_capability`` get ``enable_thinking`` on the wire
+        even when the catalog has no explicit declaration for them.
+
+        This is the regression net for the design choice that the dispatch
+        is *not* provider-keyed: a user-configured openai-compatible
+        endpoint pointing at a known family Just Works, without requiring
+        anyone to edit a per-provider registry.
+        """
+        options = provider_options.build_provider_options(
+            "openai-compatible", model_id, resolve_max_tokens=False,
+        )
+        assert options.get("extra_body", {}).get("enable_thinking") is True, (
+            f"openai-compatible/{model_id} matches a known series token; "
+            "series-token fallback should have inferred interleaved and "
+            f"emitted enable_thinking. options={options!r}"
+        )
 
 
 class TestOpenAICompatibleExtraBody:
