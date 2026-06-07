@@ -21,6 +21,7 @@ const {
   consoleUpgradeApi,
   useAuth,
   useStats,
+  useUserDefinedPages,
 } = vi.hoisted(() => ({
   catalogAPI: {
     list: vi.fn(),
@@ -54,6 +55,24 @@ const {
   },
   useAuth: vi.fn(),
   useStats: vi.fn(),
+  useUserDefinedPages: vi.fn(() => ({
+    pages: [
+      {
+        id: 'dash-1',
+        title: '自定义仪表盘',
+        route: '/user-defined-pages/dash-1',
+        icon: 'LayoutDashboard',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'abc',
+        buildStatus: 'ready',
+      },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  })),
 }));
 
 vi.mock('@/api/provider', () => ({
@@ -98,6 +117,16 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 vi.mock('@/hooks/useStats', () => ({
   useStats,
+}));
+
+vi.mock('@/components/common/Toast', () => ({
+  useToast: () => ({
+    error: vi.fn(),
+  }),
+}));
+
+vi.mock('@/hooks/useUserDefinedPages', () => ({
+  useUserDefinedPages,
 }));
 
 vi.mock('@/components/common/LanguageSwitcher', () => ({
@@ -526,5 +555,89 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('Token 免费期已延长')).toBeInTheDocument();
     expect(screen.getByText('Flocks v2026.04.28 更新内容')).toBeInTheDocument();
+  });
+});
+
+describe('Layout user defined pages navigation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    checkUpdate.mockResolvedValue({
+      has_update: false,
+      latest_version: null,
+      current_version: '0.2.0',
+      error: null,
+    });
+    getActiveNotifications.mockResolvedValue([]);
+    useAuth.mockReturnValue({
+      user: {
+        id: 'user-1',
+        username: 'admin',
+        role: 'admin',
+        status: 'active',
+        must_reset_password: false,
+      },
+    });
+    useStats.mockReturnValue({
+      stats: {
+        agents: { total: 0 },
+        workflows: { total: 0 },
+        skills: { total: 0 },
+        tools: { total: 0 },
+        tasks: { week: 0, scheduledActive: 0 },
+        models: { total: 0 },
+        system: { status: 'healthy' },
+      },
+      loading: false,
+      error: null,
+    });
+    flocksproUsersApi.hasCapability.mockResolvedValue(false);
+    flocksproUsersApi.getLicenseStatus.mockResolvedValue({ pro_enabled: false });
+    consoleUpgradeApi.getProPackageStatus.mockResolvedValue({ pro_enabled: false });
+  });
+
+  it('renders custom user defined page links under the home section', async () => {
+    renderHomeWithLayout();
+    expect(await screen.findByRole('link', { name: '自定义仪表盘' })).toHaveAttribute(
+      'href',
+      '/user-defined-pages/dash-1',
+    );
+  });
+
+  it('does not render custom page links until their build is ready', async () => {
+    useUserDefinedPages.mockReturnValue({
+      pages: [
+        {
+          id: 'ready-page',
+          title: '可用页面',
+          route: '/user-defined-pages/ready-page',
+          icon: 'LayoutDashboard',
+          order: 10,
+          enabled: true,
+          placement: 'home.after',
+          buildHash: 'ready',
+          buildStatus: 'ready',
+        },
+        {
+          id: 'failed-page',
+          title: '失败页面',
+          route: '/user-defined-pages/failed-page',
+          icon: 'LayoutDashboard',
+          order: 20,
+          enabled: true,
+          placement: 'home.after',
+          buildHash: '',
+          buildStatus: 'failed',
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderHomeWithLayout();
+
+    expect(await screen.findByRole('link', { name: '可用页面' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: '失败页面' })).not.toBeInTheDocument();
   });
 });
