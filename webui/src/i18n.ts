@@ -23,6 +23,7 @@ import enAuth from './locales/en-US/auth.json';
 import enNotification from './locales/en-US/notification.json';
 import enFlocksPro from './locales/en-US/flockspro.json';
 import enUserDefinedPage from './locales/en-US/userDefinedPage.json';
+import enDevice from './locales/en-US/device.json';
 
 import zhCommon from './locales/zh-CN/common.json';
 import zhNav from './locales/zh-CN/nav.json';
@@ -45,6 +46,7 @@ import zhAuth from './locales/zh-CN/auth.json';
 import zhNotification from './locales/zh-CN/notification.json';
 import zhFlocksPro from './locales/zh-CN/flockspro.json';
 import zhUserDefinedPage from './locales/zh-CN/userDefinedPage.json';
+import zhDevice from './locales/zh-CN/device.json';
 
 i18n
   .use(LanguageDetector)
@@ -73,6 +75,7 @@ i18n
         notification: enNotification,
         flockspro: enFlocksPro,
         userDefinedPage: enUserDefinedPage,
+        device: enDevice,
       },
       'zh-CN': {
         common: zhCommon,
@@ -96,11 +99,12 @@ i18n
         notification: zhNotification,
         flockspro: zhFlocksPro,
         userDefinedPage: zhUserDefinedPage,
+        device: zhDevice,
       },
     },
     fallbackLng: 'en-US',
     defaultNS: 'common',
-    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace', 'auth', 'notification', 'flockspro', 'userDefinedPage'],
+    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace', 'auth', 'notification', 'flockspro', 'device', 'userDefinedPage'],
     detection: {
       order: ['localStorage', 'navigator'],
       lookupLocalStorage: 'flocks-language',

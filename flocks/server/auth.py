@@ -67,6 +67,7 @@ PUBLIC_PREFIXES = (
 # entries that touch user data without a per-request integrity check.
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
+    re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
 )
 
 

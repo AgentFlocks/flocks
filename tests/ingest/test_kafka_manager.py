@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from flocks.ingest.kafka import manager as kafka_manager
+from flocks.workflow.triggers.models import TriggerDefinition
 
 
 @pytest.mark.asyncio
@@ -29,13 +30,16 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
 
     manager = kafka_manager.KafkaManager()
     pool_size = kafka_manager._MAX_CONCURRENT_EXECUTIONS
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"kafka_message": "$.body"}}
+    )
 
     in_flight = 0
     max_in_flight = 0
     completed = 0
     lock = asyncio.Lock()
 
-    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, producer=None, output_topic=""):  # noqa: ANN001
+    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, producer=None, output_topic="", **kwargs):  # noqa: ANN001
         nonlocal in_flight, max_in_flight, completed
         async with lock:
             in_flight += 1
@@ -56,7 +60,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
     manager._abort_events[workflow_id] = abort
     workers = [
         asyncio.create_task(
-                manager._worker_loop(workflow_id, {}, "kafka_message", {}, queue, abort),
+                manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
             name=f"test-worker-{i}",
         )
         for i in range(pool_size)
@@ -92,8 +96,11 @@ async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch
     queue: asyncio.Queue = asyncio.Queue(maxsize=8)
     abort = asyncio.Event()
     captured: list[dict] = []
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"kafka_message": "$.body"}}
+    )
 
-    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, producer=None, output_topic=""):  # noqa: ANN001
+    async def _fake_trigger(workflow_id, workflow_json, msg, input_key, producer=None, output_topic="", **kwargs):  # noqa: ANN001
         captured.append(msg)
         abort.set()
 
@@ -106,7 +113,7 @@ async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch
     )
 
     worker = asyncio.create_task(
-        manager._worker_loop(workflow_id, {}, "kafka_message", {}, queue, abort),
+        manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
         name="test-worker-raw-queue",
     )
     await asyncio.wait_for(worker, timeout=1.0)
@@ -122,6 +129,9 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
     workflow_id = "test-wf-stop"
     queue: asyncio.Queue = asyncio.Queue(maxsize=8)
     abort = asyncio.Event()
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"kafka_message": "$.body"}}
+    )
     manager._queues[workflow_id] = queue
     manager._abort_events[workflow_id] = abort
     manager._status[workflow_id] = {"state": "running", "error": None}
@@ -133,7 +143,7 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
 
     workers = [
         asyncio.create_task(
-            manager._worker_loop(workflow_id, {}, "kafka_message", {}, queue, abort),
+            manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
             name=f"stop-worker-{i}",
         )
         for i in range(3)
@@ -347,13 +357,82 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
         },
     )
 
-    assert captured_run_kwargs["inputs"] == {
-        "kafka_message": {"alarmData": {"id": 1}},
-        "kafka_output_enabled": True,
-        "kafka_output_topic": "topic_soc_flocks_result_log",
-    }
+    assert captured_run_kwargs["inputs"]["kafka_message"] == {"alarmData": {"id": 1}}
+    assert captured_run_kwargs["inputs"]["kafka_output_enabled"] is True
+    assert captured_run_kwargs["inputs"]["kafka_output_topic"] == "topic_soc_flocks_result_log"
+    assert captured_run_kwargs["inputs"]["_trigger"] == "kafka"
+    assert captured_run_kwargs["inputs"]["_flocks"]["trigger"]["id"] == "kafka-default"
     assert recorded_input_params["_trigger"] == "kafka"
     assert recorded_input_params["kafka_output_enabled"] is True
     assert recorded_input_params["kafka_output_topic"] == "topic_soc_flocks_result_log"
     assert recorded_input_params["kafka_message"]["_type"] == "dict"
     assert recorded_input_params["kafka_message"]["keys"] == ["alarmData"]
+
+
+@pytest.mark.asyncio
+async def test_trigger_workflow_applies_mapping_and_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = kafka_manager.KafkaManager()
+    captured_run_kwargs: dict = {}
+    recorded_exec_data: dict = {}
+
+    async def _fake_create_execution_record(workflow_id, *, input_params=None, exec_id=None):  # noqa: ANN001
+        return {"id": "exec-filter", "workflowId": workflow_id, "inputParams": input_params}
+
+    async def _fake_record_execution_result(workflow_id, exec_id, exec_data):  # noqa: ANN001
+        recorded_exec_data.update(exec_data)
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        captured_run_kwargs.update(kwargs)
+        return SimpleNamespace(
+            status="SUCCEEDED",
+            error=None,
+            outputs={"ok": True},
+            history=[],
+            last_node_id="done",
+            steps=1,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+
+    trigger = TriggerDefinition.model_validate(
+        {
+            "id": "kafka-orders",
+            "type": "kafka",
+            "mapping": {
+                "order_id": "$.body.order.id",
+                "region": "$.body.order.region",
+            },
+            "inputs": {"pipeline": "orders"},
+            "filter": {"expr": "body.order.region == 'cn'"},
+        }
+    )
+
+    await manager._trigger_workflow(
+        "wf-orders",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"order": {"id": 7, "region": "cn"}},
+        "kafka_message",
+        trigger=trigger,
+        source="orders-topic",
+    )
+
+    assert captured_run_kwargs["inputs"]["order_id"] == 7
+    assert captured_run_kwargs["inputs"]["region"] == "cn"
+    assert captured_run_kwargs["inputs"]["pipeline"] == "orders"
+    assert recorded_exec_data["triggerId"] == "kafka-orders"
+    assert recorded_exec_data["triggerSource"] == "orders-topic"
+
+    captured_run_kwargs.clear()
+    await manager._trigger_workflow(
+        "wf-orders",
+        {"start": "receive_alert", "nodes": [], "edges": []},
+        {"order": {"id": 8, "region": "us"}},
+        "kafka_message",
+        trigger=trigger,
+        source="orders-topic",
+    )
+    assert captured_run_kwargs == {}

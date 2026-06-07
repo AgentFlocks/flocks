@@ -50,6 +50,21 @@ def _secret_keys_for(storage_key: str) -> FrozenSet[str]:
         return _FALLBACK_SECRET_KEYS
 
 
+def _normalize_config_field(storage_key: str, key: str, value: str) -> str:
+    """Canonicalize non-secret device fields before storing them in SQL."""
+    if key not in {"base_url", "baseUrl"}:
+        return value
+    if storage_key != "tdp_api" and not storage_key.startswith("tdp_api_v"):
+        return value
+
+    normalized = value.strip().rstrip("/")
+    for suffix in ("/config/api", "/api/v1"):
+        if normalized.lower().endswith(suffix):
+            normalized = normalized[: -len(suffix)].rstrip("/")
+            break
+    return normalized
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -86,7 +101,7 @@ def persist_fields(
                 continue
             result[key] = f"{_PLACEHOLDER_PREFIX}{sid}{_PLACEHOLDER_SUFFIX}"
         else:
-            result[key] = value
+            result[key] = _normalize_config_field(storage_key, key, value)
 
     return result
 
@@ -135,8 +150,8 @@ def mask_for_display(db_fields: Dict[str, str]) -> Tuple[Dict[str, str], Dict[st
 def resolve_for_runtime(db_fields: Dict[str, str]) -> Dict[str, str]:
     """Resolve ``{secret:…}`` placeholders to plaintext.
 
-    Call ONLY at the moment of making an outbound API request.
-    Never store or return the result through a public interface.
+    Call ONLY at the moment of making an outbound API request or serving an
+    explicit authenticated reveal action. Never store or log the result.
     """
     from flocks.security import get_secret_manager
 

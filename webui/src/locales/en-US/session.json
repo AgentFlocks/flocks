@@ -146,7 +146,18 @@
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
       "errorLabel": "Error",
-      "elapsed": "Elapsed"
+      "elapsed": "Elapsed",
+      "workflowStage": "Current stage: {{phase}}",
+      "workflowNode": "Node: {{node}}",
+      "workflowStep": "Step: {{step}}",
+      "workflowPhase": {
+        "queued": "Queued",
+        "running": "Running",
+        "success": "Completed",
+        "error": "Failed",
+        "timeout": "Timed out",
+        "cancelled": "Cancelled"
+      }
     }
   },
   "groupToday": "Today",

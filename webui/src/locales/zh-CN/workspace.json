@@ -26,6 +26,7 @@
     "close": "关闭",
     "uploading": "上传中...",
     "binaryPreview": "二进制文件无法预览",
+    "truncatedPreview": "文件较大，当前仅预览前 {{limit}} 内容。为避免误保存截断内容，已禁用在线编辑；如需完整内容请下载文件。",
     "downloadFile": "下载文件",
     "toast": {
       "loadDirFailed": "加载目录失败",

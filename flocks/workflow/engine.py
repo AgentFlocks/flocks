@@ -713,7 +713,7 @@ class WorkflowEngine:
         if node.type == "tool":
             return self._execute_tool_node(node, inputs, _runtime=_runtime)
         if node.type == "llm":
-            return self._execute_llm_node(node, inputs)
+            return self._execute_llm_node(node, inputs, _runtime=_runtime)
         if node.type == "http_request":
             return self._execute_http_request_node(node, inputs)
         if node.type == "subworkflow":
@@ -759,7 +759,13 @@ class WorkflowEngine:
         output_k = node.output_key or "result"
         return {output_k: result}, ""
 
-    def _execute_llm_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+    def _execute_llm_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
         """Execute an LLM node: render Jinja2 prompt template, call LLM."""
         assert node.prompt, "llm node requires prompt"
         try:
@@ -771,9 +777,13 @@ class WorkflowEngine:
                 message=f"Prompt template render failed: {type(e).__name__}: {e}",
             ) from e
         from .llm import get_llm_client
+        _rt = _runtime or self.runtime
+        cancel_checker = getattr(_rt, "cancel_checker", None)
         try:
-            client = get_llm_client(model=node.model)
+            client = get_llm_client(model=node.model, cancel_checker=cancel_checker)
             text = client.ask(rendered)
+        except RunCancelledError:
+            raise
         except Exception as e:
             raise NodeExecutionError(
                 node_id=node.id,

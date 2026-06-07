@@ -465,7 +465,8 @@ export default function Layout() {
     matchPath('/workflows/create', location.pathname) ||
     matchPath('/workflows/:id/edit', location.pathname) ||
     matchPath('/workflows/:id', location.pathname) ||
-    matchPath('/sessions', location.pathname);
+    matchPath('/sessions', location.pathname) ||
+    matchPath('/devices', location.pathname);
   const productName = isFlocksproActive ? 'Flocks Pro' : 'Flocks';
   const displayVersion = isFlocksproActive
     ? flocksproVersion || (currentVersion ? formatProVersion(currentVersion) : null)
@@ -685,7 +686,7 @@ export default function Layout() {
             <Outlet />
           ) : (
             <div className="h-full overflow-y-auto">
-              <div className="min-h-full p-6">
+              <div className="min-h-full p-6 flex flex-col">
                 <Outlet />
               </div>
             </div>

@@ -8,19 +8,22 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import aiosqlite
 import httpx
-from fastapi import APIRouter, HTTPException, status as http_status
+from fastapi import APIRouter, HTTPException, Request, status as http_status
 from pydantic import BaseModel, Field
 
+from flocks.audit import emit_audit_event
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_user
 from flocks.tool.device import (
     DEFAULT_GROUP_ID,
     MULTI_GROUP_ENABLED,
     DeviceGroup,
     DeviceGroupCreate,
     DeviceGroupUpdate,
+    DeviceCredentialResponse,
     DeviceIntegration,
     DeviceIntegrationCreate,
     DeviceIntegrationUpdate,
@@ -49,6 +52,54 @@ from flocks.tool.device.store import (
 from flocks.tool.device.sync import sync_service_tool_state
 
 router = APIRouter()
+
+
+async def _emit_device_audit_fallback(event_type: str, payload: dict[str, Any]) -> None:
+    """Persist device audit even when the default sink is still a no-op."""
+    try:
+        from flocks.audit import NullAuditSink, get_sink
+
+        sink_cls = get_sink()
+        if sink_cls is not NullAuditSink:
+            return
+    except Exception:
+        return
+
+    try:
+        from flockspro.audit.service import AuditEvent
+        from flockspro.audit.sinks import SqliteAuditSink
+    except Exception:
+        # OSS or flockspro not installed: nothing to persist.
+        return
+
+    failed = bool(payload.get("error") or payload.get("reason"))
+    event = AuditEvent(
+        event_type=event_type,
+        category="device",
+        action="credentials_reveal",
+        status="error" if failed else "ok",
+        result="failed" if failed else "success",
+        user_id=str(payload.get("user_id")) if payload.get("user_id") else None,
+        user_name=str(payload.get("username")) if payload.get("username") else None,
+        resource_type="device",
+        resource_id=str(payload.get("device_id")) if payload.get("device_id") else None,
+        ip=str(payload.get("ip")) if payload.get("ip") else None,
+        payload=payload,
+        metadata=payload,
+    )
+    await SqliteAuditSink().write(event)
+
+
+async def _emit_device_audit(event_type: str, payload: dict[str, Any]) -> None:
+    try:
+        await emit_audit_event(event_type, payload)
+    except Exception:
+        # Audit failures must not block credential reveal.
+        pass
+    try:
+        await _emit_device_audit_fallback(event_type, payload)
+    except Exception:
+        pass
 
 
 # ===========================================================================
@@ -129,6 +180,57 @@ async def route_get_device(device_id: str):
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
     return row_to_device(row)
+
+
+class DeviceCredentialRevealRequest(BaseModel):
+    field: Optional[str] = Field(
+        None,
+        description="Reveal only this credential key when provided.",
+    )
+
+
+@router.post("/{device_id}/credentials", response_model=DeviceCredentialResponse)
+async def route_get_device_credentials(
+    device_id: str,
+    request: Request,
+    body: Optional[DeviceCredentialRevealRequest] = None,
+):
+    current_user = require_user(request)
+    row = await fetch_device(device_id)
+    if row is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Device not found")
+    db_fields: dict = json.loads(row["fields"] or "{}")
+    requested_field = (body.field or "").strip() if body else ""
+    resolved_fields = resolve_for_runtime(db_fields)
+    if requested_field:
+        if requested_field not in resolved_fields:
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=f"Credential field '{requested_field}' not found",
+            )
+        response_fields = {requested_field: resolved_fields[requested_field]}
+        revealed_keys = [requested_field]
+    else:
+        response_fields = resolved_fields
+        revealed_keys = sorted(resolved_fields.keys())
+
+    # Record the reveal action without ever logging the plaintext values.
+    await _emit_device_audit(
+        "device.credentials_reveal",
+        {
+            "action": "credentials_reveal",
+            "actor_id": current_user.id,
+            "actor_name": current_user.username,
+            "user_id": current_user.id,
+            "username": current_user.username,
+            "device_id": device_id,
+            "storage_key": row["storage_key"],
+            "field_keys": revealed_keys,
+            "ip": get_request_ip(request),
+            "user_agent": get_request_user_agent(request),
+        },
+    )
+    return DeviceCredentialResponse(fields=response_fields)
 
 
 @router.post("", response_model=DeviceIntegration, status_code=http_status.HTTP_201_CREATED)

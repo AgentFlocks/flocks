@@ -24,7 +24,7 @@ log = Log.create(service="workspace.manager")
 # Note: dotfiles like .gitignore have suffix='' in Python, so they are NOT
 # matched here; they will fall through to the binary-file path (download only).
 TEXT_EXTENSIONS = {
-    ".md", ".txt", ".log", ".json", ".yaml", ".yml",
+    ".md", ".txt", ".log", ".json", ".jsonl", ".yaml", ".yml",
     ".toml", ".ini", ".cfg", ".py", ".js", ".ts",
     ".sh", ".bash", ".csv", ".xml", ".html", ".css",
     ".tsx", ".jsx", ".env",

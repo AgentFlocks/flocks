@@ -2439,6 +2439,7 @@ class SessionRunner:
             session_id=self.session.id,
             assistant_message=assistant_msg,
             agent=agent,
+            abort_event=self._external_abort or self._abort,
             permission_callback=self._handle_permission,
             text_delta_callback=self.callbacks.on_text_delta,
             reasoning_delta_callback=self.callbacks.on_reasoning_delta,

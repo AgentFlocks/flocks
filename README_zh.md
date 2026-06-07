@@ -287,7 +287,7 @@ flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
 
 ## 6. 参与贡献
 
-开发环境、代码规范、测试要求和 Pull Request 流程请参考 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)。
+开发环境、代码规范、测试要求和 Pull Request 流程请参考 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## 7. 开源协议
 

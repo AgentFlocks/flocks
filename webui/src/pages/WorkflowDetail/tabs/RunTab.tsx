@@ -21,6 +21,29 @@ interface RunTabProps {
   onExecutionSettled?: () => void;
 }
 
+function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string {
+  if (!execution) return 'unknown';
+  if (execution.status === 'running' && execution.currentPhase) {
+    return execution.currentPhase;
+  }
+  return execution.status;
+}
+
+function getExecutionDisplayMessage(
+  execution: WorkflowExecution | null | undefined,
+  t: (key: string) => string,
+): string {
+  if (!execution?.errorMessage) return '';
+  const displayStatus = getExecutionDisplayStatus(execution);
+  if (
+    displayStatus === 'cancelling'
+    && execution.errorMessage === 'Cancellation requested'
+  ) {
+    return t('detail.run.cancelRequested');
+  }
+  return execution.errorMessage;
+}
+
 function SectionHeader({
   title,
   expanded,
@@ -275,6 +298,10 @@ function TestSection({
     };
   }, [execution, onExecutionChange, onExecutionSettled, t, workflow.id]);
 
+  const displayStatus = getExecutionDisplayStatus(execution);
+  const isCancelling = displayStatus === 'cancelling';
+  const displayMessage = getExecutionDisplayMessage(execution, t);
+
   const scheduleSampleSave = useCallback((raw: string, parsed: Record<string, any>) => {
     if (saveTimerRef.current) {
       window.clearTimeout(saveTimerRef.current);
@@ -357,6 +384,12 @@ function TestSection({
     try {
       setStopping(true);
       await workflowAPI.cancelExecution(workflow.id, execution.id);
+      onExecutionChange?.({
+        ...execution,
+        currentPhase: 'cancelling',
+        errorMessage: execution.errorMessage || 'Cancellation requested',
+      });
+      setStopping(false);
     } catch (error) {
       setStopping(false);
       onExecutionChange?.(execution ? {
@@ -397,21 +430,21 @@ function TestSection({
           </div>
           <button
             onClick={running ? handleStop : handleRun}
-            disabled={stopping}
+            disabled={stopping || isCancelling}
             className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
-            {stopping
+            {stopping || isCancelling
               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
               : running
                 ? <StopCircle className="w-3.5 h-3.5" />
                 : <FlaskConical className="w-3.5 h-3.5" />}
-            {stopping ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
+            {stopping || isCancelling ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
           {execution && (
             <div className="border border-gray-200 rounded-lg overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
-                <WorkflowStatusBadge status={execution.status} />
+                <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
                   <span className="text-xs text-gray-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
@@ -420,9 +453,11 @@ function TestSection({
                 )}
               </div>
 
-              {execution.errorMessage && (
-                <div className="px-3 py-2 bg-red-50 border-b border-red-100">
-                  <p className="text-xs text-red-600">{execution.errorMessage}</p>
+              {displayMessage && (
+                <div className={`px-3 py-2 border-b ${
+                  isCancelling ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'
+                }`}>
+                  <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
                 </div>
               )}
 
@@ -598,24 +633,27 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
 function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
   const { t } = useTranslation('workflow');
   const [logExpanded, setLogExpanded] = useState(false);
+  const displayStatus = getExecutionDisplayStatus(ex);
   const isRunning = ex.status === 'running';
+  const isCancelling = displayStatus === 'cancelling';
   const hasOutput = ex.outputResults && Object.keys(ex.outputResults).length > 0;
   const hasLog = ex.executionLog && ex.executionLog.length > 0;
+  const displayMessage = getExecutionDisplayMessage(ex, t);
 
   return (
     <div className="border-t border-gray-200 bg-gray-50">
       {isRunning && (
         <div className="px-4 py-2 flex items-center gap-2 border-b border-gray-200">
-          <Loader2 className="w-3 h-3 animate-spin text-red-500" />
-          <span className="text-xs text-red-600">
-            {t('detail.run.running')}
+          <Loader2 className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
+          <span className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>
+            {isCancelling ? t('detail.run.stopping') : t('detail.run.running')}
             {hasLog && ` (${ex.executionLog.length} ${t('detail.run.stepsCompleted')})`}
           </span>
         </div>
       )}
-      {ex.errorMessage && (
+      {displayMessage && (
         <div className="px-4 py-2 border-b border-gray-200">
-          <p className="text-xs text-red-600">{ex.errorMessage}</p>
+          <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
         </div>
       )}
       {hasOutput && (
@@ -717,6 +755,7 @@ function HistorySection({
   };
 
   const statusIcon = (status: string) => {
+    if (status === 'cancelling') return <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
     if (status === 'success' || status === 'SUCCEEDED') return <CheckCircle className="w-3.5 h-3.5 text-green-500" />;
     if (status === 'running') return <Loader2 className="w-3.5 h-3.5 text-red-500 animate-spin" />;
     if (status === 'error' || status === 'FAILED') return <XCircle className="w-3.5 h-3.5 text-red-500" />;
@@ -746,7 +785,7 @@ function HistorySection({
                     onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
                     className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
                   >
-                    {statusIcon(exec.status)}
+                    {statusIcon(getExecutionDisplayStatus(exec))}
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
                     </div>

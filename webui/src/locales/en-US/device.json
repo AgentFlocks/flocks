@@ -1,0 +1,242 @@
+{
+  "pageTitle": "Device Integration",
+  "pageDescription": "Configure security device API connections so Flocks agents can call and control them directly",
+
+  "status": {
+    "disabled": "Disabled",
+    "connected": "Connected",
+    "error": "Connection failed",
+    "unknown": "Not checked"
+  },
+
+  "vendor": {
+    "unspecified": "Unspecified vendor"
+  },
+
+  "sidebar": {
+    "heading": "Rooms",
+    "addRoom": "New room",
+    "allRooms": "All Rooms",
+    "rename": "Rename",
+    "deleteRoom": "Delete room",
+    "deleteDisabled": "{{count}} device(s) present — cannot delete",
+    "roomNamePlaceholder": "Room name...",
+    "deleteHasDevices": "Room \"{{name}}\" still has {{count}} device(s). Move or delete them first."
+  },
+
+  "toolbar": {
+    "refresh": "Refresh",
+    "addDevice": "Add Device",
+    "collapseAll": "Collapse all",
+    "expandAll": "Expand all"
+  },
+
+  "header": {
+    "allRooms": "All Rooms",
+    "deviceCount": "{{count}} device(s) · {{rooms}} room(s)",
+    "connected": "{{count}} connected",
+    "failed": "{{count}} failed",
+    "devices": "{{count}} device(s)"
+  },
+
+  "empty": {
+    "noDevices": "No devices integrated yet",
+    "noDevicesHint": "Once you add a device, Flocks agents can call its tools",
+    "addNow": "Add device now",
+    "roomEmpty": "No devices in this room",
+    "roomEmptyHint": "Click \"Add Device\" to integrate a device into this room"
+  },
+
+  "section": {
+    "activeDevices": "Integrated Devices",
+    "ungrouped": "Ungrouped Devices",
+    "ungroupedHint": "Room not found — edit the device to reassign it"
+  },
+
+  "wizard": {
+    "title": "Add Device",
+    "closeAriaLabel": "Close add-device panel",
+    "step1": "1 Select vendor",
+    "step2": "2 Select device",
+    "step3": "3 Fill in config",
+    "modeTitle": "Select access mode",
+    "step1Custom": "1 Select vendor / custom",
+    "step2Custom": "2 Select device / mode",
+    "step3Custom": "3 Fill in details / config",
+    "selectVendorTitle": "Select {{vendor}} device",
+    "vendorHint": "Choose a vendor — {{count}} available",
+    "chooseVendorOrCustom": "Choose a vendor or create a custom device integration",
+    "customCardTitle": "Custom Device",
+    "customCardSubtitle": "API / WebCLI / Workflow",
+    "customCardCta": "Create a new integration path",
+    "chooseCustomMode": "Choose how this custom device should connect",
+    "customModes": {
+      "api": {
+        "title": "API Integration",
+        "desc": "Use this when the device exposes APIs. Provide API docs and generate a reusable device plugin."
+      },
+      "webcli": {
+        "title": "WebCLI Integration",
+        "desc": "Use this when the device has no open API. First generate and integrate the skill or CLI asset; for security devices, also generate a device plugin for the device page."
+      },
+      "workflow": {
+        "title": "Workflow Integration",
+        "desc": "Use this for Syslog, Kafka, or Webhook sources. The device page will guide you to the workflow integration screen for the final setup."
+      }
+    },
+    "productCount": "{{count}} product(s)",
+    "instanceCount": "{{count}} integrated",
+    "productHint": "{{count}} product(s) — the same type can be added multiple times"
+  },
+
+  "config": {
+    "closeAriaLabel": "Close device config panel",
+    "newDeviceTitle": "Fill in config",
+    "tabConfig": "Config",
+    "tabTools": "Tools",
+    "tabToolsCount": "Tools ({{count}})",
+    "tabOverview": "Overview",
+    "nameLabel": "Device name",
+    "namePlaceholder": "e.g. HQ AF Firewall",
+    "roomLabel": "Room",
+    "connectionParams": "Connection parameters",
+    "secretConfigured": "Already set · Leave unchanged to keep it, clear to remove",
+    "secretRevealFailed": "Failed to reveal credential",
+    "showSecretAction": "Show",
+    "hideSecretAction": "Hide",
+    "showSecretAria": "Show {{label}}",
+    "hideSecretAria": "Hide {{label}}",
+    "sslLabel": "SSL verification",
+    "sslHint": "Disable to reach internal devices with self-signed certificates",
+    "enabledLabel": "Enable device",
+    "enabledHint": "When disabled, agents will not call tools from this device",
+    "testBtn": "Test connection",
+    "saveBtn": "Save config",
+    "addBtn": "Confirm integration",
+    "deleteBtn": "Delete device",
+    "confirmDelete": "Confirm delete this device config?"
+  },
+
+  "tools": {
+    "empty": "No associated tools",
+    "colName": "Tool name",
+    "colDesc": "Description",
+    "colStatus": "Status",
+    "colAction": "Action",
+    "detail": "Test / Details"
+  },
+
+  "overview": {
+    "serviceName": "Service name",
+    "version": "Version",
+    "toolCount": "Tools",
+    "vendor": "Vendor",
+    "serviceDesc": "Service description",
+    "viewDocs": "View API docs"
+  },
+
+  "toast": {
+    "loadFailed": "Failed to load",
+    "nameRequired": "Please enter a device name",
+    "saveDone": "Config saved",
+    "addDone": "Device added",
+    "saveFailed": "Save failed",
+    "sslOn": "SSL verification enabled",
+    "sslOff": "SSL verification disabled",
+    "rollback": "Save failed — changes rolled back",
+    "enabledOn": "Device enabled",
+    "enabledOff": "Device disabled",
+    "deleteDone": "Device deleted",
+    "deleteFailed": "Delete failed",
+    "actionFailed": "Action failed"
+  },
+
+  "custom": {
+    "title": {
+      "api": "Custom Device API Integration",
+      "webcli": "Custom Device WebCLI Integration",
+      "workflow": "Custom Device Workflow Integration"
+    },
+    "subtitle": {
+      "api": "Provide API documentation and generate a reusable device plugin",
+      "webcli": "Provide the product URL and target interfaces to generate a WebCLI device plugin for the device page",
+      "workflow": "Configure Syslog, Kafka, and Webhook integrations on the workflow integration page"
+    },
+    "welcome": {
+      "api": "Please add an API docs URL or upload the docs file directly. I will use the tool-builder skill to generate a device plugin that can be used from the device page.",
+      "webcli": "Please add the product URL, target interfaces, and auth hints. I will use the web2cli skill to build and integrate the CLI or skill assets first, and then generate a device plugin when needed.",
+      "workflow": "Workflow integrations are not created here. Go to the workflow integration page and configure Syslog, Kafka, or Webhook as needed."
+    },
+    "validation": {
+      "deviceNameRequired": "Please enter the device product name",
+      "vendorNameRequired": "Please enter the vendor name",
+      "baseUrlRequired": "Please enter the Base URL",
+      "productUrlRequired": "Please enter the product URL",
+      "targetInterfacesRequired": "Please describe the interfaces or page behaviors to capture"
+    },
+    "toast": {
+      "submitSuccess": "Submitted to Rex. Continue the plugin generation in chat.",
+      "submitFailed": "Failed to submit to Rex"
+    },
+    "details": {
+      "prepareTitle": "Prepare the integration details before sending them to Rex",
+      "prepareIntro": "After submission, you will enter the Rex conversation directly. ",
+      "apiNext": "You can continue to add API doc links, upload documentation files, or explain interface details. Once the plugin is generated, return to the device page to finish the rest of the setup.",
+      "webcliNext": "You can continue to add page actions, capture targets, and authentication details. The final result should be a WebCLI device plugin that the device page can recognize; a CLI can remain as an optional debugging entry."
+    },
+    "rex": {
+      "apiHint": "After you finish the plugin with Rex, return to the device page and check whether the corresponding device plugin appears. If API docs are inconvenient to paste, upload them directly in this conversation.",
+      "webcliHint": "After you finish with Rex, confirm that the WebCLI device plugin has been generated. Then return to the device page to continue reviewing and configuring it; the CLI should remain only as an optional debugging entry.",
+      "placeholder": "Continue adding interface details, authentication information, or debugging notes",
+      "pending": "Rex is getting ready..."
+    },
+    "workflow": {
+      "heading": "Workflow integration currently supports Syslog, Kafka, and Webhook",
+      "body": "On the workflow detail page, open the Integration tab, choose Syslog, Kafka, or Webhook for your scenario, and then push data from the device or upstream system into the matching entry point.",
+      "requirementsTitle": "Requirements",
+      "requirement1": "Choose the integration type based on the data source: Syslog for log forwarding, Kafka for message queues, and Webhook for HTTP callbacks.",
+      "requirement2": "Make sure the workflow listener address, topic, or webhook URL is reachable from the device or upstream system, and map the input fields correctly.",
+      "requirement3": "After configuration, check the workflow execution history to confirm that the input data has been received and consumed.",
+      "goToWorkflows": "Go to workflow list"
+    },
+    "actions": {
+      "backToSelection": "Back to mode selection",
+      "backToForm": "Back to details form",
+      "openSessionList": "Open in session list",
+      "submit": "Submit to Rex"
+    },
+    "form": {
+      "common": {
+        "versionLabel": "Product version"
+      },
+      "api": {
+        "deviceNameLabel": "Device product name",
+        "deviceNamePlaceholder": "e.g. Custom bastion host",
+        "vendorNameLabel": "Vendor name",
+        "vendorNamePlaceholder": "e.g. Acme Security",
+        "versionPlaceholder": "e.g. v3.2.1",
+        "baseUrlLabel": "Base URL",
+        "baseUrlPlaceholder": "e.g. https://device.example.com/api",
+        "docsUrlLabel": "API docs URL",
+        "docsUrlPlaceholder": "e.g. https://device.example.com/openapi",
+        "docsUrlHint": "A public URL is optional. After submission, you can keep uploading API docs inside the Rex conversation.",
+        "capabilitiesLabel": "Expected capability scope",
+        "capabilitiesPlaceholder": "All APIs by default, or limit to specific APIs",
+        "capabilitiesHint": "All APIs are used by default. If you only need specific interfaces, describe them here."
+      },
+      "webcli": {
+        "deviceNameLabel": "Device product name",
+        "deviceNamePlaceholder": "e.g. Custom situation awareness platform",
+        "vendorNameLabel": "Vendor name",
+        "vendorNamePlaceholder": "e.g. Acme Security",
+        "versionPlaceholder": "e.g. 2026.05",
+        "productUrlLabel": "Product URL",
+        "productUrlPlaceholder": "e.g. https://device.example.com",
+        "targetInterfacesLabel": "Interfaces or page behaviors to capture",
+        "targetInterfacesPlaceholder": "e.g. alert list API, asset detail API, and the request triggered by the \"Block IP\" button",
+        "authHintLabel": "Authentication or permission hints",
+        "authHintPlaceholder": "e.g. admin role required; request depends on Cookie + X-CSRF-Token"
+      }
+    }
+  }
+}

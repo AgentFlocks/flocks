@@ -1,7 +1,10 @@
 import asyncio
+import threading
+import time
 
 import pytest
 
+from flocks.workflow.errors import RunCancelledError
 from flocks.workflow.llm import LLMClient
 from flocks.workflow.engine import WorkflowEngine
 from flocks.workflow.models import Workflow
@@ -25,13 +28,38 @@ class _FakeProvider:
         *,
         configured: bool = True,
         models: list[str] | None = None,
+        _shared_state: dict[str, object] | None = None,
     ):
         self.id = provider_id
         self._behavior = behavior
         self._configured = configured
         self._models = models or []
-        self.calls = 0
-        self.last_config = None
+        self._shared_state = _shared_state or {"calls": 0, "last_config": None}
+
+    @property
+    def calls(self) -> int:
+        return int(self._shared_state["calls"])
+
+    @calls.setter
+    def calls(self, value: int) -> None:
+        self._shared_state["calls"] = value
+
+    @property
+    def last_config(self):
+        return self._shared_state["last_config"]
+
+    @last_config.setter
+    def last_config(self, value) -> None:
+        self._shared_state["last_config"] = value
+
+    def __copy__(self):
+        return _FakeProvider(
+            self.id,
+            self._behavior,
+            configured=self._configured,
+            models=list(self._models),
+            _shared_state=self._shared_state,
+        )
 
     def configure(self, cfg):  # pragma: no cover
         self.last_config = cfg
@@ -55,6 +83,9 @@ class _FakeProvider:
             raise RuntimeError("simulated failure")
         if current == "timeout":
             await asyncio.sleep(0.05)
+            return _FakeResponse("late")
+        if current == "slow":
+            await asyncio.sleep(5)
             return _FakeResponse("late")
         return _FakeResponse(f"{self.id}:{model_id}")
 
@@ -219,6 +250,28 @@ def test_llm_timeout_retries_then_raises(monkeypatch):
         client.ask("hello", timeout_s=0.01, max_retries=2, retry_delay_s=0)
 
     assert provider.calls == 3
+
+
+def test_llm_ask_honors_cancel_checker(monkeypatch):
+    provider = _FakeProvider("demo", "slow", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    cancel_event = threading.Event()
+    timer = threading.Timer(0.05, cancel_event.set)
+    started = time.perf_counter()
+    timer.start()
+    try:
+        client = LLMClient(
+            provider_id="demo",
+            model="m",
+            cancel_checker=cancel_event.is_set,
+        )
+        with pytest.raises(RunCancelledError, match="Run cancelled"):
+            client.ask("hello")
+    finally:
+        timer.cancel()
+
+    assert time.perf_counter() - started < 1.0
 
 
 def test_llm_raises_clear_error_when_default_is_unavailable(monkeypatch):
