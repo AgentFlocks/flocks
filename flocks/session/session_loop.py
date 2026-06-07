@@ -406,6 +406,30 @@ class SessionLoop:
             except Exception as exc:
                 log.warn("loop.idle.event_error", {"error": str(exc)})
     
+    @classmethod
+    def _create_step_runner(cls, ctx: "LoopContext", runner_cbs: Any) -> Any:
+        """
+        Factory that creates the SessionRunner for one loop step.
+
+        Subclasses (e.g. RaptorSessionLoop) override this to return a different
+        runner implementation while keeping the rest of _run_loop identical.
+        """
+        from flocks.session.runner import SessionRunner
+
+        runner = SessionRunner(
+            session=ctx.session,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
+            agent_name=ctx.agent_name,
+            abort_event=ctx.abort_event,
+            callbacks=runner_cbs,
+            session_ctx=ctx.session_ctx,
+            memory_bootstrap_data=ctx.memory_bootstrap_data,
+            static_cache=ctx.runner_static_cache,
+        )
+        runner._step = ctx.trace_step
+        return runner
+
     @staticmethod
     def _resolve_loop_engine(session: Any) -> str:
         """
@@ -1171,8 +1195,8 @@ class SessionLoop:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
             # Process step - delegate to runner (matching TUI SessionProcessor.process)
-            from flocks.session.runner import SessionRunner, RunnerCallbacks
-            
+            from flocks.session.runner import RunnerCallbacks
+
             # Build runner callbacks from loop callbacks
             runner_cbs = callbacks.runner_callbacks
             if runner_cbs is None:
@@ -1180,20 +1204,8 @@ class SessionLoop:
             # Ensure event_publish_callback is propagated
             if callbacks.event_publish_callback and not runner_cbs.event_publish_callback:
                 runner_cbs.event_publish_callback = callbacks.event_publish_callback
-            
-            runner = SessionRunner(
-                session=ctx.session,
-                provider_id=ctx.provider_id,
-                model_id=ctx.model_id,
-                agent_name=ctx.agent_name,
-                abort_event=ctx.abort_event,
-                callbacks=runner_cbs,
-                session_ctx=ctx.session_ctx,
-                memory_bootstrap_data=ctx.memory_bootstrap_data,
-                static_cache=ctx.runner_static_cache,
-            )
-            # Use session-cumulative step number for observability.
-            runner._step = ctx.trace_step
+
+            runner = cls._create_step_runner(ctx, runner_cbs)
             
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.

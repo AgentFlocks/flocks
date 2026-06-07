@@ -2435,7 +2435,7 @@ class SessionRunner:
         except Exception as e:
             log.debug("runner.sandbox_context_init_failed", {"error": str(e)})
 
-        processor = StreamProcessor(
+        processor = self._make_stream_processor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
             agent=agent,
@@ -2792,7 +2792,11 @@ class SessionRunner:
         })
 
         await tool_accumulator.flush_remaining(stream_finish_reason)
-        
+
+        # Allow subclasses (e.g. RaptorSessionRunner) to execute deferred tool
+        # calls in parallel before we emit TextEndEvent / FinishEvent.
+        await self._after_tools_collected(processor)
+
         # End text block if started
         if text_started:
             await processor.process_event(TextEndEvent())
@@ -2984,6 +2988,25 @@ class SessionRunner:
                 trace_ctx.end(**tr_kwargs)
         except Exception as _tr_err:
             log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
+
+    def _make_stream_processor(self, **kwargs: Any) -> "StreamProcessor":
+        """
+        Factory that instantiates the StreamProcessor for one LLM call.
+
+        Subclasses (e.g. RaptorSessionRunner) override this to return a
+        processor that defers tool execution for later parallel batching.
+        """
+        return StreamProcessor(**kwargs)
+
+    async def _after_tools_collected(self, processor: "StreamProcessor") -> None:
+        """
+        Hook called after all tool-call chunks have been flushed and assembled,
+        but *before* FinishEvent is emitted.
+
+        The base implementation is a no-op (tools were executed inline by
+        StreamProcessor during streaming).  Subclasses that use a deferred
+        processor override this to execute the collected tool calls in parallel.
+        """
 
     async def _handle_permission(self, request) -> None:
         """Handle permission request."""

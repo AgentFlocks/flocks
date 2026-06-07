@@ -1,21 +1,17 @@
 """
-RaptorEngine — Pluggable adapter for hermes-agent via tui_gateway stdio JSON-RPC.
+Raptor loop engine — parallel tool execution engine built into Flocks.
 
-Architecture overview
----------------------
-Raptor reuses hermes-agent's existing ``tui_gateway`` subprocess (entry.py)
-as its execution backend.  One daemon process is kept alive per Flocks session
-(per-session daemon model) so hermes's prompt cache, checkpoints and compression
-work across turns.
+Module layout:
+  engine.py    — RaptorEngine (AgentLoopEngine protocol, auto-registered)
+  loop.py      — RaptorSessionLoop (SessionLoop subclass; replaces only the runner factory)
+  runner.py    — RaptorSessionRunner (SessionRunner subclass; uses the deferred processor)
+  processor.py — RaptorStreamProcessor (StreamProcessor subclass; deferred + parallel execution)
 
-Package contents
-----------------
-protocol.py       — RPC message builders, event-type constants, history helpers
-daemon.py         — Per-session daemon lifecycle (spawn / reuse / teardown)
-agent_bridge.py   — Inject Flocks agent system_message into hermes session
-message_bridge.py — Convert Flocks MessageInfo/Parts ↔ OpenAI messages
-stream_bridge.py  — Map tui_gateway events → Flocks publish_event SSE + turn_state
-engine.py         — RaptorEngine Protocol implementation; registered at startup
+Key capabilities (implemented natively inside Flocks):
+  - Parallel execution of multiple tool calls from a single LLM response (asyncio.gather, up to 8)
+  - Path-conflict detection: tools that write to the same file are automatically serialised
+  - Full turn_state SSE semantics and queued-message continuation (design §3.2)
+  - Flocks agent identity preserved (system prompt / tool whitelist / skill constraints all active)
 """
 
 from .engine import RaptorEngine

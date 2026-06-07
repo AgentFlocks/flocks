@@ -63,6 +63,7 @@ class LaunchInput:
     category: Optional[str] = None
     directory: Optional[str] = None
     project_id: Optional[str] = None
+    session_metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -379,6 +380,8 @@ class BackgroundManager:
                     agent=input_data.agent,
                     category=input_data.category or "task",
                 )
+                if input_data.session_metadata:
+                    create_kwargs["metadata"] = input_data.session_metadata
                 if persist_model:
                     create_kwargs.update(
                         model=launch_model_id,

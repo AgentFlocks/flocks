@@ -31,6 +31,7 @@ class UserInputEvent(BaseModel):
     mock_reply: Optional[str] = Field(None, alias="mockReply")
     system: Optional[str] = None
     tools: Optional[Dict[str, bool]] = None
+    loop_engine: Optional[str] = None
 
     @property
     def surface(self) -> str:

@@ -2980,6 +2980,7 @@ def _event_from_queued_prompt(item, working_directory: str):
         mockReply=item.mockReply,
         tools=item.tools,
         system=item.system,
+        loop_engine=getattr(item, "loop_engine", None),
         working_directory=working_directory,
     )
 
@@ -3097,6 +3098,11 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
         noReply=event.no_reply,
         tools=event.tools,
         system=event.system,
+        # loop_engine is already persisted to session.metadata by
+        # send_session_message_async before the event is dispatched; carry it
+        # here as well so _process_session_message's guard check is a no-op
+        # (it only writes when the value changes).
+        loop_engine=getattr(event, "loop_engine", None),
     )
 
 
@@ -3273,6 +3279,7 @@ async def _enqueue_prompt_request(
         mock_reply=request.mockReply,
         tools=request.tools,
         system=request.system,
+        loop_engine=getattr(request, "loop_engine", None),
     )
 
 
@@ -3408,6 +3415,7 @@ async def send_session_message_async(
     from flocks.input.events import UserInputEvent
     from flocks.session.interaction_queue import InteractionQueue, QueueFullError
     from flocks.session.session_loop import SessionLoop
+    from flocks.session.session import Session
 
     session = await _get_session_by_id_unfiltered(sessionID)
     if not session:
@@ -3425,6 +3433,25 @@ async def send_session_message_async(
         "directory": working_directory,
     })
 
+    # Persist loop_engine selection to session metadata so
+    # SessionLoop._resolve_loop_engine() picks it up for this and all
+    # subsequent turns — same logic as in _process_session_message (§7.2).
+    if request.loop_engine:
+        _new_engine = request.loop_engine
+        _current_engine = (session.metadata or {}).get("loop_engine")
+        if _current_engine != _new_engine:
+            session.metadata = dict(session.metadata or {})
+            session.metadata["loop_engine"] = _new_engine
+            _updated = await Session.update(
+                session.project_id, sessionID, metadata=session.metadata
+            )
+            if _updated is not None:
+                session = _updated
+            log.info("session.loop_engine.set", {
+                "sessionID": sessionID,
+                "loop_engine": _new_engine,
+            })
+
     event = UserInputEvent(
         source_type="webui",
         sessionID=sessionID,
@@ -3440,6 +3467,7 @@ async def send_session_message_async(
         tools=request.tools,
         system=request.system,
         working_directory=working_directory,
+        loop_engine=request.loop_engine,
     )
 
     existing_queue = await InteractionQueue.list(sessionID)

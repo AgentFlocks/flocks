@@ -18,6 +18,11 @@ from flocks.tool.delegate_task_constants import (
     DEFAULT_CATEGORIES,
     CATEGORY_PROMPT_APPENDS,
     CATEGORY_DESCRIPTIONS,
+    DELEGATE_DEPTH_KEY,
+    DELEGATE_ROLE_KEY,
+    DELEGATE_ROLE_LEAF,
+    DELEGATE_ROLE_ORCHESTRATOR,
+    DELEGATE_MAX_SPAWN_DEPTH_DEFAULT,
 )
 from flocks.task.background import get_background_manager, LaunchInput, ResumeInput
 from flocks.session.session import Session
@@ -31,6 +36,96 @@ from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.delegate_task")
+
+
+def _normalize_delegate_role(role: Optional[str]) -> str:
+    """Coerce caller-supplied role to 'leaf' or 'orchestrator'. Unknown becomes 'leaf'."""
+    if not role:
+        return DELEGATE_ROLE_LEAF
+    r = role.strip().lower()
+    if r == DELEGATE_ROLE_ORCHESTRATOR:
+        return DELEGATE_ROLE_ORCHESTRATOR
+    if r != DELEGATE_ROLE_LEAF:
+        log.warn("delegate_task.unknown_role", {"role": role, "coerced_to": DELEGATE_ROLE_LEAF})
+    return DELEGATE_ROLE_LEAF
+
+
+async def _get_max_spawn_depth() -> int:
+    """Read delegation.max_spawn_depth from config, floor at 1."""
+    try:
+        cfg = await Config.get()
+        delegation_cfg = getattr(cfg, "delegation", None) or {}
+        if isinstance(delegation_cfg, dict):
+            val = delegation_cfg.get(
+                "max_spawn_depth",
+                delegation_cfg.get("maxSpawnDepth", DELEGATE_MAX_SPAWN_DEPTH_DEFAULT),
+            )
+        else:
+            val = getattr(
+                delegation_cfg,
+                "max_spawn_depth",
+                getattr(delegation_cfg, "maxSpawnDepth", DELEGATE_MAX_SPAWN_DEPTH_DEFAULT),
+            )
+        depth = int(val)
+        return max(depth, 1)
+    except Exception:
+        return DELEGATE_MAX_SPAWN_DEPTH_DEFAULT
+
+
+def _build_delegation_context(
+    effective_role: str,
+    child_depth: int,
+    max_spawn_depth: int,
+) -> str:
+    """
+    Build a delegation-awareness block injected into the child session's prompt.
+
+    For leaf agents: a brief notice that delegation is disabled.
+    For orchestrator agents: guidance on when/how to spawn sub-agents, plus
+    an accurate depth note so the LLM doesn't confabulate capabilities.
+    """
+    if effective_role == DELEGATE_ROLE_LEAF:
+        return (
+            "\n## Delegation Scope\n"
+            "You are a **leaf** sub-agent. You CANNOT use `delegate_task` to spawn "
+            "further sub-agents. Complete this task directly with the tools available."
+        )
+
+    # orchestrator branch
+    at_depth_floor = child_depth + 1 >= max_spawn_depth
+    if at_depth_floor:
+        child_note = (
+            "Your own children MUST be leaves (cannot delegate further) "
+            "because they would be at the depth floor. "
+            "Do NOT pass role='orchestrator' to your own delegate_task calls."
+        )
+    else:
+        child_note = (
+            "Your own children can be orchestrators or leaves depending on the "
+            "`role` you pass to delegate_task. Default is 'leaf'; pass "
+            "role='orchestrator' explicitly only when a child needs to further "
+            "decompose its work."
+        )
+
+    return (
+        "\n## Subagent Spawning (Orchestrator Role)\n"
+        "You have access to `delegate_task` and CAN spawn sub-agents to "
+        "parallelise independent work.\n\n"
+        "WHEN to delegate:\n"
+        "- The goal decomposes into 2+ independent subtasks that can run in "
+        "parallel.\n"
+        "- A subtask is reasoning-heavy and would flood your context with "
+        "intermediate data.\n\n"
+        "WHEN NOT to delegate:\n"
+        "- Single-step mechanical work. Do it directly.\n"
+        "- Trivial tasks executable in one or two tool calls.\n"
+        "- Re-delegating your entire goal to one worker (pass-through, no value "
+        "added).\n\n"
+        "Coordinate your workers' results and synthesise them before reporting "
+        "back to your parent. You are responsible for the final summary.\n\n"
+        f"NOTE: You are at depth {child_depth}. The delegation tree is capped at "
+        f"max_spawn_depth={max_spawn_depth}. {child_note}"
+    )
 
 
 async def _subagent_session_permissions(agent_name: str) -> list:
@@ -301,6 +396,18 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
             description="Optional command name for tracking",
             required=False,
         ),
+        ToolParameter(
+            name="role",
+            type=ParameterType.STRING,
+            description=(
+                "Optional. 'leaf' (default) or 'orchestrator'. "
+                "leaf: the child agent cannot further delegate. "
+                "orchestrator: the child retains delegation capability and may "
+                "spawn its own sub-agents, subject to the depth cap."
+            ),
+            required=False,
+            enum=[DELEGATE_ROLE_LEAF, DELEGATE_ROLE_ORCHESTRATOR],
+        ),
     ],
 )
 async def delegate_task_tool(
@@ -313,9 +420,68 @@ async def delegate_task_tool(
     subagent_type: Optional[str] = None,
     session_id: Optional[str] = None,
     command: Optional[str] = None,
+    role: Optional[str] = None,
 ) -> ToolResult:
     if run_in_background is None:
         run_in_background = False
+
+    # Read the calling session's delegation metadata once (reused by the leaf
+    # guard, the depth guard, and child-depth computation below).
+    current_session = await Session.get_by_id(ctx.session_id)
+    current_meta = current_session.metadata if (current_session and isinstance(current_session.metadata, dict)) else {}
+    parent_depth = int(current_meta.get(DELEGATE_DEPTH_KEY, 0))
+
+    # Leaf guard
+    # A session explicitly created as a "leaf" delegate cannot spawn sub-agents,
+    # regardless of whether the depth cap has been reached.
+    if (
+        current_meta.get(DELEGATE_ROLE_KEY, DELEGATE_ROLE_LEAF) == DELEGATE_ROLE_LEAF
+        and current_meta.get(DELEGATE_DEPTH_KEY) is not None
+    ):
+        return ToolResult(
+            success=False,
+            error=(
+                "This agent was created as a leaf delegate and cannot further "
+                "delegate to sub-agents. Use role='orchestrator' on the parent "
+                "delegate_task call to enable nested delegation."
+            ),
+        )
+
+    # Depth guard
+    max_spawn = await _get_max_spawn_depth()
+    if parent_depth >= max_spawn:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Delegation depth limit reached (current depth={parent_depth}, "
+                f"max_spawn_depth={max_spawn}). Raise delegation.max_spawn_depth "
+                f"in config if deeper nesting is required."
+            ),
+        )
+
+    # Role resolution
+    # "orchestrator" is only honoured when the child's depth will still be below
+    # the spawn cap; otherwise the child cannot spawn anyway, so leaf is correct.
+    child_depth = parent_depth + 1
+    requested_role = _normalize_delegate_role(role)
+    effective_role = (
+        DELEGATE_ROLE_ORCHESTRATOR
+        if requested_role == DELEGATE_ROLE_ORCHESTRATOR and child_depth < max_spawn
+        else DELEGATE_ROLE_LEAF
+    )
+    child_metadata: Dict[str, Any] = {
+        DELEGATE_DEPTH_KEY: child_depth,
+        DELEGATE_ROLE_KEY: effective_role,
+    }
+
+    log.info("delegate_task.depth_check", {
+        "session_id": ctx.session_id,
+        "parent_depth": parent_depth,
+        "child_depth": child_depth,
+        "max_spawn_depth": max_spawn,
+        "requested_role": requested_role,
+        "effective_role": effective_role,
+    })
     load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
     description = _derive_task_description(description, prompt, subagent_type, category, session_id)
     if category and subagent_type:
@@ -440,6 +606,16 @@ async def delegate_task_tool(
         system_parts.append(skill_result["content"])
     if category_prompt_append:
         system_parts.append(category_prompt_append)
+
+    # Inject delegation-awareness context so the LLM understands its role and depth.
+    delegation_ctx = _build_delegation_context(
+        effective_role=effective_role,
+        child_depth=child_depth,
+        max_spawn_depth=max_spawn,
+    )
+    if delegation_ctx:
+        system_parts.append(delegation_ctx)
+
     system_content = "\n\n".join(system_parts) if system_parts else ""
     full_prompt = f"{system_content}\n\n{prompt}" if system_content else prompt
 
@@ -456,6 +632,7 @@ async def delegate_task_tool(
                 model=category_model,
                 model_pinned=False,
                 category=category,
+                session_metadata=child_metadata,
             )
         )
         ctx.metadata({"title": description, "metadata": {"sessionId": task.session_id}})
@@ -482,6 +659,7 @@ async def delegate_task_tool(
         agent=agent_to_use,
         permission=await _subagent_session_permissions(agent_to_use),
         category="task",
+        metadata=child_metadata,
     )
     await Message.create(
         session_id=created.id,

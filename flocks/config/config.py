@@ -526,6 +526,23 @@ class ChannelConfig(BaseModel):
         return default
 
 
+# ==================== Delegation Configuration ====================
+
+class DelegationConfig(BaseModel):
+    """Configuration for delegated sub-agent spawning."""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    max_spawn_depth: int = Field(
+        1,
+        alias="maxSpawnDepth",
+        ge=1,
+        description=(
+            "Maximum delegation spawn depth. Depth 0 is the root session; "
+            "agents at depths below this value may spawn child sessions."
+        ),
+    )
+
+
 # ==================== Main Configuration ====================
 
 class ConfigInfo(BaseModel):
@@ -566,6 +583,7 @@ class ConfigInfo(BaseModel):
     agent: Optional[Dict[str, AgentConfig]] = None
     provider: Optional[Dict[str, ProviderConfig]] = None
     categories: Optional[Dict[str, CategoryConfig]] = None
+    delegation: Optional[DelegationConfig] = None
     mcp: Optional[Dict[str, Union[McpConfig, Dict[str, Any]]]] = None
     formatter: Optional[Union[Literal[False], Dict[str, Any]]] = None
     lsp: Optional[Union[Literal[False], Dict[str, Any]]] = None

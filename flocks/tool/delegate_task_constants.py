@@ -224,3 +224,29 @@ CATEGORY_DESCRIPTIONS = {
     "unspecified-high": "Tasks that don't fit other categories, high effort required",
     "writing": "Documentation, prose, technical writing",
 }
+
+# ---------------------------------------------------------------------------
+# Delegation depth and role constants
+# ---------------------------------------------------------------------------
+
+# Session.metadata key storing this session's delegation depth.
+# Root sessions (created by users) have no entry (treated as depth 0).
+# Each child session increments by 1.
+DELEGATE_DEPTH_KEY = "_delegate_depth"
+
+# Session.metadata key storing this session's delegation role.
+# "leaf" (default): cannot further delegate.
+# "orchestrator": may delegate, subject to depth cap.
+DELEGATE_ROLE_KEY = "_delegate_role"
+
+DELEGATE_ROLE_LEAF = "leaf"
+DELEGATE_ROLE_ORCHESTRATOR = "orchestrator"
+
+# Default maximum spawn depth.
+# depth 0 = root agent.  max_spawn_depth = N means agents at depths
+# 0..N-1 can spawn; agents at depth N are the leaf floor.
+# Default 1 = flat: parent (depth 0) spawns children (depth 1);
+# children cannot spawn grandchildren unless max_spawn_depth is raised
+# or the child was created with role="orchestrator" and the parent's
+# depth still permits it.
+DELEGATE_MAX_SPAWN_DEPTH_DEFAULT = 1
