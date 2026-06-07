@@ -261,6 +261,47 @@ class TestShapeRegistry:
         missing = expected - actual
         assert not missing, f"missing thinking shape for: {sorted(missing)}"
 
+    def test_deepseek_v3_is_not_a_thinking_model(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``deepseek-chat`` (V3) has no ``interleaved`` capability in the
+        catalog and must not receive ``enable_thinking`` on the wire.
+
+        This is the regression net for the prior
+        ``_deepseek_thinking_shape`` model-name branching.  Catalog is now
+        the only source of truth: V3 stays non-thinking because the catalog
+        says so, not because the dispatcher strips it.  If a future catalog
+        change adds ``interleaved`` to V3, this test should be removed and
+        the model will then exercise the regular positive path.
+        """
+        # Sanity-check the assumption: catalog must not declare V3 as interleaved.
+        catalog = model_catalog.get_raw_catalog()
+        deepseek_models = catalog.get("deepseek", {}).get("models", {})
+        v3_models = {
+            mid: m for mid, m in deepseek_models.items()
+            if m.get("family", "").startswith("deepseek-v3")
+        }
+        assert v3_models, "expected at least one deepseek-v3 family model in catalog"
+        for mid, m in v3_models.items():
+            assert m.get("capabilities", {}).get("interleaved") is None, (
+                f"deepseek/{mid} now declares interleaved — remove this test "
+                "and let the catalog coverage test exercise it instead"
+            )
+
+        # Dispatcher must produce no enable_thinking flag for a V3 model.
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args, **_kw: None,  # V3 has no interleaved in catalog
+        )
+        options = provider_options.build_provider_options(
+            "deepseek", "deepseek-chat", resolve_max_tokens=False,
+        )
+        assert "extra_body" not in options or not options["extra_body"].get(
+            "enable_thinking"
+        ), (
+            f"deepseek-chat is V3 (non-thinking in catalog) but dispatcher "
+            f"emitted enable_thinking — catalog gate is broken. options={options!r}"
+        )
+
     def test_explicit_reasoning_toggle_propagates(self) -> None:
         """``reasoning_enabled=False`` should produce ``enable_thinking: false``
         on a shaped provider, mirroring the old token-matching branch's

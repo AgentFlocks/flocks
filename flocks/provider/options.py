@@ -49,34 +49,18 @@ def _openai_base_thinking_shape(
     """Standard OpenAI-compat-with-thinking shape: ``extra_body.enable_thinking``.
 
     Used by Alibaba DashScope, ThreatBook (cn + io), Moonshot/Kimi, Zhipu/GLM,
-    MiniMax, and Stepfun — every OpenAI-compatible endpoint that exposes
-    thinking as a single boolean in extra_body.  When the user disables
+    MiniMax, Stepfun, and DeepSeek — every OpenAI-compatible endpoint that
+    exposes thinking as a single boolean in extra_body.  When the user disables
     reasoning (``reasoning_enabled=False``) the value mirrors that toggle so
     users can override per-model via flocks.json.
+
+    This shape is unconditional on the model name: the gate is the catalog's
+    ``interleaved`` capability, not the model id.  If ``deepseek-chat`` (V3)
+    is non-thinking, the catalog should not declare it as interleaved — and
+    indeed it does not (only ``deepseek-reasoner`` does).  Re-introducing a
+    model-name branch here would re-create the exact fragility the
+    catalog-driven dispatch was meant to eliminate.
     """
-    return {"enable_thinking": True if reasoning_enabled is not False else False}
-
-
-def _deepseek_thinking_shape(
-    model_id: str, reasoning_enabled: Optional[bool]
-) -> Dict[str, Any]:
-    """DeepSeek shape.
-
-    The V3 family (``deepseek-chat``, ``deepseek-v3-*``) is non-thinking — the
-    API doesn't accept or return ``reasoning_content``, so we leave the wire
-    format untouched.  V4+ and the legacy ``deepseek-reasoner`` (R1) are
-    thinking-capable and accept ``enable_thinking: true`` on Flocks' current
-    DashScope-style transport.  This matches the existing
-    test_kimi_*_enable_thinking_by_default assertions, which exercise the
-    same code path.  If DeepSeek V4 ever diverges to the Anthropic-style
-    ``thinking: {type: "enabled"}`` shape, only this function needs to
-    change.
-    """
-    m = (model_id or "").strip().lower()
-    if m == "deepseek-chat":
-        return {}
-    if m.startswith("deepseek-v3"):
-        return {}
     return {"enable_thinking": True if reasoning_enabled is not False else False}
 
 
@@ -90,7 +74,7 @@ _THINKING_REQUEST_SHAPES: Dict[
     "minimax": _openai_base_thinking_shape,
     "stepfun": _openai_base_thinking_shape,
     "moonshot": _openai_base_thinking_shape,
-    "deepseek": _deepseek_thinking_shape,
+    "deepseek": _openai_base_thinking_shape,
     # Generic openai-compatible user-configured endpoint.  When the model in
     # the catalog declares ``interleaved``, this emits the same enable_thinking
     # flag (DashScope / Moonshot style).  Endpoints that don't accept it will
