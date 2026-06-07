@@ -182,19 +182,24 @@ class OpenAICompatibleProvider(BaseProvider):
         max_tokens = kwargs.get("max_tokens")
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
-        
+
         # Make request
         request_params = {
             "model": model_id,
             "messages": formatted_messages,
         }
 
+        # See the streaming chat_stream() counterpart for the rationale; the
+        # non-streaming path had the same extra_body-swallow bug.
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            request_params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 request_params["temperature"] = temperature
+        if extra_body:
+            request_params["extra_body"] = extra_body
         
         if max_tokens:
             request_params["max_tokens"] = max_tokens
@@ -242,7 +247,7 @@ class OpenAICompatibleProvider(BaseProvider):
         max_tokens = kwargs.get("max_tokens")
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
-        
+
         # Make streaming request
         request_params = {
             "model": model_id,
@@ -251,12 +256,23 @@ class OpenAICompatibleProvider(BaseProvider):
             "stream_options": {"include_usage": True},
         }
 
+        # extra_body assembly: mirror openai_base.py:905-913.  Caller-supplied
+        # extra_body (e.g. ``enable_thinking`` produced by
+        # ``build_provider_options`` for DashScope-style endpoints) MUST be
+        # forwarded — the old code dropped it whenever ``thinking`` was None,
+        # silently disabling thinking for user-configured openai-compatible
+        # endpoints that set ``default_parameters.enable_thinking`` in
+        # flocks.json.  ``thinking`` is merged in last so it can override a
+        # caller-supplied extra_body.thinking if both are set.
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            request_params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 request_params["temperature"] = temperature
+        if extra_body:
+            request_params["extra_body"] = extra_body
         
         if max_tokens:
             request_params["max_tokens"] = max_tokens
