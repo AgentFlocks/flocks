@@ -160,6 +160,7 @@
   "showLess": "Show less",
   "enginePicker": {
     "label": "Agent Engine",
-    "hint": "Switch inference engine; takes effect on next send"
+    "hint": "Switch Agent engine; takes effect on next send",
+    "saveFailed": "Failed to save engine selection"
   }
 }

@@ -163,26 +163,26 @@ const STATUS_STYLE: Record<string, {
     badgeBg: 'bg-gray-100 text-gray-600',
   },
   running: {
-    barColor: 'bg-sky-500',
-    bgColor: 'bg-sky-50/60',
-    borderColor: 'border-sky-200',
-    textColor: 'text-sky-700',
-    badgeBg: 'bg-sky-100 text-sky-700',
+    barColor: 'bg-slate-400',
+    bgColor: 'bg-slate-50/60',
+    borderColor: 'border-slate-200',
+    textColor: 'text-slate-600',
+    badgeBg: 'bg-sky-50 text-sky-600',
     pulse: true,
   },
   completed: {
-    barColor: 'bg-emerald-500',
-    bgColor: 'bg-emerald-50/50',
-    borderColor: 'border-emerald-200',
-    textColor: 'text-emerald-700',
-    badgeBg: 'bg-emerald-100 text-emerald-700',
+    barColor: 'bg-zinc-300',
+    bgColor: 'bg-white',
+    borderColor: 'border-zinc-200',
+    textColor: 'text-zinc-600',
+    badgeBg: 'bg-green-50 text-green-600',
   },
   error: {
-    barColor: 'bg-red-500',
-    bgColor: 'bg-red-50/50',
+    barColor: 'bg-red-400',
+    bgColor: 'bg-red-50/40',
     borderColor: 'border-red-200',
-    textColor: 'text-red-700',
-    badgeBg: 'bg-red-100 text-red-700',
+    textColor: 'text-red-600',
+    badgeBg: 'bg-red-50 text-red-500',
   },
 };
 
@@ -240,36 +240,40 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
         {/* Color accent bar */}
         <div className={`h-0.5 ${cfg.barColor} ${cfg.pulse ? 'animate-pulse' : ''}`} />
 
-        <div className="px-3 py-2.5">
-          {/* Header row */}
-          <div className="flex items-center gap-2">
+        <div className="pl-3 pr-2.5 py-2">
+          {/* Header row — flat single-line, same structure as tool rows */}
+          <div className="flex items-center gap-2 min-w-0">
             {/* Agent avatar */}
-            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gradient-to-br from-violet-500 to-red-500 text-white text-[10px] font-bold flex-shrink-0 shadow-sm">
+            <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-gradient-to-br from-violet-500 to-red-500 text-white text-[9px] font-bold flex-shrink-0">
               {info.agentName.charAt(0)}
             </span>
 
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs font-semibold text-gray-800 truncate">
-                  {info.agentName}
-                </span>
-                {info.isBackground && (
-                  <span className="text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-600 font-medium leading-none">
-                    {t('delegate.background')}
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-gray-500 truncate mt-0.5">{info.description}</p>
-            </div>
-
-            {/* Status badge */}
-            <span className={`flex-shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded-full leading-none ${cfg.badgeBg}`}>
-              {cfg.pulse && (
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse mr-1 align-middle" />
-              )}
-              {t(`delegate.${info.status}`, { defaultValue: info.status })}
+            <span className="text-xs font-semibold text-gray-800 truncate">
+              {info.agentName}
             </span>
+            {info.isBackground && (
+              <span className="text-[9px] px-1 py-0.5 rounded bg-violet-100 text-violet-600 font-medium leading-none flex-shrink-0">
+                {t('delegate.background')}
+              </span>
+            )}
+
+            {/* Status badge — ml-auto mirrors tool row layout */}
+            <div className="ml-auto flex items-center gap-1.5 flex-shrink-0">
+              <span className={`text-[11px] font-medium px-1.5 py-0.5 rounded-md ${cfg.badgeBg}`}>
+                {cfg.pulse && (
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse mr-1 align-middle" />
+                )}
+                {t(`delegate.${info.status}`, { defaultValue: info.status })}
+              </span>
+              {/* w-3 spacer matches the ChevronDown in tool rows so badge text stays on same column */}
+              <span className="w-3 flex-shrink-0" />
+            </div>
           </div>
+
+          {/* Description — secondary line */}
+          {info.description && (
+            <p className="text-[11px] text-gray-500 truncate mt-0.5 pl-7">{info.description}</p>
+          )}
 
           {/* Duration */}
           {elapsed !== null && elapsed > 0 && (
@@ -287,10 +291,10 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
                 <div key={i} className="flex items-center gap-1.5 text-[11px] leading-snug">
                   <span className={
                     step.status === 'completed'
-                      ? 'text-emerald-500'
+                      ? 'text-zinc-400'
                       : step.status === 'error'
                         ? 'text-red-500'
-                        : 'text-sky-400 animate-pulse'
+                        : 'text-slate-400 animate-pulse'
                   }>
                     {step.status === 'completed' ? '✓' : step.status === 'error' ? '✗' : '◌'}
                   </span>
@@ -334,7 +338,7 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
             disabled={!info.childSessionId}
             className={`mt-2 flex items-center gap-1 text-[11px] font-medium transition-colors group ${
               info.childSessionId
-                ? 'text-red-600 hover:text-red-800 cursor-pointer'
+                ? 'text-zinc-500 hover:text-zinc-800 cursor-pointer'
                 : 'text-gray-400 cursor-not-allowed'
             }`}
           >

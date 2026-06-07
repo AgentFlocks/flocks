@@ -95,7 +95,7 @@ export default function SessionPage() {
   const renameSubmitInFlightRef = useRef(false);
   const toast = useToast();
 
-  const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
+  const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, updateSessionMetadata, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
   const { engines: loopEngines } = useLoopEngines();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary'), [agents]);
@@ -241,7 +241,27 @@ export default function SessionPage() {
     const engineFromMeta = (selectedSession?.metadata?.loop_engine as string | undefined) ?? 'native';
     setSelectedLoopEngine(engineFromMeta);
     setShowEngineOptions(false);
-  }, [selectedSessionId]);
+  }, [selectedSessionId, selectedSession?.metadata?.loop_engine]);
+
+  const handleLoopEngineSelect = useCallback(async (engineId: string) => {
+    const previousEngine = selectedLoopEngine;
+    setSelectedLoopEngine(engineId);
+    setShowEngineOptions(false);
+
+    if (!selectedSessionId) return;
+
+    updateSessionMetadata(selectedSessionId, { loop_engine: engineId });
+    try {
+      await sessionApi.update(selectedSessionId, { loopEngine: engineId });
+    } catch (err: any) {
+      setSelectedLoopEngine(previousEngine);
+      updateSessionMetadata(selectedSessionId, { loop_engine: previousEngine });
+      toast.error(
+        t('enginePicker.saveFailed', '保存引擎选择失败'),
+        err?.response?.data?.detail || err?.message || t('errors.unknown', '未知错误'),
+      );
+    }
+  }, [selectedLoopEngine, selectedSessionId, t, toast, updateSessionMetadata]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -872,7 +892,7 @@ export default function SessionPage() {
                     <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showEngineOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showEngineOptions && (
-                    <div className="absolute left-0 bottom-full mb-2 w-56 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                    <div className="absolute left-0 bottom-full mb-2 w-56 bg-white border border-zinc-200 rounded-xl shadow-lg z-50">
                       <div className="border-b border-zinc-100 px-3 py-2">
                         <div className="text-xs font-semibold text-zinc-700">{t('enginePicker.label')}</div>
                         <div className="text-[11px] text-zinc-400">{t('enginePicker.hint')}</div>
@@ -881,7 +901,7 @@ export default function SessionPage() {
                         {loopEngines.map((engine) => (
                           <div key={engine.id} className="relative group">
                             <button
-                              onClick={() => { setSelectedLoopEngine(engine.id); setShowEngineOptions(false); }}
+                              onClick={() => { void handleLoopEngineSelect(engine.id); }}
                               className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
                                 selectedLoopEngine === engine.id
                                   ? 'bg-zinc-100 text-zinc-900'
@@ -902,10 +922,10 @@ export default function SessionPage() {
                             {/* Hover tooltip — floats to the right */}
                             {engine.description && (
                               <div className="pointer-events-none absolute left-full top-0 ml-2 z-50 hidden group-hover:block w-52">
-                                <div className="bg-zinc-800 text-white text-[11px] leading-relaxed rounded-lg px-3 py-2 shadow-xl">
-                                  <div className="font-semibold mb-0.5">{engine.name}</div>
+                                <div className="bg-white border border-zinc-200 text-zinc-700 text-[11px] leading-relaxed rounded-lg px-3 py-2 shadow-md">
+                                  <div className="font-semibold mb-0.5 text-zinc-800">{engine.name}</div>
                                   {engine.description}
-                                  <div className="absolute right-full top-3 border-4 border-transparent border-r-zinc-800" />
+                                  <div className="absolute right-full top-3 border-4 border-transparent border-r-zinc-200" />
                                 </div>
                               </div>
                             )}

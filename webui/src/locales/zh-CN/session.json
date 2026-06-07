@@ -160,6 +160,7 @@
   "showLess": "收起",
   "enginePicker": {
     "label": "Agent 引擎",
-    "hint": "切换底层推理引擎；下次发送即生效"
+    "hint": "切换底层 Agent 引擎；下次发送即生效",
+    "saveFailed": "保存引擎选择失败"
   }
 }

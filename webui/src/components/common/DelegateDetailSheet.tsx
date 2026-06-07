@@ -29,10 +29,10 @@ export interface DelegateDetailSheetProps {
 // ---------------------------------------------------------------------------
 
 const STATUS_DOT: Record<string, string> = {
-  pending:   'bg-gray-400',
-  running:   'bg-sky-500 animate-pulse',
-  completed: 'bg-emerald-500',
-  error:     'bg-red-500',
+  pending:   'bg-gray-300',
+  running:   'bg-slate-400 animate-pulse',
+  completed: 'bg-zinc-400',
+  error:     'bg-red-400',
 };
 
 // ---------------------------------------------------------------------------

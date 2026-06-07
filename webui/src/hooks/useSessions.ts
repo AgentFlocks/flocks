@@ -170,6 +170,16 @@ export function useSessions() {
     );
   }, []);
 
+  const updateSessionMetadata = useCallback((sessionId: string, metadata: Record<string, any>) => {
+    setSessions(prev =>
+      prev.map(session =>
+        session.id === sessionId
+          ? { ...session, metadata: { ...(session.metadata ?? {}), ...metadata } }
+          : session,
+      )
+    );
+  }, []);
+
   useEffect(() => {
     fetchSessions();
   }, []);
@@ -197,6 +207,7 @@ export function useSessions() {
     error,
     refetch: fetchSessions,
     updateSessionTitle,
+    updateSessionMetadata,
     removeSession,
     removeSessions,
     addSession,

@@ -85,7 +85,7 @@ export const sessionApi = {
   /**
    * 更新会话
    */
-  update: async (sessionId: string, data: { title?: string }) => {
+  update: async (sessionId: string, data: { title?: string; loopEngine?: string }) => {
     const response = await client.patch(`/api/session/${sessionId}`, data);
     return response.data;
   },

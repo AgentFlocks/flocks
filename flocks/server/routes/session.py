@@ -120,6 +120,7 @@ class SessionResponse(BaseModel):
     canWrite: bool = Field(False, description="Whether current user can continue this session")
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     isShared: bool = Field(False, description="Whether this session is locally shared")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Session metadata (e.g. loop_engine)")
 
 
 def _session_to_response(session: SessionModel) -> SessionResponse:
@@ -157,6 +158,7 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         canWrite=can_write,
         canDelete=can_delete,
         isShared=is_shared,
+        metadata=dict(session.metadata) if isinstance(session.metadata, dict) else None,
     )
 
 
@@ -569,6 +571,7 @@ class SessionUpdateRequest(BaseModel):
     
     title: Optional[str] = Field(None, description="New title")
     time: Optional[Dict[str, Any]] = Field(None, description="Time updates (archived)")
+    loop_engine: Optional[str] = Field(None, alias="loopEngine", description="Selected loop engine for this session")
 
 
 @router.patch(
@@ -598,6 +601,10 @@ async def update_session(
         updates["title"] = request.title
     if request.time and request.time.get("archived") is not None:
         updates["archived"] = request.time["archived"]
+    if request.loop_engine is not None:
+        metadata = dict(existing.metadata) if isinstance(existing.metadata, dict) else {}
+        metadata["loop_engine"] = request.loop_engine
+        updates["metadata"] = metadata
     
     session = await Session.update(
         project_id=existing.project_id,

@@ -15,8 +15,8 @@ const ENGINE_I18N: Record<string, { en: { name: string; desc: string }; zh: { na
     zh: { name: 'Native', desc: 'Flocks 原生异步循环，多会话并发优先，低延迟' },
   },
   raptor: {
-    en: { name: 'Raptor', desc: 'Hermes high-performance loop — parallel tool execution, context compaction, cross-turn prompt cache' },
-    zh: { name: 'Raptor', desc: 'Hermes 高性能循环，并行工具调用、上下文压缩，跨轮 Prompt Cache' },
+    en: { name: 'Raptor', desc: 'High-performance loop · parallel tool calls · parallel sub-agent execution · cross-turn prompt cache' },
+    zh: { name: 'Raptor', desc: '高性能循环 · 并行工具调用 · 并行子 Agent 执行 · 跨轮 Prompt Cache' },
   },
 };
 
