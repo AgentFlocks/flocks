@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import client from '@/api/client';
 
 export interface LoopEngine {
@@ -7,14 +8,37 @@ export interface LoopEngine {
   description?: string;
 }
 
+/** i18n overrides for well-known engine IDs (name + description). */
+const ENGINE_I18N: Record<string, { en: { name: string; desc: string }; zh: { name: string; desc: string } }> = {
+  native: {
+    en: { name: 'Native', desc: 'Flocks native async loop — multi-session concurrency, minimal overhead' },
+    zh: { name: 'Native', desc: 'Flocks 原生异步循环，多会话并发优先，低延迟' },
+  },
+  raptor: {
+    en: { name: 'Raptor', desc: 'Hermes high-performance loop — parallel tool execution, context compaction, cross-turn prompt cache' },
+    zh: { name: 'Raptor', desc: 'Hermes 高性能循环，并行工具调用、上下文压缩，跨轮 Prompt Cache' },
+  },
+};
+
+function localizeEngine(engine: LoopEngine, lang: string): LoopEngine {
+  const override = ENGINE_I18N[engine.id];
+  if (!override) return engine;
+  const locale = lang.startsWith('zh') ? 'zh' : 'en';
+  return {
+    ...engine,
+    name: override[locale].name,
+    description: override[locale].desc,
+  };
+}
+
 /**
  * Fetch available agent loop engines from GET /api/engine/list.
- *
- * The list always contains at least the built-in "native" engine.
- * Additional engines (e.g. "raptor") appear when the server-side adapter
- * is registered (i.e. hermes-agent is available).
+ * Names and descriptions are localized using built-in i18n overrides for
+ * well-known engine IDs (native, raptor). Unknown engines fall back to the
+ * server-provided strings.
  */
 export function useLoopEngines() {
+  const { i18n } = useTranslation();
   const [engines, setEngines] = useState<LoopEngine[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -24,14 +48,13 @@ export function useLoopEngines() {
       .get<LoopEngine[]>('/api/engine/list')
       .then((res) => {
         if (!cancelled) {
-          setEngines(Array.isArray(res.data) ? res.data : []);
+          const raw = Array.isArray(res.data) ? res.data : [];
+          setEngines(raw.map((e) => localizeEngine(e, i18n.language)));
         }
       })
       .catch(() => {
-        // If the endpoint is unavailable (old server build), fall back to
-        // showing only the native engine so the UI still works.
         if (!cancelled) {
-          setEngines([{ id: 'native', name: 'Flocks Native', description: '' }]);
+          setEngines([localizeEngine({ id: 'native', name: 'Native', description: '' }, i18n.language)]);
         }
       })
       .finally(() => {
@@ -40,7 +63,7 @@ export function useLoopEngines() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [i18n.language]);
 
   return { engines, loading };
 }

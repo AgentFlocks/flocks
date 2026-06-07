@@ -77,6 +77,7 @@ export const agentAPI = {
     delegatable?: boolean;
     skills?: string[];
     tools?: string[];
+    defaultLoopEngine?: string | null;
   }) =>
     client.put<Agent>(`/api/agent/${name}`, data),
 

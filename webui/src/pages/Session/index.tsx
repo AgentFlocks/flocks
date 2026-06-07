@@ -76,7 +76,6 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedLoopEngine, setSelectedLoopEngine] = useState('native');
   const [showEngineOptions, setShowEngineOptions] = useState(false);
-  const [engineInfoId, setEngineInfoId] = useState<string | null>(null);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -880,10 +879,10 @@ export default function SessionPage() {
                       </div>
                       <div className="p-1.5 space-y-0.5">
                         {loopEngines.map((engine) => (
-                          <div key={engine.id} className="relative">
+                          <div key={engine.id} className="relative group">
                             <button
-                              onClick={() => { setSelectedLoopEngine(engine.id); setShowEngineOptions(false); setEngineInfoId(null); }}
-                              className={`w-full text-left px-3 py-2 rounded-lg transition-colors pr-8 ${
+                              onClick={() => { setSelectedLoopEngine(engine.id); setShowEngineOptions(false); }}
+                              className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
                                 selectedLoopEngine === engine.id
                                   ? 'bg-zinc-100 text-zinc-900'
                                   : 'hover:bg-zinc-50 text-zinc-700'
@@ -891,24 +890,23 @@ export default function SessionPage() {
                             >
                               <div className="flex items-center gap-2">
                                 <Cpu className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                                <span className="text-sm font-medium truncate">{engine.name}</span>
+                                <span className="text-sm font-medium">{engine.name}</span>
                                 {selectedLoopEngine === engine.id && (
                                   <div className="ml-auto w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0" />
                                 )}
+                                {engine.description && (
+                                  <Info className="w-3 h-3 text-zinc-300 shrink-0 ml-auto group-hover:text-zinc-400" />
+                                )}
                               </div>
                             </button>
+                            {/* Hover tooltip — floats to the right */}
                             {engine.description && (
-                              <button
-                                type="button"
-                                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-zinc-400 hover:text-zinc-600"
-                                onClick={(e) => { e.stopPropagation(); setEngineInfoId(engineInfoId === engine.id ? null : engine.id); }}
-                              >
-                                <Info className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            {engineInfoId === engine.id && engine.description && (
-                              <div className="mx-2 mb-1.5 px-2 py-1.5 bg-zinc-50 rounded-lg border border-zinc-200 text-[11px] text-zinc-500 leading-relaxed">
-                                {engine.description}
+                              <div className="pointer-events-none absolute left-full top-0 ml-2 z-50 hidden group-hover:block w-52">
+                                <div className="bg-zinc-800 text-white text-[11px] leading-relaxed rounded-lg px-3 py-2 shadow-xl">
+                                  <div className="font-semibold mb-0.5">{engine.name}</div>
+                                  {engine.description}
+                                  <div className="absolute right-full top-3 border-4 border-transparent border-r-zinc-800" />
+                                </div>
                               </div>
                             )}
                           </div>

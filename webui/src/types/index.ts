@@ -22,6 +22,8 @@ export interface Session {
   canWrite?: boolean;
   canDelete?: boolean;
   isShared?: boolean;
+  agent?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface SessionTime {

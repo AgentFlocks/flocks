@@ -57,7 +57,6 @@ interface AgentSheetProps {
 export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps) {
   const { t } = useTranslation('agent');
   const isEdit = !!agent;
-  const { engines: loopEngines } = useLoopEngines();
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
@@ -302,6 +301,7 @@ function AgentFormContent({
 }: AgentFormContentProps) {
   const { t } = useTranslation('agent');
   const { openRex } = useEntitySheet();
+  const { engines: loopEngines } = useLoopEngines();
   const update = (fields: Partial<AgentFormData>) => onChange({ ...formData, ...fields });
 
   const modelsByProvider = availableModels.reduce<Record<string, AvailableModel[]>>((acc, m) => {
