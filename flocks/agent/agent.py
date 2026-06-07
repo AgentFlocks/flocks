@@ -164,6 +164,12 @@ class AgentInfo(BaseModel):
     # which the Web UI uses to decide whether to surface the agent.
     tags: List[str] = Field(default_factory=list)
 
+    # Default agent loop engine for sessions using this agent.
+    # When set, sessions that haven't explicitly chosen an engine will use this.
+    # Takes effect only when no session-level loop_engine override is present.
+    # Allowed values: "native" (default Flocks loop) | "raptor" | any registered engine id.
+    default_loop_engine: Optional[str] = Field(default=None)
+
     @model_validator(mode="after")
     def _derive_delegatable(self) -> "AgentInfo":
         if self.delegatable is None:

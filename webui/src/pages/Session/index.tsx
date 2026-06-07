@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2, Cpu,
+  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -76,6 +76,7 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedLoopEngine, setSelectedLoopEngine] = useState('native');
   const [showEngineOptions, setShowEngineOptions] = useState(false);
+  const [engineInfoId, setEngineInfoId] = useState<string | null>(null);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -235,6 +236,13 @@ export default function SessionPage() {
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [showEngineOptions]);
+
+  // Sync loop engine selection from session metadata when session changes
+  useEffect(() => {
+    const engineFromMeta = (selectedSession?.metadata?.loop_engine as string | undefined) ?? 'native';
+    setSelectedLoopEngine(engineFromMeta);
+    setShowEngineOptions(false);
+  }, [selectedSessionId]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -855,49 +863,55 @@ export default function SessionPage() {
                 <div className="relative" data-engine-selector>
                   <button
                     onClick={() => setShowEngineOptions(!showEngineOptions)}
-                    className={`flex items-center gap-1.5 h-8 px-2 rounded-lg text-sm transition-colors ${
-                      selectedLoopEngine !== 'native'
-                        ? 'bg-violet-50 text-violet-700 hover:bg-violet-100'
-                        : 'text-zinc-500 hover:text-zinc-900 hover:bg-zinc-200/60'
-                    }`}
+                    className="flex items-center gap-1.5 h-8 px-2 rounded-lg text-zinc-600 hover:text-zinc-900 hover:bg-zinc-200/60 transition-colors text-sm"
                     title={t('enginePicker.title')}
                   >
                     <Cpu className="w-3.5 h-3.5 flex-shrink-0" />
-                    <span className="font-medium text-xs truncate max-w-[80px]">
+                    <span className="font-medium text-sm truncate max-w-[90px]">
                       {loopEngines.find(e => e.id === selectedLoopEngine)?.name ?? selectedLoopEngine}
                     </span>
-                    <ChevronDown className={`w-3 h-3 transition-transform ${showEngineOptions ? 'rotate-180' : ''}`} />
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showEngineOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showEngineOptions && (
-                    <div className="absolute left-0 bottom-full mb-2 w-64 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                    <div className="absolute left-0 bottom-full mb-2 w-56 bg-white border border-zinc-200 rounded-xl shadow-lg z-50 overflow-hidden">
                       <div className="border-b border-zinc-100 px-3 py-2">
-                        <div className="text-xs font-semibold text-zinc-700">{t('enginePicker.title')}</div>
+                        <div className="text-xs font-semibold text-zinc-700">{t('enginePicker.label')}</div>
                         <div className="text-[11px] text-zinc-400">{t('enginePicker.hint')}</div>
                       </div>
                       <div className="p-1.5 space-y-0.5">
                         {loopEngines.map((engine) => (
-                          <button
-                            key={engine.id}
-                            onClick={() => { setSelectedLoopEngine(engine.id); setShowEngineOptions(false); }}
-                            className={`w-full text-left px-3 py-2 rounded-lg transition-colors ${
-                              selectedLoopEngine === engine.id
-                                ? 'bg-violet-50 text-violet-900'
-                                : 'hover:bg-zinc-50 text-zinc-700'
-                            }`}
-                          >
-                            <div className="flex items-center gap-2">
-                              <Cpu className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
-                              <div className="min-w-0">
-                                <div className="text-sm font-medium truncate">{engine.name}</div>
-                                {engine.description && (
-                                  <div className="text-[11px] text-zinc-400 truncate">{engine.description}</div>
+                          <div key={engine.id} className="relative">
+                            <button
+                              onClick={() => { setSelectedLoopEngine(engine.id); setShowEngineOptions(false); setEngineInfoId(null); }}
+                              className={`w-full text-left px-3 py-2 rounded-lg transition-colors pr-8 ${
+                                selectedLoopEngine === engine.id
+                                  ? 'bg-zinc-100 text-zinc-900'
+                                  : 'hover:bg-zinc-50 text-zinc-700'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Cpu className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                                <span className="text-sm font-medium truncate">{engine.name}</span>
+                                {selectedLoopEngine === engine.id && (
+                                  <div className="ml-auto w-1.5 h-1.5 rounded-full bg-zinc-500 shrink-0" />
                                 )}
                               </div>
-                              {selectedLoopEngine === engine.id && (
-                                <div className="ml-auto w-1.5 h-1.5 rounded-full bg-violet-500 shrink-0" />
-                              )}
-                            </div>
-                          </button>
+                            </button>
+                            {engine.description && (
+                              <button
+                                type="button"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 text-zinc-400 hover:text-zinc-600"
+                                onClick={(e) => { e.stopPropagation(); setEngineInfoId(engineInfoId === engine.id ? null : engine.id); }}
+                              >
+                                <Info className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            {engineInfoId === engine.id && engine.description && (
+                              <div className="mx-2 mb-1.5 px-2 py-1.5 bg-zinc-50 rounded-lg border border-zinc-200 text-[11px] text-zinc-500 leading-relaxed">
+                                {engine.description}
+                              </div>
+                            )}
+                          </div>
                         ))}
                       </div>
                     </div>

@@ -78,6 +78,7 @@ class AgentResponse(BaseModel):
     skills: List[str] = Field(default_factory=list)
     tools: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
+    defaultLoopEngine: Optional[str] = None
 
 
 # =============================================================================
@@ -131,6 +132,7 @@ def agent_to_response(
         skills=skills or [],
         tools=tools or [],
         tags=agent.tags,
+        defaultLoopEngine=agent.default_loop_engine,
     )
 
 
@@ -159,6 +161,7 @@ def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
         native=False,
         hidden=False,
         delegatable=delegatable,
+        default_loop_engine=agent_data.get("default_loop_engine"),
     )
 
 
@@ -348,6 +351,7 @@ class AgentCreateRequest(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
     skills: List[str] = Field(default_factory=list, description="Enabled skill names")
     tools: List[str] = Field(default_factory=list, description="Enabled tool names")
+    defaultLoopEngine: Optional[str] = Field(None, description="Default loop engine id for sessions using this agent")
 
 
 class AgentUpdateRequest(BaseModel):
@@ -361,6 +365,7 @@ class AgentUpdateRequest(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
     skills: Optional[List[str]] = Field(None, description="Enabled skill names")
     tools: Optional[List[str]] = Field(None, description="Enabled tool names")
+    defaultLoopEngine: Optional[str] = Field(None, description="Default loop engine id for sessions using this agent")
 
 
 class AgentModelUpdateRequest(BaseModel):
@@ -402,6 +407,7 @@ async def create_agent(req: AgentCreateRequest):
             "hidden": False,
             "skills": req.skills,
             "tools": req.tools,
+            "default_loop_engine": req.defaultLoopEngine,
         }
         await Storage.write(f"agent/custom/{req.name}", agent_data)
         from flocks.agent.registry import Agent as AgentRegistry
@@ -455,6 +461,9 @@ async def update_agent(name: str, req: AgentUpdateRequest):
                 agent_data["skills"] = req.skills
             if req.tools is not None:
                 agent_data["tools"] = req.tools
+            # Allow explicit None to clear the engine override (pass "" or "native" to reset)
+            if req.defaultLoopEngine is not None:
+                agent_data["default_loop_engine"] = req.defaultLoopEngine if req.defaultLoopEngine else None
 
             await Storage.write(agent_key, agent_data)
 

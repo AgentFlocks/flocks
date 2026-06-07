@@ -23,6 +23,7 @@ export interface Agent {
   skills: string[];
   tools: string[];
   tags?: string[];
+  defaultLoopEngine?: string | null;
 }
 
 export interface BackgroundTask {

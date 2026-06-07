@@ -9,7 +9,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Bot, Sparkles, Lock } from 'lucide-react';
+import { Bot, Sparkles, Lock, Cpu } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { agentAPI, Agent } from '@/api/agent';
 import { sessionApi } from '@/api/session';
@@ -19,6 +19,7 @@ import PillGroup from '@/components/common/PillGroup';
 import { providerAPI, defaultModelAPI } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
+import { useLoopEngines } from '@/hooks/useLoopEngines';
 
 interface AvailableModel {
   providerID: string;
@@ -39,6 +40,8 @@ interface AgentFormData {
   modelKey: string;
   tools: string[];
   skills: string[];
+  /** Default loop engine id, "" = system default (native) */
+  defaultLoopEngine: string;
 }
 
 // ─── AgentSheet ───────────────────────────────────────────────────────────────
@@ -54,6 +57,7 @@ interface AgentSheetProps {
 export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps) {
   const { t } = useTranslation('agent');
   const isEdit = !!agent;
+  const { engines: loopEngines } = useLoopEngines();
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
@@ -65,6 +69,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     modelKey: agent?.model ? `${agent.model.providerID}::${agent.model.modelID}` : '',
     tools: agent?.tools ?? [],
     skills: agent?.skills ?? [],
+    defaultLoopEngine: agent?.defaultLoopEngine ?? '',
   });
   const [loading, setLoading] = useState(false);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
@@ -144,6 +149,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
           model,
           tools: formData.tools,
           skills: formData.skills,
+          defaultLoopEngine: formData.defaultLoopEngine || null,
         });
       }
       onSaved();
@@ -472,6 +478,26 @@ function AgentFormContent({
             className="w-28 px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
           />
         </div>
+
+        {/* Default loop engine — only rendered when server exposes >1 engine */}
+        {loopEngines.length > 1 && (
+          <div className="flex items-center gap-3">
+            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.defaultEngine', 'Agent 引擎')}</span>
+            <div className="flex items-center gap-1.5 flex-1">
+              <Cpu className="w-4 h-4 text-gray-400 shrink-0" />
+              <select
+                value={formData.defaultLoopEngine}
+                onChange={(e) => update({ defaultLoopEngine: e.target.value })}
+                className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-slate-400"
+              >
+                <option value="">{t('form.defaultEngineSystem', '— 跟随全局默认 —')}</option>
+                {loopEngines.map((eng) => (
+                  <option key={eng.id} value={eng.id}>{eng.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        )}
 
       </div>
 

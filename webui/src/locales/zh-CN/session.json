@@ -159,10 +159,7 @@
   "showMore": "显示更多 {{count}} 条",
   "showLess": "收起",
   "enginePicker": {
-    "title": "选择 Agent 循环引擎",
-    "hint": "切换底层推理引擎；下次发送即生效",
-    "native": "原生",
-    "nativeDesc": "Flocks 原生异步循环",
-    "raptorDesc": "Hermes 高性能循环，含并行工具调用与上下文压缩"
+    "label": "Agent 引擎",
+    "hint": "切换底层推理引擎；下次发送即生效"
   }
 }

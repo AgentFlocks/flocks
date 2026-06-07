@@ -159,10 +159,7 @@
   "showMore": "Show {{count}} more",
   "showLess": "Show less",
   "enginePicker": {
-    "title": "Select Agent Loop Engine",
-    "hint": "Switch the inference engine; takes effect on next send",
-    "native": "Native",
-    "nativeDesc": "Flocks native async loop",
-    "raptorDesc": "Hermes high-performance loop with parallel tool calls and context compaction"
+    "label": "Agent Engine",
+    "hint": "Switch inference engine; takes effect on next send"
   }
 }

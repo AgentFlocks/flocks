@@ -360,7 +360,7 @@ class SessionLoop:
             # behaviour). Non-native engines receive the fully-prepared LoopContext
             # (abort_event wired, _active_loops registered, busy status set).
             from flocks.engine import LoopEngineRegistry
-            _engine_id = cls._resolve_loop_engine(ctx.session)
+            _engine_id = await cls._resolve_loop_engine(ctx.session)
             if _engine_id != "native":
                 result = await LoopEngineRegistry.get(_engine_id).run(
                     ctx, callbacks or LoopCallbacks()
@@ -431,22 +431,42 @@ class SessionLoop:
         return runner
 
     @staticmethod
-    def _resolve_loop_engine(session: Any) -> str:
+    async def _resolve_loop_engine(session: Any) -> str:
         """
         Determine which agent loop engine to use for this session.
 
         Resolution order (highest to lowest priority):
-          1. session.metadata["loop_engine"]   — persisted by HTTP handler when user picks an engine
-          2. "native"                           — hard-coded fallback (default behaviour)
+          1. session.metadata["loop_engine"]       — persisted when user picks an engine in the UI
+          2. agent.default_loop_engine             — agent-level default saved in agent config
+          3. "native"                              — hard-coded fallback (default behaviour)
 
         Only returns an engine id that is either "native" or registered in
         LoopEngineRegistry — unknown values fall back to "native" so stale
         metadata never breaks a session.
         """
         from flocks.engine import LoopEngineRegistry
-        engine_id = (session.metadata or {}).get("loop_engine")
-        if engine_id and engine_id != "native" and engine_id in LoopEngineRegistry.ids():
-            return engine_id
+
+        def _is_valid(eid: Any) -> bool:
+            return bool(eid) and (eid == "native" or eid in LoopEngineRegistry.ids())
+
+        # Priority 1: session-level override (set by UI engine selector)
+        session_engine = (session.metadata or {}).get("loop_engine")
+        if _is_valid(session_engine):
+            return session_engine  # type: ignore[return-value]
+
+        # Priority 2: agent-level default
+        try:
+            from flocks.agent.registry import Agent as AgentRegistry
+            agent_name = getattr(session, "agent", None)
+            if agent_name:
+                agent_info = await AgentRegistry.get(agent_name)
+                if agent_info and hasattr(agent_info, "default_loop_engine"):
+                    agent_engine = agent_info.default_loop_engine
+                    if _is_valid(agent_engine):
+                        return agent_engine  # type: ignore[return-value]
+        except Exception:
+            pass
+
         return "native"
 
     @staticmethod
