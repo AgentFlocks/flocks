@@ -23,6 +23,7 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "python-multipart>=0.0.9",
     "sse-starlette>=1.8.2",
+    "starlette>=1.0.1",
     "websockets>=12.0",
     "aiohttp>=3.13.3",
     "requests>=2.32.5",
