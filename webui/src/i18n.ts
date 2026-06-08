@@ -22,6 +22,7 @@ import enWorkspace from './locales/en-US/workspace.json';
 import enAuth from './locales/en-US/auth.json';
 import enNotification from './locales/en-US/notification.json';
 import enFlocksPro from './locales/en-US/flockspro.json';
+import enUserDefinedPage from './locales/en-US/userDefinedPage.json';
 import enDevice from './locales/en-US/device.json';
 
 import zhCommon from './locales/zh-CN/common.json';
@@ -44,6 +45,7 @@ import zhWorkspace from './locales/zh-CN/workspace.json';
 import zhAuth from './locales/zh-CN/auth.json';
 import zhNotification from './locales/zh-CN/notification.json';
 import zhFlocksPro from './locales/zh-CN/flockspro.json';
+import zhUserDefinedPage from './locales/zh-CN/userDefinedPage.json';
 import zhDevice from './locales/zh-CN/device.json';
 
 i18n
@@ -72,6 +74,7 @@ i18n
         auth: enAuth,
         notification: enNotification,
         flockspro: enFlocksPro,
+        userDefinedPage: enUserDefinedPage,
         device: enDevice,
       },
       'zh-CN': {
@@ -95,12 +98,13 @@ i18n
         auth: zhAuth,
         notification: zhNotification,
         flockspro: zhFlocksPro,
+        userDefinedPage: zhUserDefinedPage,
         device: zhDevice,
       },
     },
     fallbackLng: 'en-US',
     defaultNS: 'common',
-    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace', 'auth', 'notification', 'flockspro', 'device'],
+    ns: ['common', 'nav', 'home', 'session', 'agent', 'task', 'workflow', 'tool', 'skill', 'model', 'mcp', 'config', 'channel', 'permission', 'monitoring', 'update', 'workspace', 'auth', 'notification', 'flockspro', 'device', 'userDefinedPage'],
     detection: {
       order: ['localStorage', 'navigator'],
       lookupLocalStorage: 'flocks-language',
