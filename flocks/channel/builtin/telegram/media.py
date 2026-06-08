@@ -11,13 +11,14 @@ from __future__ import annotations
 
 import mimetypes
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
 
 import httpx
+
+from flocks.channel.media_filename import sanitize_filename
 
 DingTalkOutboundMediaType = Literal[  # type: ignore[misc]
     "photo", "document", "video", "audio", "voice", "animation",
@@ -38,8 +39,7 @@ class PreparedTelegramMedia:
 
 
 def _sanitize_filename(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-    return cleaned[:120] or "attachment"
+    return sanitize_filename(name)
 
 
 def _media_kind_from_filename(filename: str) -> TelegramOutboundMediaType:

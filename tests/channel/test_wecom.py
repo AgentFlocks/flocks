@@ -344,6 +344,37 @@ class TestWeComSendMedia:
             {"msgtype": "markdown", "markdown": {"content": "这是附件说明"}},
         )
 
+    async def test_send_media_with_text_reports_caption_failure(self, tmp_path: Path):
+        path = tmp_path / "report.pdf"
+        path.write_bytes(b"pdf-data")
+
+        ch = WeComChannel()
+        ch._config = {"botId": "b", "secret": "s"}
+        ch._ws_client = AsyncMock()
+        ch._ws_client.upload_media = AsyncMock(
+            return_value={"media_id": "media_1", "type": "file"},
+        )
+        ch._ws_client.send_media_message = AsyncMock(
+            return_value={"body": {"msgid": "wx_media_1"}},
+        )
+        ch._ws_client.send_message = AsyncMock(
+            side_effect=RuntimeError("timeout"),
+        )
+
+        result = await ch.send_media(
+            OutboundContext(
+                channel_id="wecom",
+                to="zhangsan",
+                text="这是附件说明",
+                media_url=path.as_uri(),
+            )
+        )
+
+        assert result.success is False
+        assert result.message_id == "wx_media_1"
+        assert result.retryable is True
+        assert "caption failed" in result.error
+
 
 # ------------------------------------------------------------------
 # reconnect watchdog

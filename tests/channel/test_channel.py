@@ -1354,6 +1354,18 @@ class TestGatewayManagerHelpers:
         assert task.done()
 
 
+class TestMediaFilenameHelpers:
+    def test_sanitize_filename_preserves_unicode_names(self):
+        from flocks.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("报告 2026.pdf") == "报告 2026.pdf"
+
+    def test_sanitize_filename_removes_path_separators(self):
+        from flocks.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("../report.bin") == ".._report.bin"
+
+
 # ------------------------------------------------------------------
 # Per-channel inbound media downloader routing
 # ------------------------------------------------------------------

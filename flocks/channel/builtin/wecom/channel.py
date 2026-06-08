@@ -257,13 +257,25 @@ class WeComChannel(ChannelPlugin):
 
             # WeCom's media payload does not carry companion text. Keep the
             # attachment first, then send text as a separate message.
+            message_id = _extract_sent_message_id(sent)
             if ctx.text:
-                await self.send_text(OutboundContext(**{**vars(ctx), "media_url": None}))
+                text_result = await self.send_text(
+                    OutboundContext(**{**vars(ctx), "media_url": None})
+                )
+                if not text_result.success:
+                    return DeliveryResult(
+                        channel_id="wecom",
+                        message_id=message_id,
+                        chat_id=ctx.to,
+                        success=False,
+                        error=f"WeCom media sent but caption failed: {text_result.error}",
+                        retryable=text_result.retryable,
+                    )
 
             self.record_message()
             return DeliveryResult(
                 channel_id="wecom",
-                message_id=_extract_sent_message_id(sent),
+                message_id=message_id,
                 chat_id=ctx.to,
             )
         except Exception as e:

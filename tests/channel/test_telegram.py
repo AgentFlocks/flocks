@@ -1086,8 +1086,7 @@ class TestTelegramInboundMedia:
             },
         )
         assert media is not None
-        assert media.filename.endswith(".pdf")
-        assert media.filename != "file_42.pdf"
+        assert media.filename == "原始报告.pdf"
 
     @pytest.mark.asyncio
     async def test_download_supports_legacy_api_base_with_token(

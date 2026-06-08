@@ -22,6 +22,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from flocks.channel.base import InboundMessage
+from flocks.channel.media_filename import sanitize_filename
 from flocks.channel.builtin.dingtalk.client import (
     DingTalkApiError,
     api_request_for_account,
@@ -48,8 +49,7 @@ class DownloadedInboundMedia:
 
 
 def _sanitize_filename(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-    return cleaned[:120] or "attachment"
+    return sanitize_filename(name)
 
 
 def _media_storage_dir(account_id: str) -> Path:

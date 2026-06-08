@@ -20,6 +20,7 @@ from typing import Any, Optional
 from urllib.parse import unquote, urlparse
 
 from flocks.channel.base import InboundMessage
+from flocks.channel.media_filename import sanitize_filename
 from flocks.utils.log import Log
 
 log = Log.create(service="channel.wecom.media")
@@ -52,8 +53,7 @@ def _media_storage_dir(account_id: str) -> Path:
 
 
 def _sanitize_filename(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-    return cleaned[:120] or "attachment"
+    return sanitize_filename(name)
 
 
 def _guess_mime_from_ext(filename: str) -> Optional[str]:

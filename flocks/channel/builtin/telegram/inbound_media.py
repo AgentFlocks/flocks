@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime
 import mimetypes
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -26,6 +25,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 
 from flocks.channel.base import InboundMessage
+from flocks.channel.media_filename import sanitize_filename
 from flocks.utils.log import Log
 from .config import resolve_account_config, resolve_api_base
 
@@ -47,8 +47,7 @@ class DownloadedInboundMedia:
 
 
 def _sanitize_filename(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip())
-    return cleaned[:120] or "attachment"
+    return sanitize_filename(name)
 
 
 def _media_storage_dir(account_id: str) -> Path:
