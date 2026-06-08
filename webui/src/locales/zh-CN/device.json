@@ -86,6 +86,15 @@
     },
     "productCount": "{{count}} 种设备",
     "instanceCount": "已接入 {{count}} 台",
+    "installState": {
+      "install": "请先在 FlockHub 安装",
+      "update": "请先在 FlockHub 更新",
+      "broken": "插件不可用",
+      "installed": "已安装",
+      "available": "可安装",
+      "updateAvailable": "可更新",
+      "brokenShort": "不可用"
+    },
     "productHint": "共 {{count}} 款设备，同款设备可多次接入"
   },
 

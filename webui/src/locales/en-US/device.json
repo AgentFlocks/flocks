@@ -86,6 +86,15 @@
     },
     "productCount": "{{count}} product(s)",
     "instanceCount": "{{count}} integrated",
+    "installState": {
+      "install": "Install in FlockHub first",
+      "update": "Update in FlockHub first",
+      "broken": "Plugin unavailable",
+      "installed": "Installed",
+      "available": "Available",
+      "updateAvailable": "Update",
+      "brokenShort": "Broken"
+    },
     "productHint": "{{count}} product(s) — the same type can be added multiple times"
   },
 

@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
   revealDeviceCredentials: vi.fn(),
   listDeviceTools: vi.fn(),
   updateDeviceTool: vi.fn(),
-  listApiServices: vi.fn(),
+  listTemplates: vi.fn(),
   getServiceMetadata: vi.fn(),
   listTools: vi.fn(),
   setToolEnabled: vi.fn(),
@@ -140,6 +140,7 @@ vi.mock('@/api/device', () => ({
     update: (...args: unknown[]) => mocks.updateDevice(...args),
     delete: (...args: unknown[]) => mocks.deleteDevice(...args),
     test: (...args: unknown[]) => mocks.testDevice(...args),
+    listTemplates: (...args: unknown[]) => mocks.listTemplates(...args),
     listDeviceTools: (...args: unknown[]) => mocks.listDeviceTools(...args),
     updateDeviceTool: (...args: unknown[]) => mocks.updateDeviceTool(...args),
   },
@@ -147,7 +148,6 @@ vi.mock('@/api/device', () => ({
 
 vi.mock('@/api/provider', () => ({
   providerAPI: {
-    listApiServices: (...args: unknown[]) => mocks.listApiServices(...args),
     getServiceMetadata: (...args: unknown[]) => mocks.getServiceMetadata(...args),
   },
 }));
@@ -162,13 +162,15 @@ vi.mock('@/api/tool', () => ({
 
 function buildTemplate(overrides: Record<string, unknown> = {}) {
   return {
-    id: 'existing_device_v1',
+    plugin_id: 'existing_device_v1',
+    storage_key: 'existing_device_v1',
+    service_id: 'existing_device',
     name: 'Existing Device',
-    enabled: true,
-    status: 'unknown',
+    credential_schema: [],
     tool_count: 1,
-    verify_ssl: false,
-    integration_type: 'device',
+    installed: true,
+    state: 'installed',
+    source: 'project',
     vendor: 'threatbook',
     ...overrides,
   };
@@ -197,7 +199,7 @@ describe('DeviceIntegrationPage', () => {
     mocks.listGroups.mockResolvedValue({
       data: [{ id: 'default', name: '默认机房', sort_order: 0, created_at: 0, updated_at: 0 }],
     });
-    mocks.listApiServices.mockResolvedValue({ data: [buildTemplate()] });
+    mocks.listTemplates.mockResolvedValue({ data: [buildTemplate()] });
     mocks.getServiceMetadata.mockResolvedValue({ data: { credential_schema: [] } });
     mocks.revealDeviceCredentials.mockResolvedValue({ data: { fields: {} } });
     mocks.listTools.mockResolvedValue({ data: [] });
@@ -217,6 +219,33 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByText('API 接入')).toBeInTheDocument();
     expect(screen.getByText('WebCLI 接入')).toBeInTheDocument();
     expect(screen.getByText('Workflow 接入')).toBeInTheDocument();
+  });
+
+  it('navigates unavailable templates to FlockHub', async () => {
+    const user = userEvent.setup();
+    mocks.listTemplates.mockResolvedValueOnce({
+      data: [
+        buildTemplate({
+          plugin_id: 'onesig_v2_5_3_D20250710',
+          storage_key: 'onesig_v2_5_3_D20250710_api_v2_5_3_D20250710',
+          service_id: 'onesig_v2_5_3_D20250710_api',
+          name: 'onesig',
+          version: '2.5.3 D20250710',
+          installed: false,
+          state: 'available',
+        }),
+      ],
+    });
+
+    render(<DeviceIntegrationPage />);
+
+    await user.click(await screen.findByRole('button', { name: /立即添加设备/ }));
+    await user.click(screen.getByText('微步'));
+    await user.click(screen.getByText('onesig'));
+
+    expect(mocks.navigate).toHaveBeenCalledWith(
+      '/hub?type=device&plugin=onesig_v2_5_3_D20250710&q=onesig_v2_5_3_D20250710',
+    );
   });
 
   it('submits api draft to Rex with device plugin prompt', async () => {
@@ -356,18 +385,16 @@ describe('DeviceIntegrationPage', () => {
         },
       ],
     });
-    mocks.listApiServices.mockResolvedValueOnce({
+    mocks.listTemplates.mockResolvedValueOnce({
       data: [
-        {
-          id: 'tdp_api_v3_3_10',
+        buildTemplate({
+          plugin_id: 'tdp_v3_3_10',
+          storage_key: 'tdp_api_v3_3_10',
+          service_id: 'tdp_api',
           name: 'TDP',
-          enabled: true,
-          status: 'ready',
           tool_count: 21,
-          verify_ssl: false,
-          integration_type: 'device',
           vendor: 'threatbook',
-        },
+        }),
       ],
     });
     mocks.listGroups.mockResolvedValueOnce({
@@ -454,18 +481,16 @@ describe('DeviceIntegrationPage', () => {
         },
       ],
     });
-    mocks.listApiServices.mockResolvedValueOnce({
+    mocks.listTemplates.mockResolvedValueOnce({
       data: [
-        {
-          id: 'onesec_api_v2_8_2',
+        buildTemplate({
+          plugin_id: 'onesec_v2_8_2',
+          storage_key: 'onesec_api_v2_8_2',
+          service_id: 'onesec_api',
           name: 'OneSEC',
-          enabled: true,
-          status: 'ready',
           tool_count: 5,
-          verify_ssl: false,
-          integration_type: 'device',
           vendor: 'threatbook',
-        },
+        }),
       ],
     });
     mocks.getServiceMetadata.mockResolvedValueOnce({

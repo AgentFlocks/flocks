@@ -1,9 +1,9 @@
 import type {
-  APIServiceSummary,
   CustomDeviceAccessMode,
   CustomDeviceApiDraft,
   CustomDeviceWebCliDraft,
 } from '@/types';
+import type { DeviceTemplate } from '@/api/device';
 
 function sanitizeSlug(value: string, fallback: string): string {
   const normalized = value
@@ -163,9 +163,9 @@ export function buildCustomDevicePrompt(
 }
 
 export function findTemplateForCustomDevice(
-  templates: APIServiceSummary[],
+  templates: DeviceTemplate[],
   deviceName: string,
-): APIServiceSummary | undefined {
+): DeviceTemplate | undefined {
   const normalized = deviceName.trim().toLowerCase();
   if (!normalized) return undefined;
   return templates.find((template) => template.name.trim().toLowerCase() === normalized)

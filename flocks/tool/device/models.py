@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -159,3 +159,56 @@ class DeviceTestResult(BaseModel):
     success: bool
     message: str
     latency_ms: Optional[int] = None
+
+
+class DeviceTestRequest(BaseModel):
+    """Optional body for ``POST /devices/{id}/test``."""
+
+    base_url: Optional[str] = Field(
+        None,
+        description="Override the persisted base_url for this probe only",
+    )
+    verify_ssl: Optional[bool] = Field(
+        None,
+        description="Override the persisted verify_ssl for this probe only",
+    )
+
+
+class DeviceTemplate(BaseModel):
+    plugin_id: str
+    storage_key: str
+    service_id: str
+    name: str
+    version: Optional[str] = None
+    vendor: Optional[str] = None
+    description: Optional[str] = None
+    description_cn: Optional[str] = None
+    credential_schema: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_count: int = 0
+    installed: bool
+    state: Literal["available", "installed", "updateAvailable", "localOnly", "broken"]
+    source: Literal["bundled", "project", "global"]
+
+
+class CustomDeviceToolCreate(BaseModel):
+    name: str
+    description: str
+    description_cn: Optional[str] = None
+    category: Optional[str] = None
+    inputSchema: Optional[Dict[str, Any]] = None
+    parameters: Optional[List[Dict[str, Any]]] = None
+    handler: Dict[str, Any]
+    response: Optional[Dict[str, Any]] = None
+    requires_confirmation: Optional[bool] = None
+
+
+class CustomDeviceTemplateCreate(BaseModel):
+    plugin_id: str
+    name: str
+    vendor: Optional[str] = None
+    service_id: str
+    version: Optional[str] = None
+    description: Optional[str] = None
+    description_cn: Optional[str] = None
+    credential_fields: List[Dict[str, Any]] = Field(default_factory=list)
+    tools: List[CustomDeviceToolCreate] = Field(default_factory=list)

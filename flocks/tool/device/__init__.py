@@ -15,7 +15,11 @@ from .models import (
     DeviceIntegration,
     DeviceIntegrationCreate,
     DeviceIntegrationUpdate,
+    DeviceTemplate,
+    DeviceTestRequest,
     DeviceTestResult,
+    CustomDeviceTemplateCreate,
+    CustomDeviceToolCreate,
 )
 from .startup import device_startup
 from .store import get_device_credentials
@@ -33,7 +37,11 @@ __all__ = [
     "DeviceIntegration",
     "DeviceIntegrationCreate",
     "DeviceIntegrationUpdate",
+    "DeviceTemplate",
+    "DeviceTestRequest",
     "DeviceTestResult",
+    "CustomDeviceTemplateCreate",
+    "CustomDeviceToolCreate",
     # Entry points
     "device_startup",
     "get_device_credentials",

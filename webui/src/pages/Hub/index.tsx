@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Archive,
   CheckCircle,
@@ -68,6 +69,13 @@ const TYPE_LABEL_CN: Record<HubPluginType, string> = {
   device: '设备',
   workflow: 'Workflow',
 };
+
+function normalizePluginType(value: string | null): HubPluginType | '' {
+  if (value === 'skill' || value === 'agent' || value === 'tool' || value === 'device' || value === 'workflow') {
+    return value;
+  }
+  return '';
+}
 
 function formatPluginTypeLabel(type: HubPluginType, language: string): string {
   if (language.toLowerCase().startsWith('zh')) {
@@ -243,13 +251,16 @@ function buildFacetCounts(items: HubCatalogEntry[], filters: HubFilterSnapshot):
 
 export default function HubPage() {
   const { i18n } = useTranslation();
+  const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
+  const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
+  const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [query, setQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState<HubPluginType | ''>('');
-  const [stateFilter, setStateFilter] = useState('');
+  const [query, setQuery] = useState(searchParams.get('q') || urlPluginId);
+  const [typeFilter, setTypeFilter] = useState<HubPluginType | ''>(urlType);
+  const [stateFilter, setStateFilter] = useState(searchParams.get('state') || '');
   const [tagFilter, setTagFilter] = useState('');
   const [useCaseFilter, setUseCaseFilter] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -280,6 +291,16 @@ export default function HubPage() {
     fetchCatalog();
     hubAPI.categories().then(res => setTaxonomy(res.data as HubTaxonomyResponse)).catch(() => setTaxonomy(null));
   }, []);
+
+  useEffect(() => {
+    if (!urlPluginId || catalogItems.length === 0) return;
+    const target = catalogItems.find(item => item.id === urlPluginId && (!urlType || item.type === urlType));
+    if (target) {
+      setSelected(target);
+      setTypeFilter(target.type);
+      setQuery(urlPluginId);
+    }
+  }, [catalogItems, urlPluginId, urlType]);
 
   useEffect(() => {
     setPage(1);

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
@@ -10,8 +11,8 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { providerAPI } from '@/api/provider';
-import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceToolInfo } from '@/api/device';
-import type { APIServiceSummary, APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
+import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
+import type { APIServiceCredentialField, CustomDeviceAccessMode, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import CustomDeviceAccessPanel from './CustomDeviceAccessPanel';
@@ -34,7 +35,7 @@ function errDetail(err: unknown, fallback: string): string {
 // Vendor catalog
 //
 // Vendor identity comes from the backend: each `_provider.yaml` declares a
-// `vendor` field that propagates into `APIServiceSummary.vendor`. The frontend
+// `vendor` field that propagates into `DeviceTemplate.vendor`. The frontend
 // only owns the *presentation* (Chinese/English labels and color theme). When
 // a brand-new vendor key appears (i.e. one not in `VENDOR_PRESENTATION` below),
 // we still render it with a generic neutral label so the device is never
@@ -144,14 +145,15 @@ function ActiveCard({ device, vendorKey, selected, onClick }: {
 // ============================================================================
 
 function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSelect, onSelectCustom, onClose }: {
-  templates: APIServiceSummary[];
+  templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
   initialVendor?: DeviceVendor;
-  onSelect: (template: APIServiceSummary) => void;
+  onSelect: (template: DeviceTemplate) => void;
   onSelectCustom: (mode: CustomDeviceAccessMode) => void;
   onClose: () => void;
 }) {
   const { t, i18n } = useTranslation('device');
+  const navigate = useNavigate();
   const [selectedVendor, setSelectedVendor] = useState<DeviceVendor | null>(initialVendor ?? null);
   const [showCustomModes, setShowCustomModes] = useState(false);
 
@@ -183,7 +185,7 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
     const counts: Record<string, number> = {};
     for (const t of templates) {
       const key = t.vendor || '__unspecified__';
-      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.id] ?? 0);
+      counts[key] = (counts[key] ?? 0) + (instanceCounts[t.storage_key] ?? 0);
     }
     return counts;
   }, [templates, instanceCounts]);
@@ -345,15 +347,35 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
               </p>
               <div className="space-y-2">
                 {vendorTemplates.map((tpl) => {
-                  const count = instanceCounts[tpl.id] ?? 0;
+                  const count = instanceCounts[tpl.storage_key] ?? 0;
+                  const disabled = !tpl.installed;
+                  const stateHint = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.update')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.broken')
+                      : t('wizard.installState.install');
+                  const stateBadge = tpl.state === 'updateAvailable'
+                    ? t('wizard.installState.updateAvailable')
+                    : tpl.state === 'broken'
+                      ? t('wizard.installState.brokenShort')
+                      : tpl.installed
+                        ? t('wizard.installState.installed')
+                        : t('wizard.installState.available');
+                  const hubUrl = `/hub?type=device&plugin=${encodeURIComponent(tpl.plugin_id)}&q=${encodeURIComponent(tpl.plugin_id)}`;
                   return (
                     <button
-                      key={tpl.id}
-                      onClick={() => onSelect(tpl)}
-                      className="w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30 transition-all group"
+                      key={tpl.storage_key}
+                      onClick={() => { if (disabled) navigate(hubUrl); else onSelect(tpl); }}
+                      className={`w-full text-left flex items-start gap-3 px-4 py-3.5 rounded-xl border transition-all group ${
+                        disabled
+                          ? 'border-zinc-100 bg-zinc-50 opacity-85 hover:border-amber-200 hover:bg-amber-50/30'
+                          : 'border-zinc-100 bg-white hover:border-blue-200 hover:bg-blue-50/30'
+                      }`}
                     >
-                      <div className="w-9 h-9 rounded-xl bg-zinc-50 group-hover:bg-blue-50 flex items-center justify-center flex-shrink-0 transition-colors">
-                        <Plug className="w-4 h-4 text-zinc-400 group-hover:text-blue-500 transition-colors" />
+                      <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 transition-colors ${
+                        disabled ? 'bg-zinc-100' : 'bg-zinc-50 group-hover:bg-blue-50'
+                      }`}>
+                        <Plug className={`w-4 h-4 transition-colors ${disabled ? 'text-zinc-300' : 'text-zinc-400 group-hover:text-blue-500'}`} />
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
@@ -363,6 +385,15 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                               v{tpl.version}
                             </span>
                           )}
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-md flex-shrink-0 mt-0.5 font-medium ${
+                            tpl.installed
+                              ? 'bg-green-50 text-green-700'
+                              : tpl.state === 'broken'
+                                ? 'bg-red-50 text-red-700'
+                                : 'bg-amber-50 text-amber-700'
+                          }`}>
+                            {stateBadge}
+                          </span>
                         </div>
                         {(tpl.description_cn || tpl.description) && (
                           <p className="text-xs text-zinc-400 mt-0.5 line-clamp-2 leading-relaxed">
@@ -374,8 +405,13 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                             {t('wizard.instanceCount', { count })}
                           </span>
                         )}
+                        {disabled && (
+                          <span className="inline-block mt-1.5 text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md font-medium underline underline-offset-2">
+                            {stateHint}
+                          </span>
+                        )}
                       </div>
-                      <ChevronRight className="w-4 h-4 text-zinc-300 group-hover:text-blue-400 flex-shrink-0 mt-2 transition-colors" />
+                      <ChevronRight className={`w-4 h-4 flex-shrink-0 mt-2 transition-colors ${disabled ? 'text-amber-300 group-hover:text-amber-500' : 'text-zinc-300 group-hover:text-blue-400'}`} />
                     </button>
                   );
                 })}
@@ -411,7 +447,7 @@ function DeviceConfigPanel({
   onSave, onDelete, onClose, onTest, onToggleVerifySsl, onToggleEnabled, onBack,
 }: {
   device?: DeviceIntegration;
-  template?: APIServiceSummary;
+  template?: DeviceTemplate;
   vendorKey?: string;
   initialGroupId: string;
   groups: DeviceGroup[];
@@ -453,12 +489,26 @@ function DeviceConfigPanel({
   const [toolEnabled, setToolEnabled] = useState<Record<string, boolean>>({});
   const originalMasked = useRef<Record<string, string>>({});
 
-  const serviceId = device?.service_id ?? template?.id ?? '';
-  const storageKey = device?.storage_key ?? template?.id ?? '';
+  const serviceId = device?.service_id ?? template?.service_id ?? '';
+  const storageKey = device?.storage_key ?? template?.storage_key ?? '';
   const vendor = vendorKey ? vendorPresentation(vendorKey) : undefined;
 
   useEffect(() => {
     if (!serviceId) return;
+    if (template) {
+      const schema = template.credential_schema ?? [];
+      setMetadata({
+        name: template.name,
+        version: template.version ?? undefined,
+        description: template.description ?? undefined,
+        description_cn: template.description_cn ?? undefined,
+      });
+      setCredFields(schema);
+      const defaults: Record<string, string> = {};
+      schema.forEach((f) => { if (f.default_value) defaults[f.key] = f.default_value; });
+      setFields((prev) => ({ ...defaults, ...prev }));
+      return;
+    }
     providerAPI.getServiceMetadata(serviceId)
       .then((res) => {
         const meta = res.data;
@@ -502,7 +552,7 @@ function DeviceConfigPanel({
         })
         .catch(() => {});
     }
-  }, [device, serviceId, storageKey]);
+  }, [device, serviceId, storageKey, template]);
 
   const handleSave = async () => {
     if (!name.trim()) { toast.error(t('toast.nameRequired')); return; }
@@ -663,7 +713,7 @@ function DeviceConfigPanel({
                 <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   {vendor && <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</span>}
-                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.id}</span>
+                  <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.storage_key}</span>
                 </div>
               </div>
             </div>
@@ -1231,7 +1281,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 type PanelMode =
   | { kind: 'pick-group' }
   | { kind: 'wizard'; initialVendor?: DeviceVendor }
-  | { kind: 'add'; template: APIServiceSummary }
+  | { kind: 'add'; template: DeviceTemplate }
   | { kind: 'custom'; mode: CustomDeviceAccessMode }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
@@ -1240,7 +1290,7 @@ export default function DeviceIntegrationPage() {
   const toast = useToast();
   const { t } = useTranslation('device');
   const [devices, setDevices] = useState<DeviceIntegration[]>([]);
-  const [templates, setTemplates] = useState<APIServiceSummary[]>([]);
+  const [templates, setTemplates] = useState<DeviceTemplate[]>([]);
   const [groups, setGroups] = useState<DeviceGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1271,16 +1321,16 @@ export default function DeviceIntegrationPage() {
     [devices, selectedGroupId],
   );
 
-  const fetchData = useCallback(async (silent = false): Promise<APIServiceSummary[]> => {
+  const fetchData = useCallback(async (silent = false): Promise<DeviceTemplate[]> => {
     if (!silent) setLoading(true);
     else setRefreshing(true);
     try {
       const [devRes, tplRes, grpRes] = await Promise.all([
         deviceAPI.list(),
-        providerAPI.listApiServices(),
+        deviceAPI.listTemplates(),
         deviceAPI.listGroups(),
       ]);
-      const nextTemplates = (tplRes.data || []).filter((s) => s.integration_type === 'device');
+      const nextTemplates = tplRes.data || [];
       setDevices(devRes.data || []);
       setTemplates(nextTemplates);
       setGroups(grpRes.data || []);
@@ -1308,11 +1358,8 @@ export default function DeviceIntegrationPage() {
     const map: Record<string, string> = {};
     templates.forEach((t) => {
       if (!t.vendor) return;
-      map[t.id] = t.vendor;
-      const bareServiceId = t.id.replace(/_v[\w.]+$/i, '');
-      if (bareServiceId !== t.id && !map[bareServiceId]) {
-        map[bareServiceId] = t.vendor;
-      }
+      map[t.storage_key] = t.vendor;
+      map[t.service_id] = t.vendor;
     });
     return map;
   }, [templates]);
@@ -1380,7 +1427,8 @@ export default function DeviceIntegrationPage() {
     if (panel?.kind === 'add') {
       await deviceAPI.create({
         name: data.name,
-        storage_key: panel.template.id,
+        storage_key: panel.template.storage_key,
+        service_id: panel.template.service_id,
         group_id: data.group_id,
         enabled: data.enabled,
         verify_ssl: data.verify_ssl,
@@ -1743,13 +1791,13 @@ export default function DeviceIntegrationPage() {
       {(panel?.kind === 'add' || panel?.kind === 'edit') && (() => {
         const panelVendorKey = panel.kind === 'edit'
           ? vendorOf(panel.device)
-          : panel.template.vendor;
+          : panel.template.vendor ?? undefined;
         const panelInitGroupId = panel.kind === 'edit'
           ? panel.device.group_id
           : addDefaultGroupId;
         return (
           <DeviceConfigPanel
-            key={panel.kind === 'edit' ? panel.device.id : panel.template.id}
+            key={panel.kind === 'edit' ? panel.device.id : panel.template.storage_key}
             device={panel.kind === 'edit' ? panel.device : undefined}
             template={panel.kind === 'add' ? panel.template : undefined}
             vendorKey={panelVendorKey}
