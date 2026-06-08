@@ -7,6 +7,11 @@ from flocks.engine.raptor import memory_delegate
 from flocks.tool.registry import ToolResult
 
 
+def _chunk(delta: str = "", tool_calls=None, event_type=None):
+    """Create a minimal StreamChunk-like object for testing."""
+    return SimpleNamespace(delta=delta, tool_calls=tool_calls, event_type=event_type)
+
+
 @pytest.mark.asyncio
 async def test_raptor_memory_delegate_does_not_create_persistent_session(monkeypatch):
     calls = {
@@ -51,8 +56,8 @@ async def test_raptor_memory_delegate_does_not_create_persistent_session(monkeyp
         def is_configured(self):
             return True
 
-        async def chat(self, model_id, messages, **kwargs):
-            return SimpleNamespace(content="delegate completed", tool_calls=None)
+        async def chat_stream(self, model_id, messages, **kwargs):
+            yield _chunk(delta="delegate completed")
 
     monkeypatch.setattr(memory_delegate.Provider, "get", lambda provider_id: FakeProvider())
 
@@ -123,16 +128,12 @@ async def test_raptor_memory_delegate_continues_after_tool_intent_text(monkeypat
         def is_configured(self):
             return True
 
-        async def chat(self, model_id, messages, **kwargs):
+        async def chat_stream(self, model_id, messages, **kwargs):
             self.calls += 1
             if self.calls == 1:
-                return SimpleNamespace(
-                    content="I will start by calling `device_context` to inspect the device.",
-                    tool_calls=None,
-                )
-            if self.calls == 2:
-                return SimpleNamespace(
-                    content="",
+                yield _chunk(delta="I will start by calling `device_context` to inspect the device.")
+            elif self.calls == 2:
+                yield _chunk(
                     tool_calls=[
                         {
                             "id": "call_1",
@@ -141,9 +142,10 @@ async def test_raptor_memory_delegate_continues_after_tool_intent_text(monkeypat
                                 "arguments": '{"device_id": "dev-1"}',
                             },
                         }
-                    ],
+                    ]
                 )
-            return SimpleNamespace(content="Device inspection completed.", tool_calls=None)
+            else:
+                yield _chunk(delta="Device inspection completed.")
 
     fake_provider = FakeProvider()
     monkeypatch.setattr(memory_delegate.Provider, "get", lambda provider_id: fake_provider)
@@ -231,11 +233,11 @@ async def test_raptor_memory_delegate_fails_repeated_tool_intent_without_calls(m
         def is_configured(self):
             return True
 
-        async def chat(self, model_id, messages, **kwargs):
+        async def chat_stream(self, model_id, messages, **kwargs):
             self.calls += 1
-            return SimpleNamespace(
-                content="<think>I need to execute the tool calls now. Let me call the tools.</think>",
-                tool_calls=None,
+            # Return text with tool-intent language; no actual tool_calls.
+            yield _chunk(
+                delta="I will call the device_context tool to inspect the device now."
             )
 
     fake_provider = FakeProvider()

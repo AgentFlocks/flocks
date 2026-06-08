@@ -792,19 +792,39 @@ async def run_memory_delegate_task(
     emit_metadata({})
 
     skill_content = await _resolve_skill_content(load_skills)
-    system_parts = [
-        (
-            "You are a delegated in-memory agent. Complete the task and return a concise final result. "
-            "Use the available tools whenever the task requires inspecting, searching, querying, "
-            "or validating information. Do not describe future tool use; emit the tool call instead. "
-            "Only provide a final result after completing required tool calls or when no tool is relevant. "
-            "Do NOT use bash or any shell command merely to echo, announce, or stage actions — "
-            "call the required data-gathering tools directly."
-        ),
-        f"Parent agent: {parent_agent}",
+
+    # Build tools first so tool names are available for the system prompt
+    tools, fold_catalog = await _build_tool_schema(agent_name)
+
+    # Build standard system prompt blocks via SessionPrompt so the sub-agent
+    # gets PROMPT_DEFAULT (SecOps identity + safety guardrails), tool_protocol,
+    # and agent_identity — the same foundation as the main session runner.
+    tool_names_for_prompt = [
+        t.get("function", {}).get("name", "")
+        for t in tools
+        if isinstance(t, dict) and t.get("function", {}).get("name")
     ]
-    if agent and getattr(agent, "prompt", None):
-        system_parts.append(str(agent.prompt))
+    session_prompt_blocks = await SessionPrompt.build_system_prompts(
+        session_id=f"memory:{agent_name}",
+        session_directory=None,
+        agent_name=agent_name,
+        agent_prompt=getattr(agent, "prompt", None),
+        provider_id=effective_provider,
+        model_id=effective_model,
+        prompt_tool_names=tool_names_for_prompt,
+    )
+
+    # Prepend memory-delegate execution constraints; append category/skill extras
+    memory_header = (
+        "You are a delegated in-memory agent. Complete the task and return a concise final result. "
+        "Use the available tools whenever the task requires inspecting, searching, querying, "
+        "or validating information. Do not describe future tool use; emit the tool call instead. "
+        "Only provide a final result after completing required tool calls or when no tool is relevant. "
+        "Do NOT use bash or any shell command merely to echo, announce, or stage actions — "
+        "call the required data-gathering tools directly."
+    )
+    system_parts = [memory_header, f"Parent agent: {parent_agent}"]
+    system_parts.extend(b for b in session_prompt_blocks if b)
     if category_prompt:
         system_parts.append(category_prompt)
     if skill_content:
@@ -814,7 +834,6 @@ async def run_memory_delegate_task(
         ChatMessage(role="system", content="\n\n".join(system_parts)),
         ChatMessage(role="user", content=prompt),
     ]
-    tools, fold_catalog = await _build_tool_schema(agent_name)
     active_provider = effective_provider
     active_model = effective_model
     provider_options = build_provider_options(active_provider, active_model)
@@ -938,7 +957,9 @@ async def run_memory_delegate_task(
             ))
             continue
         if not calls:
-            visible_content = content.strip()
+            # Safety net: strip any <think> blocks that leaked into text deltas
+            # (e.g. providers that don't set event_type="reasoning" properly).
+            visible_content = _strip_think_blocks(content)
             looks_like_tool_intent = _looks_like_tool_intent_without_call(
                 prompt=prompt,
                 content=content,
@@ -981,7 +1002,7 @@ async def run_memory_delegate_task(
                         "modelID": active_model,
                     },
                 )
-            final_content = content
+            final_content = visible_content
             break
 
         messages.append(ChatMessage(

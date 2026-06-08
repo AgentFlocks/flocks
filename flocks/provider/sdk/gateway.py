@@ -295,6 +295,12 @@ class GatewayProvider(BaseProvider):
                     )
                 else:
                     yield StreamChunk(delta="", finish_reason=choice.finish_reason)
+
+        # Emit any accumulated tool_calls that arrived without a finish_reason
+        # (some gateways omit finish_reason on the final tool-call chunk).
+        if tool_calls:
+            sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
+            yield StreamChunk(delta="", finish_reason="tool_calls", tool_calls=sorted_calls)
     
     async def list_available_models(self) -> List[Dict[str, Any]]:
         """Query the gateway for available models"""

@@ -453,6 +453,13 @@ class SessionLoop:
         session_engine = (session.metadata or {}).get("loop_engine")
         if _is_valid(session_engine):
             return session_engine  # type: ignore[return-value]
+        if session_engine:
+            log.warning("session.loop_engine.invalid_fallback", {
+                "sessionID": getattr(session, "id", None),
+                "requested": session_engine,
+                "fallback": "native",
+                "registered": list(LoopEngineRegistry.ids()),
+            })
 
         # Priority 2: agent-level default
         try:
@@ -464,6 +471,13 @@ class SessionLoop:
                     agent_engine = agent_info.default_loop_engine
                     if _is_valid(agent_engine):
                         return agent_engine  # type: ignore[return-value]
+                    if agent_engine:
+                        log.warning("session.loop_engine.agent_default_invalid_fallback", {
+                            "sessionID": getattr(session, "id", None),
+                            "agent": agent_name,
+                            "requested": agent_engine,
+                            "fallback": "native",
+                        })
         except Exception:
             pass
 

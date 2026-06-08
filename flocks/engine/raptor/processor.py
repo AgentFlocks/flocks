@@ -72,11 +72,9 @@ log = Log.create(service="engine.raptor.processor")
 # They carry session-level or global side-effects that make interleaving unsafe.
 _NEVER_PARALLEL_TOOLS: frozenset = frozenset()
 
-# Sub-agent delegation tools. Raptor delegations run as isolated in-memory
-# provider loops, so multiple delegations are safe to run concurrently with
-# each other and with read-only tools.
-# Guard: delegation is NOT parallelised alongside file-mutating tools in the
-# same batch (see _MUTATING_PATH_TOOLS below).
+# Sub-agent delegation tools. Multiple delegations may run concurrently with
+# each other, but a delegation must never be mixed with any other tool in the
+# same batch (see _should_parallelize_batch for the TOCTOU guard).
 _DELEGATION_TOOLS: frozenset = frozenset({
     "delegate_task",
 })
@@ -222,11 +220,15 @@ def _should_parallelize_batch(
     ]
     names = [name for _, name, _ in normalized_calls]
     has_delegation = any(n in _DELEGATION_TOOLS for n in names)
-    has_mutation = any(n in _MUTATING_PATH_TOOLS for n in names)
+    has_non_delegation = any(n not in _DELEGATION_TOOLS for n in names)
 
-    # Never parallelise a sub-agent delegation alongside a file write/edit.
-    if has_delegation and has_mutation:
+    # Never parallelise a sub-agent delegation alongside any other tool.
+    # Sub-agents may call bash/write internally, creating TOCTOU risk with
+    # any concurrent read or write in the parent loop.
+    if has_delegation and has_non_delegation:
         return False
+
+    has_mutation = any(n in _MUTATING_PATH_TOOLS for n in names)
 
     reserved_paths: List[str] = []
 

@@ -172,6 +172,32 @@ def _require_session_write_access(session: SessionModel, user) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
 
 
+async def _persist_loop_engine_if_changed(
+    session: SessionModel,
+    new_engine: Optional[str],
+) -> SessionModel:
+    """Persist loop_engine to session metadata when it has changed.
+
+    Returns the updated session (or the original if no change was needed).
+    This helper avoids duplicating the same logic in every message route.
+    """
+    if not new_engine:
+        return session
+    current_engine = (session.metadata or {}).get("loop_engine")
+    if current_engine == new_engine:
+        return session
+    session.metadata = dict(session.metadata or {})
+    session.metadata["loop_engine"] = new_engine
+    updated = await Session.update(session.project_id, session.id, metadata=session.metadata)
+    if updated is not None:
+        session = updated
+    log.info("session.loop_engine.set", {
+        "sessionID": session.id,
+        "loop_engine": new_engine,
+    })
+    return session
+
+
 def _is_hidden_from_session_manager(session: SessionModel) -> bool:
     """Return whether a session should be excluded from manager listings."""
     metadata = session.metadata if isinstance(session.metadata, dict) else {}
@@ -2560,21 +2586,7 @@ async def _process_session_message(
     #     Done here (before SessionLoop.run) so even mid-stream switches
     #     take effect on the very next turn.
     # ------------------------------------------------------------------
-    if request.loop_engine:
-        _new_engine = request.loop_engine
-        _current_engine = (session.metadata or {}).get("loop_engine")
-        if _current_engine != _new_engine:
-            session.metadata = dict(session.metadata or {})
-            session.metadata["loop_engine"] = _new_engine
-            _updated = await Session.update(
-                session.project_id, sessionID, metadata=session.metadata
-            )
-            if _updated is not None:
-                session = _updated
-            log.info("session.loop_engine.set", {
-                "sessionID": sessionID,
-                "loop_engine": _new_engine,
-            })
+    session = await _persist_loop_engine_if_changed(session, request.loop_engine)
 
     # ------------------------------------------------------------------
     # 4. Run unified SessionLoop (replaces ~700 lines of inline loop)
@@ -3443,21 +3455,7 @@ async def send_session_message_async(
     # Persist loop_engine selection to session metadata so
     # SessionLoop._resolve_loop_engine() picks it up for this and all
     # subsequent turns — same logic as in _process_session_message (§7.2).
-    if request.loop_engine:
-        _new_engine = request.loop_engine
-        _current_engine = (session.metadata or {}).get("loop_engine")
-        if _current_engine != _new_engine:
-            session.metadata = dict(session.metadata or {})
-            session.metadata["loop_engine"] = _new_engine
-            _updated = await Session.update(
-                session.project_id, sessionID, metadata=session.metadata
-            )
-            if _updated is not None:
-                session = _updated
-            log.info("session.loop_engine.set", {
-                "sessionID": sessionID,
-                "loop_engine": _new_engine,
-            })
+    session = await _persist_loop_engine_if_changed(session, request.loop_engine)
 
     event = UserInputEvent(
         source_type="webui",
