@@ -28,6 +28,11 @@ log = Log.create(service="provider.options")
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
 
+_GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
+    "reasoning_content": "enable_thinking",
+    "reasoning_details": "reasoning_split",
+}
+
 
 def _coerce_optional_bool(value: Any) -> Optional[bool]:
     """Coerce config values to bool while preserving None."""
@@ -170,6 +175,65 @@ def _resolve_reasoning_transport(provider_id: str, model_id: str) -> str:
     return transport
 
 
+def _build_generic_chat_extra_body(
+    provider_id: str,
+    model_id: str,
+    interleaved_capability: Optional[Dict[str, Any]],
+    reasoning_enabled: Optional[bool],
+) -> Optional[Dict[str, Any]]:
+    """Build OpenAI-compatible reasoning params for the active replay field."""
+    provider_lower = provider_id.lower()
+    model_lower = model_id.lower()
+    enabled = reasoning_enabled is not False
+
+    if "deepseek" in model_lower or provider_lower == "deepseek":
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "glm" in model_lower or provider_lower == "zhipu":
+        return {
+            "thinking": (
+                {"type": "enabled", "clear_thinking": False}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "mimo" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "kimi" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if isinstance(interleaved_capability, dict):
+        field = interleaved_capability.get("field")
+        key = _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS.get(field)
+        if key:
+            return {key: enabled}
+
+    if reasoning_enabled is True:
+        return {"enable_thinking": True}
+
+    return None
+
+
 def build_provider_options(
     provider_id: str,
     model_id: str,
@@ -254,33 +318,27 @@ def build_provider_options(
 
     # -- Generic-chat (OpenAI-compat) interleaved thinking --------------------
     # The Anthropic branch above handles ``anthropic_messages`` transport.
-    # Everything else that exposes thinking as a single boolean in extra_body
-    # (Alibaba DashScope, ThreatBook, Moonshot, Zhipu/GLM, MiniMax, Stepfun,
-    # DeepSeek, generic openai-compatible user-configured endpoints) sits on
-    # the ``generic_chat`` transport, and the wire format is identical —
-    # ``extra_body.enable_thinking``.  No per-provider dispatch needed.
-    #
-    # The gate is the resolved ``interleaved_capability``: catalog explicit
-    # declaration wins, with the series-token inference in
-    # ``interleaved.infer_interleaved_capability`` as fallback.  This means a
-    # new model from a known family (qwen*, glm-*, kimi-k2*, deepseek-v4*,
-    # step-3.5*, minimax-m*, …) Just Works without anyone editing the
-    # dispatch — the prior hard-coded token whitelist that silently dropped
-    # GLM-5 / minimax / deepseek / stepfun is gone, and so is the
-    # provider-keyed shape registry that replaced it (every entry produced
-    # the same dict).
+    # Generic-chat endpoints expose provider-specific extra_body toggles:
+    # most reasoning_content models use enable_thinking, while MiniMax's
+    # OpenAI-compatible interleaved format uses reasoning_split so the model
+    # returns reasoning_details that can be replayed in later tool turns.
     elif (
-        interleaved_enabled
+        (interleaved_enabled or reasoning_enabled is True)
         and reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT
     ):
-        options["extra_body"] = {
-            "enable_thinking": True if reasoning_enabled is not False else False,
-        }
-        log.debug("options.thinking_params.resolved", {
-            "provider_id": provider_id,
-            "model_id": model_id,
-            "extra_body_keys": list(options["extra_body"].keys()),
-        })
+        extra_body = _build_generic_chat_extra_body(
+            provider_id,
+            model_id,
+            interleaved_capability,
+            reasoning_enabled,
+        )
+        if extra_body:
+            options["extra_body"] = extra_body
+            log.debug("options.thinking_params.resolved", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "extra_body_keys": list(options["extra_body"].keys()),
+            })
 
     # -- max_tokens fallback from model config ------------------------------
     if resolve_max_tokens and "max_tokens" not in options:

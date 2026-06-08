@@ -4,6 +4,11 @@ from flocks.provider.interleaved import (
     REASONING_TRANSPORT_GENERIC_CHAT,
 )
 
+DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
+KIMI_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+MIMO_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+
 
 class TestBuildProviderOptions:
     def test_claude_reasoning_can_be_disabled(self):
@@ -35,23 +40,23 @@ class TestBuildProviderOptions:
 
         assert options["extra_body"]["enable_thinking"] is False
 
-    def test_threatbook_kimi_hybrid_models_enable_thinking_by_default(self):
+    def test_threatbook_kimi_hybrid_models_use_official_thinking_payload(self):
         options = provider_options.build_provider_options(
             "threatbook-cn-llm",
             "kimi-k2.6",
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
 
-    def test_moonshot_kimi_hybrid_models_enable_thinking_by_default(self):
+    def test_moonshot_kimi_hybrid_models_use_official_thinking_payload(self):
         options = provider_options.build_provider_options(
             "moonshot",
             "kimi-k2.6",
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
 
     def test_openai_compatible_qwen_models_enable_thinking_by_default(self, monkeypatch):
         monkeypatch.setattr(
@@ -72,7 +77,7 @@ class TestBuildProviderOptions:
 
         assert options["extra_body"]["enable_thinking"] is True
 
-    def test_openai_compatible_kimi_models_enable_thinking_by_default(self, monkeypatch):
+    def test_openai_compatible_kimi_models_use_official_thinking_payload(self, monkeypatch):
         monkeypatch.setattr(
             provider_options,
             "_resolve_interleaved_capability",
@@ -90,7 +95,129 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_minimax_models_use_reasoning_split(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_details",
+                "echo": "tool_calls",
+                "cross_provider_policy": "promote",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "minimax",
+            "minimax-m3",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_split": True}
+
+    def test_deepseek_models_use_official_thinking_payload(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_content",
+                "echo": "tool_calls",
+                "placeholder": " ",
+                "cross_provider_policy": "placeholder",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "deepseek",
+            "deepseek-v4-pro",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == DEEPSEEK_THINKING_EXTRA_BODY
+
+    def test_deepseek_models_emit_disabled_thinking_when_reasoning_disabled(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_content",
+                "echo": "tool_calls",
+                "placeholder": " ",
+                "cross_provider_policy": "placeholder",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "deepseek",
+            "deepseek-v4-pro",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_glm_models_use_official_thinking_payload(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_content",
+                "echo": "tool_calls",
+                "cross_provider_policy": "promote",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "zhipu",
+            "glm-4.7",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == GLM_THINKING_EXTRA_BODY
+
+    def test_glm_models_emit_disabled_thinking_when_reasoning_disabled(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_content",
+                "echo": "tool_calls",
+                "cross_provider_policy": "promote",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "zhipu",
+            "glm-4.7",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    def test_mimo_models_use_official_thinking_payload(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_interleaved_capability",
+            lambda *_args: {
+                "field": "reasoning_content",
+                "echo": "tool_calls",
+                "placeholder": " ",
+                "cross_provider_policy": "placeholder",
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "mimo-v2.5-pro",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == MIMO_THINKING_EXTRA_BODY
 
     def test_claude_thinking_depends_on_transport_not_capability(self, monkeypatch):
         monkeypatch.setattr(
@@ -148,7 +275,17 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_kimi_hybrid_models_emit_disabled_thinking_when_reasoning_disabled(self):
+        options = provider_options.build_provider_options(
+            "threatbook-cn-llm",
+            "kimi-k2.5",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"thinking": {"type": "disabled"}}
 
     def test_model_setting_enable_thinking_is_applied(self, monkeypatch):
         monkeypatch.setattr(provider_options, "_resolve_reasoning_enabled", lambda *_args: True)
@@ -159,7 +296,24 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_model_setting_enable_thinking_applies_without_interleaved(self, monkeypatch):
+        monkeypatch.setattr(provider_options, "_resolve_reasoning_enabled", lambda *_args: True)
+        monkeypatch.setattr(provider_options, "_resolve_interleaved_capability", lambda *_args: None)
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_reasoning_transport",
+            lambda *_args: REASONING_TRANSPORT_GENERIC_CHAT,
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "custom-thinking-model",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"enable_thinking": True}
 
     def test_openai_reasoning_can_be_disabled(self):
         options = provider_options.build_provider_options(

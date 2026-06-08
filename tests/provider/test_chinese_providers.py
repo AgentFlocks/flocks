@@ -225,8 +225,8 @@ class TestCuratedCatalogModels:
         m3 = next(m for m in models if m.id == "minimax-m3")
         assert m3.capabilities.supports_reasoning is True
         assert m3.capabilities.interleaved["field"] == "reasoning_details"
-        assert m3.limits.context_window == 512000
-        assert m3.limits.max_output_tokens == 512000
+        assert m3.limits.context_window == 1000000
+        assert m3.limits.max_output_tokens == 128000
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.supports_reasoning is True
         assert m27.capabilities.interleaved["field"] == "reasoning_details"
@@ -253,6 +253,7 @@ class TestCuratedCatalogModels:
         assert get_provider_default_url("threatbook-cn-llm") == "https://llm.threatbook.cn/v1"
         models = get_provider_model_definitions("threatbook-cn-llm")
         assert {m.id for m in models} == {
+            "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
             "GLM-5",
@@ -269,8 +270,8 @@ class TestCuratedCatalogModels:
         assert flash_cn.pricing.input == 1.0
         assert flash_cn.pricing.output == 2.0
         assert flash_cn.pricing.currency == "CNY"
-        assert flash_cn.limits.context_window == 200000
-        assert flash_cn.limits.max_output_tokens == 128000
+        assert flash_cn.limits.context_window == 1000000
+        assert flash_cn.limits.max_output_tokens == 384000
 
         kimi = next(m for m in models if m.id == "kimi-k2.6")
         assert kimi.capabilities.supports_vision is True
@@ -291,6 +292,7 @@ class TestCuratedCatalogModels:
         assert get_provider_default_url("threatbook-io-llm") == "https://llm.threatbook.io/v1"
         models = get_provider_model_definitions("threatbook-io-llm")
         assert {m.id for m in models} == {
+            "minimax-m3",
             "minimax-m2.7",
             "minimax-m2.5",
             "GLM-5",
@@ -306,8 +308,8 @@ class TestCuratedCatalogModels:
         assert flash_io.pricing.input == 1.0
         assert flash_io.pricing.output == 2.0
         assert flash_io.pricing.currency == "CNY"
-        assert flash_io.limits.context_window == 200000
-        assert flash_io.limits.max_output_tokens == 128000
+        assert flash_io.limits.context_window == 1000000
+        assert flash_io.limits.max_output_tokens == 384000
 
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.interleaved["field"] == "reasoning_details"

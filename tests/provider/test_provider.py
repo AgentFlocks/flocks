@@ -168,9 +168,7 @@ def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkey
     ``_PROMOTE_REASONING_CONTENT_TOKENS`` / ``_STRICT_REASONING_CONTENT_TOKENS``
     lists, the provider id ``custom-demo`` does not match any of the
     special-case provider prefixes, and the base_url does not match any of
-    the provider-hosting hints.  Previously this test used ``deepseek-chat``;
-    that no longer qualifies because the entire deepseek series is now
-    considered thinking-capable per the catalog-driven dispatch design.
+    the provider-hosting hints.
     """
     provider_model = SimpleNamespace(
         id="gpt-4-turbo",

@@ -34,7 +34,6 @@ _ANTHROPIC_THINKING = {
 }
 
 _STRICT_REASONING_CONTENT_TOKENS = (
-    "deepseek",
     "deepseek-v3",
     "deepseek-v4",
     "deepseek-v4-pro",

@@ -16,7 +16,7 @@ thinking flag, causing the upstream API to short-circuit with
 The new dispatch is transport-driven:
 
   - ``reasoning_transport == anthropic_messages``  →  ``thinking={type: "enabled", budget_tokens:...}``
-  - ``reasoning_transport == generic_chat``        →  ``extra_body.enable_thinking: bool``
+  - ``reasoning_transport == generic_chat``        →  provider-specific ``extra_body`` params
 
 The gate is the resolved ``interleaved_capability``: catalog explicit
 declaration wins, with the series-token inference in
@@ -48,6 +48,11 @@ import pytest
 from flocks.provider import model_catalog
 from flocks.provider import options as provider_options
 
+DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
+KIMI_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+MIMO_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,6 +82,27 @@ def _iter_interleaved_catalog_entries() -> Iterator[Tuple[str, str]]:
                 continue
             if capabilities.get("interleaved") is not None:
                 yield provider_id, model_id
+
+
+def _expected_generic_chat_extra_body(
+    provider_id: str,
+    model_id: str,
+) -> Dict[str, Any]:
+    """Return the expected OpenAI-compatible thinking control payload."""
+    provider_lower = provider_id.lower()
+    model_lower = model_id.lower()
+
+    if "deepseek" in model_lower or provider_lower == "deepseek":
+        return DEEPSEEK_THINKING_EXTRA_BODY
+    if "glm" in model_lower or provider_lower == "zhipu":
+        return GLM_THINKING_EXTRA_BODY
+    if "mimo" in model_lower:
+        return MIMO_THINKING_EXTRA_BODY
+    if "kimi" in model_lower:
+        return KIMI_THINKING_EXTRA_BODY
+    if "minimax" in model_lower or provider_lower == "minimax":
+        return {"reasoning_split": True}
+    return {"enable_thinking": True}
 
 
 # ---------------------------------------------------------------------------
@@ -133,17 +159,38 @@ class TestCatalogInterleavedCoverage:
             f"options={options!r}"
         )
 
+    @pytest.mark.parametrize("provider_id,model_id", list(_iter_interleaved_catalog_entries()))
+    def test_interleaved_model_gets_official_generic_chat_payload(
+        self,
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        """Every catalog-declared generic-chat model emits its official payload."""
+        options = provider_options.build_provider_options(
+            provider_id,
+            model_id,
+            resolve_max_tokens=False,
+        )
+
+        assert options.get("extra_body") == _expected_generic_chat_extra_body(
+            provider_id,
+            model_id,
+        ), f"{provider_id}/{model_id} emitted unexpected options={options!r}"
+
 
 class TestGLM5TraceReplay:
     """Specific regression for ses_1628dfe6cffe1i5xZY9lv1u20m step 50.
 
     Trace showed: GLM-5 on alibaba, tools present, returned
     ``finishReason=stop, content=495, toolCallCount=0`` because the request
-    went out without ``enable_thinking: true``.  After the fix, the request
-    body should include the flag.
+    went out without a thinking payload.  After the fix, the request body
+    should include GLM's official thinking object.
     """
 
-    def test_glm5_alibaba_emits_enable_thinking(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_glm5_alibaba_emits_official_thinking_payload(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         monkeypatch.setattr(
             provider_options,
             "_resolve_interleaved_capability",
@@ -164,13 +211,13 @@ class TestGLM5TraceReplay:
             "alibaba/GLM-5 catalog declares interleaved but no extra_body emitted — "
             "this is the exact regression that caused ses_1628dfe6cffe1i5xZY9lv1u20m"
         )
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == GLM_THINKING_EXTRA_BODY
 
     @pytest.mark.parametrize(
         "provider_id",
         ["alibaba", "threatbook-cn-llm", "threatbook-io-llm", "zhipu"],
     )
-    def test_glm5_emits_enable_thinking_on_every_provider(
+    def test_glm5_emits_official_thinking_payload_on_every_provider(
         self, provider_id: str, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(
@@ -188,33 +235,35 @@ class TestGLM5TraceReplay:
             "GLM-5",
             resolve_max_tokens=False,
         )
-        assert options["extra_body"]["enable_thinking"] is True
+        assert options["extra_body"] == GLM_THINKING_EXTRA_BODY
 
     @pytest.mark.parametrize(
-        "provider_id,model_id",
+        "provider_id,model_id,field,expected_extra_body",
         [
-            ("threatbook-cn-llm", "minimax-m2.5"),
-            ("threatbook-cn-llm", "minimax-m2.7"),
-            ("threatbook-cn-llm", "minimax-m3"),
-            ("threatbook-io-llm", "minimax-m2.5"),
-            ("threatbook-io-llm", "minimax-m2.7"),
-            ("threatbook-io-llm", "minimax-m3"),
-            ("minimax", "minimax-m2.5"),
-            ("deepseek", "deepseek-reasoner"),
-            ("stepfun", "step-3.5-flash"),
+            ("threatbook-cn-llm", "minimax-m2.5", "reasoning_details", {"reasoning_split": True}),
+            ("threatbook-cn-llm", "minimax-m2.7", "reasoning_details", {"reasoning_split": True}),
+            ("threatbook-cn-llm", "minimax-m3", "reasoning_details", {"reasoning_split": True}),
+            ("threatbook-io-llm", "minimax-m2.5", "reasoning_details", {"reasoning_split": True}),
+            ("threatbook-io-llm", "minimax-m2.7", "reasoning_details", {"reasoning_split": True}),
+            ("threatbook-io-llm", "minimax-m3", "reasoning_details", {"reasoning_split": True}),
+            ("minimax", "minimax-m2.5", "reasoning_details", {"reasoning_split": True}),
+            ("deepseek", "deepseek-reasoner", "reasoning_content", DEEPSEEK_THINKING_EXTRA_BODY),
+            ("stepfun", "step-3.5-flash", "reasoning_content", {"enable_thinking": True}),
         ],
     )
     def test_previously_dropped_models_now_get_flag(
         self,
         provider_id: str,
         model_id: str,
+        field: str,
+        expected_extra_body: Dict[str, Any],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(
             provider_options,
             "_resolve_interleaved_capability",
             lambda *_args, **_kw: {
-                "field": "reasoning_content",
+                "field": field,
                 "echo": "tool_calls",
                 "cross_provider_policy": "promote",
             },
@@ -225,9 +274,9 @@ class TestGLM5TraceReplay:
             model_id,
             resolve_max_tokens=False,
         )
-        assert options.get("extra_body", {}).get("enable_thinking") is True, (
+        assert options.get("extra_body") == expected_extra_body, (
             f"{provider_id}/{model_id} — catalog says interleaved, dispatch "
-            "should have emitted enable_thinking"
+            f"should have emitted {expected_extra_body}"
         )
 
 
@@ -237,7 +286,7 @@ class TestDispatchShape:
 
     The dispatch is now transport-driven: ``anthropic_messages`` →
     ``thinking={type: "enabled", ...}``; ``generic_chat`` →
-    ``extra_body.enable_thinking``.  Catalog explicit declaration wins,
+    provider-specific ``extra_body``.  Catalog explicit declaration wins,
     with the series-token inference in ``interleaved.infer_interleaved_capability``
     as fallback for any model the catalog forgot to declare.
     """
@@ -262,28 +311,13 @@ class TestDispatchShape:
         )
         assert not hasattr(provider_options, "_openai_base_thinking_shape"), (
             "_openai_base_thinking_shape should be removed; generic_chat "
-            "interleaved just emits extra_body.enable_thinking inline"
+            "interleaved emits extra_body inline"
         )
 
-    def test_deepseek_v3_is_a_thinking_model(self) -> None:
-        """``deepseek-chat`` (V3) is auto-enabled as a thinking model via the
-        ``deepseek`` series-token in ``_STRICT_REASONING_CONTENT_TOKENS``,
-        even though the catalog does not declare ``interleaved`` for it.
-
-        Per the "deepseek 系列 全部" design decision, every DeepSeek series
-        is treated as thinking-capable by default.  V3 is the last holdout —
-        previously kept non-thinking because the series token wasn't broad
-        enough to match ``deepseek-chat``.  Now that ``deepseek`` is in the
-        tokens, V3 picks up ``enable_thinking: true`` automatically.
-
-        This test exercises the real chain (no monkeypatch) so it pins both:
-        1. The catalog gate is silent for V3 (no ``interleaved`` field).
-        2. The series-token inference fills the gap.
+    def test_deepseek_v3_is_not_auto_thinking_model(self) -> None:
+        """``deepseek-chat`` (V3) must not inherit thinking params from a
+        broad ``deepseek`` substring.
         """
-        # Sanity-check: V3 has no catalog declaration.  If someone adds
-        # ``interleaved`` to the catalog later, that path will take over and
-        # the test will still pass — the assertion is just a "this is the
-        # current shape" guard.
         catalog = model_catalog.get_raw_catalog()
         v3_entry = catalog.get("deepseek", {}).get("models", {}).get("deepseek-chat")
         assert v3_entry is not None, "deepseek-chat missing from catalog"
@@ -292,15 +326,12 @@ class TestDispatchShape:
             "series-token assertion and let the catalog coverage test pin it"
         )
 
-        # Real chain: catalog silent → series-token inference fires →
-        # dispatch emits enable_thinking.
         options = provider_options.build_provider_options(
             "deepseek", "deepseek-chat", resolve_max_tokens=False,
         )
-        assert options.get("extra_body", {}).get("enable_thinking") is True, (
-            f"deepseek-chat is a deepseek-series model; the 'deepseek' token "
-            f"in _STRICT_REASONING_CONTENT_TOKENS should have inferred it as "
-            f"thinking and emitted enable_thinking. options={options!r}"
+        assert "extra_body" not in options, (
+            "deepseek-chat does not declare interleaved in catalog and should "
+            f"not be auto-enabled by a broad deepseek token. options={options!r}"
         )
 
     def test_explicit_reasoning_toggle_propagates(self) -> None:
@@ -349,7 +380,7 @@ class TestDispatchShape:
         assert "extra_body" not in options
 
     @pytest.mark.parametrize(
-        "model_id",
+        "model_id,expected_extra_body",
         [
             # A model that is NOT in any catalog but matches a known series
             # token in ``infer_interleaved_capability``.  Demonstrates that
@@ -358,16 +389,21 @@ class TestDispatchShape:
             # embed a real token from ``_PROMOTE_REASONING_CONTENT_TOKENS`` /
             # ``_STRICT_REASONING_CONTENT_TOKENS`` so the substring match
             # fires regardless of where Flocks runs the test.
-            "qwen3-7b-uncatalogued",        # contains "qwen3"
-            "glm-5-uncatalogued",           # contains "glm-5"
-            "kimi-k2.6-uncatalogued",       # contains "kimi-k2.6"
-            "minimax-m4-uncatalogued",      # contains "minimax"
-            "step-3.5-flash-uncatalogued",  # contains "step-3.5-flash"
+            ("qwen3-7b-uncatalogued", {"enable_thinking": True}),
+            ("glm-5-uncatalogued", GLM_THINKING_EXTRA_BODY),
+            ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
+            ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
+            ("minimax-m4-uncatalogued", {"reasoning_split": True}),
+            ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),
         ],
     )
-    def test_series_token_fallback_emits_enable_thinking(self, model_id: str) -> None:
+    def test_series_token_fallback_emits_expected_extra_body(
+        self,
+        model_id: str,
+        expected_extra_body: Dict[str, Any],
+    ) -> None:
         """Models matching a known series token in
-        ``infer_interleaved_capability`` get ``enable_thinking`` on the wire
+        ``infer_interleaved_capability`` get the expected extra_body on the wire
         even when the catalog has no explicit declaration for them.
 
         This is the regression net for the design choice that the dispatch
@@ -378,11 +414,35 @@ class TestDispatchShape:
         options = provider_options.build_provider_options(
             "openai-compatible", model_id, resolve_max_tokens=False,
         )
-        assert options.get("extra_body", {}).get("enable_thinking") is True, (
+        assert options.get("extra_body") == expected_extra_body, (
             f"openai-compatible/{model_id} matches a known series token; "
             "series-token fallback should have inferred interleaved and "
-            f"emitted enable_thinking. options={options!r}"
+            f"emitted {expected_extra_body}. options={options!r}"
         )
+
+    @pytest.mark.parametrize(
+        "provider_id,model_id,expected_extra_body",
+        [
+            ("deepseek", "deepseek-reasoner", DEEPSEEK_THINKING_EXTRA_BODY),
+            ("deepseek", "deepseek-v4-flash", DEEPSEEK_THINKING_EXTRA_BODY),
+            ("minimax", "minimax-m3", {"reasoning_split": True}),
+            ("stepfun", "step-3.5-flash", {"enable_thinking": True}),
+            ("zhipu", "glm-4.7", GLM_THINKING_EXTRA_BODY),
+        ],
+    )
+    def test_real_catalog_chain_emits_expected_extra_body(
+        self,
+        provider_id: str,
+        model_id: str,
+        expected_extra_body: Dict[str, Any],
+    ) -> None:
+        """Exercise catalog/inference/dispatch without monkeypatching."""
+        options = provider_options.build_provider_options(
+            provider_id,
+            model_id,
+            resolve_max_tokens=False,
+        )
+        assert options.get("extra_body") == expected_extra_body
 
 
 class TestOpenAICompatibleExtraBody:
@@ -391,6 +451,59 @@ class TestOpenAICompatibleExtraBody:
     ``build_provider_options`` produces the right shape, ``chat_stream`` /
     ``chat`` in ``openai_compatible.py`` dropped the kwargs it received.
     """
+
+    def test_chat_non_streaming_propagates_extra_body(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The non-streaming ``chat`` path must preserve extra_body too."""
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        from flocks.provider.sdk.openai_compatible import OpenAICompatibleProvider
+
+        captured: Dict[str, Any] = {}
+
+        class _FakeCompletions:
+            async def create(self, **kwargs: Any) -> Any:
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    id="chatcmpl-test",
+                    model="qwen3-235b-a22b-thinking",
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="ok"),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=1,
+                        completion_tokens=1,
+                        total_tokens=2,
+                    ),
+                )
+
+        class _FakeChat:
+            completions = _FakeCompletions()
+
+        class _FakeClient:
+            chat = _FakeChat()
+
+        provider = OpenAICompatibleProvider()
+        provider._get_client = MagicMock(return_value=_FakeClient())  # type: ignore[method-assign]
+
+        asyncio.run(
+            provider.chat(
+                "qwen3-235b-a22b-thinking",
+                messages=[],
+                extra_body={"enable_thinking": True},
+            )
+        )
+
+        assert captured.get("extra_body") == {"enable_thinking": True}, (
+            "openai_compatible.chat swallowed caller-supplied extra_body"
+        )
 
     def test_chat_stream_propagates_extra_body(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Smoke test that an ``extra_body`` kwarg passed to ``chat_stream``
