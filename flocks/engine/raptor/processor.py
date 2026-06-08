@@ -228,8 +228,6 @@ def _should_parallelize_batch(
     if has_delegation and has_non_delegation:
         return False
 
-    has_mutation = any(n in _MUTATING_PATH_TOOLS for n in names)
-
     reserved_paths: List[str] = []
 
     for _, tool_name, args in normalized_calls:
