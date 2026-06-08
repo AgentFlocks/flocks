@@ -38,6 +38,8 @@
     "notFound": "工作流不存在",
     "backToList": "返回列表",
     "resetLayout": "重置布局",
+    "flocksHelp": "Flocks 帮助",
+    "flocksHelpTitle": "打开右侧 AI 编辑",
     "downloadMd": "下载 MD",
     "downloadMdTitle": "下载 MD 文件",
     "downloadJson": "下载 JSON",
@@ -51,6 +53,11 @@
       "flow": "流程图",
       "md": "MD 描述",
       "json": "JSON"
+    },
+    "flowControls": {
+      "zoomIn": "放大",
+      "zoomOut": "缩小",
+      "fitView": "适应视图"
     },
     "topBar": {
       "collapsePanel": "收起面板",

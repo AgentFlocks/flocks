@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import RightPanel from './RightPanel';
@@ -80,5 +81,26 @@ describe('RightPanel', () => {
     );
 
     expect(screen.queryByRole('button', { name: '前往会话列表查看' })).not.toBeInTheDocument();
+  });
+
+  it('支持外部控制当前 Tab', async () => {
+    const user = userEvent.setup();
+    const onActiveTabChange = vi.fn();
+
+    render(
+      <RightPanel
+        workflow={makeWorkflow()}
+        open
+        activeTab="chat"
+        onActiveTabChange={onActiveTabChange}
+      />,
+    );
+
+    expect(screen.getByText('chat tab')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '运行' }));
+
+    expect(onActiveTabChange).toHaveBeenCalledWith('run');
+    expect(screen.getByText('chat tab')).toBeInTheDocument();
   });
 });

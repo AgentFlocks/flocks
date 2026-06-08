@@ -38,6 +38,8 @@
     "notFound": "Workflow not found",
     "backToList": "Back to List",
     "resetLayout": "Reset Layout",
+    "flocksHelp": "Flocks Help",
+    "flocksHelpTitle": "Open AI Edit in the right panel",
     "downloadMd": "Download MD",
     "downloadMdTitle": "Download MD file",
     "downloadJson": "Download JSON",
@@ -51,6 +53,11 @@
       "flow": "Flow Diagram",
       "md": "MD Description",
       "json": "JSON"
+    },
+    "flowControls": {
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
+      "fitView": "Fit view"
     },
     "topBar": {
       "collapsePanel": "Collapse Panel",

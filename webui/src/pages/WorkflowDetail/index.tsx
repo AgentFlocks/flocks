@@ -3,12 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, Layout, Download, FileJson } from 'lucide-react';
+import { X, GitBranch, FileText, Code2, Download, FileJson, LifeBuoy } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
-import RightPanel from './RightPanel';
+import RightPanel, { type RightPanelTabId } from './RightPanel';
 import { extractErrorMessage } from '@/utils/error';
 import NodeInfoPanel from './NodeInfoPanel';
 
@@ -43,8 +43,8 @@ export default function WorkflowDetail() {
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
-  const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTabId>('overview');
   const [showMdHint, setShowMdHint] = useState(false);
   const hasAutoSwitchedRef = useRef(false);
   const dragging = useRef(false);
@@ -128,9 +128,9 @@ export default function WorkflowDetail() {
     setTimeout(() => setRunToast(null), 3000);
   }, []);
 
-  // 自动布局：递增 layoutKey 触发 FlowCanvas 重新 BFS 布局
-  const handleAutoLayout = useCallback(() => {
-    setLayoutKey((k) => k + 1);
+  const handleFlocksHelp = useCallback(() => {
+    setPanelOpen(true);
+    setRightPanelTab('chat');
   }, []);
 
   // 删除工作流
@@ -299,16 +299,15 @@ export default function WorkflowDetail() {
                 workflowJson={workflow.workflowJson}
                 editable={false}
                 onNodeClick={(node) => setDrawerNode(node)}
-                layoutKey={layoutKey}
               />
-              {/* 重置布局按钮 - 右上角浮动 */}
+              {/* 流程图快捷操作 - 右上角浮动 */}
               <button
-                onClick={handleAutoLayout}
-                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm transition-colors"
-                title={t('detail.resetLayout')}
+                onClick={handleFlocksHelp}
+                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-red-50 border border-red-100 text-red-700 text-xs rounded-lg hover:bg-red-100 transition-colors"
+                title={t('detail.flocksHelpTitle')}
               >
-                <Layout className="w-3.5 h-3.5" />
-                {t('detail.resetLayout')}
+                <LifeBuoy className="w-3.5 h-3.5" />
+                {t('detail.flocksHelp')}
               </button>
             </div>
 
@@ -393,6 +392,8 @@ export default function WorkflowDetail() {
           latestExecution={latestExecution}
           open={panelOpen}
           width={panelWidth}
+          activeTab={rightPanelTab}
+          onActiveTabChange={setRightPanelTab}
           onLatestExecutionChange={setLatestExecution}
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}

@@ -60,13 +60,15 @@ class TabErrorBoundary extends Component<
 // RightPanel
 // ─────────────────────────────────────────────
 
-type TabId = 'chat' | 'overview' | 'run' | 'integration';
+export type RightPanelTabId = 'chat' | 'overview' | 'run' | 'integration';
 
 interface RightPanelProps {
   workflow: Workflow;
   latestExecution?: WorkflowExecution | null;
   open: boolean;
   width?: number;
+  activeTab?: RightPanelTabId;
+  onActiveTabChange?: (tab: RightPanelTabId) => void;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
@@ -80,6 +82,8 @@ interface RightPanelProps {
 
 export default function RightPanel({
   workflow, latestExecution, open, width = 320,
+  activeTab,
+  onActiveTabChange,
   onLatestExecutionChange,
   onExecutionSettled,
   onWorkflowUpdated,
@@ -90,8 +94,16 @@ export default function RightPanel({
 }: RightPanelProps) {
   const { t } = useTranslation('workflow');
   const confirm = useConfirm();
-  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [internalActiveTab, setInternalActiveTab] = useState<RightPanelTabId>('overview');
   const [deleting, setDeleting] = useState(false);
+  const currentActiveTab = activeTab ?? internalActiveTab;
+
+  const handleTabChange = (tab: RightPanelTabId) => {
+    if (activeTab === undefined) {
+      setInternalActiveTab(tab);
+    }
+    onActiveTabChange?.(tab);
+  };
 
   const handleDelete = async () => {
     const ok = await confirm({
@@ -109,7 +121,7 @@ export default function RightPanel({
     }
   };
 
-  const TABS: { id: TabId; label: string }[] = [
+  const TABS: { id: RightPanelTabId; label: string }[] = [
     { id: 'overview',     label: t('detail.rightPanel.tabOverview') },
     { id: 'chat',         label: t('detail.rightPanel.tabChat') },
     { id: 'run',          label: t('detail.rightPanel.tabRun') },
@@ -126,13 +138,13 @@ export default function RightPanel({
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => handleTabChange(tab.id)}
             className={`flex-1 py-3 text-xs font-medium transition-colors relative ${
-              activeTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'
+              currentActiveTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
             {tab.label}
-            {activeTab === tab.id && (
+            {currentActiveTab === tab.id && (
               <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600 rounded-full" />
             )}
           </button>
@@ -141,7 +153,7 @@ export default function RightPanel({
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-        {activeTab === 'chat' && (
+        {currentActiveTab === 'chat' && (
           <ChatTab
             workflow={workflow}
             onLatestExecutionChange={onLatestExecutionChange}
@@ -152,8 +164,8 @@ export default function RightPanel({
             onNodeRefDismiss={onDeselectNode}
           />
         )}
-        {activeTab === 'overview' && <OverviewTab workflow={workflow} />}
-        {activeTab === 'run' && (
+        {currentActiveTab === 'overview' && <OverviewTab workflow={workflow} />}
+        {currentActiveTab === 'run' && (
           <TabErrorBoundary>
             <RunTab
               workflow={workflow}
@@ -163,7 +175,7 @@ export default function RightPanel({
             />
           </TabErrorBoundary>
         )}
-        {activeTab === 'integration' && (
+        {currentActiveTab === 'integration' && (
           <TabErrorBoundary>
             <IntegrationTab workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
           </TabErrorBoundary>
