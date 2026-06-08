@@ -108,6 +108,8 @@ export interface SessionChatProps {
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
+  /** Model override to include in prompt_async requests */
+  model?: { providerID: string; modelID: string } | null;
   /** Agents available for one-turn @mention routing. */
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
@@ -120,8 +122,10 @@ export interface SessionChatProps {
   onSSEEvent?: (event: SSEChatEvent) => void;
   /** Called on session errors from SSE */
   onError?: (message: string) => void;
-  /** Extra content injected into the composer toolbar (left of send button, after divider) */
+  /** Extra content injected into the left side of the composer toolbar */
   toolbarSlot?: React.ReactNode;
+  /** Extra content injected between left toolbar controls and right actions */
+  centerToolbarSlot?: React.ReactNode;
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
@@ -135,7 +139,12 @@ export interface SessionChatProps {
    * session id) directly without an empty ``async (..) => { await ... }``
    * shim.
    */
-  onCreateAndSend?: (text: string, imageParts?: ImagePartData[], agentOverride?: string) => Promise<unknown> | unknown;
+  onCreateAndSend?: (
+    text: string,
+    imageParts?: ImagePartData[],
+    agentOverride?: string,
+    modelOverride?: { providerID: string; modelID: string } | null,
+  ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
   /**
@@ -693,6 +702,7 @@ export default function SessionChat({
   onStreamingDone,
   initialMessage,
   agentName,
+  model,
   display,
   welcomeContent,
   onSseStatusChange,
@@ -703,6 +713,7 @@ export default function SessionChat({
   onInitialMessageConsumed,
   supportsVision,
   toolbarSlot,
+  centerToolbarSlot,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -1522,6 +1533,7 @@ export default function SessionChat({
         parts: buildPromptParts(text, imageParts),
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
+      if (model) payload.model = model;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
@@ -1549,6 +1561,7 @@ export default function SessionChat({
       await sessionApi.enqueuePrompt(sessionId, {
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
+        ...(model ? { model } : {}),
       });
       await fetchPromptQueue();
       setQueueExpanded(true);
@@ -1625,7 +1638,7 @@ export default function SessionChat({
         setSending(true);
         try {
           setPendingAgentName(mentionedAgent || 'rex');
-          await onCreateAndSend(text, imageParts, mentionedAgent || undefined);
+          await onCreateAndSend(text, imageParts, mentionedAgent || undefined, model);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can
@@ -2458,6 +2471,16 @@ export default function SessionChat({
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
+                  {toolbarSlot}
+
+                  {centerToolbarSlot && (
+                    <div className="ml-1">
+                      {centerToolbarSlot}
+                    </div>
+                  )}
+
+                  <div className="flex-1" />
+
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -2467,16 +2490,6 @@ export default function SessionChat({
                   >
                     <Paperclip className="w-4 h-4" />
                   </button>
-
-                  {/* divider + injected slot (e.g. agent selector) */}
-                  {toolbarSlot && (
-                    <>
-                      <div className="w-px h-4 bg-zinc-200 mx-1 flex-shrink-0" />
-                      {toolbarSlot}
-                    </>
-                  )}
-
-                  <div className="flex-1" />
 
                   {isStreaming ? (
                     <>

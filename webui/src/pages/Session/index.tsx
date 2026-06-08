@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2,
+  MoreHorizontal, PencilLine, Download, Share2, Cpu,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -16,11 +16,14 @@ import { sessionApi } from '@/api/session';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
+import { useProviders } from '@/hooks/useProviders';
 import client from '@/api/client';
+import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
+import type { ModelDefinitionV2 } from '@/types';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -33,6 +36,19 @@ function sanitizeSessionExportName(value: string) {
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+type ChatModelOption = {
+  key: string;
+  providerID: string;
+  providerName: string;
+  modelID: string;
+  label: string;
+  supportsVision: boolean | null;
+};
+type ChatModelProviderGroup = {
+  providerID: string;
+  providerName: string;
+  models: ChatModelOption[];
+};
 
 function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
@@ -73,6 +89,10 @@ export default function SessionPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
+  const [showModelOptions, setShowModelOptions] = useState(false);
+  const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
+  const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
@@ -94,6 +114,7 @@ export default function SessionPage() {
 
   const { sessions, loading: loadingSessions, refetch: refetchSessions, updateSessionTitle, removeSession, removeSessions, addSession } = useSessions();
   const { agents, loading: loadingAgents } = useAgents();
+  const { providers, loading: loadingProviders } = useProviders();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary'), [agents]);
   const subAgents = useMemo(
     () => agents.filter((a) => a.mode !== 'primary' && !(a.tags ?? []).includes('system')),
@@ -112,6 +133,61 @@ export default function SessionPage() {
     () => chatAgents.find((agent) => agent.name === selectedAgent),
     [chatAgents, selectedAgent],
   );
+  const chatModelOptions = useMemo<ChatModelOption[]>(() => {
+    const providerById = new Map(
+      providers
+        .filter((provider) => provider.configured)
+        .map((provider) => [provider.id, provider]),
+    );
+
+    return enabledModelDefinitions.flatMap((model) => {
+      const provider = providerById.get(model.provider_id);
+      if (!provider) return [];
+      return [{
+        key: `${provider.id}::${model.id}`,
+        providerID: provider.id,
+        providerName: provider.name || provider.id,
+        modelID: model.id,
+        label: model.name || model.id,
+        supportsVision: typeof model.capabilities?.supports_vision === 'boolean'
+          ? model.capabilities.supports_vision
+          : null,
+      }];
+    });
+  }, [enabledModelDefinitions, providers]);
+  const groupedChatModelOptions = useMemo<ChatModelProviderGroup[]>(() => {
+    const groups = new Map<string, ChatModelProviderGroup>();
+
+    providers.forEach((provider) => {
+      if (!provider.configured) return;
+      groups.set(provider.id, {
+        providerID: provider.id,
+        providerName: provider.name || provider.id,
+        models: [],
+      });
+    });
+
+    chatModelOptions.forEach((option) => {
+      const group = groups.get(option.providerID);
+      if (group) group.models.push(option);
+    });
+
+    return Array.from(groups.values())
+      .map((group) => ({
+        ...group,
+        models: [...group.models].sort((a, b) => a.label.localeCompare(b.label)),
+      }))
+      .filter((group) => group.models.length > 0)
+      .sort((a, b) => a.providerName.localeCompare(b.providerName));
+  }, [chatModelOptions, providers]);
+  const selectedModelOption = useMemo(
+    () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? chatModelOptions[0] ?? null,
+    [chatModelOptions, selectedModelKey],
+  );
+  const selectedPromptModel = selectedModelOption
+    ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
+    : null;
+  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
   const selectedSession = useMemo(
     () => sessions.find(s => s.id === selectedSessionId) ?? null,
     [sessions, selectedSessionId],
@@ -210,6 +286,24 @@ export default function SessionPage() {
     writeLastSelectedSessionId(selectedSessionId);
   }, [selectedSessionId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingEnabledModels(true);
+    modelV2API.listDefinitions({ enabled_only: true })
+      .then((response) => {
+        if (!cancelled) setEnabledModelDefinitions(response.data.models ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setEnabledModelDefinitions([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEnabledModels(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Close agent dropdown on outside click
   useEffect(() => {
     if (!showAgentOptions) return;
@@ -220,6 +314,41 @@ export default function SessionPage() {
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [showAgentOptions]);
+
+  useEffect(() => {
+    if (!showModelOptions) return;
+    const handle = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-model-selector]')) setShowModelOptions(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showModelOptions]);
+
+  useEffect(() => {
+    if (selectedModelKey || chatModelOptions.length === 0) return;
+    let cancelled = false;
+    defaultModelAPI.getResolved()
+      .then((response) => {
+        if (cancelled) return;
+        const { provider_id: providerID, model_id: modelID } = response.data;
+        const defaultKey = `${providerID}::${modelID}`;
+        const fallbackKey = chatModelOptions[0]?.key ?? null;
+        setSelectedModelKey(chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedModelKey(chatModelOptions[0]?.key ?? null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [chatModelOptions, selectedModelKey]);
+
+  useEffect(() => {
+    if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey) return;
+    if (chatModelOptions.some((option) => option.key === selectedModelKey)) return;
+    setSelectedModelKey(chatModelOptions[0].key);
+  }, [chatModelOptions, loadingEnabledModels, selectedModelKey]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -294,6 +423,7 @@ export default function SessionPage() {
     text: string,
     imageParts?: ImagePartData[],
     agentOverride?: string,
+    modelOverride?: { providerID: string; modelID: string } | null,
   ) => {
     try {
       const response = await client.post('/api/session', { title: 'New Session' });
@@ -308,6 +438,7 @@ export default function SessionPage() {
       };
       const effectiveAgent = agentOverride || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
+      if (modelOverride) payload.model = modelOverride;
       client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
         toast.error(t('chat.sendFailed', 'Send failed'), err.message);
       });
@@ -742,7 +873,8 @@ export default function SessionPage() {
           onCreateAndSend={handleCreateAndSend}
           onCreateNewSession={handleCreateSession}
           onStreamingDone={() => setPendingInitialMessage(null)}
-          supportsVision={supportsVision}
+          supportsVision={effectiveSupportsVision}
+          model={selectedPromptModel}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
           )}
@@ -827,6 +959,76 @@ export default function SessionPage() {
                       })
                     ) : (
                       <div className="p-4 text-center text-sm text-zinc-500">{t('noAgents')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          }
+          centerToolbarSlot={
+            <div className="relative" data-model-selector>
+              <button
+                type="button"
+                onClick={() => setShowModelOptions(!showModelOptions)}
+                disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
+                className="flex h-8 max-w-[260px] items-center gap-1.5 rounded-lg px-2 text-sm text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+                title={selectedModelOption ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}` : t('modelPicker.empty')}
+              >
+                <Cpu className="h-4 w-4 shrink-0" />
+                <span className="truncate font-medium">
+                  {selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
+                </span>
+                <ChevronDown className={`h-3.5 w-3.5 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
+              </button>
+              {showModelOptions && (
+                <div className="absolute left-0 bottom-full z-50 mb-2 w-[32rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg">
+                  <div className="border-b border-zinc-100 px-3 py-2">
+                    <div className="text-xs font-semibold text-zinc-700">{t('modelPicker.title')}</div>
+                    <div className="text-[11px] text-zinc-400">{t('modelPicker.hint')}</div>
+                  </div>
+                  <div className="max-h-80 overflow-y-auto p-1.5">
+                    {loadingProviders || loadingEnabledModels ? (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('loading')}</div>
+                    ) : groupedChatModelOptions.length > 0 ? (
+                      groupedChatModelOptions.map((group) => (
+                        <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
+                          <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-2 py-1.5 text-[11px] font-semibold text-zinc-500 backdrop-blur">
+                            <span className="truncate">{group.providerName}</span>
+                            <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] text-zinc-500">
+                              {t('modelPicker.count', { count: group.models.length })}
+                            </span>
+                          </div>
+                          <div className="space-y-0.5">
+                            {group.models.map((option) => (
+                              <button
+                                key={option.key}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedModelKey(option.key);
+                                  setShowModelOptions(false);
+                                }}
+                                className={`w-full rounded-lg px-3 py-2 text-left transition-colors ${
+                                  selectedModelOption?.key === option.key
+                                    ? 'bg-zinc-100 text-zinc-900'
+                                    : 'text-zinc-700 hover:bg-zinc-50'
+                                }`}
+                              >
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <Cpu className="h-4 w-4 shrink-0 text-zinc-500" />
+                                  <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-900">{option.label}</span>
+                                  {option.supportsVision === true && (
+                                    <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-600">
+                                      {t('modelPicker.vision')}
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="p-4 text-center text-sm text-zinc-500">{t('modelPicker.empty')}</div>
                     )}
                   </div>
                 </div>
