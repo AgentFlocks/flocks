@@ -347,6 +347,15 @@ class TestSystemPromptProvider:
         except (AttributeError, TypeError):
             pytest.skip("provider(None) not supported by this implementation")
 
+    def test_provider_prompts_do_not_reference_retired_todo_tools(self):
+        prompt_dir = Path(__file__).resolve().parents[2] / "flocks" / "session" / "prompt"
+        retired = ("TodoWrite", "TodoRead", "todowrite", "todoread")
+
+        for prompt_path in prompt_dir.glob("*.txt"):
+            content = prompt_path.read_text(encoding="utf-8")
+            for name in retired:
+                assert name not in content, f"{prompt_path.name} references retired tool {name}"
+
 
 class TestPromptToolInstructions:
     def test_tool_instructions_are_platform_agnostic(self):

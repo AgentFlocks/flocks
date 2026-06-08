@@ -157,14 +157,14 @@ export namespace Config {
 
     // Backwards compatibility: legacy top-level `tools` config
     if (result.tools) {
-      const perms: Record<string, Config.PermissionAction> = {}
+      const perms: Record<string, Config.PermissionRule> = {}
       for (const [tool, enabled] of Object.entries(result.tools)) {
         const action: Config.PermissionAction = enabled ? "allow" : "deny"
         if (tool === "write" || tool === "edit" || tool === "patch") {
-          perms.edit = action
+          assignPermission(perms, "edit", action)
           continue
         }
-        perms[tool] = action
+        assignPermission(perms, tool, action)
       }
       result.permission = mergeDeep(perms, result.permission ?? {})
     }
@@ -499,14 +499,28 @@ export namespace Config {
     return val
   }
 
+  const canonicalPermissionToolName = (tool: string) => {
+    if (tool === "todowrite" || tool === "todoread") return "todo"
+    return tool
+  }
+
+  const assignPermission = (target: Record<string, PermissionRule>, tool: string, action: PermissionRule) => {
+    const canonical = canonicalPermissionToolName(tool)
+    if (target[canonical] === "deny" || action === "deny") {
+      target[canonical] = "deny"
+      return
+    }
+    if (!(canonical in target)) target[canonical] = action
+  }
+
   const permissionTransform = (x: unknown): Record<string, PermissionRule> => {
     if (typeof x === "string") return { "*": x as PermissionAction }
     const obj = x as { __originalKeys?: string[] } & Record<string, unknown>
     const { __originalKeys, ...rest } = obj
-    if (!__originalKeys) return rest as Record<string, PermissionRule>
     const result: Record<string, PermissionRule> = {}
-    for (const key of __originalKeys) {
-      if (key in rest) result[key] = rest[key] as PermissionRule
+    const keys = __originalKeys ?? Object.keys(rest)
+    for (const key of keys) {
+      if (key in rest) assignPermission(result, key, rest[key] as PermissionRule)
     }
     return result
   }
@@ -610,9 +624,9 @@ export namespace Config {
         const action = enabled ? "allow" : "deny"
         // write, edit, patch all map to edit permission
         if (tool === "write" || tool === "edit" || tool === "patch") {
-          permission.edit = action
+          assignPermission(permission, "edit", action)
         } else {
-          permission[tool] = action
+          assignPermission(permission, tool, action)
         }
       }
       Object.assign(permission, agent.permission)
