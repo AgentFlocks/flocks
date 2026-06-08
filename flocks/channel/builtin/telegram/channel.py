@@ -308,19 +308,23 @@ class TelegramChannel(ChannelPlugin):
             endpoint, param_name = _TELEGRAM_KIND_TO_ENDPOINT[prepared.kind]
             fields: dict[str, Any] = {
                 "chat_id": chat_id,
-                param_name: ("buffer", prepared.data, prepared.mime),
-                "caption": (ctx.text or "")[:1024] if ctx.text else None,
             }
+            if ctx.text:
+                fields["caption"] = (ctx.text or "")[:1024]
             if message_thread_id is not None:
                 fields["message_thread_id"] = message_thread_id
             if reply_to_message_id is not None:
                 fields["reply_to_message_id"] = reply_to_message_id
             if ctx.silent:
                 fields["disable_notification"] = True
+            files = {
+                param_name: (prepared.filename, prepared.data, prepared.mime),
+            }
 
             response = await client.post(
                 f"{base_url}/{endpoint}",
                 data=fields,
+                files=files,
                 timeout=timeout_seconds,
             )
         except FileNotFoundError as exc:

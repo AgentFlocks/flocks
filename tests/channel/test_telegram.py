@@ -971,9 +971,11 @@ class TestTelegramInboundMedia:
         from flocks.channel.builtin.telegram import inbound_media as mod
 
         async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
+            assert api_base == "https://api.telegram.org/bot123:abc"
             return "documents/file_42.pdf", file_id
 
-        async def fake_download_file(*, bot_token, file_path, max_bytes, timeout):
+        async def fake_download_file(*, download_base, file_path, max_bytes, timeout):
+            assert download_base == "https://api.telegram.org/file/bot123:abc"
             return b"%PDF-1.4 hello"
 
         monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
@@ -1008,7 +1010,7 @@ class TestTelegramInboundMedia:
         async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
             return "documents/big.bin", file_id
 
-        async def fake_download_file(*, bot_token, file_path, max_bytes, timeout):
+        async def fake_download_file(*, download_base, file_path, max_bytes, timeout):
             raise mod.TelegramInboundMediaTooLarge("too large")
 
         monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
@@ -1042,6 +1044,83 @@ class TestTelegramInboundMedia:
             config={},
         )
         assert media is None
+
+    @pytest.mark.asyncio
+    async def test_download_uses_configured_api_root_and_preserves_nested_filename(
+        self, monkeypatch, tmp_path,
+    ):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+        from flocks.channel.base import ChatType, InboundMessage
+
+        async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
+            assert api_base == "https://tg-proxy.example/bot123:abc"
+            return "documents/file_42.pdf", file_id
+
+        async def fake_download_file(*, download_base, file_path, max_bytes, timeout):
+            assert download_base == "https://tg-proxy.example/file/bot123:abc"
+            assert file_path == "documents/file_42.pdf"
+            return b"%PDF-1.4 proxy"
+
+        monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
+        monkeypatch.setattr(mod, "_download_file", fake_download_file)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="telegram",
+                account_id="acc1",
+                message_id="m4",
+                sender_id="u1",
+                chat_id="c1",
+                chat_type=ChatType.DIRECT,
+                media_url="telegram://document/ABC",
+                raw={"document": {"file_name": "原始报告.pdf"}},
+            ),
+            config={
+                "accounts": {
+                    "acc1": {
+                        "botToken": "123:abc",
+                        "apiRoot": "https://tg-proxy.example",
+                    },
+                },
+            },
+        )
+        assert media is not None
+        assert media.filename.endswith(".pdf")
+        assert media.filename != "file_42.pdf"
+
+    @pytest.mark.asyncio
+    async def test_download_supports_legacy_api_base_with_token(
+        self, monkeypatch, tmp_path,
+    ):
+        from flocks.channel.builtin.telegram import inbound_media as mod
+        from flocks.channel.base import ChatType, InboundMessage
+
+        async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
+            assert api_base == "https://legacy.example/bot123:abc"
+            return "documents/file_7.pdf", file_id
+
+        async def fake_download_file(*, download_base, file_path, max_bytes, timeout):
+            assert download_base == "https://legacy.example/file/bot123:abc"
+            return b"legacy"
+
+        monkeypatch.setattr(mod, "_get_file_path", fake_get_file_path)
+        monkeypatch.setattr(mod, "_download_file", fake_download_file)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="telegram",
+                account_id="default",
+                message_id="m5",
+                sender_id="u1",
+                chat_id="c1",
+                chat_type=ChatType.DIRECT,
+                media_url="telegram://document/ABC",
+            ),
+            config={"botToken": "123:abc", "apiBase": "https://legacy.example/bot123:abc"},
+        )
+        assert media is not None
 
 
 # ------------------------------------------------------------------
@@ -1130,8 +1209,8 @@ class TestTelegramSendMedia:
                 return {"ok": True, "result": {"message_id": "111", "chat": {"id": "c1"}}}
 
         class FakeClient:
-            async def post(self, url, *, data, timeout):
-                posted.append({"url": url, "data": data})
+            async def post(self, url, *, data, files, timeout):
+                posted.append({"url": url, "data": data, "files": files})
                 return FakeResponse()
 
         from unittest.mock import AsyncMock
@@ -1151,7 +1230,8 @@ class TestTelegramSendMedia:
         assert result.success is True
         assert result.message_id == "111"
         assert posted[0]["url"].endswith("/sendPhoto")
-        assert "photo" in posted[0]["data"]
+        assert "photo" in posted[0]["files"]
+        assert posted[0]["files"]["photo"][0] == "photo.jpg"
         assert posted[0]["data"]["caption"] == "look"
 
     @pytest.mark.asyncio
@@ -1182,8 +1262,8 @@ class TestTelegramSendMedia:
                 return {"ok": True, "result": {"message_id": "222", "chat": {"id": "c1"}}}
 
         class FakeClient:
-            async def post(self, url, *, data, timeout):
-                posted.append({"url": url, "data": data})
+            async def post(self, url, *, data, files, timeout):
+                posted.append({"url": url, "data": data, "files": files})
                 return FakeResponse()
 
         from unittest.mock import AsyncMock
@@ -1202,6 +1282,7 @@ class TestTelegramSendMedia:
         )
         assert result.success is True
         assert posted[0]["url"].endswith("/sendDocument")
+        assert posted[0]["files"]["document"][0] == "doc.pdf"
 
     @pytest.mark.asyncio
     async def test_send_media_kind_override_prefix(
@@ -1233,7 +1314,7 @@ class TestTelegramSendMedia:
                 return {"ok": True, "result": {"message_id": "333", "chat": {"id": "c1"}}}
 
         class FakeClient:
-            async def post(self, url, *, data, timeout):
+            async def post(self, url, *, data, files, timeout):
                 return FakeResponse()
 
         from unittest.mock import AsyncMock
@@ -1281,7 +1362,7 @@ class TestTelegramSendMedia:
                 return {"ok": False, "description": "bad chat id"}
 
         class FakeClient:
-            async def post(self, url, *, data, timeout):
+            async def post(self, url, *, data, files, timeout):
                 return FakeResponse()
 
         from unittest.mock import AsyncMock

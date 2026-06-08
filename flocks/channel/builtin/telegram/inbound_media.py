@@ -27,6 +27,7 @@ import httpx
 
 from flocks.channel.base import InboundMessage
 from flocks.utils.log import Log
+from .config import resolve_account_config, resolve_api_base
 
 log = Log.create(service="channel.telegram.media")
 
@@ -128,12 +129,12 @@ def coerce_str(value: Any) -> Optional[str]:
 
 async def _download_file(
     *,
-    bot_token: str,
+    download_base: str,
     file_path: str,
     max_bytes: int,
     timeout: float,
 ) -> bytes:
-    url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+    url = f"{download_base.rstrip('/')}/{file_path.lstrip('/')}"
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
@@ -164,6 +165,12 @@ def _guess_filename(
 
     # Document blocks carry a `file_name`.  Photos have no name.
     if kind in {"document", "audio", "video", "animation", "voice"}:
+        block = raw.get(kind)
+        if isinstance(block, dict):
+            for key in ("file_name", "fileName"):
+                candidate = str(block.get(key) or "").strip()
+                if candidate:
+                    return _sanitize_filename(candidate)
         for key in ("file_name", "fileName"):
             candidate = str(raw.get(key) or "").strip()
             if candidate:
@@ -179,17 +186,56 @@ def _guess_filename(
     return _sanitize_filename(f"telegram_{kind}_{file_id[:12]}")
 
 
-def _resolve_api_base(config: dict, account_id: Optional[str]) -> str:
-    if isinstance(config, dict):
-        if account_id and isinstance(config.get("accounts"), dict):
-            acc = config["accounts"].get(account_id) or {}
-            base = acc.get("apiBase") or acc.get("api_base")
-            if base:
-                return str(base)
-        base = config.get("apiBase") or config.get("api_base")
+def _legacy_api_root(
+    config: dict[str, Any],
+    account_id: Optional[str],
+    bot_token: str,
+) -> Optional[str]:
+    if not isinstance(config, dict):
+        return None
+    if account_id and isinstance(config.get("accounts"), dict):
+        acc = config["accounts"].get(account_id) or {}
+        base = acc.get("apiBase") or acc.get("api_base")
         if base:
-            return str(base)
-    return "https://api.telegram.org/bot"
+            return _normalize_legacy_api_root(str(base), bot_token)
+    base = config.get("apiBase") or config.get("api_base")
+    if base:
+        return _normalize_legacy_api_root(str(base), bot_token)
+    return None
+
+
+def _normalize_legacy_api_root(base: str, bot_token: str) -> str:
+    normalized = base.rstrip("/")
+    if "{token}" in normalized:
+        normalized = normalized.replace("{token}", "").rstrip("/")
+    if normalized.endswith(bot_token):
+        normalized = normalized[: -len(bot_token)].rstrip("/")
+    if normalized.endswith("/bot"):
+        return normalized[: -len("/bot")]
+    return normalized
+
+
+def _resolve_api_roots(
+    config: dict[str, Any],
+    account_id: Optional[str],
+    bot_token: str,
+) -> tuple[str, str]:
+    try:
+        _, account = resolve_account_config(config, account_id)
+        api_root = coerce_str(account.get("apiRoot"))
+        if api_root:
+            api_call_base = resolve_api_base(account, bot_token)
+            api_root = api_call_base.rsplit("/bot", 1)[0]
+        else:
+            legacy_root = _legacy_api_root(config, account_id, bot_token)
+            api_root = legacy_root or "https://api.telegram.org"
+            api_call_base = f"{api_root.rstrip('/')}/bot{bot_token}"
+    except ValueError:
+        legacy_root = _legacy_api_root(config, account_id, bot_token)
+        api_root = legacy_root or "https://api.telegram.org"
+        api_call_base = f"{api_root.rstrip('/')}/bot{bot_token}"
+    download_base = f"{api_root.rstrip('/')}/file/bot{bot_token}"
+    return api_call_base, download_base
 
 
 async def download_inbound_media(
@@ -215,18 +261,9 @@ async def download_inbound_media(
         })
         return None
 
-    api_base = _resolve_api_base(config, msg.account_id)
-    # The base form is ``https://api.telegram.org/bot`` — append the token
-    # so we can call ``/getFile`` against the standard endpoint shape.
-    base_url = api_base.rstrip("/")
-    if base_url.endswith("/bot"):
-        api_call_base = f"{base_url}{bot_token}"
-    elif "{token}" in base_url:
-        api_call_base = base_url.format(token=bot_token)
-    elif base_url.endswith(bot_token):
-        api_call_base = base_url
-    else:
-        api_call_base = f"{base_url}/{bot_token}"
+    api_call_base, download_base = _resolve_api_roots(
+        config, msg.account_id, bot_token,
+    )
 
     try:
         file_path, _ = await _get_file_path(
@@ -234,7 +271,7 @@ async def download_inbound_media(
             file_id=file_id, timeout=30.0,
         )
         buffer = await _download_file(
-            bot_token=bot_token, file_path=file_path,
+            download_base=download_base, file_path=file_path,
             max_bytes=max_bytes, timeout=60.0,
         )
     except TelegramInboundMediaTooLarge as e:
