@@ -422,6 +422,20 @@ export function getStandaloneThinkingBubbleClassName(compact: boolean): string {
   return getMessageBubbleClassName({ compact, isUser: false, isEditing: false });
 }
 
+export function getRenderableFileUrl(url: string): string {
+  if (!url.startsWith('file://')) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    const path = decodeURIComponent(parsed.pathname);
+    return `${getApiBase()}/api/file/download?path=${encodeURIComponent(path)}`;
+  } catch {
+    return url;
+  }
+}
+
 export function getUserAvatarContainerClassName(compact: boolean): string {
   return `pointer-events-none absolute left-full top-0 ml-2.5 translate-y-1/2 flex items-center justify-end ${
     compact ? 'h-7' : 'h-8'
@@ -2774,13 +2788,14 @@ function ChatMessageBubbleInner({
                   {fileParts.map((part, i) => {
                     const isImage = (part.mime || '').startsWith('image/');
                     if (isImage && part.url) {
+                      const imageUrl = getRenderableFileUrl(part.url);
                       return (
                         <img
                           key={part.id || `file-${i}`}
-                          src={part.url}
+                          src={imageUrl}
                           alt={part.filename || ''}
                           className="h-24 w-24 flex-shrink-0 rounded-lg border border-gray-200 object-cover bg-gray-50 cursor-zoom-in transition-transform hover:scale-[1.02]"
-                          onClick={() => setPreviewImage({ url: part.url!, alt: part.filename })}
+                          onClick={() => setPreviewImage({ url: imageUrl, alt: part.filename })}
                         />
                       );
                     }

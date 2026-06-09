@@ -161,6 +161,11 @@ def _guess_filename(
 ) -> str:
     """Resolve a filename from message raw body / header / URL fallback."""
     raw = msg.raw if isinstance(msg.raw, dict) else {}
+    content = _extract_content_dict(msg.raw)
+    for key in ("fileName", "filename", "name"):
+        candidate = str(content.get(key) or "").strip()
+        if candidate:
+            return _sanitize_filename(candidate)
     for key in ("fileName", "filename", "name"):
         candidate = str(raw.get(key) or "").strip()
         if candidate:
@@ -180,6 +185,35 @@ def _guess_filename(
         return _sanitize_filename(url_basename)
     msg_id = msg.message_id or "unknown"
     return _sanitize_filename(f"dingtalk_{msg_id[:12]}")
+
+
+def _extract_content_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        content = raw.get("content")
+        return content if isinstance(content, dict) else {}
+
+    content = getattr(raw, "content", None)
+    if isinstance(content, dict):
+        return content
+
+    extensions = getattr(raw, "extensions", None)
+    if isinstance(extensions, dict):
+        content = extensions.get("content")
+        if isinstance(content, dict):
+            return content
+
+    file_content = getattr(raw, "file_content", None)
+    if isinstance(file_content, dict):
+        return file_content
+    if file_content is not None:
+        result: dict[str, Any] = {}
+        for key in ("fileName", "filename", "name"):
+            value = getattr(file_content, key, None)
+            if value:
+                result[key] = value
+        return result
+
+    return {}
 
 
 async def download_inbound_media(
