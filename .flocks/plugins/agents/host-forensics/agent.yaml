@@ -29,8 +29,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - ssh_run_script
   - ssh_host_cmd

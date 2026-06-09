@@ -53,6 +53,13 @@
       "custom": "Custom"
     }
   },
+  "modelPicker": {
+    "title": "Choose Model",
+    "hint": "Overrides the model used when sending this chat message",
+    "empty": "No available models",
+    "count": "{{count}}",
+    "vision": "Vision"
+  },
   "welcome": {
     "title": "Start a new conversation",
     "description": "AI-native security operations assistant — threat analysis, incident response, and security orchestration",
@@ -145,6 +152,7 @@
       "error": "Failed",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
+      "todoStages": "Todo stages",
       "errorLabel": "Error",
       "elapsed": "Elapsed",
       "workflowStage": "Current stage: {{phase}}",

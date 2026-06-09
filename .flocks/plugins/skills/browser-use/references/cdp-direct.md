@@ -167,6 +167,17 @@ click_at_xy(420, 315)
 '
 ```
 
+## 表单填充与点击操作模式
+
+### 字段类型（js 优先）
+
+| 字段 | 推荐 | 备注 |
+|---|---|---|
+| text / email / tel / password / textarea | `js("el=document.querySelector('[name=x]');el.value='...';el.dispatchEvent(new Event('input'))")` | **必须** dispatchEvent |
+| radio / checkbox | `js("document.querySelector('[name=size][value=small]').click()")` | `click_at_xy` 不可靠 |
+| select | `js("el=document.querySelector('[name=size]');el.value='small';el.dispatchEvent(new Event('change'))")` | 必须 dispatch change |
+| file | `upload_file('input[type=file]', '/abs/path')` | 唯一方式 |
+
 ## 对话框与阻塞状态
 
 浏览器原生 `alert`、`confirm`、`prompt`、`beforeunload` 会冻结 JS 线程。动作后如果 `page_info()` 返回 `{"dialog": ...}`，先处理对话框：

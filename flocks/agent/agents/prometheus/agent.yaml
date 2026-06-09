@@ -37,7 +37,7 @@ prompt_metadata:
       trigger: User wants to discuss approach, scope, or tradeoffs before execution
   use_when:
     - Non-trivial tasks with multiple steps or unclear scope
-    - User asks for a plan, roadmap, or /plan-style workflow
+    - User asks for a plan or roadmap
     - Before delegating hephaestus or rex-junior for implementation
   avoid_when:
     - Trivial single-file fixes with clear instructions

@@ -53,6 +53,13 @@
       "custom": "自定义"
     }
   },
+  "modelPicker": {
+    "title": "选择模型",
+    "hint": "作为本次对话发送时的模型覆盖",
+    "empty": "暂无可用模型",
+    "count": "{{count}} 个",
+    "vision": "视觉"
+  },
   "welcome": {
     "title": "开始新的对话",
     "description": "AI 原生的安全运营助手，帮您进行威胁分析、应急响应、安全编排等任务",
@@ -145,6 +152,7 @@
       "error": "失败",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
+      "todoStages": "Todo 阶段",
       "errorLabel": "错误",
       "elapsed": "耗时",
       "workflowStage": "当前阶段：{{phase}}",

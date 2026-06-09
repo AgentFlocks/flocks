@@ -53,6 +53,18 @@ from .polling import PollingLoop
 
 log = Log.create(service="channel.telegram")
 
+# Mapping from :class:`PreparedTelegramMedia.kind` to Bot API endpoint
+# + multipart field name.  Animation covers GIFs that should NOT be sent
+# via the photo endpoint.
+_TELEGRAM_KIND_TO_ENDPOINT: dict[str, tuple[str, str]] = {
+    "photo": ("sendPhoto", "photo"),
+    "document": ("sendDocument", "document"),
+    "video": ("sendVideo", "video"),
+    "audio": ("sendAudio", "audio"),
+    "voice": ("sendVoice", "voice"),
+    "animation": ("sendAnimation", "animation"),
+}
+
 
 class TelegramChannel(ChannelPlugin):
     """Telegram bot channel — polling (default) or webhook mode."""
@@ -230,6 +242,130 @@ class TelegramChannel(ChannelPlugin):
     # ------------------------------------------------------------------
     # Outbound
     # ------------------------------------------------------------------
+
+    async def send_media(self, ctx: OutboundContext) -> DeliveryResult:
+        """Send a media message via the Telegram Bot HTTP API.
+
+        Routes the call to ``sendPhoto`` / ``sendDocument`` /
+        ``sendVideo`` / ``sendAudio`` / ``sendVoice`` / ``sendAnimation``
+        based on the inferred kind of *ctx.media_url* (or ``ctx.text``
+        carrying a ``KIND:...`` prefix when overridden by the agent).
+        Local files are read directly; ``http(s)`` URLs are passed
+        through to the Bot API (Telegram fetches them itself for
+        sub-5MB photos / sub-20MB files).
+        """
+        try:
+            account_id, account = resolve_account_config(self._config, ctx.account_id)
+        except ValueError as exc:
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False, error=str(exc),
+            )
+
+        token = coerce_str(account.get("botToken"))
+        if not token:
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False, error="Missing botToken",
+            )
+
+        chat_id, target_thread_id = parse_target(ctx.to)
+        if not chat_id:
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False,
+                error="Invalid Telegram target",
+            )
+
+        if not ctx.media_url:
+            return await self.send_text(ctx)
+
+        message_thread_id = coerce_int(ctx.thread_id) or target_thread_id
+        reply_to_message_id = coerce_int(ctx.reply_to_id)
+        base_url = resolve_api_base(account, token)
+        timeout_seconds = max(coerce_int(account.get("timeoutSeconds")) or 60, 1)
+        client = await get_http_client()
+
+        try:
+            from flocks.channel.builtin.telegram.media import prepare_telegram_media
+
+            kind_override = None
+            media_source = ctx.media_url
+            # Optional agent-side override: ``telegram:document:<url>``
+            # forces the document endpoint (e.g. for images that fail
+            # photo dimension checks).
+            if media_source.startswith("telegram:"):
+                head, _, tail = media_source.partition(":")
+                # head is e.g. ``telegram:document`` then a ``:``-separated URL
+                kind_part = media_source.split(":", 2)
+                if len(kind_part) == 3 and kind_part[0] == "telegram":
+                    candidate = kind_part[1].strip().lower()
+                    if candidate in {"photo", "document", "video", "audio", "voice", "animation"}:
+                        kind_override = candidate
+                        media_source = kind_part[2]
+
+            prepared = await prepare_telegram_media(
+                media_source, kind_override=kind_override,
+            )
+
+            endpoint, param_name = _TELEGRAM_KIND_TO_ENDPOINT[prepared.kind]
+            fields: dict[str, Any] = {
+                "chat_id": chat_id,
+            }
+            if ctx.text:
+                fields["caption"] = (ctx.text or "")[:1024]
+            if message_thread_id is not None:
+                fields["message_thread_id"] = message_thread_id
+            if reply_to_message_id is not None:
+                fields["reply_to_message_id"] = reply_to_message_id
+            if ctx.silent:
+                fields["disable_notification"] = True
+            files = {
+                param_name: (prepared.filename, prepared.data, prepared.mime),
+            }
+
+            response = await client.post(
+                f"{base_url}/{endpoint}",
+                data=fields,
+                files=files,
+                timeout=timeout_seconds,
+            )
+        except FileNotFoundError as exc:
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False,
+                error=str(exc),
+            )
+        except Exception as exc:
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False,
+                error=f"Telegram send_media failed: {exc}",
+                retryable=is_retryable(0, exc if isinstance(exc, httpx.HTTPError) else None),
+            )
+
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        if response.status_code >= 400 or not data.get("ok", response.is_success):
+            description = (
+                data.get("description") or data.get("error")
+                or f"HTTP {response.status_code}"
+            )
+            return DeliveryResult(
+                channel_id="telegram", message_id="", success=False,
+                error=f"Telegram send_media failed: {description}",
+                retryable=is_retryable(response.status_code),
+            )
+
+        result = data.get("result") or {}
+        message_id = coerce_str(result.get("message_id"))
+        returned_chat_id = coerce_str((result.get("chat") or {}).get("id")) or chat_id
+        self.record_message()
+        return DeliveryResult(
+            channel_id="telegram",
+            message_id=message_id,
+            chat_id=returned_chat_id,
+            success=True,
+        )
+
 
     async def send_text(self, ctx: OutboundContext) -> DeliveryResult:
         try:

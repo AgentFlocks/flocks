@@ -16,12 +16,14 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
 import PillGroup from '@/components/common/PillGroup';
-import { providerAPI, defaultModelAPI } from '@/api/provider';
+import { providerAPI, defaultModelAPI, modelV2API } from '@/api/provider';
 import { toolAPI, Tool } from '@/api/tool';
 import { skillAPI, Skill } from '@/api/skill';
+import type { ModelDefinitionV2 } from '@/types';
 
 interface AvailableModel {
   providerID: string;
+  providerName: string;
   modelID: string;
   label: string;
 }
@@ -68,6 +70,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   });
   const [loading, setLoading] = useState(false);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [defaultModel, setDefaultModel] = useState<{ providerID: string; modelID: string } | null>(null);
   const [allTools, setAllTools] = useState<Tool[]>([]);
   const [allSkills, setAllSkills] = useState<Skill[]>([]);
@@ -78,17 +81,30 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   const isPrimary = formData.mode === 'primary';
 
   useEffect(() => {
-    providerAPI.list().then((r) => {
-      const connectedSet = new Set<string>(r.data.connected ?? []);
-      const list: AvailableModel[] = [];
-      for (const provider of r.data.all) {
-        if (!connectedSet.has(provider.id)) continue;
-        for (const [modelId, modelInfo] of Object.entries(provider.models ?? {})) {
-          list.push({ providerID: provider.id, modelID: modelId, label: (modelInfo as any).name || modelId });
-        }
-      }
+    Promise.all([
+      providerAPI.list(),
+      modelV2API.listDefinitions({ enabled_only: true }),
+    ]).then(([providersRes, modelsRes]) => {
+      const connectedSet = new Set<string>(providersRes.data.connected ?? []);
+      const providerById = new Map(
+        providersRes.data.all
+          .filter((provider) => connectedSet.has(provider.id))
+          .map((provider) => [provider.id, provider]),
+      );
+      const enabledModels = (modelsRes.data.models ?? []) as ModelDefinitionV2[];
+      const list: AvailableModel[] = enabledModels.flatMap((model) => {
+        const provider = providerById.get(model.provider_id);
+        if (!provider) return [];
+        return [{
+          providerID: provider.id,
+          providerName: provider.name || provider.id,
+          modelID: model.id,
+          label: model.name || model.id,
+        }];
+      });
       setAvailableModels(list);
-    }).catch(() => {});
+    }).catch(() => setAvailableModels([]))
+      .finally(() => setModelsLoaded(true));
 
     defaultModelAPI.getResolved().then((r) => {
       const d = r.data;
@@ -112,6 +128,16 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       }
     }).catch(() => {}).finally(() => setSkillsLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!modelsLoaded || !formData.modelKey) return;
+    const selectedStillAvailable = availableModels.some(
+      (model) => `${model.providerID}::${model.modelID}` === formData.modelKey,
+    );
+    if (!selectedStillAvailable) {
+      setFormData((prev) => ({ ...prev, modelKey: '' }));
+    }
+  }, [availableModels, formData.modelKey, modelsLoaded]);
 
   const isNative = !!agent?.native;
   const submitDisabled = false;
@@ -303,6 +329,10 @@ function AgentFormContent({
     acc[m.providerID].push(m);
     return acc;
   }, {});
+  const providerLabelById = availableModels.reduce<Record<string, string>>((acc, m) => {
+    acc[m.providerID] = m.providerName;
+    return acc;
+  }, {});
 
   const defaultModelLabel = defaultModel
     ? `${defaultModel.modelID} (${defaultModel.providerID})`
@@ -449,7 +479,7 @@ function AgentFormContent({
           >
             <option value="">— {defaultModelLabel} —</option>
             {Object.entries(modelsByProvider).map(([pID, pModels]) => (
-              <optgroup key={pID} label={pID}>
+              <optgroup key={pID} label={providerLabelById[pID] || pID}>
                 {pModels.map((m) => (
                   <option key={`${m.providerID}::${m.modelID}`} value={`${m.providerID}::${m.modelID}`}>
                     {m.label}

@@ -147,7 +147,8 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 - Match existing codebase patterns when editing.
 - Fix bugs minimally; do not refactor during a bugfix unless required.
 - Keep search bounded: stop when you have enough context, when results repeat, or when direct evidence already answers the question.
-- Use parallel background delegation only when you will benefit from independent branches of work.
+- For independent parallel branches whose results are needed this turn, emit multiple foreground `delegate_task` / `task` tool calls in the same assistant turn. The runtime executes those sibling tool calls concurrently and returns all tool results before you continue.
+- Do not use `run_in_background=true`; background subagent execution is disabled.
 
 ## 5. Verify
 
@@ -279,7 +280,7 @@ Should I proceed with [recommendation], or would you prefer differently?
 def _task_management_section(use_task_system: bool) -> str:
     title = "Task Management" if use_task_system else "Todo Management"
     unit = "tasks" if use_task_system else "todos"
-    create_action = "`TaskCreate`" if use_task_system else "`todowrite`"
+    create_action = "`TaskCreate`" if use_task_system else '`todo(action="write")`'
     progress_action = (
         '`TaskUpdate(status="in_progress")`'
         if use_task_system
@@ -445,7 +446,7 @@ Check your system prompt for a `## Current IM Channel Context` block:
 | No such block | User is chatting via **Flocks Web UI** — this is NOT an IM session. You do NOT have a target session ID yet. | Proceed to Step 2 |
 
 #### Step 2 — Discover sessions (only if Step 1 found nothing)
-Call `session_list(category="user", status="active")`.
+Call `session_manage(action="list", category="user", status="active")`.
 Filter results to sessions whose `title` starts with `[Wecom]`, `[Feishu]`, or `[Dingtalk]`.
 
 If no IM sessions found → stop and tell the user:

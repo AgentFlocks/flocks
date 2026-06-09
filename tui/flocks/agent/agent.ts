@@ -63,8 +63,6 @@ export namespace Agent {
         [Truncate.GLOB]: "allow",
       },
       question: "deny",
-      plan_enter: "deny",
-      plan_exit: "deny",
       // mirrors github.com/github/gitignore Node.gitignore pattern for .env files
       read: {
         "*": "allow",
@@ -100,7 +98,6 @@ export namespace Agent {
           defaults,
           PermissionNext.fromConfig({
             question: "allow",
-            plan_enter: "allow",
           }),
           user,
         ),
@@ -115,7 +112,6 @@ export namespace Agent {
           defaults,
           PermissionNext.fromConfig({
             question: "allow",
-            plan_exit: "allow",
             external_directory: {
               [path.join(Global.Path.data, "plans", "*")]: "allow",
             },

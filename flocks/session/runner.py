@@ -1103,8 +1103,20 @@ class SessionRunner:
         
         # Convert messages to chat format with error handling
         try:
+            queued_user_message_ids = self._get_queued_user_message_ids(messages)
+            if queued_user_message_ids:
+                self._invalidate_chat_context_cache()
+            previous_queued_user_ids = getattr(self, "_queued_user_message_ids", None)
+            self._queued_user_message_ids = queued_user_message_ids
             chat_messages_started_at = time.perf_counter()
-            chat_messages = await self._to_chat_messages(messages, system_prompts)
+            try:
+                chat_messages = await self._to_chat_messages(messages, system_prompts)
+            finally:
+                if previous_queued_user_ids is None:
+                    if hasattr(self, "_queued_user_message_ids"):
+                        delattr(self, "_queued_user_message_ids")
+                else:
+                    self._queued_user_message_ids = previous_queued_user_ids
             self._log_perf(
                 "runner.process_step.chat_messages_ready",
                 chat_messages_started_at,
@@ -1140,67 +1152,6 @@ class SessionRunner:
                     "step": self._step,
                     "session_id": self.session.id,
                 })
-        
-        # Add reminder wrapping for queued user messages (matching Flocks logic)
-        # This reminds the AI to address new user messages while continuing tasks
-        if self._step > 1:
-            # Find last finished assistant message
-            last_finished = None
-            for msg in reversed(messages):
-                if msg.role == MessageRole.ASSISTANT and hasattr(msg, 'finish') and msg.finish:
-                    if msg.finish not in ("tool-calls", "unknown"):
-                        last_finished = msg
-                        break
-            
-            # Wrap queued user messages with reminder
-            if last_finished:
-                from flocks.session.prompt_strings import SYNTHETIC_MESSAGE_MARKERS
-                for chat_msg in chat_messages:
-                    if chat_msg.role != "user":
-                        continue
-
-                    content = chat_msg.content
-
-                    if isinstance(content, str):
-                        if any(marker in content for marker in SYNTHETIC_MESSAGE_MARKERS):
-                            continue
-                        chat_msg.content = (
-                            "<system-reminder>\n"
-                            "The user sent the following message:\n"
-                            f"{content}\n\n"
-                            "Please address this message and continue with your tasks.\n"
-                            "</system-reminder>"
-                        )
-                    elif isinstance(content, list):
-                        # Multimodal user content (e.g. image_url blocks).
-                        # Naively f-stringing the whole list would call
-                        # ``str(list)`` and serialize every image block — base64
-                        # data and all — into plain text, which both blows up
-                        # the token count AND makes vision-capable models
-                        # respond with "I see only base64 text". Wrap *only*
-                        # the first text block instead, leaving image blocks
-                        # untouched. If there is no text block at all (rare —
-                        # an image-only turn), skip wrapping entirely.
-                        first_text_idx: Optional[int] = None
-                        for idx, block in enumerate(content):
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                first_text_idx = idx
-                                break
-                        if first_text_idx is None:
-                            continue
-                        text_val = content[first_text_idx].get("text") or ""
-                        if any(marker in text_val for marker in SYNTHETIC_MESSAGE_MARKERS):
-                            continue
-                        content[first_text_idx] = {
-                            "type": "text",
-                            "text": (
-                                "<system-reminder>\n"
-                                "The user sent the following message:\n"
-                                f"{text_val}\n\n"
-                                "Please address this message and continue with your tasks.\n"
-                                "</system-reminder>"
-                            ),
-                        }
         
         # Add max steps warning if this is the last step (matching Flocks)
         if is_last_step:
@@ -1274,6 +1225,20 @@ class SessionRunner:
                     agent=agent,
                     assistant_msg=assistant_msg,
                 )
+
+                if getattr(self, "_llm_call_aborted", False):
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=self._build_message_aborted_error(),
+                        finish="error",
+                    )
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                    return StepResult(
+                        action="stop",
+                        content=result.content,
+                        usage=result.usage,
+                    )
 
                 # Detect empty response: some models (e.g. MiniMax) occasionally
                 # return 0 chunks with finish_reason=stop after tool execution,
@@ -1889,6 +1854,90 @@ class SessionRunner:
         )
 
     @staticmethod
+    def _build_message_aborted_error() -> Dict[str, Any]:
+        message = "Message generation was interrupted before completion."
+        return {
+            "name": "MessageAbortedError",
+            "message": message,
+            "data": {
+                "message": message,
+            },
+        }
+
+    @staticmethod
+    def _message_role_value(msg: MessageInfo) -> Optional[str]:
+        return msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
+
+    def _get_queued_user_message_ids(
+        self,
+        messages: List[MessageInfo],
+    ) -> set[str]:
+        if self._step <= 1:
+            return set()
+
+        last_finished_index: Optional[int] = None
+        for idx, msg in enumerate(messages):
+            role = self._message_role_value(msg)
+            finish = getattr(msg, "finish", None)
+            if role == "assistant" and finish and finish not in ("tool-calls", "unknown"):
+                last_finished_index = idx
+
+        if last_finished_index is None:
+            return set()
+
+        queued_user_ids: set[str] = set()
+        seen_turn_root_user = False
+        for msg in messages[last_finished_index + 1:]:
+            if self._message_role_value(msg) != "user":
+                continue
+            if not seen_turn_root_user:
+                seen_turn_root_user = True
+                continue
+            queued_user_ids.add(msg.id)
+        return queued_user_ids
+
+    def _invalidate_chat_context_cache(self) -> None:
+        self._static_cache.pop("chat_context_cache", None)
+
+    @staticmethod
+    def _wrap_queued_user_text(content: str) -> str:
+        from flocks.session.prompt_strings import SYNTHETIC_MESSAGE_MARKERS
+
+        if not content or any(marker in content for marker in SYNTHETIC_MESSAGE_MARKERS):
+            return content
+        return (
+            "<system-reminder>\n"
+            "The user sent the following message:\n"
+            f"{content}\n\n"
+            "Please address this message and continue with your tasks.\n"
+            "</system-reminder>"
+        )
+
+    def _wrap_queued_user_blocks(
+        self,
+        blocks: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        first_text_idx: Optional[int] = None
+        for idx, block in enumerate(blocks):
+            if isinstance(block, dict) and block.get("type") == "text":
+                first_text_idx = idx
+                break
+        if first_text_idx is None:
+            return blocks
+
+        text_val = blocks[first_text_idx].get("text") or ""
+        wrapped_text = self._wrap_queued_user_text(text_val)
+        if wrapped_text == text_val:
+            return blocks
+
+        wrapped_blocks = copy.deepcopy(blocks)
+        wrapped_blocks[first_text_idx] = {
+            "type": "text",
+            "text": wrapped_text,
+        }
+        return wrapped_blocks
+
+    @staticmethod
     def _clone_cached_chat_messages(payloads: List[Dict[str, Any]]) -> List[ChatMessage]:
         return [ChatMessage.model_validate(copy.deepcopy(payload)) for payload in payloads]
 
@@ -1975,6 +2024,7 @@ class SessionRunner:
         ctx_window_tokens = self._get_context_window_tokens()
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
+        queued_user_message_ids: set[str] = set(getattr(self, "_queued_user_message_ids", set()) or set())
         active_model = Provider.resolve_model(self.provider_id, self.model_id)
         active_interleaved = (
             getattr(active_model.capabilities, "interleaved", None)
@@ -2047,7 +2097,8 @@ class SessionRunner:
         for idx, msg in enumerate(messages):
             if idx < resume_message_index:
                 continue
-            if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
+            role = msg.role if isinstance(msg.role, str) else msg.role.value
+            if role == "user":
                 turn_index += 1
             is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
@@ -2057,14 +2108,18 @@ class SessionRunner:
                 # Fallback: use text content only
                 content = await Message.get_text_content(msg)
                 if content.strip():
+                    normalized_content = _expand_workflow_node_ref(content)
+                    if role == "user" and msg.id in queued_user_message_ids:
+                        normalized_content = self._wrap_queued_user_text(normalized_content)
                     chat_messages.append(ChatMessage(
-                        role=msg.role if isinstance(msg.role, str) else msg.role.value,
-                        content=_expand_workflow_node_ref(content),
+                        role=role,
+                        content=normalized_content,
                     ))
                 continue
             
             # Build message content from parts
             if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
+                is_queued_user_turn = msg.id in queued_user_message_ids
                 user_content_parts = []
                 user_content_blocks: list[dict[str, Any]] = []
                 for part in parts:
@@ -2123,14 +2178,19 @@ class SessionRunner:
                     block.get("type") == "image"
                     for block in user_content_blocks
                 ):
+                    if is_queued_user_turn:
+                        user_content_blocks = self._wrap_queued_user_blocks(user_content_blocks)
                     chat_messages.append(ChatMessage(
                         role="user",
                         content=user_content_blocks,
                     ))
                 elif user_content_parts:
+                    user_text = "\n\n".join(user_content_parts)
+                    if is_queued_user_turn:
+                        user_text = self._wrap_queued_user_text(user_text)
                     chat_messages.append(ChatMessage(
                         role="user",
-                        content="\n\n".join(user_content_parts),
+                        content=user_text,
                     ))
             
             elif msg.role == MessageRole.ASSISTANT or (isinstance(msg.role, str) and msg.role == "assistant"):
@@ -2575,6 +2635,7 @@ class SessionRunner:
         }
         llm_before_enabled = False
         llm_after_enabled = False
+        self._llm_call_aborted = False
         try:
             llm_before_enabled = await HookPipeline.has_stage_handlers(
                 HookStage.LLM_BEFORE,
@@ -2613,6 +2674,7 @@ class SessionRunner:
 
         llm_call_started_at = time.perf_counter()
         first_chunk_logged = False
+        aborted_during_stream = False
         try:
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
@@ -2649,6 +2711,7 @@ class SessionRunner:
                 
                 # Check for abort
                 if self.is_aborted:
+                    aborted_during_stream = True
                     break
                 
                 # Determine event type from chunk.  A single chunk may carry any
@@ -2813,6 +2876,11 @@ class SessionRunner:
         await processor.process_event(FinishEvent(
             finish_reason=processor.get_finish_reason()
         ))
+
+        # Foreground subagent tool-calls are launched concurrently during
+        # streaming so sibling subagents can start in the same assistant turn.
+        # Drain them here before exposing tool results to the next loop step.
+        await processor.drain_parallel_tool_calls()
         
         # Get processed content
         content = processor.get_text_content()
@@ -2850,6 +2918,7 @@ class SessionRunner:
                 assistant_msg.id,
                 content=content,
             )
+        self._llm_call_aborted = aborted_during_stream
         
         # Note: Tools were already executed synchronously during streaming
         # Build tool call list for result

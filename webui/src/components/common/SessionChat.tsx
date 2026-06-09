@@ -117,6 +117,8 @@ export interface SessionChatProps {
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
+  /** Model override to include in prompt_async requests */
+  model?: { providerID: string; modelID: string } | null;
   /** Agents available for one-turn @mention routing. */
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
@@ -131,12 +133,14 @@ export interface SessionChatProps {
   onSSEEvent?: (event: SSEChatEvent) => void;
   /** Called on session errors from SSE */
   onError?: (message: string) => void;
-  /** Extra content injected into the composer toolbar (left of send button, after divider) */
+  /** Extra content injected into the left side of the composer toolbar */
   toolbarSlot?: React.ReactNode;
   /** Minimum textarea height in px. Defaults to the compact single-line composer height. */
   composerTextareaMinHeight?: number;
   /** Maximum textarea height in px. Defaults to the existing compact/full-page values. */
   composerTextareaMaxHeight?: number;
+  /** Extra content injected between left toolbar controls and right actions */
+  centerToolbarSlot?: React.ReactNode;
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
@@ -150,7 +154,12 @@ export interface SessionChatProps {
    * session id) directly without an empty ``async (..) => { await ... }``
    * shim.
    */
-  onCreateAndSend?: (text: string, imageParts?: ImagePartData[], agentOverride?: string) => Promise<unknown> | unknown;
+  onCreateAndSend?: (
+    text: string,
+    imageParts?: ImagePartData[],
+    agentOverride?: string,
+    modelOverride?: { providerID: string; modelID: string } | null,
+  ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
   /**
@@ -708,6 +717,7 @@ export default function SessionChat({
   onStreamingDone,
   initialMessage,
   agentName,
+  model,
   display,
   welcomeContent,
   conversationBottomSlot,
@@ -721,6 +731,7 @@ export default function SessionChat({
   toolbarSlot,
   composerTextareaMinHeight,
   composerTextareaMaxHeight,
+  centerToolbarSlot,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -1546,6 +1557,7 @@ export default function SessionChat({
         parts: buildPromptParts(text, imageParts),
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
+      if (model) payload.model = model;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
@@ -1573,6 +1585,7 @@ export default function SessionChat({
       await sessionApi.enqueuePrompt(sessionId, {
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
+        ...(model ? { model } : {}),
       });
       await fetchPromptQueue();
       setQueueExpanded(true);
@@ -1692,7 +1705,7 @@ export default function SessionChat({
         setSending(true);
         try {
           setPendingAgentName(mentionedAgent || 'rex');
-          await onCreateAndSend(text, imageParts, mentionedAgent || undefined);
+          await onCreateAndSend(text, imageParts, mentionedAgent || undefined, model);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can
@@ -2549,6 +2562,16 @@ export default function SessionChat({
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
+                  {toolbarSlot}
+
+                  {centerToolbarSlot && (
+                    <div className="ml-1">
+                      {centerToolbarSlot}
+                    </div>
+                  )}
+
+                  <div className="flex-1" />
+
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -2558,16 +2581,6 @@ export default function SessionChat({
                   >
                     <Paperclip className="w-4 h-4" />
                   </button>
-
-                  {/* divider + injected slot (e.g. agent selector) */}
-                  {toolbarSlot && (
-                    <>
-                      <div className="w-px h-4 bg-zinc-200 mx-1 flex-shrink-0" />
-                      {toolbarSlot}
-                    </>
-                  )}
-
-                  <div className="flex-1" />
 
                   {isStreaming ? (
                     <>
@@ -2844,7 +2857,7 @@ function ChatMessageBubbleInner({
           // image previews above the textual prompt — matches typical chat
           // UX for "look at this image and …" style messages.
           const fileParts = parts.filter((p) => p.type === 'file' && p.url);
-          const otherParts = parts.filter((p) => !(p.type === 'file' && p.url));
+          const displayParts = parts.filter((p) => !(p.type === 'file' && p.url));
           return (
             <>
               {fileParts.length > 0 && (
@@ -2874,7 +2887,7 @@ function ChatMessageBubbleInner({
                   })}
                 </div>
               )}
-              {otherParts.map((part: MessagePart, i: number) => (
+              {displayParts.map((part: MessagePart, i: number) => (
                 // Spacing between consecutive parts is owned by this wrapper,
                 // not by individual part components. Each part used to set its
                 // own `mt-2 first:mt-0`, but since every part lives in its own
@@ -3149,7 +3162,11 @@ export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_
 
 function buildToolInputSummary(input: Record<string, unknown>): string {
   return Object.entries(input)
-    .map(([k, v]) => `${k}=${String(v)}`)
+    .map(([k, v]) => {
+      if (Array.isArray(v)) return `${k}=[${v.length} items]`;
+      if (v && typeof v === 'object') return `${k}=${JSON.stringify(v)}`;
+      return `${k}=${String(v)}`;
+    })
     .join(', ');
 }
 
@@ -3187,10 +3204,16 @@ function pickTodoEntries(...candidates: unknown[]): TodoSummaryEntry[] {
   return [];
 }
 
-export function buildTodoWriteSummary(state: Partial<ToolState>): string {
+function getTodoActionLabel(action: unknown): string {
+  if (action === 'read') return 'Read todos';
+  if (action === 'write') return 'Update todos';
+  return 'Todos';
+}
+
+export function buildTodoSummary(state: Partial<ToolState>): string {
   const metadata = state.metadata ?? {};
   const currentTodos = pickTodoEntries(metadata.newTodos, metadata.todos, state.input?.todos);
-  if (currentTodos.length === 0) return '';
+  if (currentTodos.length === 0) return getTodoActionLabel(state.input?.action);
   const totalCount = currentTodos.length;
   const terminalCount = currentTodos.filter(
     (todo) => todo.status === 'completed' || todo.status === 'cancelled',
@@ -3210,6 +3233,34 @@ export function buildTodoWriteSummary(state: Partial<ToolState>): string {
   }
 
   return summary;
+}
+
+function todoStatusLabel(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'completed';
+    case 'in_progress':
+      return 'in progress';
+    case 'cancelled':
+      return 'cancelled';
+    case 'pending':
+      return 'pending';
+    default:
+      return status || 'pending';
+  }
+}
+
+function todoStatusClass(status: string | undefined): string {
+  switch (status) {
+    case 'completed':
+      return 'bg-emerald-50 text-emerald-700 border-emerald-100';
+    case 'in_progress':
+      return 'bg-sky-50 text-sky-700 border-sky-100';
+    case 'cancelled':
+      return 'bg-zinc-100 text-zinc-500 border-zinc-200';
+    default:
+      return 'bg-amber-50 text-amber-700 border-amber-100';
+  }
 }
 
 export interface ChatToolPartProps {
@@ -3277,13 +3328,16 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     }
     return JSON.stringify(output, null, 2);
   };
+  const todoEntries = toolName === 'todo'
+    ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
+    : [];
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
   const inputSummary = state.input
     ? truncateToolDisplayText(
-        toolName === 'todowrite'
-          ? (buildTodoWriteSummary(state) || buildToolInputSummary(state.input))
+        toolName === 'todo'
+          ? buildTodoSummary(state)
           : buildToolInputSummary(state.input),
       )
     : '';
@@ -3347,6 +3401,25 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
       </summary>
 
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
+        {toolName === 'todo' && todoEntries.length > 0 && (
+          <div className="rounded-md border border-zinc-200 bg-white/70 px-2 py-1.5">
+            <div className="mb-1.5 text-[11px] font-medium text-zinc-500">{t('chat.tool.todoStages')}</div>
+            <div className="space-y-1">
+              {todoEntries.map((todo, index) => (
+                <div key={todo.id || index} className="flex items-start gap-2 text-[11px]">
+                  <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-zinc-300" />
+                  <span className="min-w-0 flex-1 text-zinc-700">
+                    {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
+                  </span>
+                  <span className={`flex-shrink-0 rounded-full border px-1.5 py-0.5 leading-none ${todoStatusClass(todo.status)}`}>
+                    {todoStatusLabel(todo.status)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {state.input && (
           <details>
             <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">

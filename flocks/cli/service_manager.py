@@ -798,11 +798,10 @@ def _port_owner_lookup_available() -> bool:
 
 
 def _bind_port_available(port: int) -> bool:
-    """Return True when the TCP port can be bound locally."""
+    """Return True when the TCP port can be bound on any local IPv4 interface."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind(("127.0.0.1", port))
+            sock.bind(("0.0.0.0", port))
         except OSError:
             return False
     return True

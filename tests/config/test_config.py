@@ -6,7 +6,7 @@ import pytest
 import json
 from pathlib import Path
 
-from flocks.config.config import Config, GlobalConfig, ConfigInfo
+from flocks.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +68,47 @@ def test_local_mcp_config_accepts_legacy_env_alias():
         "command": ["python", "-m", "demo"],
         "environment": {"DEMO_TOKEN": "secret"},
     }
+
+
+def test_legacy_todo_permission_names_migrate_to_todo():
+    permission = PermissionConfig.model_validate({
+        "todowrite": "deny",
+        "todoread": "allow",
+        "bash": "ask",
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["todo"] == PermissionAction.DENY
+    assert "todowrite" not in dumped
+    assert "todoread" not in dumped
+    assert dumped["bash"] == PermissionAction.ASK
+
+
+def test_legacy_todo_tool_flags_migrate_to_todo_permission():
+    config = ConfigInfo.model_validate({
+        "tools": {
+            "todowrite": False,
+            "todoread": True,
+        },
+        "agent": {
+            "worker": {
+                "tools": {
+                    "todowrite": False,
+                    "bash": True,
+                },
+            },
+        },
+    })
+
+    assert isinstance(config.permission, dict)
+    assert config.permission["todo"] == PermissionAction.DENY
+    assert "todowrite" not in config.permission
+    assert "todoread" not in config.permission
+
+    worker = config.agent["worker"]
+    assert isinstance(worker.permission, dict)
+    assert worker.permission["todo"] == PermissionAction.DENY
+    assert worker.permission["bash"] == PermissionAction.ALLOW
 
 
 @pytest.mark.asyncio

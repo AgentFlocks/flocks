@@ -21,8 +21,7 @@ tools:
   - glob
   - grep
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - device_context
   - run_slash_command

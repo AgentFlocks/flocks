@@ -261,22 +261,6 @@ class Command:
                 allow_attachments=True,
             ),
             CommandDef(
-                name="plan",
-                description="Create a plan for a task",
-                template="Create a detailed plan for: $ARGUMENTS",
-                agent="prometheus",
-                execution_kind="llm",
-                allow_attachments=True,
-            ),
-            CommandDef(
-                name="ask",
-                description="Ask a question without making changes",
-                template="$ARGUMENTS",
-                agent="ask",
-                execution_kind="llm",
-                allow_attachments=True,
-            ),
-            CommandDef(
                 name="tasks",
                 description="Show task center overview",
                 template="Use the schedule_task_list tool to show the current task center overview including running, queued, and recently completed tasks. Present the results clearly.",

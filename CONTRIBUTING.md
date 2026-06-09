@@ -131,29 +131,90 @@ If you are fixing a bug, prefer adding a regression test that reproduces the iss
 
 All contribution PRs for `flocks` should target the `dev` branch.
 
-When opening a PR, make it easy for reviewers to understand:
+When opening a PR, structure the description so reviewers can quickly identify the change points, the scope of impact, and the business logic that needs careful review. A good PR description answers three core questions:
 
-1. What problem the change solves.
-2. What the scope of the change is.
-3. Why the chosen approach is appropriate.
-4. How you validated the change.
-5. Whether there are compatibility, migration, or configuration impacts.
+1. **What changed** — the concrete change points in this PR.
+2. **What is affected** — the impact scope (users, APIs, configuration, dependencies, performance).
+3. **Where to look closely** — the business logic, invariants, and edge cases that reviewers should focus on.
 
-If the PR changes UI or interaction behavior, include screenshots, recordings, or a clear before/after explanation.
+### 1. Key Changes (改动点)
+
+List the concrete changes grouped by area (backend, frontend, docs, tests, etc.). Each bullet should describe one reviewable change, not a vague summary.
+
+- What was added, modified, or removed.
+- Which modules, files, or APIs are touched.
+- Any new public interfaces, configuration options, environment variables, or CLI flags.
+
+### 2. Impact Scope (影响范围)
+
+Explain who and what is affected. Cover every category that applies, and state explicitly when a category has no impact (e.g. "No public API change.").
+
+- **User-visible behavior**: UX, UI, CLI, API responses, log/event output, or output format changes. Include screenshots or recordings for UI changes.
+- **Compatibility**: backward-compatibility impact, deprecations, default-value changes, or required migrations.
+- **Configuration & environment**: new required settings, environment variables, secrets, or deployment changes.
+- **Dependencies**: any newly added or upgraded third-party packages, and why they are needed.
+- **Performance & resources**: expected impact on latency, memory, CPU, network, or storage.
+- **Security & permissions**: authentication, authorization, data-privacy, or secret-handling touch points.
+
+### 3. Business Logic to Focus On During Review (需重点 Review 的业务逻辑)
+
+Call out the parts of the change that deserve extra reviewer attention. This section is the most valuable part of the PR description — it shortens review time and reduces back-and-forth.
+
+- The specific functions, classes, endpoints, or flows that implement the core logic.
+- Assumptions, preconditions, or invariants the code relies on, and why they hold.
+- Edge cases and error paths that are easy to miss (empty input, partial failure, retry, timeout, concurrency, ordering).
+- Any cross-module contract (e.g. how this change interacts with existing APIs, plugins, or workflows).
+- Anything you are uncertain about and would like a second opinion on — say so explicitly.
+
+### 4. Why This Approach
+
+Briefly justify the chosen approach over reasonable alternatives, especially for non-trivial changes.
+
+### 5. Test Plan & Validation
+
+- Which tests you added or updated, and which suites you ran.
+- Any manual verification, reproduction scripts, or staging checks.
+- For UI changes, attach before/after screenshots or short recordings.
+
+### 6. Compatibility, Migration & Rollback
+
+- Any breaking changes and the migration path.
+- New or changed configuration, environment variables, or feature flags.
+- Rollback strategy if the change is risky.
+
+---
 
 Recommended PR description template:
 
 ```markdown
 ## Summary
+- One or two sentences stating the goal of this PR.
+
+## Key Changes
 - ...
 
-## Why
+## Impact Scope
+- User-visible behavior:
+- Compatibility / migration:
+- Configuration / environment:
+- Dependencies:
+- Performance / resources:
+- Security / permissions:
+
+## Business Logic to Review
+- ...
+- ...
+
+## Why This Approach
 - ...
 
 ## Test Plan
 - [x] uv run pytest ...
 - [x] npm run lint
 - [ ] Manual verification
+
+## Compatibility, Migration & Rollback
+- ...
 ```
 
 Please keep PRs as small and focused as practical. Multiple reviewable PRs are usually easier to merge than one large mixed change.

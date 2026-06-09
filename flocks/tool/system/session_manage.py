@@ -1,13 +1,8 @@
 """
 Session management tools — 查询、创建、更新、删除 Flocks Session 的元数据。
 
-提供以下工具：
-- session_list   : 列出所有（或指定 project）的 session
-- session_get    : 获取单个 session 的完整元数据
-- session_create : 创建新 session
-- session_update : 更新 session 元数据（标题、agent、状态等）
-- session_delete : 删除 session（软删除，同时清理子 session）
-- session_archive: 归档 / 取消归档 session
+提供统一工具：
+- session_manage(action=...) : list/get/create/update/delete/archive
 """
 
 from __future__ import annotations
@@ -25,6 +20,199 @@ from flocks.tool.registry import (
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.session_manage")
+
+
+SESSION_MANAGE_ACTIONS = ["list", "get", "create", "update", "delete", "archive"]
+
+SESSION_MANAGE_DESCRIPTION = """\
+管理 Flocks Session 元数据。
+
+Use `action` to choose the operation:
+- list: 列出 session；可用 project_id/status/category/limit/offset 过滤或分页
+- get: 获取单个 session；需要 session_id
+- create: 创建 session；可传 title/project_id/directory/agent/parent_id
+- update: 更新 session；需要 session_id，可传 title/agent/model/provider/memory_enabled
+- delete: 软删除 session 及其子 session；需要 session_id，会请求确认
+- archive: 归档或取消归档 session；需要 session_id，archive=false 表示恢复 active
+"""
+
+
+SESSION_MANAGE_PARAMETERS = [
+    ToolParameter(
+        name="action",
+        type=ParameterType.STRING,
+        required=True,
+        enum=SESSION_MANAGE_ACTIONS,
+        description="要执行的 session 操作：list/get/create/update/delete/archive",
+    ),
+    ToolParameter(
+        name="session_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="Session ID；get/update/delete/archive 需要",
+    ),
+    ToolParameter(
+        name="project_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="项目 ID；list 时用于过滤，create 时用于归属项目（默认 default）",
+    ),
+    ToolParameter(
+        name="status",
+        type=ParameterType.STRING,
+        required=False,
+        enum=["active", "archived"],
+        description="list 过滤状态：active 或 archived",
+    ),
+    ToolParameter(
+        name="category",
+        type=ParameterType.STRING,
+        required=False,
+        enum=["user", "task"],
+        description="list 过滤分类：user（人工会话）或 task（任务触发会话）",
+    ),
+    ToolParameter(
+        name="limit",
+        type=ParameterType.INTEGER,
+        required=False,
+        description="list 最多返回条数（默认 50）",
+    ),
+    ToolParameter(
+        name="offset",
+        type=ParameterType.INTEGER,
+        required=False,
+        description="list 跳过前 N 条（默认 0）",
+    ),
+    ToolParameter(
+        name="title",
+        type=ParameterType.STRING,
+        required=False,
+        description="create/update 的 session 标题",
+    ),
+    ToolParameter(
+        name="directory",
+        type=ParameterType.STRING,
+        required=False,
+        description="create 的工作目录路径（默认当前目录）",
+    ),
+    ToolParameter(
+        name="agent",
+        type=ParameterType.STRING,
+        required=False,
+        description="create/update 的 agent 类型",
+    ),
+    ToolParameter(
+        name="parent_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="create 子 session 时使用的父 session ID",
+    ),
+    ToolParameter(
+        name="model",
+        type=ParameterType.STRING,
+        required=False,
+        description="update 的 model ID",
+    ),
+    ToolParameter(
+        name="provider",
+        type=ParameterType.STRING,
+        required=False,
+        description="update 的 provider ID",
+    ),
+    ToolParameter(
+        name="memory_enabled",
+        type=ParameterType.BOOLEAN,
+        required=False,
+        description="update 时是否启用 memory 系统",
+    ),
+    ToolParameter(
+        name="archive",
+        type=ParameterType.BOOLEAN,
+        required=False,
+        default=True,
+        description="archive action: true=归档（默认），false=取消归档",
+    ),
+]
+
+
+@ToolRegistry.register_function(
+    name="session_manage",
+    description=SESSION_MANAGE_DESCRIPTION,
+    category=ToolCategory.SYSTEM,
+    parameters=SESSION_MANAGE_PARAMETERS,
+)
+async def session_manage(
+    ctx: ToolContext,
+    action: str,
+    session_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    title: Optional[str] = None,
+    directory: Optional[str] = None,
+    agent: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    memory_enabled: Optional[bool] = None,
+    archive: Optional[bool] = True,
+) -> ToolResult:
+    """Unified session management tool."""
+    if action == "list":
+        return await _session_list_impl(
+            ctx,
+            project_id=project_id,
+            status=status,
+            category=category,
+            limit=limit,
+            offset=offset,
+        )
+    if action == "get":
+        if not session_id:
+            return ToolResult(success=False, error="action=get 需要 session_id")
+        return await _session_get_impl(ctx, session_id=session_id)
+    if action == "create":
+        return await _session_create_impl(
+            ctx,
+            title=title,
+            project_id=project_id,
+            directory=directory,
+            agent=agent,
+            parent_id=parent_id,
+        )
+    if action == "update":
+        if not session_id:
+            return ToolResult(success=False, error="action=update 需要 session_id")
+        return await _session_update_impl(
+            ctx,
+            session_id=session_id,
+            title=title,
+            agent=agent,
+            model=model,
+            provider=provider,
+            memory_enabled=memory_enabled,
+        )
+    if action == "delete":
+        if not session_id:
+            return ToolResult(success=False, error="action=delete 需要 session_id")
+        await ctx.ask(
+            permission="session_manage",
+            patterns=[f"delete:{session_id}"],
+            always=[],
+            metadata={"action": "delete", "session_id": session_id},
+        )
+        return await _session_delete_impl(ctx, session_id=session_id)
+    if action == "archive":
+        if not session_id:
+            return ToolResult(success=False, error="action=archive 需要 session_id")
+        return await _session_archive_impl(ctx, session_id=session_id, archive=archive)
+
+    return ToolResult(
+        success=False,
+        error=f"未知 action: {action!r}. 支持: {', '.join(SESSION_MANAGE_ACTIONS)}",
+    )
 
 
 def _session_to_dict(session, bindings: list | None = None) -> dict[str, Any]:
@@ -97,52 +285,10 @@ async def _enrich_with_channels(sessions_dict: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# session_list
+# list
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_list",
-    description=(
-        "列出 Flocks 的所有 Session 元数据。"
-        "可按 project_id、status、category 过滤，支持分页。"
-    ),
-    category=ToolCategory.SYSTEM,
-    parameters=[
-        ToolParameter(
-            name="project_id",
-            type=ParameterType.STRING,
-            required=False,
-            description="按 project_id 过滤；不填则列出所有项目的 session",
-        ),
-        ToolParameter(
-            name="status",
-            type=ParameterType.STRING,
-            required=False,
-            enum=["active", "archived"],
-            description="按状态过滤：active（默认）或 archived",
-        ),
-        ToolParameter(
-            name="category",
-            type=ParameterType.STRING,
-            required=False,
-            enum=["user", "task"],
-            description="按分类过滤：user（人工会话）或 task（任务触发会话）",
-        ),
-        ToolParameter(
-            name="limit",
-            type=ParameterType.INTEGER,
-            required=False,
-            description="最多返回条数（默认 50）",
-        ),
-        ToolParameter(
-            name="offset",
-            type=ParameterType.INTEGER,
-            required=False,
-            description="跳过前 N 条（用于翻页，默认 0）",
-        ),
-    ],
-)
-async def session_list(
+async def _session_list_impl(
     ctx: ToolContext,
     project_id: Optional[str] = None,
     status: Optional[str] = None,
@@ -194,23 +340,10 @@ async def session_list(
 
 
 # ---------------------------------------------------------------------------
-# session_get
+# get
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_get",
-    description="获取指定 session 的完整元数据，包含时间戳、agent、状态、摘要等。",
-    category=ToolCategory.SYSTEM,
-    parameters=[
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            required=True,
-            description="Session ID",
-        ),
-    ],
-)
-async def session_get(ctx: ToolContext, session_id: str) -> ToolResult:
+async def _session_get_impl(ctx: ToolContext, session_id: str) -> ToolResult:
     from flocks.session.session import Session
 
     session = await Session.get_by_id(session_id)
@@ -223,47 +356,10 @@ async def session_get(ctx: ToolContext, session_id: str) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# session_create
+# create
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_create",
-    description="创建一个新的 Flocks Session。",
-    category=ToolCategory.SYSTEM,
-    parameters=[
-        ToolParameter(
-            name="title",
-            type=ParameterType.STRING,
-            required=False,
-            description="Session 标题；不填则自动生成",
-        ),
-        ToolParameter(
-            name="project_id",
-            type=ParameterType.STRING,
-            required=False,
-            description="归属的 project ID（默认 'default'）",
-        ),
-        ToolParameter(
-            name="directory",
-            type=ParameterType.STRING,
-            required=False,
-            description="工作目录路径（默认使用当前目录）",
-        ),
-        ToolParameter(
-            name="agent",
-            type=ParameterType.STRING,
-            required=False,
-            description="指定 agent 类型，如 hephaestus、rex、build、plan 等",
-        ),
-        ToolParameter(
-            name="parent_id",
-            type=ParameterType.STRING,
-            required=False,
-            description="父 session ID（创建子 session 时使用）",
-        ),
-    ],
-)
-async def session_create(
+async def _session_create_impl(
     ctx: ToolContext,
     title: Optional[str] = None,
     project_id: Optional[str] = None,
@@ -295,56 +391,10 @@ async def session_create(
 
 
 # ---------------------------------------------------------------------------
-# session_update
+# update
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_update",
-    description=(
-        "更新指定 session 的元数据字段。"
-        "支持修改标题、agent、model、provider、memory_enabled 等。"
-    ),
-    category=ToolCategory.SYSTEM,
-    parameters=[
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            required=True,
-            description="要更新的 Session ID",
-        ),
-        ToolParameter(
-            name="title",
-            type=ParameterType.STRING,
-            required=False,
-            description="新标题",
-        ),
-        ToolParameter(
-            name="agent",
-            type=ParameterType.STRING,
-            required=False,
-            description="新 agent 类型",
-        ),
-        ToolParameter(
-            name="model",
-            type=ParameterType.STRING,
-            required=False,
-            description="新 model ID",
-        ),
-        ToolParameter(
-            name="provider",
-            type=ParameterType.STRING,
-            required=False,
-            description="新 provider ID",
-        ),
-        ToolParameter(
-            name="memory_enabled",
-            type=ParameterType.BOOLEAN,
-            required=False,
-            description="是否启用 memory 系统",
-        ),
-    ],
-)
-async def session_update(
+async def _session_update_impl(
     ctx: ToolContext,
     session_id: str,
     title: Optional[str] = None,
@@ -392,27 +442,10 @@ async def session_update(
 
 
 # ---------------------------------------------------------------------------
-# session_delete
+# delete
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_delete",
-    description=(
-        "删除指定 session（软删除）。"
-        "同时会递归删除其所有子 session，并清空消息记录。"
-    ),
-    category=ToolCategory.SYSTEM,
-    requires_confirmation=True,
-    parameters=[
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            required=True,
-            description="要删除的 Session ID",
-        ),
-    ],
-)
-async def session_delete(ctx: ToolContext, session_id: str) -> ToolResult:
+async def _session_delete_impl(ctx: ToolContext, session_id: str) -> ToolResult:
     from flocks.session.session import Session
 
     session = await Session.get_by_id(session_id)
@@ -434,29 +467,10 @@ async def session_delete(ctx: ToolContext, session_id: str) -> ToolResult:
 
 
 # ---------------------------------------------------------------------------
-# session_archive
+# archive
 # ---------------------------------------------------------------------------
 
-@ToolRegistry.register_function(
-    name="session_archive",
-    description="归档或取消归档指定 session。归档后 session 仍可查询，但不再活跃。",
-    category=ToolCategory.SYSTEM,
-    parameters=[
-        ToolParameter(
-            name="session_id",
-            type=ParameterType.STRING,
-            required=True,
-            description="Session ID",
-        ),
-        ToolParameter(
-            name="archive",
-            type=ParameterType.BOOLEAN,
-            required=False,
-            description="true=归档（默认），false=取消归档（恢复为 active）",
-        ),
-    ],
-)
-async def session_archive(
+async def _session_archive_impl(
     ctx: ToolContext,
     session_id: str,
     archive: Optional[bool] = True,

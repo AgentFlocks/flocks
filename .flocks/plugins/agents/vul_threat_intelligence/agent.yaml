@@ -23,8 +23,7 @@ tools:
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - threatbook_mcp_vulnlist_query
   - threatbook_mcp_vuln_query

@@ -873,8 +873,6 @@ def _build_base_permissions(user_perms, cli_overrides):
             f"{Truncate.GLOB}": "allow",
         },
         "question": "deny",
-        "plan_enter": "deny",
-        "plan_exit": "deny",
         "read": {
             "*": "allow",
             "*.env": "ask",
