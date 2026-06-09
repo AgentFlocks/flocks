@@ -89,7 +89,6 @@ webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
 
 _LEGACY_SINGLETON_TRIGGER_TYPES = frozenset({"schedule", "kafka", "syslog"})
-_WORKFLOW_INTEGRATION_CONFIG_VERSION = 1
 
 
 @dataclass
@@ -130,11 +129,6 @@ class WorkflowUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
     workflow_json: Optional[Dict[str, Any]] = Field(None, alias="workflowJson", description="Workflow JSON")
-    edit_markdown_content: Optional[str] = Field(
-        None,
-        alias="editMarkdownContent",
-        description="Human-editable workflow markdown document content",
-    )
     status: Optional[Literal["draft", "active", "archived"]] = Field(None, description="Status")
 
 
@@ -146,7 +140,6 @@ class WorkflowResponse(BaseModel):
     name: str = Field(..., description="Workflow name")
     description: Optional[str] = Field(None, description="Description")
     markdownContent: Optional[str] = Field(None, description="Workflow markdown documentation content")
-    editMarkdownContent: Optional[str] = Field(None, description="Human-editable workflow markdown document content")
     category: str = Field("default", description="Category")
     workflowJson: Dict[str, Any] = Field(..., description="Workflow JSON")
     status: str = Field("draft", description="Status")
@@ -242,26 +235,6 @@ def _global_workflow_dir(workflow_id: str) -> Path:
     return Path.home() / ".flocks" / "plugins" / "workflows" / workflow_id
 
 
-def _existing_workflow_dir(workflow_id: str) -> Optional[Path]:
-    """Return the highest-priority existing directory for a workflow."""
-    result: Optional[Path] = None
-    for root, _source in _all_scan_dirs():
-        wf_dir = root / workflow_id
-        if (wf_dir / "workflow.json").is_file():
-            result = wf_dir
-    return result
-
-
-def _workflow_config_dir(workflow_id: str, workflow_data: Optional[Dict[str, Any]] = None) -> Path:
-    """Return the directory where workflow-local config.json should be written."""
-    existing = _existing_workflow_dir(workflow_id)
-    if existing is not None:
-        return existing
-    if workflow_data and workflow_data.get("source") == "global":
-        return _global_workflow_dir(workflow_id)
-    return _workflow_dir(workflow_id)
-
-
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Read workflow data from the filesystem.
 
@@ -296,7 +269,6 @@ def _write_workflow_to_fs(
     workflow_json: Dict[str, Any],
     meta: Dict[str, Any],
     markdown_content: Optional[str] = None,
-    edit_markdown_content: Optional[str] = None,
     *,
     global_store: bool = False,
 ) -> None:
@@ -311,21 +283,13 @@ def _write_workflow_to_fs(
     with open(wf_dir / "workflow.json", "w", encoding="utf-8") as f:
         json.dump(workflow_json, f, ensure_ascii=False, indent=2)
 
-    meta_to_save = {
-        k: v
-        for k, v in meta.items()
-        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
-    }
+    meta_to_save = {k: v for k, v in meta.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
     with open(wf_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
 
     if markdown_content is not None:
         with open(wf_dir / "workflow.md", "w", encoding="utf-8") as f:
             f.write(markdown_content)
-
-    if edit_markdown_content is not None:
-        with open(wf_dir / "workflow.edit.md", "w", encoding="utf-8") as f:
-            f.write(edit_markdown_content)
 
 
 def _delete_workflow_from_fs(workflow_id: str) -> bool:
@@ -495,111 +459,6 @@ def _trigger_to_api_dict(trigger: TriggerDefinition) -> Dict[str, Any]:
     return trigger.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
-def _drop_none_values(payload: Dict[str, Any]) -> Dict[str, Any]:
-    return {key: value for key, value in payload.items() if value is not None}
-
-
-def _auth_for_config(auth: Optional[Any]) -> Optional[Dict[str, Any]]:
-    if auth is None:
-        return None
-    if hasattr(auth, "model_dump"):
-        auth_payload = auth.model_dump(mode="json", by_alias=True, exclude_none=True)
-    elif isinstance(auth, dict):
-        auth_payload = dict(auth)
-    else:
-        return None
-
-    if "apiKey" in auth_payload:
-        auth_payload.pop("apiKey", None)
-        auth_payload["apiKeyConfigured"] = True
-    return auth_payload
-
-
-def _trigger_for_config(workflow_id: str, trigger: TriggerDefinition) -> Dict[str, Any]:
-    payload = _trigger_to_api_dict(trigger)
-    if trigger.auth is not None:
-        payload["auth"] = _auth_for_config(trigger.auth)
-
-    if trigger.type in ("webhook", "custom_webhook"):
-        payload["invoke"] = {
-            "method": str((trigger.source or {}).get("method") or "POST").upper(),
-            "path": f"/webhook/workflows/{workflow_id}/{trigger.id}",
-        }
-    return payload
-
-
-def _publish_for_config(service: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    service = service if isinstance(service, dict) else None
-    status_value = str(service.get("status") or "stopped") if service else "stopped"
-    return _drop_none_values(
-        {
-            "type": "api_service",
-            "enabled": bool(service) and status_value not in {"stopped", "unpublished"},
-            "status": status_value,
-            "driver": service.get("driver") if service else None,
-            "serviceUrl": service.get("serviceUrl") if service else None,
-            "invokeUrl": service.get("invokeUrl") if service else None,
-            "containerName": service.get("containerName") if service else None,
-            "publishedAt": service.get("publishedAt") if service else None,
-            "stoppedAt": service.get("stoppedAt") if service else None,
-            "apiKeyConfigured": bool(service and service.get("apiKey")),
-        }
-    )
-
-
-async def _build_workflow_integration_config(
-    workflow_id: str,
-    workflow_data: Dict[str, Any],
-    *,
-    triggers: Optional[List[TriggerDefinition]] = None,
-    service: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    trigger_defs = triggers
-    if trigger_defs is None:
-        trigger_defs = await _get_workflow_trigger_defs(workflow_id, workflow_data)
-    if service is None:
-        service = await Storage.read(_api_service_key(workflow_id))
-    now_ms = int(time.time() * 1000)
-    return {
-        "version": _WORKFLOW_INTEGRATION_CONFIG_VERSION,
-        "kind": "workflow.integration-config",
-        "workflow": _drop_none_values(
-            {
-                "id": workflow_id,
-                "name": workflow_data.get("name") or workflow_id,
-                "category": workflow_data.get("category"),
-                "source": workflow_data.get("source"),
-            }
-        ),
-        "updatedAt": now_ms,
-        "publish": _publish_for_config(service),
-        "triggers": [_trigger_for_config(workflow_id, trigger) for trigger in trigger_defs],
-    }
-
-
-async def _write_workflow_integration_config(
-    workflow_id: str,
-    workflow_data: Dict[str, Any],
-    *,
-    triggers: Optional[List[TriggerDefinition]] = None,
-    service: Optional[Dict[str, Any]] = None,
-) -> tuple[Path, Dict[str, Any]]:
-    config_dir = _workflow_config_dir(workflow_id, workflow_data)
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config = await _build_workflow_integration_config(
-        workflow_id,
-        workflow_data,
-        triggers=triggers,
-        service=service,
-    )
-    config_path = config_dir / "config.json"
-    config_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    return config_path, config
-
-
 def _replace_or_append_trigger(
     triggers: List[TriggerDefinition],
     trigger: TriggerDefinition,
@@ -704,14 +563,7 @@ async def _persist_workflow_triggers(
     data["workflowJson"] = updated_json
     data["updatedAt"] = int(time.time() * 1000)
     is_global = data.get("source") == "global"
-    _write_workflow_to_fs(
-        workflow_id,
-        updated_json,
-        data,
-        data.get("markdownContent"),
-        data.get("editMarkdownContent"),
-        global_store=is_global,
-    )
+    _write_workflow_to_fs(workflow_id, updated_json, data, data.get("markdownContent"), global_store=is_global)
     return data
 
 
@@ -967,7 +819,6 @@ async def create_workflow(req: WorkflowCreateRequest):
             **meta,
             "workflowJson": req.workflow_json,
             "markdownContent": None,
-            "editMarkdownContent": None,
             "stats": stats,
             "source": source,
         }
@@ -1022,7 +873,6 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
 
         workflow_json = data["workflowJson"]
         markdown_content = data.get("markdownContent")
-        edit_markdown_content = data.get("editMarkdownContent")
 
         if req.name is not None:
             data["name"] = req.name
@@ -1038,24 +888,14 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 workflow_json = req.workflow_json
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
-        if req.edit_markdown_content is not None:
-            edit_markdown_content = req.edit_markdown_content
 
         data["updatedAt"] = int(time.time() * 1000)
 
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(
-            workflow_id,
-            workflow_json,
-            data,
-            markdown_content,
-            edit_markdown_content,
-            global_store=is_global,
-        )
+        _write_workflow_to_fs(workflow_id, workflow_json, data, markdown_content, global_store=is_global)
 
         stats = await _get_workflow_stats(workflow_id)
         data["workflowJson"] = workflow_json
-        data["editMarkdownContent"] = edit_markdown_content
         data["stats"] = stats
 
         log.info("workflow.updated", {"id": workflow_id})
@@ -1652,7 +1492,6 @@ async def import_workflow(workflow_json: Dict[str, Any]):
             **meta,
             "workflowJson": workflow_json,
             "markdownContent": None,
-            "editMarkdownContent": None,
             "stats": stats,
             "source": "global",
         }
@@ -1934,60 +1773,6 @@ async def get_workflow_service(workflow_id: str):
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
-
-
-@router.get("/workflow/{workflow_id}/config")
-async def get_workflow_config(workflow_id: str):
-    """Read workflow-local config.json, or return the computed config preview."""
-    data = _read_workflow_from_fs(workflow_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
-
-    config_path = _workflow_config_dir(workflow_id, data) / "config.json"
-    if config_path.is_file():
-        try:
-            return {
-                "exists": True,
-                "path": str(config_path),
-                "config": json.loads(config_path.read_text(encoding="utf-8")),
-            }
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to read workflow config: {str(exc)}")
-
-    config = await _build_workflow_integration_config(workflow_id, data)
-    return {
-        "exists": False,
-        "path": str(config_path),
-        "config": config,
-    }
-
-
-@router.post("/workflow/{workflow_id}/config/sync")
-async def sync_workflow_config(workflow_id: str):
-    """Create workflow-local config.json when missing, preserving existing templates."""
-    data = _read_workflow_from_fs(workflow_id)
-    if not data:
-        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
-    try:
-        config_path = _workflow_config_dir(workflow_id, data) / "config.json"
-        if config_path.is_file():
-            return {
-                "ok": True,
-                "path": str(config_path),
-                "exists": True,
-                "config": json.loads(config_path.read_text(encoding="utf-8")),
-            }
-        config_path, config = await _write_workflow_integration_config(workflow_id, data)
-        log.info("workflow.config.synced", {"id": workflow_id, "path": str(config_path)})
-        return {
-            "ok": True,
-            "path": str(config_path),
-            "exists": False,
-            "config": config,
-        }
-    except Exception as exc:
-        log.error("workflow.config.sync.error", {"id": workflow_id, "error": str(exc)})
-        raise HTTPException(status_code=500, detail=f"Failed to sync workflow config: {str(exc)}")
 
 
 @router.get("/workflow-services")
@@ -2771,23 +2556,11 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
             workflow_json["metadata"] = {}
         workflow_json["metadata"]["sampleInputs"] = req.sampleInputs
 
-        meta = {
-            k: v
-            for k, v in data.items()
-            if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
-        }
+        meta = {k: v for k, v in data.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
         meta["updatedAt"] = int(time.time() * 1000)
         markdown_content = data.get("markdownContent")
-        edit_markdown_content = data.get("editMarkdownContent")
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(
-            workflow_id,
-            workflow_json,
-            meta,
-            markdown_content,
-            edit_markdown_content,
-            global_store=is_global,
-        )
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, markdown_content, global_store=is_global)
 
         log.info("workflow.sample_inputs.saved", {"id": workflow_id})
         return {"ok": True}
