@@ -22,6 +22,7 @@ from flocks.tool.registry import (
 
 _CHANNEL_ALIASES: dict[str, list[str]] = {
     "wecom": ["wecom", "企微", "企业微信", "wechat_work", "wxwork"],
+    "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
 }
@@ -122,7 +123,7 @@ async def _http_session_send(
 @ToolRegistry.register_function(
     name="channel_message",
     description=(
-        "Send a message to the IM channel (WeCom / Feishu / DingTalk) bound to a session. "
+        "Send a message to the IM channel (WeCom / Weixin / Feishu / DingTalk) bound to a session. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -144,9 +145,9 @@ async def _http_session_send(
             name="channel_type",
             type=ParameterType.STRING,
             required=False,
-            enum=["wecom", "feishu", "dingtalk", "企微", "飞书", "钉钉"],
+            enum=["wecom", "weixin", "feishu", "dingtalk", "企微", "微信", "飞书", "钉钉"],
             description=(
-                "Target channel: wecom, feishu, or dingtalk. "
+                "Target channel: wecom, weixin, feishu, or dingtalk. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."

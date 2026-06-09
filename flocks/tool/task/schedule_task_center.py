@@ -129,9 +129,10 @@ def _normalize_schedule_task_create_inputs(
         "Queue-only (use type=queued, no schedule): "
         "'等会', '稍后', '待会', '有空时', '不着急'\n\n"
         "IMPORTANT — IM session resolution before creating:\n"
-        "If the task involves sending a message to an IM platform (企业微信/WeCom、飞书/Feishu、钉钉/DingTalk), "
-        "you MUST resolve the target session_id and channel_type BEFORE calling this tool "
-        "(follow the IM Session Resolution for schedule_task_create protocol in your system prompt). "
+        "If the task involves sending a message to an IM platform "
+        "(企业微信/WeCom、微信/Weixin/WeChat、飞书/Feishu、钉钉/DingTalk), "
+        "you MUST resolve the target session_id and channel_type with im_send_message(resolve_only=true) "
+        "BEFORE calling this tool. "
         "Embed both into description and user_prompt. "
         "If the user cannot provide a session_id, do NOT create the task."
     ),
@@ -148,7 +149,7 @@ def _normalize_schedule_task_create_inputs(
             type=ParameterType.STRING,
             description=(
                 "Detailed task description. "
-                "If the task involves sending a message to an IM platform (WeCom/Feishu/DingTalk), "
+                "If the task involves sending a message to an IM platform (WeCom/Weixin/Feishu/DingTalk), "
                 "MUST include the resolved channel_type and session_id here. "
                 "Example: '每天早上8点向飞书群发送日报 channel_type=feishu session_id=ses_abc123'"
             ),
@@ -257,7 +258,7 @@ def _normalize_schedule_task_create_inputs(
                 "Example — user says: '帮我加个任务，明天上午扫描一下内网资产' "
                 "→ user_prompt should be: '扫描内网资产' "
                 "CRITICAL — IM tasks: If the action involves sending a message to an IM platform "
-                "(WeCom/Feishu/DingTalk), you MUST include the resolved channel_type and session_id "
+                "(WeCom/Weixin/Feishu/DingTalk), you MUST include the resolved channel_type and session_id "
                 "in user_prompt. NEVER omit them — the task runs unattended and cannot ask the user. "
                 "Example — user says: '每天8点发飞书消息给研发群' (session already resolved to ses_abc123) "
                 "→ user_prompt should be: '向飞书(channel_type=feishu) session_id=ses_abc123 发送消息：<消息内容>' "
