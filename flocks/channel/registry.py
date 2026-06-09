@@ -32,7 +32,21 @@ class ChannelRegistry:
 
     def register(self, plugin: ChannelPlugin) -> None:
         meta = plugin.meta()
-        self._channels[meta.id.lower()] = plugin
+        key = meta.id.lower()
+        existing = self._channels.get(key)
+        if existing is not None:
+            log.debug(
+                "channel.register.skip_existing",
+                {
+                    "id": meta.id,
+                    "aliases": meta.aliases,
+                    "existing_instance": f"{id(existing):x}",
+                    "candidate_instance": f"{id(plugin):x}",
+                },
+            )
+            return
+
+        self._channels[key] = plugin
         for alias in meta.aliases:
             self._channels[alias.lower()] = plugin
         log.info("channel.registered", {"id": meta.id, "aliases": meta.aliases})
@@ -105,6 +119,7 @@ class ChannelRegistry:
             dedup_key=lambda ch: ch.meta().id,
             recursive=True,
             max_depth=2,
+            load_once=True,
         ))
 
     def _load_plugin_channels(self) -> None:

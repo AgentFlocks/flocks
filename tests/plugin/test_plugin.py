@@ -151,6 +151,41 @@ class TestPluginLoader:
         assert len(collected) == 1
         assert collected[0]["name"] == "lookup"
 
+    def test_load_once_extension_skips_later_load_all_passes(self, tmp_path: Path):
+        """Stateful extension points should not be re-imported by load_all."""
+        channels_dir = tmp_path / "channels"
+        counter_file = tmp_path / "counter.txt"
+        _write_plugin(channels_dir, "my_channel.py", f"""\
+            from pathlib import Path
+
+            counter = Path({str(counter_file)!r})
+            count = int(counter.read_text() or "0") if counter.exists() else 0
+            counter.write_text(str(count + 1))
+
+            CHANNELS = [
+                {{"id": "test-channel", "import_count": count + 1}},
+            ]
+        """)
+
+        collected = []
+
+        PluginLoader._plugin_root = tmp_path
+        PluginLoader.register_extension_point(ExtensionPoint(
+            attr_name="CHANNELS",
+            subdir="channels",
+            consumer=lambda items, src: collected.extend(items),
+            item_type=dict,
+            dedup_key=lambda d: d["id"],
+            load_once=True,
+        ))
+
+        PluginLoader.load_all(project_dir=tmp_path)
+        PluginLoader.load_all(project_dir=tmp_path)
+
+        assert counter_file.read_text() == "1"
+        assert len(collected) == 1
+        assert collected[0]["import_count"] == 1
+
     def test_multiple_extension_points(self, tmp_path: Path):
         """Both AGENTS and TOOLS extension points loaded in one load_all."""
         agents_dir = tmp_path / "agents"

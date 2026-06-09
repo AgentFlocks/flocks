@@ -1248,6 +1248,17 @@ class TestChannelRegistry:
         reg.register(plugin)
         assert reg.get("test_ch") is plugin
 
+    def test_register_keeps_existing_channel_instance(self):
+        from flocks.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        first = _StubChannel("test_ch", "First")
+        replacement = _StubChannel("test_ch", "Replacement")
+
+        reg.register(first)
+        reg.register(replacement)
+
+        assert reg.get("test_ch") is first
+
     def test_get_by_alias(self):
         from flocks.channel.registry import ChannelRegistry
         reg = ChannelRegistry()
