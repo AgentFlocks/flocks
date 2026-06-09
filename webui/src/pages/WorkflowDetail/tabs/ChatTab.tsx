@@ -18,6 +18,14 @@ import {
 const FALLBACK_POLL_MS = 30_000;
 const WORKFLOW_CONFIG_SKILL_NAME = 'workflow-config-guide';
 
+function workflowRevisionKey(workflow: Workflow): string {
+  return [
+    workflow.updatedAt,
+    workflow.markdownContent ?? workflow.editMarkdownContent ?? '',
+    JSON.stringify(workflow.workflowJson),
+  ].join('\u0000');
+}
+
 // ─────────────────────────────────────────────
 // ChatTab
 // ─────────────────────────────────────────────
@@ -58,15 +66,19 @@ export default function ChatTab({
   const [showHistory, setShowHistory] = useState(false);
   const hasCreatedRef = useRef(false);
   const handledLaunchRequestRef = useRef<number | null>(null);
-  const lastUpdatedAtRef = useRef<number>(workflow.updatedAt);
+  const workflowRevisionRef = useRef<string>(workflowRevisionKey(workflow));
   const workflowIdRef = useRef<string>(workflow.id);
   workflowIdRef.current = workflow.id;
   const historyBtnRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    workflowRevisionRef.current = workflowRevisionKey(workflow);
+  }, [workflow]);
+
   const workflowDir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
-  const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
+  const workflowMdPath = `${workflowDir}workflow.md`;
 
   const {
     sessionId: hookSessionId,
@@ -83,8 +95,7 @@ export default function ChatTab({
       name: workflow.name,
       category: workflow.category,
       dir: workflowDir,
-      editDocPath: workflowEditDocPath,
-      mdPath: `${workflowDir}workflow.md`,
+      mdPath: workflowMdPath,
       jsonPath: `${workflowDir}workflow.json`,
       configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
     }),
@@ -222,8 +233,9 @@ export default function ChatTab({
     try {
       const res = await workflowAPI.get(workflowIdRef.current);
       const fresh = res.data;
-      if (fresh.updatedAt > lastUpdatedAtRef.current) {
-        lastUpdatedAtRef.current = fresh.updatedAt;
+      const nextRevision = workflowRevisionKey(fresh);
+      if (nextRevision !== workflowRevisionRef.current) {
+        workflowRevisionRef.current = nextRevision;
         onWorkflowUpdated(fresh);
       }
     } catch { /* ignore */ }
@@ -238,12 +250,14 @@ export default function ChatTab({
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
       const { type, properties } = event;
+      const toolPart = (
+        type === 'message.part.updated' && properties?.part?.type === 'tool'
+      ) ? properties.part : null;
       if (
-        type === 'message.part.updated'
-        && properties?.part?.type === 'tool'
-        && properties.part.tool === 'run_workflow'
+        toolPart
+        && toolPart.tool === 'run_workflow'
       ) {
-        const state = properties.part.state as Record<string, any> | undefined;
+        const state = toolPart.state as Record<string, any> | undefined;
         const metadata = (state?.metadata ?? {}) as Record<string, any>;
         const workflowId = metadata.workflow_id;
         if (
@@ -270,6 +284,12 @@ export default function ChatTab({
           });
         }
       }
+      if (toolPart) {
+        const state = toolPart.state as Record<string, any> | undefined;
+        if (state?.status === 'completed' || state?.status === 'error') {
+          void checkWorkflowUpdate();
+        }
+      }
       if (!onWorkflowUpdated) return;
       if (
         (type === 'workflow.updated' || type === 'workflow.created') &&
@@ -284,11 +304,10 @@ export default function ChatTab({
   // Fallback: low-frequency polling for filesystem-driven changes (Rex writes directly)
   useEffect(() => {
     if (!sessionId || !onWorkflowUpdated) return;
-    lastUpdatedAtRef.current = workflow.updatedAt;
 
     const timer = setInterval(checkWorkflowUpdate, FALLBACK_POLL_MS);
     return () => clearInterval(timer);
-  }, [sessionId, workflow.id, workflow.updatedAt, onWorkflowUpdated, checkWorkflowUpdate]);
+  }, [sessionId, workflow.id, onWorkflowUpdated, checkWorkflowUpdate]);
 
   const nodeRef: NodeRef | null = selectedNode
     ? { id: selectedNode.id, type: selectedNode.type, description: selectedNode.description }
@@ -458,12 +477,12 @@ function WorkflowGuideDock({
   const workflowDir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
-  const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
+  const workflowMdPath = `${workflowDir}workflow.md`;
   const promptParams = {
     id: workflow.id,
     name: workflow.name,
     dir: workflowDir,
-    editDocPath: workflowEditDocPath,
+    mdPath: workflowMdPath,
     configSkillName: WORKFLOW_CONFIG_SKILL_NAME,
   };
   const guideActions = [

@@ -1,7 +1,7 @@
 {
   "id": "workflow_template",
   "name": "workflow_template",
-  "description": "Hidden template for workflow.json, workflow.md, workflow.edit.md, and config.json.",
+  "description": "Hidden template for workflow.json, workflow.md, and config.json.",
   "start": "template_entry",
   "nodes": [
     {
@@ -22,7 +22,6 @@
     "requiredFiles": [
       "workflow.json",
       "workflow.md",
-      "workflow.edit.md",
       "config.json",
       "meta.json"
     ],

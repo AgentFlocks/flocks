@@ -14,10 +14,10 @@ Do not use this skill to create a brand-new workflow from scratch. Use `workflow
 ## Quick Start
 
 1. Identify the current workflow directory. Prefer the explicit path in the user request; otherwise inspect the active workflow context and project/user workflow roots.
-2. Read the workflow files that exist: `workflow.json`, `workflow.md`, `workflow.edit.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template.
+2. Read the workflow files that exist: `workflow.json`, `workflow.md`, optional legacy `config.json`, and `meta.json`. Treat the backend `/api/workflow/<workflow_id>/config` response as the canonical publish template.
 3. Summarize the current configurable capabilities in plain language: publish mode, triggers, inputs, outputs, sample inputs, existing secrets references, and missing items.
-4. Ask one decision question at a time. Always offer a default and avoid exposing technical knobs unless the user asks for details.
-5. Before changing the publish template, show a unified diff of the proposed JSON and ask for explicit confirmation.
+4. When any user decision, missing value, preference, or confirmation is needed, call the `question` tool. Do not ask configuration questions in ordinary assistant text.
+5. Before changing the publish template, show a unified diff of the proposed JSON, then call the `question` tool for explicit confirmation.
 6. After applying changes, validate JSON syntax and run the lightest useful workflow/config smoke test available.
 7. End with a concise report in chat and save a timestamped report under `~/.flocks/workspace/outputs/<today>/`, computing `<today>` at execution time.
 
@@ -36,7 +36,7 @@ Treat the publish configuration template as a workflow runtime/publish template,
 
 Guide the user from "I have this workflow" to "I know what is configured and what I still need to do".
 
-Ask these decisions in order when relevant:
+Ask these decisions in order when relevant, using one `question` tool call per step:
 
 1. **Input mode**: API, Syslog, Kafka, Webhook, Schedule, File, or manual test input.
 2. **Source system or data shape**: product/source name, expected payload format, and whether a sample exists.
@@ -45,13 +45,48 @@ Ask these decisions in order when relevant:
 5. **Validation sample**: ask for one representative payload when available; if unavailable, mark the configuration as unvalidated rather than blocking forever.
 6. **Apply or draft**: show the publish-template JSON diff, then ask whether to apply through the backend endpoint or save as draft.
 
-Use the Question tool when available for 2-4 clear options, but never make a configuration question choice-only. Every Question-tool prompt used by this skill must include a way for the user to type a custom answer:
+### Mandatory Question Tool Rule
+
+The `question` tool is mandatory for this skill. Any time you need the user to choose, confirm, approve a diff, provide a missing value, decide whether to change another file, or answer a follow-up, stop prose and call `question`.
+
+- Ordinary assistant text may summarize the current state, explain a proposed diff, or report results. It must not contain actionable questions such as "要不要...", "是否...", "请确认...", or numbered follow-ups like "第二个问题...".
+- If `question` is not available in the tool list, say that the configuration guide cannot continue interactively until the `question` tool is available. Do not fall back to inline chat questions.
+- Use one question card per turn. Do not ask several independent decisions in a single text paragraph.
+- For diff approval, show the diff first, then call `question` with choices such as "应用上面的 diff", "只保存草稿", and "暂不修改".
+- For side-effect scope questions, such as "是否顺手修改 workflow.md", call `question`; do not ask in prose.
+
+Never make a configuration question choice-only. Every Question-tool prompt used by this skill must include a way for the user to type a custom answer:
 
 - Prefer a `type: "text"` question when the answer may be a hostname, port, topic, path, payload shape, product name, or any value not safely covered by fixed options.
 - If you provide a `type: "choice"` question for recommended modes, also include a short `type: "text"` follow-up such as "Custom value or notes" with a placeholder that explains what the user can type. If the user has no custom value, allow them to enter "none".
 - Do not force the user into only API/Syslog/Kafka/Webhook/Schedule choices; custom integration modes, source products, output destinations, and deployment notes must be expressible in free text.
 
 Do not use the Question tool to collect long JSON, field lists, or credentials.
+
+Good pattern after showing a diff:
+
+```json
+{
+  "questions": [
+    {
+      "header": "确认应用",
+      "question": "是否应用上面的发布配置 diff?",
+      "type": "choice",
+      "options": [
+        {"label": "应用 diff", "description": "通过后端配置接口写入 Storage/SQL。"},
+        {"label": "只保存草稿", "description": "不改运行配置，只写到输出目录。"},
+        {"label": "暂不修改", "description": "停止本次配置变更。"}
+      ]
+    },
+    {
+      "header": "补充说明",
+      "question": "如需限制范围或补充要求，请输入；没有则填 none。",
+      "type": "text",
+      "placeholder": "none"
+    }
+  ]
+}
+```
 
 ## Applying Publish Configuration
 

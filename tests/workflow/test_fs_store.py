@@ -89,3 +89,21 @@ def test_read_workflow_dir_uses_latest_file_mtime_when_meta_is_stale(
     assert data is not None
     assert data["updatedAt"] == 9000
     assert data["markdownContent"] == "# demo\n"
+    assert data["editMarkdownContent"] == "# demo\n"
+
+
+def test_read_workflow_dir_uses_legacy_edit_markdown_only_as_fallback(
+    tmp_path: Path,
+):
+    workspace = tmp_path / "workspace"
+    workflow_id = "legacy-edit-md-demo"
+    _write_workflow(workspace, workflow_id, "legacy-demo")
+    workflow_dir = workspace / ".flocks" / "plugins" / "workflows" / workflow_id
+
+    (workflow_dir / "workflow.edit.md").write_text("# legacy\n", encoding="utf-8")
+
+    data = fs_store.read_workflow_dir(workflow_dir, workflow_id, "project")
+
+    assert data is not None
+    assert data["markdownContent"] == "# legacy\n"
+    assert data["editMarkdownContent"] == "# legacy\n"

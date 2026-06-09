@@ -1,16 +1,19 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ChatTab from './ChatTab';
+import { workflowAPI } from '@/api/workflow';
 
 const {
+  capturedSessionChatProps,
   capturedSessionOptions,
   mockCreate,
   mockCreateAndSend,
   mockReset,
   mockSendPrompt,
 } = vi.hoisted(() => ({
+  capturedSessionChatProps: [] as any[],
   capturedSessionOptions: [] as any[],
   mockCreate: vi.fn(),
   mockCreateAndSend: vi.fn(),
@@ -45,12 +48,15 @@ vi.mock('@/api/workflow', () => ({
 }));
 
 vi.mock('@/components/common/SessionChat', () => ({
-  default: ({ conversationBottomSlot, welcomeContent }: any) => (
-    <div data-testid="session-chat">
-      {welcomeContent}
-      {conversationBottomSlot?.({ sendPrompt: mockSendPrompt, sending: false })}
-    </div>
-  ),
+  default: (props: any) => {
+    capturedSessionChatProps.push(props);
+    return (
+      <div data-testid="session-chat">
+        {props.welcomeContent}
+        {props.conversationBottomSlot?.({ sendPrompt: mockSendPrompt, sending: false })}
+      </div>
+    );
+  },
 }));
 
 vi.mock('react-i18next', () => ({
@@ -62,7 +68,7 @@ vi.mock('react-i18next', () => ({
           '工作流 ID： {{id}}',
           '工作流名称： {{name}}',
           '工作流目录： {{dir}}',
-          '编辑文档： {{editDocPath}}',
+          'MD 文件： {{mdPath}}',
           '配置工作流时请加载 {{configSkillName}} skill。',
         ].join('\n'),
         'detail.chat.inputPlaceholder': '描述你想对工作流做的修改...',
@@ -72,7 +78,7 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.title': '{{name}} 当前状态',
         'detail.chat.welcome.descPart1': '你可以直接描述需求。',
         'detail.chat.welcome.descPart2': '。',
-        'detail.chat.welcome.mdTabLabel': '编辑文档',
+        'detail.chat.welcome.mdTabLabel': 'workflow.md',
         'detail.chat.welcome.canHelp': '我可以帮你：',
         'detail.chat.welcome.bullet1': '修改节点',
         'detail.chat.welcome.bullet2': '调整流转',
@@ -128,6 +134,7 @@ const workflow = {
 describe('WorkflowDetail ChatTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    capturedSessionChatProps.length = 0;
     capturedSessionOptions.length = 0;
     localStorage.clear();
   });
@@ -137,6 +144,8 @@ describe('WorkflowDetail ChatTab', () => {
 
     expect(capturedSessionOptions[0].contextMessage).toContain('工作流 ID： stream_alert_denoise');
     expect(capturedSessionOptions[0].contextMessage).toContain('工作流目录： ~/.flocks/plugins/workflows/stream_alert_denoise/');
+    expect(capturedSessionOptions[0].contextMessage).toContain('workflow.md');
+    expect(capturedSessionOptions[0].contextMessage).not.toContain('workflow.edit.md');
     expect(capturedSessionOptions[0].contextMessage).toContain('workflow-config-guide');
   });
 
@@ -148,5 +157,38 @@ describe('WorkflowDetail ChatTab', () => {
 
     expect(mockSendPrompt).toHaveBeenCalledWith(expect.stringContaining('工作流 ID 是 stream_alert_denoise'));
     expect(mockSendPrompt).toHaveBeenCalledWith(expect.stringContaining('~/.flocks/plugins/workflows/stream_alert_denoise/'));
+  });
+
+  it('refreshes after a tool finishes when workflow.md content changed without updatedAt changing', async () => {
+    const updatedWorkflow = {
+      ...workflow,
+      updatedAt: workflow.updatedAt,
+      markdownContent: '# AI edited markdown\n',
+    };
+    vi.mocked(workflowAPI.get).mockResolvedValueOnce({ data: updatedWorkflow } as any);
+    const onWorkflowUpdated = vi.fn();
+
+    render(
+      <ChatTab
+        workflow={{ ...workflow, markdownContent: '# old markdown\n' }}
+        onWorkflowUpdated={onWorkflowUpdated}
+      />,
+    );
+
+    capturedSessionChatProps[0].onSSEEvent({
+      type: 'message.part.updated',
+      properties: {
+        part: {
+          type: 'tool',
+          tool: 'apply_patch',
+          state: { status: 'completed' },
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.get).toHaveBeenCalledWith('stream_alert_denoise');
+      expect(onWorkflowUpdated).toHaveBeenCalledWith(updatedWorkflow);
+    });
   });
 });

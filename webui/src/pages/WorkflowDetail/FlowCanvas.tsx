@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, memo, type ReactNode } from 'react';
+import { useState, useCallback, useEffect, useRef, memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ReactFlow,
@@ -17,7 +17,7 @@ import {
   NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Code2, Zap, GitBranch, RotateCw, RotateCcw, X, ChevronRight, Wrench, Sparkles, Globe, Workflow, ZoomIn, ZoomOut, Scan } from 'lucide-react';
+import { Code2, Zap, GitBranch, RotateCw, RotateCcw, X, ChevronRight, ChevronUp, ChevronDown, Wrench, Sparkles, Globe, Workflow, ZoomIn, ZoomOut, Scan } from 'lucide-react';
 import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import {
   buildWorkflowGraphLayout,
@@ -623,10 +623,10 @@ function CanvasControlButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="group relative flex h-8 w-8 items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-200"
+      className="group relative flex h-8 w-8 items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
     >
       {children}
-      <span className="pointer-events-none absolute left-full top-1/2 z-20 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+      <span className="pointer-events-none absolute right-full top-1/2 z-20 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
         {label}
       </span>
     </button>
@@ -653,6 +653,35 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
   const { t } = useTranslation('workflow');
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [controlsCollapsed, setControlsCollapsed] = useState(false);
+  const [showMiniMap, setShowMiniMap] = useState(false);
+  const miniMapTimerRef = useRef<number | null>(null);
+
+  const revealMiniMap = useCallback(() => {
+    setShowMiniMap(true);
+    if (miniMapTimerRef.current !== null) {
+      window.clearTimeout(miniMapTimerRef.current);
+    }
+    miniMapTimerRef.current = window.setTimeout(() => {
+      setShowMiniMap(false);
+      miniMapTimerRef.current = null;
+    }, 2200);
+  }, []);
+
+  const handleCanvasOperation = useCallback((event: React.PointerEvent<HTMLDivElement> | React.WheelEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('.react-flow')) {
+      revealMiniMap();
+    }
+  }, [revealMiniMap]);
+
+  useEffect(() => {
+    return () => {
+      if (miniMapTimerRef.current !== null) {
+        window.clearTimeout(miniMapTimerRef.current);
+      }
+    };
+  }, []);
 
   const handleNodeClick = useCallback((nodeId: string) => {
     if (externalOnNodeClick) {
@@ -666,41 +695,55 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges] = useEdgesState<Edge>([]);
 
-  const resetLayout = useCallback(() => {
+  const applyLayout = useCallback((options: { reveal?: boolean } = {}) => {
     const { nodes: newNodes, edges: newEdges } = buildLayout(workflowJson, handleNodeClick);
     setNodes(newNodes);
     setEdges(newEdges);
+    if (options.reveal) {
+      revealMiniMap();
+    }
     // Re-fit after layout (small delay lets ReactFlow measure node sizes first)
     setTimeout(() => fitView({ padding: 0.2 }), 60);
-  }, [workflowJson, handleNodeClick, setNodes, setEdges, fitView]);
+  }, [workflowJson, handleNodeClick, setNodes, setEdges, fitView, revealMiniMap]);
+
+  const resetLayout = useCallback(() => {
+    applyLayout({ reveal: true });
+  }, [applyLayout]);
 
   // Rebuild layout whenever workflowJson or layoutKey changes
   useEffect(() => {
-    resetLayout();
-  }, [resetLayout, layoutKey]);
+    applyLayout();
+  }, [applyLayout, layoutKey]);
 
   const onInit = useCallback(() => {
     setTimeout(() => fitView({ padding: 0.2 }), 50);
   }, [fitView]);
 
   const handleZoomIn = useCallback(() => {
+    revealMiniMap();
     void zoomIn();
-  }, [zoomIn]);
+  }, [revealMiniMap, zoomIn]);
 
   const handleZoomOut = useCallback(() => {
+    revealMiniMap();
     void zoomOut();
-  }, [zoomOut]);
+  }, [revealMiniMap, zoomOut]);
 
   const handleFitView = useCallback(() => {
+    revealMiniMap();
     void fitView({ padding: 0.2 });
-  }, [fitView]);
+  }, [fitView, revealMiniMap]);
 
   const selectedNode = selectedNodeId
     ? workflowJson.nodes.find((n) => n.id === selectedNodeId) ?? null
     : null;
 
   return (
-    <div className="relative w-full h-full">
+    <div
+      className="relative w-full h-full"
+      onPointerDownCapture={handleCanvasOperation}
+      onWheelCapture={handleCanvasOperation}
+    >
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -718,35 +761,53 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e2e8f0" />
-        <MiniMap
-          nodeColor={(node) => {
-            const colors: Record<string, string> = {
-              python: '#60a5fa',
-              logic: '#34d399',
-              branch: '#fbbf24',
-              loop: '#c084fc',
-            };
-            const d = node.data as unknown as ViewNodeData | undefined;
-            return colors[d?.nodeType ?? ''] ?? '#94a3b8';
-          }}
-          className="!border !border-gray-200 !shadow-sm !rounded-xl"
-          maskColor="rgba(241, 245, 249, 0.7)"
-        />
+        {showMiniMap && (
+          <MiniMap
+            nodeColor={(node) => {
+              const colors: Record<string, string> = {
+                python: '#60a5fa',
+                logic: '#34d399',
+                branch: '#fbbf24',
+                loop: '#c084fc',
+              };
+              const d = node.data as unknown as ViewNodeData | undefined;
+              return colors[d?.nodeType ?? ''] ?? '#94a3b8';
+            }}
+            className="!rounded-lg !border !border-slate-200 !bg-white/95 !shadow-none"
+            maskColor="rgba(241, 245, 249, 0.68)"
+          />
+        )}
       </ReactFlow>
 
-      <div className="absolute bottom-3 left-3 z-10 flex flex-col divide-y divide-gray-200 overflow-visible rounded-md border border-gray-200 bg-white shadow-sm">
-        <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
-          <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
-        </CanvasControlButton>
-        <CanvasControlButton label={t('detail.flowControls.zoomOut')} onClick={handleZoomOut}>
-          <ZoomOut className="h-4 w-4" strokeWidth={1.8} />
-        </CanvasControlButton>
-        <CanvasControlButton label={t('detail.flowControls.fitView')} onClick={handleFitView}>
-          <Scan className="h-4 w-4" strokeWidth={1.8} />
-        </CanvasControlButton>
-        <CanvasControlButton label={t('detail.resetLayout')} onClick={resetLayout}>
-          <RotateCcw className="h-4 w-4" strokeWidth={1.8} />
-        </CanvasControlButton>
+      <div className="absolute right-4 top-4 z-20 flex flex-col items-end gap-1 overflow-visible">
+        {!controlsCollapsed && (
+          <div className="flex flex-col divide-y divide-slate-100 overflow-visible rounded-lg border border-slate-200 bg-white/90 backdrop-blur">
+            <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
+              <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
+            </CanvasControlButton>
+            <CanvasControlButton label={t('detail.flowControls.zoomOut')} onClick={handleZoomOut}>
+              <ZoomOut className="h-4 w-4" strokeWidth={1.8} />
+            </CanvasControlButton>
+            <CanvasControlButton label={t('detail.flowControls.fitView')} onClick={handleFitView}>
+              <Scan className="h-4 w-4" strokeWidth={1.8} />
+            </CanvasControlButton>
+            <CanvasControlButton label={t('detail.resetLayout')} onClick={resetLayout}>
+              <RotateCcw className="h-4 w-4" strokeWidth={1.8} />
+            </CanvasControlButton>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setControlsCollapsed((prev) => !prev)}
+          aria-label={t(controlsCollapsed ? 'detail.flowControls.expand' : 'detail.flowControls.collapse')}
+          className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 bg-white/90 text-slate-500 backdrop-blur transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-100"
+        >
+          {controlsCollapsed ? (
+            <ChevronDown className="h-4 w-4" strokeWidth={1.8} />
+          ) : (
+            <ChevronUp className="h-4 w-4" strokeWidth={1.8} />
+          )}
+        </button>
       </div>
 
       {/* Node detail modal — only shown when no external onNodeClick handler */}

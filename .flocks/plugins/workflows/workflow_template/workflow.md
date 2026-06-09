@@ -1,33 +1,111 @@
-# Hidden Workflow Publish Template
+# workflow_template
 
-This directory is an internal template for project workflows. It is intentionally hidden from frontend workflow lists and initial agent system prompts by `meta.json` and `workflow.json.metadata`.
+> `workflow.md` is the single human-editable workflow specification. Flocks uses this file to understand intent, then keeps `workflow.json` aligned with the executable graph.
 
-## Files
+## 1. Workflow Card
 
-- `workflow.json`: executable workflow definition. Replace the placeholder node when copying the template.
-- `workflow.md`: read-only generated documentation shown for real workflows.
-- `workflow.edit.md`: editable workflow document used by the workflow editing page.
-- `config.json`: publish-page template. The visible publish page is derived from the enabled sections in this file.
-- `meta.json`: workflow metadata and visibility flags.
+- Workflow ID: `workflow_template`
+- Directory: `.flocks/plugins/workflows/workflow_template/`
+- Category: `template`
+- Status: hidden template
+- Entry node: `template_entry`
+- Terminal node: `template_entry`
 
-## Visibility Contract
+## 2. Business Goal
 
-Keep these flags on template-only workflow directories:
+Describe the operational problem this workflow solves, who will use it, and what a successful run produces.
 
-- `hidden: true`
-- `templateOnly: true`
-- `visibility: hidden`
-- `excludeFromUI: true`
-- `excludeFromPrompt: true`
+Success criteria:
 
-Remove those flags only after copying the template into a real workflow directory.
+- [ ] The expected input shape is clear.
+- [ ] Each module has an explicit responsibility.
+- [ ] The final output contract is clear to humans and downstream systems.
+- [ ] Failure and empty-input behavior are documented.
 
-## Publish Config Contract
+## 3. Runtime Contract
 
-The publish page should render from `config.json`.
+### Inputs
 
-- If `publish.type` is `api_service`, show the API publish controls.
-- If the only configured trigger is `syslog`, show only syslog listener start/stop controls. Syslog host, port, framing, parser, filters, and input mapping already live in `config.json`.
-- If the only configured trigger is `kafka`, show only kafka consumer start/stop controls. Kafka connection and topic details already live in `config.json`.
-- If the only configured trigger is `schedule`, show only schedule start/stop controls. Cron/interval details already live in `config.json`.
-- Do not write plaintext secrets into `config.json`; store only booleans such as `apiKeyConfigured` or secret references.
+Replace this section with the real input keys and shapes.
+
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `input` | object | yes | - | Primary workflow input. |
+
+### Outputs
+
+Replace this section with the final output contract.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `result` | object | Final workflow result. |
+
+### Tunables
+
+List thresholds, switches, timeouts, file paths, concurrency settings, and rollback notes.
+
+## 4. Flow Map
+
+`template_entry`
+
+| Order | Node | Type | Responsibility | Next |
+| --- | --- | --- | --- | --- |
+| 1 | `template_entry` | Python | Placeholder entry node. Replace before use. | final output |
+
+## 5. Module Specs
+
+### 1. template_entry
+
+| Item | Content |
+| --- | --- |
+| Module type | Python |
+| Responsibility | Placeholder node that marks this directory as a template. |
+| Inputs | Workflow inputs |
+| Outputs | `templateOnly`, `message` |
+| Edit focus | Replace this node with the real first module. |
+
+Generation notes for Flocks:
+
+- Keep node IDs stable after users start configuring publish modes.
+- When adding or renaming outputs, update downstream edges and the runtime contract.
+- Do not store plaintext secrets in this directory.
+
+## 6. Data Flow And Field Contract
+
+Document every cross-module field that must remain stable.
+
+- `template_entry -> final output`
+
+## 7. Publish And Triggers
+
+The publish page reads `config.json` as a template and runtime state from storage.
+
+- If `publish.type` is `api_service`, show API publish controls.
+- If only `syslog` is configured, show only syslog listener start/stop controls.
+- If only `kafka` is configured, show only kafka consumer start/stop controls.
+- If only `schedule` is configured, show only schedule start/stop controls.
+- Store secret references or configured booleans only; never store plaintext secrets.
+
+## 8. Change Guide
+
+| Change type | Edit first | Also check |
+| --- | --- | --- |
+| Input shape | Runtime Contract | Entry module, sample inputs |
+| Module logic | Module Specs | Upstream outputs, downstream inputs |
+| Output shape | Runtime Contract | Terminal module, downstream consumers |
+| Publish mode | Publish And Triggers / `config.json` | Auth, secret refs, runtime state |
+
+## 9. Flocks Generation Constraints
+
+- `workflow.md` describes intent, module boundaries, field contracts, and validation.
+- `workflow.json` describes executable nodes, edges, code, triggers, and metadata.
+- Regeneration should preserve node IDs unless the user explicitly requests a graph change.
+- Deleting or renaming a node requires updating edges, mappings, samples, and tests.
+
+## 10. Validation Checklist
+
+- [ ] `workflow.md` and `workflow.json` describe the same flow.
+- [ ] A representative sample input runs successfully.
+- [ ] At least one edge or error case is documented.
+- [ ] Publish page only shows capabilities enabled by `config.json`.
+- [ ] No plaintext secrets are stored in the workflow directory.

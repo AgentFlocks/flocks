@@ -383,6 +383,7 @@ export const workflowAPI = {
     description?: string;
     category?: string;
     workflowJson?: WorkflowJSON;
+    markdownContent?: string;
     editMarkdownContent?: string;
     status?: 'draft' | 'active' | 'archived';
   }) =>

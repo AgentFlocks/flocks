@@ -38,10 +38,6 @@ function summarizeDescription(text?: string): string {
   return value;
 }
 
-function truncateText(text: string, maxLength: number): string {
-  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
-}
-
 function outgoingEdges(nodeId: string, edges: WorkflowEdge[]): WorkflowEdge[] {
   return edges
     .filter((edge) => edge.from === nodeId)
@@ -136,17 +132,7 @@ function summarizeSampleInputs(workflowJson: WorkflowJSON): string[] {
   });
 }
 
-function summarizeOriginalMarkdown(markdown?: string): string {
-  const lines = (markdown || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 20);
-  if (lines.length === 0) return '原始 workflow.md 暂无内容。';
-  return lines.map((line) => `> ${line}`).join('\n');
-}
-
-export function buildWorkflowEditMarkdown(workflow: Workflow): string {
+export function buildWorkflowMarkdown(workflow: Workflow): string {
   const workflowJson = workflow.workflowJson;
   const orderedNodeIds = buildLinearFlow(workflowJson);
   const nodesById = new Map(workflowJson.nodes.map((node) => [node.id, node]));
@@ -159,9 +145,11 @@ export function buildWorkflowEditMarkdown(workflow: Workflow): string {
     : `.flocks/plugins/workflows/${workflow.id}/`;
   const generatedAt = new Date().toLocaleString();
 
-  const nodeTable = workflowJson.nodes.map((node) => (
-    `| ${tableCell(node.id)} | ${tableCell(NODE_TYPE_LABELS[node.type] || node.type)} | ${tableCell(summarizeDescription(node.description))} | ${tableCell(describeNodeOutputs(node, workflowJson))} |`
-  ));
+  const nodeTable = orderedNodeIds.map((nodeId, index) => {
+    const node = nodesById.get(nodeId);
+    if (!node) return '';
+    return `| ${index + 1} | ${tableCell(node.id)} | ${tableCell(summarizeDescription(node.description))} | ${tableCell(describeNodeOutputs(node, workflowJson))} |`;
+  }).filter(Boolean);
 
   const nodeSections = orderedNodeIds.map((nodeId, index) => {
     const node = nodesById.get(nodeId);
@@ -169,95 +157,134 @@ export function buildWorkflowEditMarkdown(workflow: Workflow): string {
     const incoming = incomingEdges(node.id, workflowJson.edges).map(describeEdge);
     const outgoing = outgoingEdges(node.id, workflowJson.edges).map(describeEdge);
     return [
-      `### ${index + 1}. ${node.id}`,
+      `### 4.${index + 1} ${node.id}`,
       '',
-      `- 类型: ${NODE_TYPE_LABELS[node.type] || node.type}`,
-      `- 作用: ${summarizeDescription(node.description)}`,
+      `职责: ${summarizeDescription(node.description)}`,
+      '',
+      `- 节点类型: ${NODE_TYPE_LABELS[node.type] || node.type}`,
       `- 输入来源: ${describeNodeInputs(node, workflowJson)}`,
       `- 输出去向: ${describeNodeOutputs(node, workflowJson)}`,
-      `- 编辑关注点: ${inferEditFocus(node)}`,
-      incoming.length > 0 ? `- 入边: ${formatList(incoming)}` : '- 入边: 起点输入',
-      outgoing.length > 0 ? `- 出边: ${formatList(outgoing)}` : '- 出边: 终点输出',
+      `- 编辑重点: ${inferEditFocus(node)}`,
+      incoming.length > 0 ? `- 上游关系: ${formatList(incoming)}` : '- 上游关系: 从工作流输入开始',
+      outgoing.length > 0 ? `- 下游关系: ${formatList(outgoing)}` : '- 下游关系: 输出工作流结果',
     ].join('\n');
   }).filter(Boolean);
 
   return [
-    `# ${workflow.name || workflow.id} 工作流编辑文档`,
+    `# ${workflow.name || workflow.id}`,
     '',
-    '> 这份文件面向人阅读和编辑，用来解释工作流意图、流程、节点职责和可调整点。机器执行定义仍以 `workflow.json` 为准。',
+    '这份 `workflow.md` 是工作流的人类可编辑说明。它用来解释工作流的功能、处理原理、输入输出和可修改位置；机器执行仍以 `workflow.json` 为准。',
     '',
-    '## 1. 快速理解',
+    '## 1. 功能概览',
     '',
-    `- 工作流 ID: ${workflow.id}`,
+    `一句话说明: ${workflow.description ? summarizeDescription(workflow.description) : '这个工作流会按固定步骤处理输入，并整理出稳定、可验证的输出结果。'}`,
+    '',
+    '基本信息:',
+    '',
+    `- 工作流 ID: \`${workflow.id}\``,
     `- 工作流目录: \`${workflowDir}\``,
+    `- 分类: \`${workflow.category || 'default'}\``,
+    `- 状态: \`${workflow.status || 'draft'}\``,
     `- 入口节点: ${nodeLabel(startNode)}`,
     `- 终点节点: ${formatList(terminalNodes.map(nodeLabel))}`,
-    `- 规模: ${workflowJson.nodes.length} 个节点，${workflowJson.edges.length} 条边`,
-    `- 分类: ${workflow.category || 'default'}`,
     `- 生成时间: ${generatedAt}`,
     '',
-    '一句话说明:',
+    '适合在这里写清楚:',
     '',
-    `${workflow.description || workflow.markdownContent ? truncateText(summarizeDescription(workflow.description || workflow.markdownContent), 260) : '这个工作流用于按既定节点顺序处理输入数据，并输出最终处理结果。'}`,
+    '- 这个工作流解决什么问题。',
+    '- 适合处理什么输入。',
+    '- 不负责处理什么边界场景。',
     '',
-    '## 2. 流程地图',
+    '## 2. 原理和总体流程',
     '',
-    '推荐按下面顺序阅读和修改:',
+    '核心原理是把输入按节点顺序逐步加工，每个节点只负责一个清晰职责。流程顺序如下:',
     '',
-    `\`${orderedNodeIds.join(' -> ')}\``,
+    '```text',
+    orderedNodeIds.join(' -> '),
+    '```',
     '',
-    '| 节点 | 类型 | 主要职责 | 下一步 |',
+    '流程表:',
+    '',
+    '| 顺序 | 节点 | 做什么 | 下一步 |',
     '| --- | --- | --- | --- |',
     ...nodeTable,
     '',
-    '## 3. 节点详解',
+    '编辑流程结构时，要同时确认节点顺序、边关系、字段映射和最终输出是否仍然一致。',
+    '',
+    '## 3. 输入说明',
+    '',
+    '本章用于说明工作流接受什么输入，以及入口节点如何理解这些输入。',
+    '',
+    sampleInputLines.length > 0
+      ? '当前工作流保存了这些样例输入，可以先照着这些字段测试:'
+      : '当前工作流还没有保存样例输入。建议先补一条最小可运行输入，方便后续测试。',
+    '',
+    ...(sampleInputLines.length > 0 ? sampleInputLines : ['- 待补充。']),
+    '',
+    '修改输入时，至少同步检查:',
+    '',
+    '- 入口节点是否能读取新字段。',
+    '- 样例输入是否覆盖主要场景。',
+    '- 下游节点是否还在引用旧字段名。',
+    '- 发布方式中的参数说明是否需要更新。',
+    '',
+    '## 4. 模块逻辑',
+    '',
+    '本章按执行顺序解释每个节点。修改内部逻辑时，优先定位到对应节点，再检查它的上下游关系。',
     '',
     ...nodeSections.flatMap((section) => [section, '']),
-    '## 4. 数据流和字段约定',
+    '## 5. 输出说明',
     '',
-    '请先确认每条边的字段映射，再修改节点输出字段。字段名变化通常需要同步更新下游节点。',
+    '本章用于维护工作流最终返回什么，以及是否产生额外副作用。',
     '',
-    ...(workflowJson.edges.length > 0
-      ? workflowJson.edges.map((edge) => `- ${describeEdge(edge)}`)
-      : ['- 暂无显式边配置。']),
+    '输出说明建议包含:',
     '',
-    '## 5. 触发器和输入样例',
+    '- 返回给用户或调用方的核心字段。',
+    '- 给下游系统继续消费的结构化字段。',
+    '- 是否写文件、发通知、调用外部系统或更新状态。',
+    '- 没有结果、部分失败、完全失败时分别返回什么。',
     '',
-    triggers.length > 0 ? '触发器:' : '触发器: 暂无显式触发器，通常通过手动测试或外部调用传入 inputs。',
+    '如果还不确定输出格式，先用一条样例跑通，再把真实返回字段补到这里。',
     '',
-    ...(triggers.length > 0 ? triggers.map(summarizeTrigger) : []),
+    '## 6. 发布方式',
     '',
-    sampleInputLines.length > 0 ? '样例输入:' : '样例输入: 暂无保存样例，可在「概览 > 测试运行」中补充。',
+    '发布页会根据 `config.json` 模板和运行时状态决定展示哪些能力；`workflow.md` 只负责解释这些能力的用途。',
     '',
-    ...sampleInputLines,
+    triggers.length > 0 ? '当前 `workflow.json` 里配置了这些触发器:' : '当前 `workflow.json` 里还没有显式触发器。',
     '',
-    '## 6. 关键可调点',
+    ...(triggers.length > 0 ? triggers.map(summarizeTrigger) : ['- 可以通过发布页配置 API、Syslog、Kafka、Schedule 或 Webhook 等方式。']),
     '',
-    '- 输入解析: 输入字段、日志格式、来源类型识别。',
-    '- 归一化: 统一字段名、默认值、来源差异兼容。',
-    '- 过滤策略: 哪些数据继续进入下游，哪些数据被丢弃。',
-    '- 去重策略: 相似度阈值、状态保存位置、历史窗口、结果文件格式。',
-    '- 输出契约: 最终结果字段、文件路径、错误处理和下游消费方式。',
+    '发布相关编辑原则:',
     '',
-    '## 7. 编辑流程建议',
+    '- 改展示模板: 修改 `config.json`。',
+    '- 改运行启停状态: 通过发布页或后端运行时状态处理。',
+    '- 改参数语义: 同步更新本章、输入说明和相关节点。',
+    '- 不要把明文密钥、长期 token 或私人路径写进 `workflow.md` 或 `config.json`。',
     '',
-    '1. 先在本文档写清楚要改的业务规则。',
-    '2. 再修改 `workflow.md`，让自然语言说明和预期行为一致。',
-    '3. 最后同步 `workflow.json` 或节点代码，保证流程图和执行定义一致。',
-    '4. 用一条最小样例验证输入、关键中间字段和最终输出。',
-    '5. 如果涉及阈值、状态文件或落盘格式，需要记录默认值和回滚方式。',
+    '## 7. 编辑指南',
     '',
-    '## 8. 验收清单',
+    '先判断你要改哪一类内容，再去找对应位置:',
     '',
-    '- [ ] 每个节点的输入来源清楚。',
-    '- [ ] 每个节点的输出去向清楚。',
-    '- [ ] 关键字段名在上下游保持一致。',
-    '- [ ] 测试样例覆盖正常输入和至少一个边界情况。',
-    '- [ ] 输出结果可以被人读懂，也可以被下游系统稳定解析。',
+    '| 修改目标 | 优先查看 |',
+    '| --- | --- |',
+    '| 输入格式、来源、样例 | 第 3 章和入口节点 |',
+    '| 字段映射、清洗、分类 | 第 4 章对应节点 |',
+    '| 分支、循环、节点增删 | `workflow.json` 和第 2 章流程表 |',
+    '| 输出字段、落盘、通知 | 第 5 章和终点节点 |',
+    '| API、Syslog、Kafka 等发布方式 | `config.json` 和第 6 章 |',
+    '| 字段重命名 | 所有上下游节点、样例输入和输出说明 |',
     '',
-    '## 9. 原始 workflow.md 摘要',
+    '编辑后建议把改动说明写回相应章节，让下一个人可以直接看懂为什么这样改。',
     '',
-    summarizeOriginalMarkdown(workflow.markdownContent),
+    '## 8. 验证方式',
+    '',
+    '最小验收清单:',
+    '',
+    '- [ ] 用一条正常样例能跑通。',
+    '- [ ] 输出字段符合你的预期。',
+    '- [ ] 如果改了字段名，下游节点没有继续引用旧字段。',
+    '- [ ] 如果改了发布方式，发布页只展示应该出现的能力。',
+    '- [ ] 没有明文密钥、长期 token 或私人路径写进工作流目录。',
     '',
   ].join('\n');
 }
