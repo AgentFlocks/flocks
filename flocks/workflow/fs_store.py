@@ -79,16 +79,11 @@ def read_workflow_dir(
             }
 
         md_file = wf_dir / "workflow.md"
-        edit_md_file = wf_dir / "workflow.edit.md"
         markdown_content: Optional[str] = None
-        edit_markdown_content: Optional[str] = None
         updated_candidates = [json_mtime_ms]
         if md_file.is_file():
             markdown_content = md_file.read_text(encoding="utf-8")
             updated_candidates.append(int(md_file.stat().st_mtime * 1000))
-        if edit_md_file.is_file():
-            edit_markdown_content = edit_md_file.read_text(encoding="utf-8")
-            updated_candidates.append(int(edit_md_file.stat().st_mtime * 1000))
         if meta_file.is_file():
             updated_candidates.append(int(meta_file.stat().st_mtime * 1000))
             updated_candidates.append(int(meta.get("updatedAt") or 0))
@@ -100,7 +95,6 @@ def read_workflow_dir(
             "source": source,
             "workflowJson": workflow_json,
             "markdownContent": markdown_content,
-            "editMarkdownContent": edit_markdown_content,
         }
     except Exception as exc:
         log.warning(

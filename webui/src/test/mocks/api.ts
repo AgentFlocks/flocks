@@ -80,12 +80,10 @@ export function createWorkflowApiMock() {
   return {
     list: vi.fn().mockResolvedValue({ data: [MOCK_WORKFLOW] }),
     get: vi.fn().mockResolvedValue({ data: MOCK_WORKFLOW }),
-    getConfig: vi.fn().mockResolvedValue({ data: { exists: false, path: '/tmp/config.json', config: {} } }),
     create: vi.fn().mockResolvedValue({ data: MOCK_WORKFLOW }),
     update: vi.fn().mockResolvedValue({ data: MOCK_WORKFLOW }),
     delete: vi.fn().mockResolvedValue({ data: true }),
     run: vi.fn().mockResolvedValue({ data: { executionId: 'exec_test', status: 'success' } }),
-    syncConfig: vi.fn().mockResolvedValue({ data: { ok: true, path: '/tmp/config.json', config: {} } }),
   };
 }
 

@@ -48,33 +48,26 @@ function SectionHeader({
   title,
   expanded,
   onToggle,
-  summary,
   badge,
 }: {
   title: string;
   expanded: boolean;
   onToggle: () => void;
-  summary?: React.ReactNode;
   badge?: React.ReactNode;
 }) {
   return (
     <button
       onClick={onToggle}
-      className="w-full flex items-center justify-between gap-3 px-4 py-3.5 bg-white hover:bg-slate-50 transition-colors text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-red-100 focus-visible:ring-inset"
+      className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100 transition-colors text-left"
     >
-      <span className="min-w-0">
-        <span className="flex items-center gap-2 text-sm font-semibold text-slate-700">
-          {title}
-          {badge}
-        </span>
-        {!expanded && summary && (
-          <span className="mt-1 block truncate text-xs font-normal text-slate-400">{summary}</span>
-        )}
+      <span className="text-xs font-semibold text-gray-700 flex items-center gap-2">
+        {title}
+        {badge}
       </span>
       {expanded ? (
-        <ChevronDown className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+        <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
       ) : (
-        <ChevronRight className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+        <ChevronRight className="w-3.5 h-3.5 text-gray-400" />
       )}
     </button>
   );
@@ -198,21 +191,19 @@ function isPlainObject(value: unknown): value is Record<string, any> {
 // ─────────────────────────────────────────────
 // 区块1：测试运行
 // ─────────────────────────────────────────────
-export function TestSection({
+function TestSection({
   workflow,
   execution,
   onExecutionChange,
   onExecutionSettled,
-  defaultExpanded = true,
 }: {
   workflow: Workflow;
   execution: WorkflowExecution | null;
   onExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
-  defaultExpanded?: boolean;
 }) {
   const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [expanded, setExpanded] = useState(true);
   const [inputs, setInputs] = useState(() => buildMockInputs(workflow.workflowJson));
   const [inputError, setInputError] = useState('');
   const [running, setRunning] = useState(false);
@@ -310,12 +301,6 @@ export function TestSection({
   const displayStatus = getExecutionDisplayStatus(execution);
   const isCancelling = displayStatus === 'cancelling';
   const displayMessage = getExecutionDisplayMessage(execution, t);
-  const testSummary = execution
-    ? [
-      t(`detail.topBar.phase.${displayStatus}`),
-      execution.duration != null ? `${execution.duration.toFixed(2)}s` : null,
-    ].filter(Boolean).join(' · ')
-    : t('detail.run.testSummaryIdle');
 
   const scheduleSampleSave = useCallback((raw: string, parsed: Record<string, any>) => {
     if (saveTimerRef.current) {
@@ -417,20 +402,15 @@ export function TestSection({
   const showSampleSaveHint = sampleSaveState === 'saving' || sampleSaveState === 'saved';
 
   return (
-    <div className="border-b border-slate-100 bg-white">
-      <SectionHeader
-        title={t('detail.run.testSection')}
-        expanded={expanded}
-        onToggle={() => setExpanded(v => !v)}
-        summary={testSummary}
-      />
+    <div className="border-b border-gray-100">
+      <SectionHeader title={t('detail.run.testSection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
       {expanded && (
-        <div className="px-4 pb-4 pt-2 space-y-3">
+        <div className="p-4 space-y-3">
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
-              <label className="block text-xs text-slate-500">{t('detail.run.inputParams')}</label>
+              <label className="block text-xs text-gray-500">{t('detail.run.inputParams')}</label>
               {showSampleSaveHint && (
-                <span className="text-[11px] text-slate-400">
+                <span className="text-[11px] text-gray-400">
                   {sampleSaveState === 'saving' ? t('detail.run.savingSampleInputs') : t('detail.run.sampleInputsSaved')}
                 </span>
               )}
@@ -439,8 +419,8 @@ export function TestSection({
               value={inputs}
               onChange={e => handleInputChange(e.target.value)}
               rows={5}
-              className={`w-full text-xs font-mono border rounded-md bg-slate-50/70 px-3 py-2 text-slate-700 resize-none focus:bg-white focus:outline-none focus:ring-1 focus:ring-red-200 ${
-                inputError ? 'border-red-300' : 'border-slate-200'
+              className={`w-full text-xs font-mono border rounded-lg px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-red-500 ${
+                inputError ? 'border-red-300' : 'border-gray-200'
               }`}
               placeholder='{}'
               spellCheck={false}
@@ -451,7 +431,7 @@ export function TestSection({
           <button
             onClick={running ? handleStop : handleRun}
             disabled={stopping || isCancelling}
-            className="w-full flex items-center justify-center gap-2 py-2 bg-red-50 border border-red-100 text-red-700 text-xs font-medium rounded-md hover:bg-red-100 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
             {stopping || isCancelling
               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -462,11 +442,11 @@ export function TestSection({
           </button>
 
           {execution && (
-            <div className="border border-slate-200 rounded-md overflow-hidden bg-white">
-              <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border-b border-slate-100">
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
                 <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
-                  <span className="text-xs text-slate-400 flex items-center gap-1">
+                  <span className="text-xs text-gray-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
                     {execution.duration.toFixed(2)}s
                   </span>
@@ -483,22 +463,22 @@ export function TestSection({
 
               {execution.outputResults && (
                 <div>
-                  <div className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-slate-50 transition-colors">
+                  <div className="flex items-center justify-between gap-2 px-3 py-2 hover:bg-gray-50 transition-colors">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-xs font-medium text-slate-600">{t('detail.run.outputResults')}</span>
+                      <span className="text-xs font-medium text-gray-600">{t('detail.run.outputResults')}</span>
                       <CopyButton text={JSON.stringify(execution.outputResults, null, 2)} size="w-3 h-3" />
                     </div>
                     <button
                       onClick={() => setOutputExpanded(v => !v)}
-                      className="flex items-center rounded p-0.5 hover:bg-slate-100"
+                      className="flex items-center rounded p-0.5 hover:bg-gray-100"
                       aria-label={t('detail.run.outputResults')}
                     >
-                      {outputExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
+                      {outputExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
                     </button>
                   </div>
                   {outputExpanded && (
-                    <div className="bg-slate-50 border-t border-slate-100 px-3 py-2 max-h-48 overflow-y-auto">
-                      <pre className="text-xs text-slate-700 font-mono whitespace-pre-wrap">
+                    <div className="bg-gray-900 px-3 py-2 max-h-48 overflow-y-auto">
+                      <pre className="text-xs text-green-300 font-mono whitespace-pre-wrap">
                         {JSON.stringify(execution.outputResults, null, 2)}
                       </pre>
                     </div>
@@ -510,15 +490,15 @@ export function TestSection({
                 <div>
                   <button
                     onClick={() => setLogExpanded(v => !v)}
-                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-50 transition-colors border-t border-slate-100"
+                    className="w-full flex items-center justify-between px-3 py-2 hover:bg-gray-50 transition-colors border-t border-gray-100"
                   >
-                    <span className="text-xs font-medium text-slate-600">
+                    <span className="text-xs font-medium text-gray-600">
                       {t('detail.run.executionLog', { count: execution.executionLog.length })}
                     </span>
-                    {logExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
+                    {logExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
                   </button>
                   {logExpanded && (
-                    <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-slate-50/70">
+                    <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
                       {execution.executionLog.map((step, i: number) => {
                         const hasInputs = step.inputs && Object.keys(step.inputs).length > 0;
                         const hasOutputs = step.outputs && Object.keys(step.outputs).length > 0;
@@ -551,6 +531,11 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
   const isError = !!step.error;
   const nodeType: string = step.node_type || step.type || '';
 
+  // Left accent bar color: green = ok, red = error
+  const accentClass = isError
+    ? 'border-l-red-400'
+    : 'border-l-green-400';
+
   // Render a dict as key: value rows (top-level keys only), with a JSON fallback toggle
   const KVRows = ({ data, open, onToggle, label, valueClass }: {
     data: Record<string, any>; open: boolean; onToggle: () => void;
@@ -558,14 +543,14 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
   }) => {
     const entries = Object.entries(data);
     return (
-      <div className="border-t border-slate-100">
+      <div className="border-t border-gray-100">
         <button
           onClick={onToggle}
-          className="w-full flex items-center gap-1 px-3 py-1.5 hover:bg-slate-50 transition-colors text-left"
+          className="w-full flex items-center gap-1 px-3 py-1.5 hover:bg-gray-50 transition-colors text-left"
         >
-          {open ? <ChevronDown className="w-3 h-3 text-slate-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-slate-400 flex-shrink-0" />}
-          <span className="text-xs text-slate-500 font-medium">{label}</span>
-          <span className="text-xs text-slate-400 ml-1">({entries.length})</span>
+          {open ? <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" /> : <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />}
+          <span className="text-xs text-gray-500 font-medium">{label}</span>
+          <span className="text-xs text-gray-400 ml-1">({entries.length})</span>
         </button>
         {open && (
           <div className="px-3 pb-2 space-y-0.5">
@@ -573,7 +558,7 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
               const isSimple = v === null || typeof v !== 'object';
               return (
                 <div key={k} className="flex gap-2 text-xs font-mono">
-                  <span className="text-slate-500 flex-shrink-0 min-w-0">{k}:</span>
+                  <span className="text-gray-500 flex-shrink-0 min-w-0">{k}:</span>
                   <span className={`${valueClass} break-all`}>
                     {isSimple ? String(v) : JSON.stringify(v)}
                   </span>
@@ -587,24 +572,24 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
   };
 
   return (
-    <div className="bg-white border border-slate-100 rounded-md overflow-hidden">
+    <div className={`bg-white border border-gray-200 rounded-lg overflow-hidden border-l-4 ${accentClass}`}>
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-white">
+      <div className="flex items-center justify-between px-3 py-2 bg-gray-50">
         <div className="flex items-center gap-2 min-w-0">
           {isError
             ? <XCircle className="w-3.5 h-3.5 text-red-500 flex-shrink-0" />
             : <CheckCircle className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />}
-          <span className="text-xs font-semibold text-slate-800 truncate">
+          <span className="text-xs font-semibold text-gray-800 truncate">
             {step.node_id || `Step ${index + 1}`}
           </span>
           {nodeType && (
-            <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded flex-shrink-0">
+            <span className="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded flex-shrink-0">
               {nodeType}
             </span>
           )}
         </div>
         {step.duration_ms != null && (
-          <span className="text-xs text-slate-400 flex-shrink-0 ml-2">
+          <span className="text-xs text-gray-400 flex-shrink-0 ml-2">
             {(step.duration_ms / 1000).toFixed(2)}s
           </span>
         )}
@@ -656,9 +641,9 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
   const displayMessage = getExecutionDisplayMessage(ex, t);
 
   return (
-    <div className="border-t border-slate-100 bg-white">
+    <div className="border-t border-gray-200 bg-gray-50">
       {isRunning && (
-        <div className="px-4 py-2 flex items-center gap-2 border-b border-slate-100">
+        <div className="px-4 py-2 flex items-center gap-2 border-b border-gray-200">
           <Loader2 className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
           <span className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>
             {isCancelling ? t('detail.run.stopping') : t('detail.run.running')}
@@ -667,13 +652,13 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
         </div>
       )}
       {displayMessage && (
-        <div className="px-4 py-2 border-b border-slate-100">
+        <div className="px-4 py-2 border-b border-gray-200">
           <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
         </div>
       )}
       {hasOutput && (
-        <div className="bg-slate-50 max-h-40 overflow-y-auto border-b border-slate-100">
-          <pre className="text-xs text-slate-700 font-mono px-4 py-2 whitespace-pre-wrap">
+        <div className="bg-gray-900 max-h-40 overflow-y-auto">
+          <pre className="text-xs text-green-300 font-mono px-4 py-2 whitespace-pre-wrap">
             {JSON.stringify(ex.outputResults, null, 2)}
           </pre>
         </div>
@@ -682,15 +667,15 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
         <div>
           <button
             onClick={() => setLogExpanded(v => !v)}
-            className="w-full flex items-center justify-between px-4 py-2 hover:bg-slate-50 transition-colors"
+            className="w-full flex items-center justify-between px-4 py-2 hover:bg-gray-100 transition-colors"
           >
-            <span className="text-xs font-medium text-slate-600">
+            <span className="text-xs font-medium text-gray-600">
               {t('detail.run.executionLog', { count: ex.executionLog.length })}
             </span>
-            {logExpanded ? <ChevronDown className="w-3 h-3 text-slate-400" /> : <ChevronRight className="w-3 h-3 text-slate-400" />}
+            {logExpanded ? <ChevronDown className="w-3 h-3 text-gray-400" /> : <ChevronRight className="w-3 h-3 text-gray-400" />}
           </button>
           {logExpanded && (
-            <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-slate-50/70">
+            <div className="p-3 space-y-2 max-h-96 overflow-y-auto bg-gray-50">
               {ex.executionLog.map((step: any, i: number) => {
                 const hasInputs = step.inputs && Object.keys(step.inputs).length > 0;
                 const hasOutputs = step.outputs && Object.keys(step.outputs).length > 0;
@@ -703,7 +688,7 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
         </div>
       )}
       {!isRunning && !hasOutput && !hasLog && !ex.errorMessage && (
-        <p className="text-xs text-slate-400 px-4 py-2">{t('detail.run.noOutput')}</p>
+        <p className="text-xs text-gray-400 px-4 py-2">{t('detail.run.noOutput')}</p>
       )}
     </div>
   );
@@ -712,19 +697,17 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
 // ─────────────────────────────────────────────
 // 区块4：执行历史
 // ─────────────────────────────────────────────
-export function HistorySection({
+function HistorySection({
   workflowId,
   latestExecutionId,
   onLatestExecutionChange,
-  defaultExpanded = true,
 }: {
   workflowId: string;
   latestExecutionId?: string;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
-  defaultExpanded?: boolean;
 }) {
   const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(defaultExpanded);
+  const [expanded, setExpanded] = useState(true);
   const [history, setHistory] = useState<WorkflowExecution[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedExec, setSelectedExec] = useState<WorkflowExecution | null>(null);
@@ -779,55 +762,40 @@ export function HistorySection({
     return <AlertCircle className="w-3.5 h-3.5 text-orange-500" />;
   };
 
-  const latestHistory = history[0];
-  const historySummary = loading
-    ? t('detail.run.historySummaryLoading')
-    : history.length > 0
-      ? t('detail.run.historySummary', {
-        count: history.length,
-        time: latestHistory ? formatTime(latestHistory.startedAt) : '',
-      })
-      : t('detail.run.noHistory');
-
   return (
-    <div className="border-b border-slate-100 bg-white">
-      <SectionHeader
-        title={t('detail.run.historySection')}
-        expanded={expanded}
-        onToggle={() => setExpanded(v => !v)}
-        summary={historySummary}
-      />
+    <div>
+      <SectionHeader title={t('detail.run.historySection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
       {expanded && (
         <div>
           {loading ? (
             <div className="flex items-center justify-center py-6">
-              <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
             </div>
           ) : history.length === 0 ? (
             <div className="py-6 text-center">
-              <Clock className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-              <p className="text-xs text-slate-400">{t('detail.run.noHistory')}</p>
+              <Clock className="w-8 h-8 text-gray-300 mx-auto mb-2" />
+              <p className="text-xs text-gray-400">{t('detail.run.noHistory')}</p>
             </div>
           ) : (
             <div>
-              <div className="divide-y divide-slate-100">
+              <div className="divide-y divide-gray-100">
                 {history.map((exec) => (
                   <button
                     key={exec.id}
                     onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
-                    className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-slate-50 transition-colors text-left"
+                    className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
                   >
                     {statusIcon(getExecutionDisplayStatus(exec))}
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs text-slate-700 truncate">{formatTime(exec.startedAt)}</p>
+                      <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
                     </div>
                     {exec.duration != null && (
-                      <span className="text-xs text-slate-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                      <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
                     )}
                     {selectedExec?.id === exec.id ? (
-                      <ChevronDown className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                      <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
                     ) : (
-                      <ChevronRight className="w-3 h-3 text-slate-400 flex-shrink-0" />
+                      <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
                     )}
                   </button>
                 ))}

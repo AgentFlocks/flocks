@@ -4,10 +4,9 @@ import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
-import ChatTab, { type WorkflowChatLaunchRequest } from './tabs/ChatTab';
+import ChatTab from './tabs/ChatTab';
+import RunTab from './tabs/RunTab';
 import IntegrationTab from './tabs/IntegrationTab';
-
-export type { WorkflowChatLaunchRequest };
 
 // ─────────────────────────────────────────────
 // Error boundary helpers
@@ -61,17 +60,13 @@ class TabErrorBoundary extends Component<
 // RightPanel
 // ─────────────────────────────────────────────
 
-export type RightPanelTabId = 'chat' | 'overview' | 'integration';
+type TabId = 'chat' | 'overview' | 'run' | 'integration';
 
 interface RightPanelProps {
   workflow: Workflow;
   latestExecution?: WorkflowExecution | null;
   open: boolean;
   width?: number;
-  activeTab?: RightPanelTabId;
-  chatLaunchRequest?: WorkflowChatLaunchRequest | null;
-  onChatLaunchRequestHandled?: (id: number) => void;
-  onActiveTabChange?: (tab: RightPanelTabId) => void;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
@@ -85,10 +80,6 @@ interface RightPanelProps {
 
 export default function RightPanel({
   workflow, latestExecution, open, width = 320,
-  activeTab,
-  chatLaunchRequest,
-  onChatLaunchRequestHandled,
-  onActiveTabChange,
   onLatestExecutionChange,
   onExecutionSettled,
   onWorkflowUpdated,
@@ -99,16 +90,8 @@ export default function RightPanel({
 }: RightPanelProps) {
   const { t } = useTranslation('workflow');
   const confirm = useConfirm();
-  const [internalActiveTab, setInternalActiveTab] = useState<RightPanelTabId>('overview');
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [deleting, setDeleting] = useState(false);
-  const currentActiveTab = activeTab ?? internalActiveTab;
-
-  const handleTabChange = (tab: RightPanelTabId) => {
-    if (activeTab === undefined) {
-      setInternalActiveTab(tab);
-    }
-    onActiveTabChange?.(tab);
-  };
 
   const handleDelete = async () => {
     const ok = await confirm({
@@ -126,9 +109,10 @@ export default function RightPanel({
     }
   };
 
-  const TABS: { id: RightPanelTabId; label: string }[] = [
+  const TABS: { id: TabId; label: string }[] = [
     { id: 'overview',     label: t('detail.rightPanel.tabOverview') },
     { id: 'chat',         label: t('detail.rightPanel.tabChat') },
+    { id: 'run',          label: t('detail.rightPanel.tabRun') },
     { id: 'integration',  label: t('detail.rightPanel.tabIntegration') },
   ];
 
@@ -142,13 +126,13 @@ export default function RightPanel({
         {TABS.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => handleTabChange(tab.id)}
+            onClick={() => setActiveTab(tab.id)}
             className={`flex-1 py-3 text-xs font-medium transition-colors relative ${
-              currentActiveTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'
+              activeTab === tab.id ? 'text-red-600' : 'text-gray-500 hover:text-gray-700'
             }`}
           >
             {tab.label}
-            {currentActiveTab === tab.id && (
+            {activeTab === tab.id && (
               <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-red-600 rounded-full" />
             )}
           </button>
@@ -157,22 +141,21 @@ export default function RightPanel({
 
       {/* Tab content */}
       <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-        {currentActiveTab === 'chat' && (
+        {activeTab === 'chat' && (
           <ChatTab
             workflow={workflow}
             onLatestExecutionChange={onLatestExecutionChange}
             onWorkflowUpdated={onWorkflowUpdated}
             onFirstMessageSent={onFirstMessageSent}
             onSessionChange={onSessionChange}
-            launchRequest={chatLaunchRequest}
-            onLaunchRequestHandled={onChatLaunchRequestHandled}
             selectedNode={selectedNode}
             onNodeRefDismiss={onDeselectNode}
           />
         )}
-        {currentActiveTab === 'overview' && (
+        {activeTab === 'overview' && <OverviewTab workflow={workflow} />}
+        {activeTab === 'run' && (
           <TabErrorBoundary>
-            <OverviewTab
+            <RunTab
               workflow={workflow}
               latestExecution={latestExecution ?? null}
               onLatestExecutionChange={onLatestExecutionChange}
@@ -180,15 +163,15 @@ export default function RightPanel({
             />
           </TabErrorBoundary>
         )}
-        {currentActiveTab === 'integration' && (
+        {activeTab === 'integration' && (
           <TabErrorBoundary>
             <IntegrationTab workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
           </TabErrorBoundary>
         )}
       </div>
 
-      {/* 底部删除按钮：仅概览页展示，避免编辑/集成流程中出现破坏性操作入口 */}
-      {onDelete && currentActiveTab === 'overview' && (
+      {/* 底部删除按钮 */}
+      {onDelete && (
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-100 flex-shrink-0">
           <button
             onClick={handleDelete}
