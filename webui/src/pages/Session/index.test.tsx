@@ -15,6 +15,9 @@ const {
   refetchSessions,
   useSessions,
   useAgents,
+  useProviders,
+  defaultModelAPI,
+  modelV2API,
   toast,
 } = vi.hoisted(() => ({
   client: {
@@ -33,6 +36,13 @@ const {
   refetchSessions: vi.fn(),
   useSessions: vi.fn(),
   useAgents: vi.fn(),
+  useProviders: vi.fn(),
+  defaultModelAPI: {
+    getResolved: vi.fn(),
+  },
+  modelV2API: {
+    listDefinitions: vi.fn(),
+  },
   toast: {
     error: vi.fn(),
     info: vi.fn(),
@@ -56,6 +66,15 @@ vi.mock('@/hooks/useSessions', () => ({
 
 vi.mock('@/hooks/useAgents', () => ({
   useAgents,
+}));
+
+vi.mock('@/hooks/useProviders', () => ({
+  useProviders,
+}));
+
+vi.mock('@/api/provider', () => ({
+  defaultModelAPI,
+  modelV2API,
 }));
 
 vi.mock('@/components/common/Toast', () => ({
@@ -157,6 +176,15 @@ describe('SessionPage session actions menu', () => {
       error: null,
       refetch: vi.fn(),
     });
+    useProviders.mockReturnValue({
+      providers: [],
+      connectedIds: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
     client.post.mockResolvedValue({ data: secondSession });
