@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next';
 import {
   workflowAPI,
   Workflow,
+  WorkflowIntegrationConfig,
   WorkflowService,
   WorkflowServiceDriver,
   WorkflowTrigger,
@@ -43,6 +44,67 @@ type JsonObject = Record<string, any>;
 
 const DEFAULT_JSON_TEXT = JSON.stringify({}, null, 2);
 const LEGACY_SINGLETON_TYPES: WorkflowTriggerType[] = ['schedule', 'kafka', 'syslog'];
+const TEMPLATE_API_MODES = new Set(['api', 'publish', 'api_service', 'service']);
+
+interface TemplateView {
+  hasApi: boolean;
+  triggers: WorkflowTrigger[];
+}
+
+function asObject(value: unknown): JsonObject {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : {};
+}
+
+function normalizeMode(value: unknown): string {
+  return String(value ?? '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+}
+
+function templateModes(config?: WorkflowIntegrationConfig | null): Set<string> {
+  const modes = new Set<string>();
+  if (!config) return modes;
+  const raw = config as JsonObject;
+  const candidates = [
+    raw.mode,
+    raw.type,
+    ...(Array.isArray(raw.modes) ? raw.modes : []),
+    ...(Array.isArray(raw.capabilities) ? raw.capabilities : []),
+  ];
+  candidates.forEach((candidate) => {
+    const mode = normalizeMode(candidate);
+    if (mode) modes.add(mode);
+  });
+  return modes;
+}
+
+function templateHasApi(config?: WorkflowIntegrationConfig | null): boolean {
+  if (!config) return false;
+  const raw = config as JsonObject;
+  const publish = asObject(raw.publish ?? raw.api);
+  if (Object.keys(publish).length > 0 && publish.enabled !== false) {
+    return true;
+  }
+  const modes = templateModes(config);
+  return Array.from(modes).some((mode) => TEMPLATE_API_MODES.has(mode));
+}
+
+function templateTriggers(config?: WorkflowIntegrationConfig | null): WorkflowTrigger[] {
+  if (!config) return [];
+  const raw = config as JsonObject;
+  const triggers = Array.isArray(raw.triggers) ? raw.triggers : Array.isArray(raw.integrations) ? raw.integrations : [];
+  return triggers
+    .filter((item): item is WorkflowTrigger => Boolean(item && typeof item === 'object' && (item as WorkflowTrigger).type))
+    .map((item, index) => ({
+      ...item,
+      id: item.id || `${item.type}-${index + 1}`,
+    }));
+}
+
+function buildTemplateView(config?: WorkflowIntegrationConfig | null): TemplateView {
+  return {
+    hasApi: templateHasApi(config),
+    triggers: templateTriggers(config),
+  };
+}
 
 function SectionHeader({
   title,
@@ -445,6 +507,244 @@ function PublishSection({ workflowId }: { workflowId: string }) {
             <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
               <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
               <span>{error}</span>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function isRuntimeActive(status?: JsonObject | null): boolean {
+  const state = String(status?.state ?? '').toLowerCase();
+  return ['binding', 'connecting', 'listening', 'ready', 'running'].includes(state);
+}
+
+function templateStatusLabel(status?: JsonObject | null): string {
+  if (!status) return 'unknown';
+  return String(status.state ?? '-');
+}
+
+function TemplateTriggersSection({
+  workflow,
+  triggers,
+  onWorkflowUpdated,
+}: {
+  workflow: Workflow;
+  triggers: WorkflowTrigger[];
+  onWorkflowUpdated?: (updated: Workflow) => void;
+}) {
+  const { t } = useTranslation('workflow');
+  const [expanded, setExpanded] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, JsonObject>>({});
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+
+  const loadStatuses = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const next: Record<string, JsonObject> = {};
+      const genericRecordsPromise = workflowAPI.getTriggers(workflow.id)
+        .then((res) => res.data ?? [])
+        .catch(() => [] as WorkflowTriggerRecord[]);
+
+      await Promise.all(triggers.map(async (trigger) => {
+        try {
+          if (trigger.type === 'syslog') {
+            const res = await workflowAPI.getSyslogStatus(workflow.id);
+            next[trigger.id] = res.data as JsonObject;
+            return;
+          }
+          if (trigger.type === 'kafka') {
+            const res = await workflowAPI.getKafkaStatus(workflow.id);
+            next[trigger.id] = res.data as JsonObject;
+            return;
+          }
+          if (trigger.type === 'schedule') {
+            const res = await workflowAPI.getPollerStatus(workflow.id);
+            next[trigger.id] = res.data as JsonObject;
+          }
+        } catch (err: unknown) {
+          next[trigger.id] = { state: 'error', error: extractErrorMessage(err) };
+        }
+      }));
+
+      const genericRecords = await genericRecordsPromise;
+      genericRecords.forEach((record) => {
+        if (record.trigger.id && !next[record.trigger.id]) {
+          next[record.trigger.id] = (record.status ?? { state: record.trigger.enabled ? 'ready' : 'stopped' }) as JsonObject;
+        }
+      });
+
+      triggers.forEach((trigger) => {
+        if (!next[trigger.id]) {
+          next[trigger.id] = { state: trigger.enabled ? 'ready' : 'stopped' };
+        }
+      });
+      setStatuses(next);
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, '加载发布状态失败'));
+    } finally {
+      setLoading(false);
+    }
+  }, [triggers, workflow.id]);
+
+  useEffect(() => {
+    void loadStatuses();
+  }, [loadStatuses]);
+
+  const syncWorkflowFromServer = useCallback(async () => {
+    try {
+      const response = await workflowAPI.get(workflow.id);
+      onWorkflowUpdated?.(response.data);
+    } catch {
+      // Status refresh is enough for this page; workflow sync is best-effort.
+    }
+  }, [onWorkflowUpdated, workflow.id]);
+
+  const upsertTemplateTrigger = async (trigger: WorkflowTrigger, enabled: boolean) => {
+    const normalizedTrigger = {
+      ...trigger,
+      enabled,
+    };
+    const records = await workflowAPI.getTriggers(workflow.id)
+      .then((res) => res.data ?? [])
+      .catch(() => [] as WorkflowTriggerRecord[]);
+    const existing = records.find((record) => record.trigger.id === trigger.id);
+    if (existing) {
+      await workflowAPI.updateTrigger(workflow.id, trigger.id, normalizedTrigger);
+      return;
+    }
+    await workflowAPI.createTrigger(workflow.id, normalizedTrigger);
+  };
+
+  const applyTemplateTrigger = async (trigger: WorkflowTrigger, enabled: boolean) => {
+    const source = trigger.source ?? {};
+    if (trigger.type === 'syslog') {
+      await workflowAPI.saveSyslogConfig(workflow.id, {
+        enabled,
+        protocol: String(source.protocol ?? 'udp'),
+        host: String(source.host ?? '0.0.0.0'),
+        port: Math.max(1, Number(source.port ?? 5140)),
+        format: String(source.format ?? 'auto'),
+        inputKey: getTriggerInputKey(trigger, 'syslog_message'),
+      });
+      return;
+    }
+    if (trigger.type === 'kafka') {
+      await workflowAPI.saveKafkaConfig(workflow.id, {
+        enabled,
+        inputBroker: String(source.inputBroker ?? 'localhost:9092'),
+        inputTopic: String(source.inputTopic ?? `${workflow.id}.events`),
+        inputGroupId: String(source.inputGroupId ?? `${workflow.id}-group`),
+        autoOffsetReset: String(source.autoOffsetReset ?? 'latest'),
+        inputKey: getTriggerInputKey(trigger, 'kafka_message'),
+        inputs: asObject(trigger.inputs ?? {}),
+      });
+      return;
+    }
+    if (trigger.type === 'schedule') {
+      await workflowAPI.savePollerConfig(workflow.id, {
+        enabled,
+        intervalSeconds: Math.max(1, Number(source.intervalSeconds ?? 300)),
+        timeoutSeconds: Math.max(1, Number(trigger.runtime?.timeoutSeconds ?? 7200)),
+        noOverlap: Boolean(trigger.runtime?.noOverlap ?? true),
+        inputs: asObject(trigger.inputs ?? {}),
+      });
+      return;
+    }
+    await upsertTemplateTrigger(trigger, enabled);
+  };
+
+  const handleToggle = async (trigger: WorkflowTrigger) => {
+    const currentStatus = statuses[trigger.id];
+    const nextEnabled = !isRuntimeActive(currentStatus);
+    setSavingId(trigger.id);
+    setError('');
+    setSuccess('');
+    try {
+      await applyTemplateTrigger(trigger, nextEnabled);
+      setSuccess(nextEnabled ? `${triggerTypeLabel(trigger.type)} 已启动` : `${triggerTypeLabel(trigger.type)} 已停止`);
+      await Promise.all([loadStatuses(), syncWorkflowFromServer()]);
+    } catch (err: unknown) {
+      setError(extractErrorMessage(err, nextEnabled ? '启动失败' : '停止失败'));
+    } finally {
+      setSavingId(null);
+    }
+  };
+
+  return (
+    <div className="border-b border-gray-100">
+      <SectionHeader
+        title={t('detail.run.triggerSection')}
+        expanded={expanded}
+        onToggle={() => setExpanded((v) => !v)}
+        badge={<span className="text-xs font-normal text-gray-500">{triggers.length} 个</span>}
+      />
+      {expanded && (
+        <div className="p-4 space-y-3">
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-gray-500">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              正在加载发布状态...
+            </div>
+          ) : null}
+
+          {triggers.map((trigger) => {
+            const status = statuses[trigger.id];
+            const active = isRuntimeActive(status);
+            const busy = savingId === trigger.id;
+            return (
+              <div key={trigger.id} className="rounded-xl border border-gray-200 bg-white px-3 py-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-gray-900">{trigger.name || triggerTypeLabel(trigger.type)}</span>
+                      <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
+                        {triggerTypeLabel(trigger.type)}
+                      </span>
+                    </div>
+                    <div className="mt-1 truncate text-[11px] text-gray-500">{triggerSourceLabel(trigger)}</div>
+                    <div className="mt-1 text-[11px] text-gray-400">配置来自 config.json</div>
+                  </div>
+                  <WorkflowStatusBadge status={templateStatusLabel(status)} />
+                </div>
+                {status?.error ? (
+                  <div className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+                    {String(status.error)}
+                  </div>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleToggle(trigger);
+                  }}
+                  disabled={busy}
+                  className={`w-full rounded-lg px-3 py-2 text-xs font-medium disabled:opacity-60 ${
+                    active
+                      ? 'border border-red-200 text-red-600 hover:bg-red-50'
+                      : 'bg-green-600 text-white hover:bg-green-700'
+                  }`}
+                >
+                  {busy ? '处理中...' : active ? '停止监听' : '启动监听'}
+                </button>
+              </div>
+            );
+          })}
+
+          {error ? (
+            <div className="flex items-start gap-1.5 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600">
+              <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+          ) : null}
+          {success ? (
+            <div className="flex items-start gap-1.5 rounded-lg bg-green-50 px-3 py-2 text-xs text-green-700">
+              <Check className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              <span>{success}</span>
             </div>
           ) : null}
         </div>
@@ -882,6 +1182,7 @@ function TriggersSection({
   workflow: Workflow;
   onWorkflowUpdated?: (updated: Workflow) => void;
 }) {
+  const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
   const [loading, setLoading] = useState(false);
   const [records, setRecords] = useState<WorkflowTriggerRecord[]>([]);
@@ -1126,7 +1427,7 @@ function TriggersSection({
   return (
     <div className="border-b border-gray-100">
       <SectionHeader
-        title="集成"
+        title={t('detail.run.triggerSection')}
         expanded={expanded}
         onToggle={() => setExpanded((v) => !v)}
         badge={<span className="text-xs font-normal text-gray-500">{records.length} 个</span>}
@@ -1299,10 +1600,84 @@ function TriggersSection({
 }
 
 export default function IntegrationTab({ workflow, onWorkflowUpdated }: IntegrationTabProps) {
+  const [config, setConfig] = useState<WorkflowIntegrationConfig | null>(null);
+  const [hasTemplate, setHasTemplate] = useState(false);
+  const [loadingConfig, setLoadingConfig] = useState(true);
+  const [configError, setConfigError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingConfig(true);
+    setConfigError('');
+    void workflowAPI.getConfig(workflow.id)
+      .then((response) => {
+        if (cancelled) return;
+        setHasTemplate(response.data.exists === true);
+        setConfig(response.data.config ?? null);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setHasTemplate(false);
+        setConfig(null);
+        setConfigError(extractErrorMessage(err, '加载发布模板失败'));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingConfig(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [workflow.id]);
+
+  if (loadingConfig) {
+    return (
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        <div className="p-4 flex items-center gap-2 text-xs text-gray-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          正在读取发布模板...
+        </div>
+      </div>
+    );
+  }
+
+  if (hasTemplate) {
+    const view = buildTemplateView(config);
+    return (
+      <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
+        {view.hasApi ? <PublishSection workflowId={workflow.id} /> : null}
+        {view.triggers.length > 0 ? (
+          <TemplateTriggersSection
+            workflow={workflow}
+            triggers={view.triggers}
+            onWorkflowUpdated={onWorkflowUpdated}
+          />
+        ) : null}
+        {!view.hasApi && view.triggers.length === 0 ? (
+          <div className="p-4">
+            <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
+              config.json 中没有声明可发布的 API 或触发能力。
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-      <PublishSection workflowId={workflow.id} />
-      <TriggersSection workflow={workflow} onWorkflowUpdated={onWorkflowUpdated} />
+    <div className="flex-1 min-h-0 overflow-y-auto">
+      {configError ? (
+        <div className="flex items-start gap-1.5 bg-red-50 px-4 py-3 text-xs text-red-600">
+          <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          <span>{configError}</span>
+        </div>
+      ) : null}
+      <div className="p-4">
+        <div className="rounded-xl border border-dashed border-gray-200 px-4 py-8 text-center text-xs text-gray-500">
+          当前工作流还没有 config.json 发布模板。
+        </div>
+      </div>
     </div>
   );
 }

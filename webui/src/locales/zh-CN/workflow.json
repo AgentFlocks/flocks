@@ -77,7 +77,7 @@
       "tabOverview": "概览",
       "tabChat": "AI 编辑",
       "tabRun": "运行",
-      "tabIntegration": "集成",
+      "tabIntegration": "发布",
       "renderError": "组件渲染出错",
       "deleteWorkflow": "删除工作流",
       "deleteConfirmTitle": "删除工作流",
@@ -193,6 +193,7 @@
     "run": {
       "testSection": "测试",
       "inputParams": "输入参数（JSON）",
+      "triggerSection": "触发能力",
       "rootObjectRequired": "输入参数必须是 JSON 对象",
       "running": "运行中...",
       "testRun": "测试运行",

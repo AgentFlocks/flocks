@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "kind": "workflow.integration-config",
+  "workflow": {
+    "id": "tdp_alert_triage",
+    "name": "tdp_alert_triage",
+    "source": "project"
+  },
+  "triggers": [
+    {
+      "id": "syslog-default",
+      "type": "syslog",
+      "name": "TDP Syslog Listener",
+      "description": "Receive TDP/NDR alert events via Syslog and pass the event body into workflow input alert_data.",
+      "enabled": false,
+      "source": {
+        "protocol": "udp",
+        "host": "0.0.0.0",
+        "port": 5140,
+        "format": "auto"
+      },
+      "mapping": {
+        "alert_data": "$.body"
+      },
+      "inputs": {}
+    }
+  ]
+}

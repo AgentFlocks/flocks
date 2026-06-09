@@ -77,7 +77,7 @@
       "tabOverview": "Overview",
       "tabChat": "AI Edit",
       "tabRun": "Run",
-      "tabIntegration": "Integrations",
+      "tabIntegration": "Publish",
       "renderError": "Component render error",
       "deleteWorkflow": "Delete Workflow",
       "deleteConfirmTitle": "Delete Workflow",
@@ -193,6 +193,7 @@
     "run": {
       "testSection": "Test",
       "inputParams": "Input Parameters (JSON)",
+      "triggerSection": "Trigger Capabilities",
       "rootObjectRequired": "Input parameters must be a JSON object",
       "running": "Running...",
       "testRun": "Test Run",
