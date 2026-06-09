@@ -538,11 +538,12 @@ export function getRenderableFileUrl(url: string): string {
   }
 }
 
-export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish'>): boolean {
+export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>): boolean {
   if (
     message.role === 'assistant' &&
     (message.parts?.length ?? 0) === 0 &&
-    !!message.finish
+    message.finish === 'stop' &&
+    !message.error
   ) {
     return false;
   }
@@ -1096,20 +1097,13 @@ export default function SessionChat({
           // run's stages do not leak into a fresh "Compacting..." panel.
           setCompactionStages([]);
         } else if (statusType === 'idle') {
-          const wasCompacting = isCompactingRef.current;
           sessionBusyRef.current = false;
           setIsStreaming(false);
           setIsCompacting(false);
           isCompactingRef.current = false;
           setCompactingMessage('');
           setCompactionStages([]);
-          if (wasCompacting) refetch();
-          const lastAsstMsg = [...messagesRef.current].reverse().find(
-            (message) => message.role === 'assistant' && !message.finish,
-          );
-          if (lastAsstMsg?.parts?.length) {
-            markMessageStopped(lastAsstMsg.id);
-          }
+          refetch();
         }
       } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
         updateMessage(properties.info);
@@ -1191,7 +1185,6 @@ export default function SessionChat({
       sessionId,
       updateMessage,
       updateMessagePart,
-      markMessageStopped,
       refetch,
       handleQuestionAsked,
       removeByRequestId,
@@ -3490,6 +3483,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
   const todoEntries = toolName === 'todo'
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
+  const showGenericToolPayload = toolName !== 'todo';
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
@@ -3579,7 +3573,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </div>
         )}
 
-        {state.input && (
+        {showGenericToolPayload && state.input && (
           <details>
             <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
               {t('chat.tool.inputParams')}
@@ -3590,7 +3584,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
           </details>
         )}
 
-        {status === 'completed' && state.output !== undefined && (
+        {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
           <details open>
             <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
               {t('chat.tool.outputResult')}
