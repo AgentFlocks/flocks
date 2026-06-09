@@ -132,7 +132,6 @@ export default function SessionPage() {
     }),
     [chatAgents, agentSourceFilter],
   );
-  const isChineseUi = i18n.language.toLowerCase().replace('_', '-').startsWith('zh');
   const selectedAgentInfo = useMemo(
     () => chatAgents.find((agent) => agent.name === selectedAgent),
     [chatAgents, selectedAgent],
@@ -921,9 +920,7 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={() => setShowAgentOptions(!showAgentOptions)}
-                className={`flex h-7 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 ${
-                  isChineseUi ? 'w-[168px]' : 'w-[104px]'
-                }`}
+                className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900"
                 title={t('agentPicker.title')}
               >
                 <Bot className="h-3 w-3 shrink-0" />
