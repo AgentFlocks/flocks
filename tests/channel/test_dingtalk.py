@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import importlib.util
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -923,6 +924,36 @@ class TestStreamHelpers:
             message, channel_id="dingtalk", account_id="default",
         ) is None
 
+    def test_chatbot_message_to_inbound_extracts_file_download_code_from_content_extension(self):
+        from flocks.channel.builtin.dingtalk.stream import (
+            chatbot_message_to_inbound,
+        )
+        message = SimpleNamespace(
+            text=None,
+            extensions={
+                "content": {
+                    "fileName": "report.pdf",
+                    "downloadCode": "DL_FILE_1",
+                    "fileId": "file_1",
+                },
+            },
+            conversation_id="cid_file",
+            conversation_type="1",
+            sender_id="u1",
+            sender_staff_id="staff_001",
+            sender_nick="Alice",
+            message_id="msg_file_1",
+            message_type="file",
+        )
+
+        inbound = chatbot_message_to_inbound(
+            message, channel_id="dingtalk", account_id="default",
+        )
+
+        assert inbound is not None
+        assert inbound.media_url == "DL_FILE_1"
+        assert inbound.text == ""
+
 
 # ------------------------------------------------------------------
 # Resilience regressions: R1 (silent stall) + R3 (back-pressure)
@@ -1453,6 +1484,61 @@ class TestDingTalkInboundMedia:
         monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
         monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
         monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m1",
+                sender_id="u1",
+                media_url="download-code-1",
+            ),
+            config={},
+            max_bytes=20,
+        )
+
+        assert captured == {"code": "download-code-1", "account": "acc1"}
+        assert media is not None
+        assert media.filename == "report.png"
+        assert media.mime == "image/png"
+        assert Path(media.url.removeprefix("file://")).read_bytes() == b"hello-img"
+
+    @pytest.mark.asyncio
+    async def test_file_message_content_filename_is_preserved(self, monkeypatch, tmp_path):
+        from flocks.channel.builtin.dingtalk import inbound_media as mod
+
+        async def fake_exchange(*, config, account_id, download_code):
+            return "https://example.com/download", None
+
+        async def fake_download(_url, _max_bytes):
+            return b"%PDF", None
+
+        monkeypatch.setattr(mod, "_exchange_download_code", fake_exchange)
+        monkeypatch.setattr(mod, "_download_remote_bytes_limited", fake_download)
+        monkeypatch.setattr(mod, "_media_storage_dir", lambda _acc: tmp_path)
+
+        media = await mod.download_inbound_media(
+            InboundMessage(
+                channel_id="dingtalk",
+                account_id="acc1",
+                message_id="m_file",
+                sender_id="u1",
+                media_url="download-code-file",
+                raw=SimpleNamespace(
+                    extensions={
+                        "content": {
+                            "fileName": "安全报告.pdf",
+                            "downloadCode": "download-code-file",
+                        },
+                    },
+                ),
+            ),
+            config={},
+        )
+
+        assert media is not None
+        assert media.filename == "安全报告.pdf"
+        assert media.mime == "application/pdf"
 
     @pytest.mark.asyncio
     async def test_direct_url_skips_exchange(self, monkeypatch, tmp_path):

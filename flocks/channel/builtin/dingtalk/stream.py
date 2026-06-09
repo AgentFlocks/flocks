@@ -336,6 +336,17 @@ def _extract_media_url(message: Any) -> Optional[str]:
         if code:
             return str(code)
 
+    content = _extract_content_dict(message)
+    if content:
+        code = (
+            content.get("downloadCode")
+            or content.get("download_code")
+            or content.get("pictureDownloadCode")
+            or content.get("picture_download_code")
+        )
+        if code:
+            return str(code)
+
     rich_text = getattr(message, "rich_text_content", None) or getattr(
         message, "rich_text", None
     )
@@ -352,6 +363,42 @@ def _extract_media_url(message: Any) -> Optional[str]:
                     if code:
                         return str(code)
     return None
+
+
+def _extract_content_dict(message: Any) -> dict[str, Any]:
+    if isinstance(message, dict):
+        content = message.get("content")
+        return content if isinstance(content, dict) else {}
+
+    content = getattr(message, "content", None)
+    if isinstance(content, dict):
+        return content
+
+    extensions = getattr(message, "extensions", None)
+    if isinstance(extensions, dict):
+        content = extensions.get("content")
+        if isinstance(content, dict):
+            return content
+
+    file_content = getattr(message, "file_content", None)
+    if isinstance(file_content, dict):
+        return file_content
+    if file_content is not None:
+        result: dict[str, Any] = {}
+        for key in (
+            "downloadCode",
+            "download_code",
+            "fileName",
+            "filename",
+            "name",
+            "fileId",
+        ):
+            value = getattr(file_content, key, None)
+            if value:
+                result[key] = value
+        return result
+
+    return {}
 
 
 # ---------------------------------------------------------------------------
