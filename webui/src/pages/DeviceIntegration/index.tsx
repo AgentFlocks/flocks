@@ -261,22 +261,22 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
           {!selectedVendor && !inModeSelection ? (
             <>
               <p className="text-xs text-zinc-400 mb-4">{t('wizard.chooseVendorOrCustom')}</p>
-              <div className="grid grid-cols-3 gap-2.5">
+              <div className="grid grid-cols-2 gap-2.5">
                 <button
                   onClick={() => setShowCustomModes(true)}
-                  className="flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-2.5 py-3 hover:border-blue-300 hover:bg-blue-50 transition-all duration-150 group"
+                  className="group flex w-full items-center gap-3 rounded-xl border border-dashed border-blue-200 bg-blue-50/40 px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50"
                 >
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center text-base font-bold bg-blue-100 text-blue-700">
+                  <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-blue-100 text-sm font-bold text-blue-700">
                     自
                   </div>
-                  <div className="min-w-0 text-center">
+                  <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-zinc-800 truncate">{t('wizard.customCardTitle')}</p>
                     <p className="text-[11px] text-zinc-400 truncate">{t('wizard.customCardSubtitle')}</p>
-                    <p className="text-[10px] text-blue-600 mt-0.5 font-medium truncate">
+                    <p className="text-[10px] text-blue-600 mt-1 font-medium truncate">
                       {t('wizard.customCardCta')}
                     </p>
                   </div>
-                  <ChevronRight className="w-3 h-3 text-blue-400 transition-colors" />
+                  <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-blue-300 transition-colors group-hover:text-blue-500" />
                 </button>
                 {availableVendors.map((vendor) => {
                   const count = vendorTotalCounts[vendor.id] ?? 0;
@@ -290,20 +290,20 @@ function AddDeviceWizardPanel({ templates, instanceCounts, initialVendor, onSele
                     <button
                       key={vendor.id}
                       onClick={() => setSelectedVendor(vendor)}
-                      className="flex min-h-[132px] flex-col items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-2.5 py-3 hover:border-blue-300 hover:bg-blue-50/40 transition-all duration-150 group"
+                      className="group flex w-full items-center gap-3 rounded-xl border border-zinc-200 bg-white px-3.5 py-3 text-left transition-all duration-150 hover:border-blue-300 hover:bg-blue-50/40"
                     >
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-base font-bold ${vendor.color}`}>
+                      <div className={`flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-sm font-bold ${vendor.color}`}>
                         {vendor.nameCn[0]}
                       </div>
-                      <div className="min-w-0 text-center">
+                      <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold text-zinc-800 truncate">{primaryName}</p>
                         {showSecondary && <p className="text-[11px] text-zinc-400 truncate">{secondaryName}</p>}
-                        <p className="text-[10px] text-zinc-400 mt-0.5">
+                        <p className="text-[10px] text-zinc-400 mt-1 truncate">
                           {t('wizard.productCount', { count: productCount })}
-                          {count > 0 && <span className="text-blue-600 font-medium"> · {t('wizard.instanceCount', { count })}</span>}
+                          {count > 0 && <span className="text-zinc-500"> / {t('wizard.instanceCount', { count })}</span>}
                         </p>
                       </div>
-                      <ChevronRight className="w-3 h-3 text-zinc-300 group-hover:text-blue-400 transition-colors" />
+                      <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-zinc-300 transition-colors group-hover:text-blue-400" />
                     </button>
                   );
                 })}
