@@ -152,3 +152,29 @@ async def test_im_send_message_asks_when_multiple_targets_match() -> None:
     _, kwargs = channel_message.await_args
     assert kwargs["session_id"] == "ses_second"
     assert kwargs["channel_type"] == "wecom"
+
+
+@pytest.mark.asyncio
+async def test_im_send_message_stops_when_channel_question_is_deferred() -> None:
+    first = _candidate(session_id="ses_first", channel_id="feishu")
+    second = _candidate(session_id="ses_second", channel_id="wecom")
+    question_result = ToolResult(
+        success=True,
+        output="Question sent to the IM channel as plain text.",
+        metadata={"deferred": True, "channel_session": True},
+    )
+
+    with patch(
+        "flocks.tool.channel.im_send_message._list_candidates",
+        AsyncMock(return_value=[first, second]),
+    ), patch(
+        "flocks.tool.channel.im_send_message._ask_user_to_choose",
+        AsyncMock(return_value=question_result),
+    ), patch(
+        "flocks.tool.channel.channel_message.channel_message",
+        AsyncMock(),
+    ) as channel_message:
+        result = await im_send_message(_ctx(session_id="ses_channel"), message="hello")
+
+    assert result is question_result
+    channel_message.assert_not_awaited()

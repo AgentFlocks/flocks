@@ -184,6 +184,8 @@ async def _resolve_target(
     question_result = await _ask_user_to_choose(ctx, candidates)
     if not question_result.success:
         return question_result
+    if (question_result.metadata or {}).get("deferred"):
+        return question_result
 
     selected = _selected_candidate(question_result, candidates)
     if selected is None:
@@ -259,7 +261,7 @@ async def im_send_message(ctx: ToolContext, **kwargs) -> ToolResult:
         return ToolResult(success=False, error="message is required unless resolve_only=true.")
 
     resolved = await _resolve_target(ctx, session_id, channel_type, target)
-    if not resolved.success or resolve_only:
+    if not resolved.success or resolve_only or (resolved.metadata or {}).get("deferred"):
         return resolved
 
     resolved_target = (resolved.metadata or {}).get("target") or {}
