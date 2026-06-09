@@ -14,6 +14,7 @@ import {
   getEditingActionBarClassName,
   getMessageBubbleClassName,
   getMessageGroupClassName,
+  getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
   getUserAvatarContainerClassName,
@@ -293,6 +294,19 @@ describe('getStandaloneThinkingBubbleClassName', () => {
     expect(getStandaloneThinkingBubbleClassName(true)).toBe(
       getMessageBubbleClassName({ compact: true, isUser: false, isEditing: false }),
     );
+  });
+});
+
+describe('getRenderableFileUrl', () => {
+  it('converts local file URLs to the guarded file download endpoint', () => {
+    expect(getRenderableFileUrl('file:///tmp/channel%20image.png')).toBe(
+      '/api/file/download?path=%2Ftmp%2Fchannel%20image.png',
+    );
+  });
+
+  it('leaves browser-readable URLs unchanged', () => {
+    expect(getRenderableFileUrl('https://example.com/image.png')).toBe('https://example.com/image.png');
+    expect(getRenderableFileUrl('data:image/png;base64,abc')).toBe('data:image/png;base64,abc');
   });
 });
 
