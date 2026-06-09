@@ -175,6 +175,7 @@ export interface Workflow {
   name: string;
   description?: string;
   markdownContent?: string;
+  editMarkdownContent?: string;
   category: string;
   workflowJson: WorkflowJSON;
   status: 'draft' | 'active' | 'archived';
@@ -375,6 +376,7 @@ export const workflowAPI = {
     description?: string;
     category?: string;
     workflowJson?: WorkflowJSON;
+    editMarkdownContent?: string;
     status?: 'draft' | 'active' | 'archived';
   }) =>
     client.put<Workflow>(`/api/workflow/${id}`, data),

@@ -130,6 +130,11 @@ class WorkflowUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
     workflow_json: Optional[Dict[str, Any]] = Field(None, alias="workflowJson", description="Workflow JSON")
+    edit_markdown_content: Optional[str] = Field(
+        None,
+        alias="editMarkdownContent",
+        description="Human-editable workflow markdown document content",
+    )
     status: Optional[Literal["draft", "active", "archived"]] = Field(None, description="Status")
 
 
@@ -141,6 +146,7 @@ class WorkflowResponse(BaseModel):
     name: str = Field(..., description="Workflow name")
     description: Optional[str] = Field(None, description="Description")
     markdownContent: Optional[str] = Field(None, description="Workflow markdown documentation content")
+    editMarkdownContent: Optional[str] = Field(None, description="Human-editable workflow markdown document content")
     category: str = Field("default", description="Category")
     workflowJson: Dict[str, Any] = Field(..., description="Workflow JSON")
     status: str = Field("draft", description="Status")
@@ -290,6 +296,7 @@ def _write_workflow_to_fs(
     workflow_json: Dict[str, Any],
     meta: Dict[str, Any],
     markdown_content: Optional[str] = None,
+    edit_markdown_content: Optional[str] = None,
     *,
     global_store: bool = False,
 ) -> None:
@@ -304,13 +311,21 @@ def _write_workflow_to_fs(
     with open(wf_dir / "workflow.json", "w", encoding="utf-8") as f:
         json.dump(workflow_json, f, ensure_ascii=False, indent=2)
 
-    meta_to_save = {k: v for k, v in meta.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
+    meta_to_save = {
+        k: v
+        for k, v in meta.items()
+        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+    }
     with open(wf_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
 
     if markdown_content is not None:
         with open(wf_dir / "workflow.md", "w", encoding="utf-8") as f:
             f.write(markdown_content)
+
+    if edit_markdown_content is not None:
+        with open(wf_dir / "workflow.edit.md", "w", encoding="utf-8") as f:
+            f.write(edit_markdown_content)
 
 
 def _delete_workflow_from_fs(workflow_id: str) -> bool:
@@ -689,7 +704,14 @@ async def _persist_workflow_triggers(
     data["workflowJson"] = updated_json
     data["updatedAt"] = int(time.time() * 1000)
     is_global = data.get("source") == "global"
-    _write_workflow_to_fs(workflow_id, updated_json, data, data.get("markdownContent"), global_store=is_global)
+    _write_workflow_to_fs(
+        workflow_id,
+        updated_json,
+        data,
+        data.get("markdownContent"),
+        data.get("editMarkdownContent"),
+        global_store=is_global,
+    )
     return data
 
 
@@ -945,6 +967,7 @@ async def create_workflow(req: WorkflowCreateRequest):
             **meta,
             "workflowJson": req.workflow_json,
             "markdownContent": None,
+            "editMarkdownContent": None,
             "stats": stats,
             "source": source,
         }
@@ -999,6 +1022,7 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
 
         workflow_json = data["workflowJson"]
         markdown_content = data.get("markdownContent")
+        edit_markdown_content = data.get("editMarkdownContent")
 
         if req.name is not None:
             data["name"] = req.name
@@ -1014,14 +1038,24 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
                 workflow_json = req.workflow_json
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
+        if req.edit_markdown_content is not None:
+            edit_markdown_content = req.edit_markdown_content
 
         data["updatedAt"] = int(time.time() * 1000)
 
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(workflow_id, workflow_json, data, markdown_content, global_store=is_global)
+        _write_workflow_to_fs(
+            workflow_id,
+            workflow_json,
+            data,
+            markdown_content,
+            edit_markdown_content,
+            global_store=is_global,
+        )
 
         stats = await _get_workflow_stats(workflow_id)
         data["workflowJson"] = workflow_json
+        data["editMarkdownContent"] = edit_markdown_content
         data["stats"] = stats
 
         log.info("workflow.updated", {"id": workflow_id})
@@ -1618,6 +1652,7 @@ async def import_workflow(workflow_json: Dict[str, Any]):
             **meta,
             "workflowJson": workflow_json,
             "markdownContent": None,
+            "editMarkdownContent": None,
             "stats": stats,
             "source": "global",
         }
@@ -2736,11 +2771,23 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
             workflow_json["metadata"] = {}
         workflow_json["metadata"]["sampleInputs"] = req.sampleInputs
 
-        meta = {k: v for k, v in data.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
+        meta = {
+            k: v
+            for k, v in data.items()
+            if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+        }
         meta["updatedAt"] = int(time.time() * 1000)
         markdown_content = data.get("markdownContent")
+        edit_markdown_content = data.get("editMarkdownContent")
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(workflow_id, workflow_json, meta, markdown_content, global_store=is_global)
+        _write_workflow_to_fs(
+            workflow_id,
+            workflow_json,
+            meta,
+            markdown_content,
+            edit_markdown_content,
+            global_store=is_global,
+        )
 
         log.info("workflow.sample_inputs.saved", {"id": workflow_id})
         return {"ok": True}

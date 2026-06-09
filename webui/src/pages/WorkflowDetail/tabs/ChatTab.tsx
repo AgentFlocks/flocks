@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, FolderOpen, Plus, Clock } from 'lucide-react';
+import { AlertCircle, Plus, Clock, Sparkles, SearchCheck, FlaskConical, ChevronsLeft, ChevronsRight } from 'lucide-react';
 import SessionChat, { NodeRef, type SSEChatEvent } from '@/components/common/SessionChat';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
@@ -21,12 +21,19 @@ const FALLBACK_POLL_MS = 30_000;
 // ChatTab
 // ─────────────────────────────────────────────
 
+export interface WorkflowChatLaunchRequest {
+  id: number;
+  prompt: string;
+}
+
 interface ChatTabProps {
   workflow: Workflow;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onWorkflowUpdated?: (updated: Workflow) => void;
   onFirstMessageSent?: () => void;
   onSessionChange?: (sessionId: string | null) => void;
+  launchRequest?: WorkflowChatLaunchRequest | null;
+  onLaunchRequestHandled?: (id: number) => void;
   selectedNode?: WorkflowNode | null;
   onNodeRefDismiss?: () => void;
 }
@@ -37,6 +44,8 @@ export default function ChatTab({
   onWorkflowUpdated,
   onFirstMessageSent,
   onSessionChange,
+  launchRequest,
+  onLaunchRequestHandled,
   selectedNode,
   onNodeRefDismiss,
 }: ChatTabProps) {
@@ -47,6 +56,7 @@ export default function ChatTab({
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const hasCreatedRef = useRef(false);
+  const handledLaunchRequestRef = useRef<number | null>(null);
   const lastUpdatedAtRef = useRef<number>(workflow.updatedAt);
   const workflowIdRef = useRef<string>(workflow.id);
   workflowIdRef.current = workflow.id;
@@ -55,6 +65,8 @@ export default function ChatTab({
   const workflowDir = workflow.source === 'global'
     ? `~/.flocks/plugins/workflows/${workflow.id}/`
     : `.flocks/plugins/workflows/${workflow.id}/`;
+  const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
+  const workflowGuidePath = `${workflowDir}rex_integration_guide.md`;
 
   const {
     sessionId: hookSessionId,
@@ -70,8 +82,10 @@ export default function ChatTab({
       name: workflow.name,
       category: workflow.category,
       dir: workflowDir,
+      editDocPath: workflowEditDocPath,
       mdPath: `${workflowDir}workflow.md`,
       jsonPath: `${workflowDir}workflow.json`,
+      guidePath: workflowGuidePath,
     }),
   });
 
@@ -177,6 +191,22 @@ export default function ChatTab({
     resetSession();
     hasCreatedRef.current = false;
   }, [resetSession]);
+
+  useEffect(() => {
+    if (!launchRequest || handledLaunchRequestRef.current === launchRequest.id) return;
+    handledLaunchRequestRef.current = launchRequest.id;
+    onLaunchRequestHandled?.(launchRequest.id);
+
+    setShowHistory(false);
+    setActiveSessionId(null);
+    setInitialMessage(null);
+    resetSession();
+    hasCreatedRef.current = true;
+
+    createAndSendSession({ text: launchRequest.prompt }).catch(() => {
+      hasCreatedRef.current = false;
+    });
+  }, [createAndSendSession, launchRequest, onLaunchRequestHandled, resetSession]);
 
   const handleSelectSession = useCallback((sid: string) => {
     setInitialMessage(null);
@@ -336,7 +366,22 @@ export default function ChatTab({
           onSSEEvent={handleSSEEvent}
           supportsVision={supportsVision}
           onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
-          welcomeContent={!sessionId ? <WorkflowWelcome workflow={workflow} error={error} onRetry={() => { hasCreatedRef.current = false; resetSession(); }} /> : undefined}
+          composerTextareaMinHeight={72}
+          composerTextareaMaxHeight={180}
+          conversationBottomSlot={({ sendPrompt, sending }) => (
+            <WorkflowGuideDock
+              workflow={workflow}
+              disabled={sending}
+              onStartPrompt={sendPrompt}
+            />
+          )}
+          welcomeContent={!sessionId ? (
+            <WorkflowWelcome
+              workflow={workflow}
+              error={error}
+              onRetry={() => { hasCreatedRef.current = false; resetSession(); }}
+            />
+          ) : undefined}
         />
       </div>
     </div>
@@ -357,9 +402,6 @@ function WorkflowWelcome({
   onRetry: () => void;
 }) {
   const { t } = useTranslation('workflow');
-  const workflowDir = workflow.source === 'global'
-    ? `~/.flocks/plugins/workflows/${workflow.id}/`
-    : `.flocks/plugins/workflows/${workflow.id}/`;
 
   return (
     <div className="w-full max-w-md space-y-4 text-left">
@@ -370,23 +412,6 @@ function WorkflowWelcome({
           <span className="font-medium text-gray-700">{t('detail.chat.welcome.mdTabLabel')}</span>
           {t('detail.chat.welcome.descPart2')}
         </p>
-      </div>
-
-      <div className="rounded-lg border border-gray-100 bg-gray-50 p-3 space-y-2">
-        <div className="flex items-center gap-1.5 text-[10px] font-medium text-gray-400 uppercase tracking-wide">
-          <FolderOpen className="w-3 h-3" />
-          {t('detail.chat.welcome.fileDir')}
-        </div>
-        <div className="font-mono text-[11px] text-gray-600 space-y-1">
-          <p className="text-gray-500">{workflowDir}</p>
-          <p className="pl-3">
-            ├── <span className="text-red-600">workflow.md</span>
-            {!workflow.markdownContent && (
-              <span className="text-gray-400 ml-1">{t('detail.chat.welcome.notGenerated')}</span>
-            )}
-          </p>
-          <p className="pl-3">└── <span className="text-amber-600">workflow.json</span></p>
-        </div>
       </div>
 
       <div className="rounded-lg border border-red-100 bg-red-50 p-3 text-xs text-red-800 space-y-1.5 leading-relaxed">
@@ -416,7 +441,122 @@ function WorkflowWelcome({
   );
 }
 
+function WorkflowGuideDock({
+  workflow,
+  disabled,
+  onStartPrompt,
+}: {
+  workflow: Workflow;
+  disabled?: boolean;
+  onStartPrompt: (text: string) => void;
+}) {
+  const { t } = useTranslation('workflow');
+  const [collapsed, setCollapsed] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const workflowDir = workflow.source === 'global'
+    ? `~/.flocks/plugins/workflows/${workflow.id}/`
+    : `.flocks/plugins/workflows/${workflow.id}/`;
+  const workflowEditDocPath = `${workflowDir}workflow.edit.md`;
+  const workflowGuidePath = `${workflowDir}rex_integration_guide.md`;
+  const promptParams = {
+    name: workflow.name,
+    dir: workflowDir,
+    editDocPath: workflowEditDocPath,
+    guidePath: workflowGuidePath,
+  };
+  const guideActions = [
+    {
+      label: t('detail.chat.welcome.guidePrimaryShort'),
+      description: t('detail.chat.welcome.guidePrimaryDesc'),
+      prompt: t('detail.chat.welcome.guidePrompt', promptParams),
+      icon: Sparkles,
+      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600',
+    },
+    {
+      label: t('detail.chat.welcome.guideAuditShort'),
+      description: t('detail.chat.welcome.guideAuditDesc'),
+      prompt: t('detail.chat.welcome.auditPrompt', promptParams),
+      icon: SearchCheck,
+      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-slate-300 hover:bg-slate-200 hover:text-slate-800',
+    },
+    {
+      label: t('detail.chat.welcome.guideSampleShort'),
+      description: t('detail.chat.welcome.guideSampleDesc'),
+      prompt: t('detail.chat.welcome.samplePrompt', promptParams),
+      icon: FlaskConical,
+      className: 'border-slate-200 bg-slate-100 text-slate-700 hover:border-slate-300 hover:bg-slate-200 hover:text-slate-800',
+    },
+  ];
+
+  const handleGuideWheel = useCallback((event: WheelEvent) => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY)
+      ? event.deltaX
+      : event.deltaY;
+    if (delta === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    el.scrollLeft += delta;
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || collapsed) return undefined;
+
+    el.addEventListener('wheel', handleGuideWheel, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', handleGuideWheel);
+    };
+  }, [collapsed, handleGuideWheel]);
+
+  return (
+    <div className="flex w-full min-w-0 items-stretch gap-2">
+      <button
+        type="button"
+        onClick={() => setCollapsed((value) => !value)}
+        className="flex h-16 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-slate-100 text-slate-500 shadow-sm transition-colors hover:border-slate-300 hover:bg-slate-200 hover:text-slate-700"
+        title={collapsed ? t('detail.chat.welcome.guideExpand') : t('detail.chat.welcome.guideCollapse')}
+      >
+        {collapsed ? <ChevronsRight className="h-4 w-4" /> : <ChevronsLeft className="h-4 w-4" />}
+      </button>
+
+      <div
+        ref={scrollRef}
+        className={`min-w-0 flex-1 overscroll-contain overflow-x-auto overflow-y-hidden transition-all duration-200 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+          collapsed ? 'basis-0 max-w-0 opacity-0 pointer-events-none' : 'basis-auto max-w-full opacity-100'
+        }`}
+      >
+        <div className="flex w-max gap-2.5 pr-1">
+          {guideActions.map((action) => {
+            const Icon = action.icon;
+            return (
+              <button
+                key={action.label}
+                type="button"
+                disabled={disabled}
+                onClick={() => onStartPrompt(action.prompt)}
+                className={`flex h-16 w-[208px] flex-shrink-0 items-center gap-2.5 rounded-lg border px-3 text-left shadow-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${action.className}`}
+                title={`${action.label} - ${action.description}`}
+              >
+                <span className="inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-md bg-slate-50 text-current">
+                  <Icon className="h-4 w-4 flex-shrink-0" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-semibold">{action.label}</span>
+                  <span className="mt-0.5 block truncate text-[11px] font-normal opacity-70">{action.description}</span>
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────
-

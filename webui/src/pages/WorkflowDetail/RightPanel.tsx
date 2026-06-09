@@ -4,9 +4,10 @@ import { useTranslation } from 'react-i18next';
 import { Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import OverviewTab from './tabs/OverviewTab';
-import ChatTab from './tabs/ChatTab';
-import RunTab from './tabs/RunTab';
+import ChatTab, { type WorkflowChatLaunchRequest } from './tabs/ChatTab';
 import IntegrationTab from './tabs/IntegrationTab';
+
+export type { WorkflowChatLaunchRequest };
 
 // ─────────────────────────────────────────────
 // Error boundary helpers
@@ -60,7 +61,7 @@ class TabErrorBoundary extends Component<
 // RightPanel
 // ─────────────────────────────────────────────
 
-export type RightPanelTabId = 'chat' | 'overview' | 'run' | 'integration';
+export type RightPanelTabId = 'chat' | 'overview' | 'integration';
 
 interface RightPanelProps {
   workflow: Workflow;
@@ -68,6 +69,8 @@ interface RightPanelProps {
   open: boolean;
   width?: number;
   activeTab?: RightPanelTabId;
+  chatLaunchRequest?: WorkflowChatLaunchRequest | null;
+  onChatLaunchRequestHandled?: (id: number) => void;
   onActiveTabChange?: (tab: RightPanelTabId) => void;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
@@ -83,6 +86,8 @@ interface RightPanelProps {
 export default function RightPanel({
   workflow, latestExecution, open, width = 320,
   activeTab,
+  chatLaunchRequest,
+  onChatLaunchRequestHandled,
   onActiveTabChange,
   onLatestExecutionChange,
   onExecutionSettled,
@@ -124,7 +129,6 @@ export default function RightPanel({
   const TABS: { id: RightPanelTabId; label: string }[] = [
     { id: 'overview',     label: t('detail.rightPanel.tabOverview') },
     { id: 'chat',         label: t('detail.rightPanel.tabChat') },
-    { id: 'run',          label: t('detail.rightPanel.tabRun') },
     { id: 'integration',  label: t('detail.rightPanel.tabIntegration') },
   ];
 
@@ -160,14 +164,15 @@ export default function RightPanel({
             onWorkflowUpdated={onWorkflowUpdated}
             onFirstMessageSent={onFirstMessageSent}
             onSessionChange={onSessionChange}
+            launchRequest={chatLaunchRequest}
+            onLaunchRequestHandled={onChatLaunchRequestHandled}
             selectedNode={selectedNode}
             onNodeRefDismiss={onDeselectNode}
           />
         )}
-        {currentActiveTab === 'overview' && <OverviewTab workflow={workflow} />}
-        {currentActiveTab === 'run' && (
+        {currentActiveTab === 'overview' && (
           <TabErrorBoundary>
-            <RunTab
+            <OverviewTab
               workflow={workflow}
               latestExecution={latestExecution ?? null}
               onLatestExecutionChange={onLatestExecutionChange}
@@ -182,8 +187,8 @@ export default function RightPanel({
         )}
       </div>
 
-      {/* 底部删除按钮 */}
-      {onDelete && (
+      {/* 底部删除按钮：仅概览页展示，避免编辑/集成流程中出现破坏性操作入口 */}
+      {onDelete && currentActiveTab === 'overview' && (
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-100 flex-shrink-0">
           <button
             onClick={handleDelete}

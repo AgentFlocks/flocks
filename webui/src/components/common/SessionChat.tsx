@@ -71,6 +71,15 @@ export interface NodeRef {
   description?: string;
 }
 
+export interface ConversationBottomSlotActions {
+  sendPrompt: (text: string) => void;
+  setInput: (text: string) => void;
+  focusInput: () => void;
+  sending: boolean;
+  streaming: boolean;
+  sessionId?: string | null;
+}
+
 /** Display-related options grouped to reduce prop surface. */
 export interface SessionChatDisplay {
   /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
@@ -114,6 +123,8 @@ export interface SessionChatProps {
   display?: SessionChatDisplay;
   /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  /** Extra content rendered below the conversation area and above the composer. */
+  conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -122,6 +133,10 @@ export interface SessionChatProps {
   onError?: (message: string) => void;
   /** Extra content injected into the composer toolbar (left of send button, after divider) */
   toolbarSlot?: React.ReactNode;
+  /** Minimum textarea height in px. Defaults to the compact single-line composer height. */
+  composerTextareaMinHeight?: number;
+  /** Maximum textarea height in px. Defaults to the existing compact/full-page values. */
+  composerTextareaMaxHeight?: number;
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
@@ -695,6 +710,7 @@ export default function SessionChat({
   agentName,
   display,
   welcomeContent,
+  conversationBottomSlot,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -703,6 +719,8 @@ export default function SessionChat({
   onInitialMessageConsumed,
   supportsVision,
   toolbarSlot,
+  composerTextareaMinHeight,
+  composerTextareaMaxHeight,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -710,6 +728,8 @@ export default function SessionChat({
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
+  const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
+  const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
   // Restore any persisted draft on first mount so navigating away (e.g.
@@ -1079,8 +1099,12 @@ export default function SessionChat({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, compact ? 96 : 200)}px`;
-  }, [compact]);
+    const nextHeight = Math.min(
+      Math.max(el.scrollHeight, effectiveComposerTextareaMinHeight),
+      effectiveComposerTextareaMaxHeight,
+    );
+    el.style.height = `${nextHeight}px`;
+  }, [effectiveComposerTextareaMaxHeight, effectiveComposerTextareaMinHeight]);
   useEffect(() => { autoResize(); }, [input, autoResize]);
 
   useEffect(() => {
@@ -1563,6 +1587,49 @@ export default function SessionChat({
     }
   };
 
+  const handleComposerPrompt = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+
+    setInput('');
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    setAttachments([]);
+
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(trimmed);
+      } catch {
+        setInput(trimmed);
+      }
+      return;
+    }
+
+    if (!sessionId) {
+      if (!onCreateAndSend) {
+        setInput(trimmed);
+        textareaRef.current?.focus();
+        return;
+      }
+      setSending(true);
+      try {
+        setPendingAgentName(agentName || 'rex');
+        await onCreateAndSend(trimmed, [], agentName);
+      } catch {
+        setInput(trimmed);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    try {
+      await sendText(trimmed, [], agentName);
+    } catch {
+      setInput(trimmed);
+    }
+  };
+
   const handleSend = async () => {
     if (!canSend) return;
     const rawText = input.trim();
@@ -2040,10 +2107,10 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3'
-    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
+    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4'
+    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
 
-  const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+  const msgListClass = compact ? 'space-y-3' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -2201,7 +2268,28 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0" />
+        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
+
+        {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
+        {conversationBottomSlot && !hideInput && (
+          <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
+            <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pl-4 pr-8' : ''}`}>
+              {typeof conversationBottomSlot === 'function'
+                ? conversationBottomSlot({
+                  sendPrompt: (text) => { void handleComposerPrompt(text); },
+                  setInput: (text) => {
+                    setInput(text);
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  },
+                  focusInput: () => textareaRef.current?.focus(),
+                  sending,
+                  streaming: isStreaming,
+                  sessionId,
+                })
+                : conversationBottomSlot}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Suggestions — shown before user sends any message */}
@@ -2450,7 +2538,10 @@ export default function SessionChat({
                     className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
                       sending ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
                     }`}
-                    style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
+                    style={{
+                      minHeight: `${effectiveComposerTextareaMinHeight}px`,
+                      maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
+                    }}
                     disabled={sending}
                     rows={1}
                   />

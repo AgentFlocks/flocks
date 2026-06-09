@@ -160,12 +160,12 @@
     "subtitle": {
       "api": "Provide API documentation and generate a reusable device plugin",
       "webcli": "Provide the product URL and target interfaces to generate a WebCLI device plugin for the device page",
-      "workflow": "Configure Syslog, Kafka, and Webhook integrations on the workflow integration page"
+      "workflow": "Configure Syslog, Kafka, and Webhook entries on the workflow Publish page"
     },
     "welcome": {
       "api": "Please add an API docs URL or upload the docs file directly. I will use the tool-builder skill to generate a device plugin that can be used from the device page.",
       "webcli": "Please add the product URL, target interfaces, and auth hints. I will use the web2cli skill to build and integrate the CLI or skill assets first, and then generate a device plugin when needed.",
-      "workflow": "Workflow integrations are not created here. Go to the workflow integration page and configure Syslog, Kafka, or Webhook as needed."
+      "workflow": "Workflow entries are not created here. Go to the workflow Publish page and configure Syslog, Kafka, or Webhook as needed."
     },
     "validation": {
       "deviceNameRequired": "Please enter the device product name",
