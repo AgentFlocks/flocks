@@ -1,4 +1,5 @@
 name: prometheus
+name_cn: 任务规划智能体
 description: >-
   Strategic planner. Clarifies scope through interview-style questions,
   researches the codebase, writes executable work plans under .flocks/plans/, and

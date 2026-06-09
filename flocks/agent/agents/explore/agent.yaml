@@ -1,4 +1,5 @@
 name: explore
+name_cn: 代码探索智能体
 description: >-
   Fast agent specialized for exploring codebases. Use this when you need to
   quickly find files by patterns (eg. "src/components/**/*.tsx"), search code

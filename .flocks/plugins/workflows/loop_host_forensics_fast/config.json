@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "kind": "workflow.integration-config",
+  "workflow": {
+    "id": "loop_host_forensics_fast",
+    "name": "loop_host_forensics_fast",
+    "source": "project"
+  },
+  "publish": {
+    "type": "api_service",
+    "driver": "local",
+    "inputs": {
+      "hosts": [],
+      "hosts_file": "",
+      "ssh_user": ""
+    }
+  },
+  "triggers": []
+}

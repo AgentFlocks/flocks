@@ -1,4 +1,5 @@
 name: device-inspector
+name_cn: 设备巡检智能体
 description: >-
   Generic device inspection agent for connected security devices. Discovers enabled
   devices through device_context, dynamically finds the right device tools, and

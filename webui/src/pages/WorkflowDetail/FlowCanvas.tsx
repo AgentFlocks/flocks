@@ -1,10 +1,9 @@
-import { useState, useCallback, useEffect, memo } from 'react';
+import { useState, useCallback, useEffect, memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ReactFlow,
   Node,
   Edge,
-  Controls,
   Background,
   BackgroundVariant,
   MiniMap,
@@ -18,7 +17,7 @@ import {
   NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Code2, Zap, GitBranch, RotateCw, X, ChevronRight, Wrench, Sparkles, Globe, Workflow } from 'lucide-react';
+import { Code2, Zap, GitBranch, RotateCw, RotateCcw, X, ChevronRight, Wrench, Sparkles, Globe, Workflow, ZoomIn, ZoomOut, Scan } from 'lucide-react';
 import { WorkflowJSON, WorkflowNode as APINode } from '@/api/workflow';
 import {
   buildWorkflowGraphLayout,
@@ -610,6 +609,30 @@ function buildLayout(
 // Main component
 // ─────────────────────────────────────────────
 
+function CanvasControlButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      className="group relative flex h-8 w-8 items-center justify-center text-slate-500 transition-colors hover:bg-slate-50 hover:text-slate-700 focus:outline-none focus:ring-2 focus:ring-red-200"
+    >
+      {children}
+      <span className="pointer-events-none absolute left-full top-1/2 z-20 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+        {label}
+      </span>
+    </button>
+  );
+}
+
 export interface FlowCanvasProps {
   workflowJson: WorkflowJSON;
   /** 预留：true 时允许编辑连线，false 时只读连线（拖拽节点位置始终可用） */
@@ -627,7 +650,8 @@ export interface FlowCanvasProps {
 }
 
 function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: externalOnNodeClick, layoutKey }: FlowCanvasProps) {
-  const { fitView } = useReactFlow();
+  const { t } = useTranslation('workflow');
+  const { fitView, zoomIn, zoomOut } = useReactFlow();
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   const handleNodeClick = useCallback((nodeId: string) => {
@@ -642,17 +666,33 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges] = useEdgesState<Edge>([]);
 
-  // Rebuild layout whenever workflowJson or layoutKey changes
-  useEffect(() => {
+  const resetLayout = useCallback(() => {
     const { nodes: newNodes, edges: newEdges } = buildLayout(workflowJson, handleNodeClick);
     setNodes(newNodes);
     setEdges(newEdges);
     // Re-fit after layout (small delay lets ReactFlow measure node sizes first)
     setTimeout(() => fitView({ padding: 0.2 }), 60);
-  }, [workflowJson, handleNodeClick, setNodes, setEdges, layoutKey]);
+  }, [workflowJson, handleNodeClick, setNodes, setEdges, fitView]);
+
+  // Rebuild layout whenever workflowJson or layoutKey changes
+  useEffect(() => {
+    resetLayout();
+  }, [resetLayout, layoutKey]);
 
   const onInit = useCallback(() => {
     setTimeout(() => fitView({ padding: 0.2 }), 50);
+  }, [fitView]);
+
+  const handleZoomIn = useCallback(() => {
+    void zoomIn();
+  }, [zoomIn]);
+
+  const handleZoomOut = useCallback(() => {
+    void zoomOut();
+  }, [zoomOut]);
+
+  const handleFitView = useCallback(() => {
+    void fitView({ padding: 0.2 });
   }, [fitView]);
 
   const selectedNode = selectedNodeId
@@ -678,7 +718,6 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#e2e8f0" />
-        <Controls showInteractive={false} className="!shadow-sm !border !border-gray-200 !rounded-xl" />
         <MiniMap
           nodeColor={(node) => {
             const colors: Record<string, string> = {
@@ -694,6 +733,21 @@ function FlowCanvasInner({ workflowJson, editable = false, onNodeClick: external
           maskColor="rgba(241, 245, 249, 0.7)"
         />
       </ReactFlow>
+
+      <div className="absolute bottom-3 left-3 z-10 flex flex-col divide-y divide-gray-200 overflow-visible rounded-md border border-gray-200 bg-white shadow-sm">
+        <CanvasControlButton label={t('detail.flowControls.zoomIn')} onClick={handleZoomIn}>
+          <ZoomIn className="h-4 w-4" strokeWidth={1.8} />
+        </CanvasControlButton>
+        <CanvasControlButton label={t('detail.flowControls.zoomOut')} onClick={handleZoomOut}>
+          <ZoomOut className="h-4 w-4" strokeWidth={1.8} />
+        </CanvasControlButton>
+        <CanvasControlButton label={t('detail.flowControls.fitView')} onClick={handleFitView}>
+          <Scan className="h-4 w-4" strokeWidth={1.8} />
+        </CanvasControlButton>
+        <CanvasControlButton label={t('detail.resetLayout')} onClick={resetLayout}>
+          <RotateCcw className="h-4 w-4" strokeWidth={1.8} />
+        </CanvasControlButton>
+      </div>
 
       {/* Node detail modal — only shown when no external onNodeClick handler */}
       {!externalOnNodeClick && (

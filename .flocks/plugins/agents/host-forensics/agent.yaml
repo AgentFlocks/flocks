@@ -1,4 +1,5 @@
 name: host-forensics
+name_cn: 主机取证智能体
 description: >-
   Linux host compromise detection and forensics subagent. Use when the user asks to inspect,
   analyze, or investigate whether a host is compromised, cryptomining, backdoors, webshells,

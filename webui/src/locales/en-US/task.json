@@ -131,7 +131,7 @@
     "filterRunning": "Running",
     "filterStopped": "Stopped",
     "emptyTitle": "No API Services",
-    "emptyDescription": "Publish a workflow as an API service from the workflow detail page's \"Run\" tab",
+    "emptyDescription": "Publish a workflow as an API service from the workflow detail page's \"Publish\" tab",
     "publishedAt": "Published {{date}}",
     "serviceDriver": "Service Driver",
     "driverLocal": "Local",

@@ -58,7 +58,12 @@
     "hint": "Overrides the model used when sending this chat message",
     "empty": "No available models",
     "count": "{{count}}",
-    "vision": "Vision"
+    "vision": "Vision",
+    "free": "Free",
+    "noCost": "No cost",
+    "contextWindow": "Context window: {{value}}",
+    "contextUnknown": "Context window: Unknown",
+    "addModel": "Add model"
   },
   "welcome": {
     "title": "Start a new conversation",
@@ -78,6 +83,8 @@
     "emptyText": "No execution records",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
+    "contextUsageUnknown": "Context usage unknown",
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",

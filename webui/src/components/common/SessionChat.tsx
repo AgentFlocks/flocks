@@ -71,6 +71,15 @@ export interface NodeRef {
   description?: string;
 }
 
+export interface ConversationBottomSlotActions {
+  sendPrompt: (text: string) => void;
+  setInput: (text: string) => void;
+  focusInput: () => void;
+  sending: boolean;
+  streaming: boolean;
+  sessionId?: string | null;
+}
+
 /** Display-related options grouped to reduce prop surface. */
 export interface SessionChatDisplay {
   /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
@@ -116,6 +125,8 @@ export interface SessionChatProps {
   display?: SessionChatDisplay;
   /** Custom welcome content when no messages. Can be a render prop receiving setInput. */
   welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
+  /** Extra content rendered below the conversation area and above the composer. */
+  conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
   /** Called when SSE connection status changes */
   onSseStatusChange?: (status: SSEConnectionStatus) => void;
   /** Forward SSE events with properties to parent (global events like session.updated) */
@@ -124,8 +135,14 @@ export interface SessionChatProps {
   onError?: (message: string) => void;
   /** Extra content injected into the left side of the composer toolbar */
   toolbarSlot?: React.ReactNode;
+  /** Minimum textarea height in px. Defaults to the compact single-line composer height. */
+  composerTextareaMinHeight?: number;
+  /** Maximum textarea height in px. Defaults to the existing compact/full-page values. */
+  composerTextareaMaxHeight?: number;
   /** Extra content injected between left toolbar controls and right actions */
   centerToolbarSlot?: React.ReactNode;
+  /** Context window size for the current model; enables composer usage ring. */
+  contextWindowTokens?: number | null;
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
@@ -176,6 +193,91 @@ type UploadedDocumentAttachmentLike = {
   workspacePath?: string;
   isImage?: boolean;
 };
+
+const APPROX_CHARS_PER_TOKEN = 4;
+
+function countTokensLikeCompaction(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+}
+
+function stringifyToolPayload(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function estimatePartTokens(part: MessagePart): number {
+  if (part.type === 'text') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'reasoning') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'tool' && part.state) {
+    const inputTokens = countTokensLikeCompaction(stringifyToolPayload(part.state.input));
+    const isCompacted = Boolean((part.state.time as { compacted?: boolean } | undefined)?.compacted);
+    const outputTokens = isCompacted
+      ? 10
+      : countTokensLikeCompaction(stringifyToolPayload(part.state.output));
+    return inputTokens + outputTokens;
+  }
+  return 0;
+}
+
+function estimateContextTokens(messages: Message[], draft: string): number {
+  const messageTokens = messages.reduce((total, message) => (
+    total + message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0)
+  ), 0);
+  return messageTokens + countTokensLikeCompaction(draft);
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens >= 10000000 ? 0 : 1)}M`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}K`;
+  return String(tokens);
+}
+
+function ContextUsageRing({ percent, title }: { percent: number; title: string }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const radius = 13;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference * (1 - clamped / 100);
+  const strokeClass = clamped >= 90
+    ? 'stroke-red-500'
+    : clamped >= 75
+      ? 'stroke-amber-500'
+      : clamped >= 50
+        ? 'stroke-sky-500'
+        : 'stroke-zinc-400';
+
+  return (
+    <div
+      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
+      title={title}
+      aria-label={title}
+    >
+      <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
+        <circle
+          cx="16"
+          cy="16"
+          r={radius}
+          fill="none"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          className={strokeClass}
+          strokeDasharray={circumference}
+          strokeDashoffset={strokeDashoffset}
+        />
+      </svg>
+    </div>
+  );
+}
 
 function isSuccessfulUploadedDocumentAttachment(
   attachment: UploadedDocumentAttachmentLike,
@@ -730,6 +832,7 @@ export default function SessionChat({
   model,
   display,
   welcomeContent,
+  conversationBottomSlot,
   onSseStatusChange,
   onSSEEvent,
   onError,
@@ -738,7 +841,10 @@ export default function SessionChat({
   onInitialMessageConsumed,
   supportsVision,
   toolbarSlot,
+  composerTextareaMinHeight,
+  composerTextareaMaxHeight,
   centerToolbarSlot,
+  contextWindowTokens,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -746,6 +852,8 @@ export default function SessionChat({
   const compact = display?.compact ?? true;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
+  const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
+  const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
   // Restore any persisted draft on first mount so navigating away (e.g.
@@ -916,6 +1024,20 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const estimatedContextTokens = useMemo(
+    () => estimateContextTokens(messages, input),
+    [messages, input],
+  );
+  const contextUsagePercent = contextWindowTokens && contextWindowTokens > 0
+    ? Math.min(100, Math.round((estimatedContextTokens / contextWindowTokens) * 100))
+    : 0;
+  const contextUsageTitle = contextWindowTokens && contextWindowTokens > 0
+    ? t('chat.contextUsageTitle', {
+        used: formatTokenCount(estimatedContextTokens),
+        total: formatTokenCount(contextWindowTokens),
+        percent: contextUsagePercent,
+      })
+    : t('chat.contextUsageUnknown');
 
   // Keep a ref to latest messages so handleAbort can read it without stale closure
   const messagesRef = useRef(messages);
@@ -1131,8 +1253,12 @@ export default function SessionChat({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, compact ? 96 : 200)}px`;
-  }, [compact]);
+    const nextHeight = Math.min(
+      Math.max(el.scrollHeight, effectiveComposerTextareaMinHeight),
+      effectiveComposerTextareaMaxHeight,
+    );
+    el.style.height = `${nextHeight}px`;
+  }, [effectiveComposerTextareaMaxHeight, effectiveComposerTextareaMinHeight]);
   useEffect(() => { autoResize(); }, [input, autoResize]);
 
   useEffect(() => {
@@ -1622,6 +1748,49 @@ export default function SessionChat({
     }
   };
 
+  const handleComposerPrompt = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed || sending) return;
+
+    setInput('');
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    setAttachments([]);
+
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(trimmed);
+      } catch {
+        setInput(trimmed);
+      }
+      return;
+    }
+
+    if (!sessionId) {
+      if (!onCreateAndSend) {
+        setInput(trimmed);
+        textareaRef.current?.focus();
+        return;
+      }
+      setSending(true);
+      try {
+        setPendingAgentName(agentName || 'rex');
+        await onCreateAndSend(trimmed, [], agentName);
+      } catch {
+        setInput(trimmed);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    try {
+      await sendText(trimmed, [], agentName);
+    } catch {
+      setInput(trimmed);
+    }
+  };
+
   const handleSend = async () => {
     if (!canSend) return;
     const rawText = input.trim();
@@ -2103,10 +2272,10 @@ export default function SessionChat({
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
-    ? 'flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 space-y-3'
-    : 'flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
+    ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4'
+    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6';
 
-  const msgListClass = compact ? '' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
+  const msgListClass = compact ? 'space-y-3' : 'space-y-5 w-[min(76%,64rem)] mx-auto pl-4 pr-8';
 
   return (
     <div className={`flex flex-col min-h-0 ${className}`}>
@@ -2264,7 +2433,28 @@ export default function SessionChat({
             )}
           </div>
         )}
-        <div ref={messagesEndRef} className="h-0" />
+        <div ref={messagesEndRef} className="h-0 flex-shrink-0" />
+
+        {/* Conversation bottom slot: lives inside the scrollable conversation area. */}
+        {conversationBottomSlot && !hideInput && (
+          <div className="sticky bottom-0 z-10 -mx-1 mt-auto translate-y-4 pt-1 bg-gradient-to-t from-gray-50 via-gray-50/95 to-transparent">
+            <div className={`relative min-w-0 ${!compact ? 'w-[min(76%,64rem)] mx-auto pl-4 pr-8' : ''}`}>
+              {typeof conversationBottomSlot === 'function'
+                ? conversationBottomSlot({
+                  sendPrompt: (text) => { void handleComposerPrompt(text); },
+                  setInput: (text) => {
+                    setInput(text);
+                    requestAnimationFrame(() => textareaRef.current?.focus());
+                  },
+                  focusInput: () => textareaRef.current?.focus(),
+                  sending,
+                  streaming: isStreaming,
+                  sessionId,
+                })
+                : conversationBottomSlot}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Suggestions — shown before user sends any message */}
@@ -2513,7 +2703,10 @@ export default function SessionChat({
                     className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 ${
                       sending ? 'text-zinc-400 cursor-not-allowed' : 'text-zinc-900'
                     }`}
-                    style={{ minHeight: '24px', maxHeight: compact ? '120px' : '240px' }}
+                    style={{
+                      minHeight: `${effectiveComposerTextareaMinHeight}px`,
+                      maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
+                    }}
                     disabled={sending}
                     rows={1}
                   />
@@ -2521,6 +2714,18 @@ export default function SessionChat({
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={sending}
+                    title={t('chat.upload.selectWithImage')}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                  </button>
+
+                  <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200" />
+
                   {toolbarSlot}
 
                   {centerToolbarSlot && (
@@ -2531,30 +2736,24 @@ export default function SessionChat({
 
                   <div className="flex-1" />
 
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={sending}
-                    title={t('chat.upload.selectWithImage')}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                  </button>
+                  {contextWindowTokens && contextWindowTokens > 0 && (
+                    <ContextUsageRing
+                      percent={contextUsagePercent}
+                      title={contextUsageTitle}
+                    />
+                  )}
 
                   {isStreaming ? (
                     <>
-                      <button
-                        onClick={handleSend}
-                        disabled={!canSend}
-                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                          canSend
-                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                            : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
-                        }`}
-                      >
-                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                      </button>
+                      {canSend && (
+                        <button
+                          onClick={handleSend}
+                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        >
+                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                        </button>
+                      )}
                       <button
                         onClick={handleAbort}
                         title={t('chat.stopTitle')}

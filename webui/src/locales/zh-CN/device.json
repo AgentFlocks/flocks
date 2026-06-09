@@ -81,7 +81,7 @@
       },
       "workflow": {
         "title": "Workflow 接入",
-        "desc": "适用于 Syslog、Kafka、Webhook。设备页会引导你前往工作流集成页面完成对应入口配置。"
+        "desc": "适用于 Syslog、Kafka、Webhook。设备页会引导你前往工作流发布页面完成对应入口配置。"
       }
     },
     "productCount": "{{count}} 种设备",
@@ -160,12 +160,12 @@
     "subtitle": {
       "api": "提供 API 文档，生成可复用的 device 插件",
       "webcli": "提供产品 URL 和目标接口，生成可在设备页使用的 WebCLI device 插件",
-      "workflow": "Syslog、Kafka、Webhook 统一在工作流集成页面配置"
+      "workflow": "Syslog、Kafka、Webhook 统一在工作流发布页面配置"
     },
     "welcome": {
       "api": "请补充 API 文档链接或直接上传文档文件，我会用 tool-builder skill 帮你生成可在设备页使用的 device 插件。",
       "webcli": "请补充产品 URL、目标接口和认证提示，我会用 web2cli skill 先生成并集成 CLI/skill 资产；如果需要，再额外生成 device 插件。",
-      "workflow": "Workflow 接入不在这里创建插件，请前往工作流集成页面，根据需要配置 Syslog、Kafka 或 Webhook。"
+      "workflow": "Workflow 接入不在这里创建插件，请前往工作流发布页面，根据需要配置 Syslog、Kafka 或 Webhook。"
     },
     "validation": {
       "deviceNameRequired": "请填写设备产品名",

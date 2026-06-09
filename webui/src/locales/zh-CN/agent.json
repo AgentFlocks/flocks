@@ -38,6 +38,8 @@
   },
   "form": {
     "name": "名称",
+    "nameCn": "中文名称",
+    "nameCnPlaceholder": "中文界面展示名",
     "description": "描述（英文）",
     "descriptionHint": "用于委派与模型上下文，请使用英文",
     "descriptionPlaceholder": "Short English description for delegation",

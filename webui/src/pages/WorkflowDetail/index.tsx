@@ -3,14 +3,16 @@ import { useParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, Layout, Download, FileJson } from 'lucide-react';
+import { X, GitBranch, FileText, Code2, Download, FileJson, LifeBuoy, Save, Sparkles, Eye, Pencil, Workflow as WorkflowIcon } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import TopBar from './TopBar';
 import FlowCanvas from './FlowCanvas';
-import RightPanel from './RightPanel';
+import RightPanel, { type RightPanelTabId, type WorkflowChatLaunchRequest } from './RightPanel';
 import { extractErrorMessage } from '@/utils/error';
 import NodeInfoPanel from './NodeInfoPanel';
+import { buildWorkflowEditMarkdown } from '@/utils/workflowEditMarkdown';
+import { useConfirm } from '@/components/common/ConfirmDialog';
 
 type CanvasTab = 'flow' | 'md' | 'json';
 
@@ -28,6 +30,7 @@ export default function WorkflowDetail() {
   const { t } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const confirm = useConfirm();
 
   const CANVAS_TABS: { id: CanvasTab; label: string; icon: React.ReactNode }[] = [
     { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
@@ -43,10 +46,16 @@ export default function WorkflowDetail() {
   const [runToast, setRunToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [drawerNode, setDrawerNode] = useState<WorkflowNode | null>(null);
   const [latestExecution, setLatestExecution] = useState<WorkflowExecution | null>(null);
-  const [layoutKey, setLayoutKey] = useState(0);
   const [canvasTab, setCanvasTab] = useState<CanvasTab>('flow');
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTabId>('overview');
   const [showMdHint, setShowMdHint] = useState(false);
+  const [editDocDraft, setEditDocDraft] = useState('');
+  const [editDocBase, setEditDocBase] = useState('');
+  const [editDocMode, setEditDocMode] = useState<'edit' | 'preview'>('preview');
+  const [editDocSaving, setEditDocSaving] = useState(false);
+  const [chatLaunchRequest, setChatLaunchRequest] = useState<WorkflowChatLaunchRequest | null>(null);
   const hasAutoSwitchedRef = useRef(false);
+  const chatLaunchSeqRef = useRef(0);
   const dragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(0);
@@ -119,6 +128,13 @@ export default function WorkflowDetail() {
     void loadWorkflow();
   }, [id, loadWorkflow]);
 
+  useEffect(() => {
+    const next = workflow?.editMarkdownContent ?? '';
+    setEditDocDraft(next);
+    setEditDocBase(next);
+    setEditDocMode(next ? 'preview' : 'edit');
+  }, [workflow?.id, workflow?.editMarkdownContent]);
+
   const refreshWorkflowStats = useCallback(() => {
     void loadWorkflow({ preserveExecution: true, silent: true });
   }, [loadWorkflow]);
@@ -128,9 +144,25 @@ export default function WorkflowDetail() {
     setTimeout(() => setRunToast(null), 3000);
   }, []);
 
-  // 自动布局：递增 layoutKey 触发 FlowCanvas 重新 BFS 布局
-  const handleAutoLayout = useCallback(() => {
-    setLayoutKey((k) => k + 1);
+  const openAiEditPanel = useCallback(() => {
+    setPanelOpen(true);
+    setCanvasTab('md');
+    setEditDocMode('edit');
+    setShowMdHint(false);
+    setRightPanelTab('chat');
+  }, []);
+
+  const handleFlocksHelp = useCallback(() => {
+    openAiEditPanel();
+  }, [openAiEditPanel]);
+
+  const handleRightPanelTabChange = useCallback((tab: RightPanelTabId) => {
+    setRightPanelTab(tab);
+    if (tab === 'chat') {
+      setCanvasTab('md');
+      setEditDocMode('edit');
+      setShowMdHint(false);
+    }
   }, []);
 
   // 删除工作流
@@ -161,17 +193,104 @@ export default function WorkflowDetail() {
     }
   }, [workflow, showToast]);
 
-  // 导出 MD 文件
-  const handleExportMd = useCallback(() => {
-    if (!workflow?.markdownContent) return;
-    const blob = new Blob([workflow.markdownContent], { type: 'text/markdown' });
+  const editDocDirty = editDocDraft !== editDocBase;
+
+  // 导出编辑文档
+  const handleExportEditDoc = useCallback(() => {
+    if (!workflow || !editDocDraft.trim()) return;
+    const blob = new Blob([editDocDraft], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `workflow-${workflow.name || workflow.id}.md`;
+    a.download = `${workflow.id || workflow.name}.edit.md`;
     a.click();
     URL.revokeObjectURL(url);
+  }, [editDocDraft, workflow]);
+
+  const handleGenerateEditDoc = useCallback(() => {
+    if (!workflow) return;
+    setEditDocDraft(buildWorkflowEditMarkdown(workflow));
+    setEditDocMode('edit');
+    setShowMdHint(false);
   }, [workflow]);
+
+  const buildWorkflowGenerationPrompt = useCallback((editDocContent: string) => {
+    if (!workflow) return '';
+    const workflowDir = workflow.source === 'global'
+      ? `~/.flocks/plugins/workflows/${workflow.id}/`
+      : `.flocks/plugins/workflows/${workflow.id}/`;
+
+    return t('detail.generateWorkflowPrompt', {
+      name: workflow.name,
+      dir: workflowDir,
+      editDocPath: `${workflowDir}workflow.edit.md`,
+      mdPath: `${workflowDir}workflow.md`,
+      jsonPath: `${workflowDir}workflow.json`,
+      editDocContent,
+    });
+  }, [t, workflow]);
+
+  const launchWorkflowGeneration = useCallback((content: string) => {
+    if (!workflow) return;
+
+    openAiEditPanel();
+    setChatLaunchRequest({
+      id: chatLaunchSeqRef.current + 1,
+      prompt: buildWorkflowGenerationPrompt(content),
+    });
+    chatLaunchSeqRef.current += 1;
+  }, [buildWorkflowGenerationPrompt, openAiEditPanel, workflow]);
+
+  const handleGenerateWorkflow = useCallback(() => {
+    if (!workflow) return;
+    const content = editDocDraft.trim() ? editDocDraft : buildWorkflowEditMarkdown(workflow);
+    if (!editDocDraft.trim()) {
+      setEditDocDraft(content);
+      setEditDocMode('edit');
+    }
+
+    launchWorkflowGeneration(content);
+  }, [editDocDraft, launchWorkflowGeneration, workflow]);
+
+  const handleChatLaunchRequestHandled = useCallback((requestId: number) => {
+    setChatLaunchRequest((current) => (
+      current?.id === requestId ? null : current
+    ));
+  }, []);
+
+  const handleSaveEditDoc = useCallback(async () => {
+    if (!workflow || editDocSaving) return;
+    const regenerateAfterSave = await confirm({
+      title: t('detail.regenerateWorkflowConfirmTitle'),
+      description: t('detail.regenerateWorkflowConfirmDesc'),
+      confirmText: t('detail.regenerateWorkflowConfirmYes'),
+      cancelText: t('detail.regenerateWorkflowConfirmNo'),
+      variant: 'default',
+    });
+    const content = editDocDraft.endsWith('\n') ? editDocDraft : `${editDocDraft}\n`;
+    setEditDocSaving(true);
+    try {
+      const response = await workflowAPI.update(workflow.id, {
+        editMarkdownContent: content,
+      });
+      const updated = {
+        ...response.data,
+        editMarkdownContent: response.data.editMarkdownContent ?? content,
+      };
+      setWorkflow(updated);
+      setEditDocDraft(updated.editMarkdownContent ?? content);
+      setEditDocBase(updated.editMarkdownContent ?? content);
+      setEditDocMode('preview');
+      showToast('success', t('detail.editDocSaveSuccess'));
+      if (regenerateAfterSave) {
+        launchWorkflowGeneration(updated.editMarkdownContent ?? content);
+      }
+    } catch (err: unknown) {
+      showToast('error', `${t('detail.editDocSaveFailed')}: ${extractErrorMessage(err)}`);
+    } finally {
+      setEditDocSaving(false);
+    }
+  }, [confirm, editDocDraft, editDocSaving, launchWorkflowGeneration, showToast, t, workflow]);
 
   // 用户手动切换 canvas tab 时，阻止后续自动跳转
   const handleCanvasTabChange = useCallback((tab: CanvasTab) => {
@@ -299,43 +418,136 @@ export default function WorkflowDetail() {
                 workflowJson={workflow.workflowJson}
                 editable={false}
                 onNodeClick={(node) => setDrawerNode(node)}
-                layoutKey={layoutKey}
               />
-              {/* 重置布局按钮 - 右上角浮动 */}
+              {/* 流程图快捷操作 - 右上角浮动 */}
               <button
-                onClick={handleAutoLayout}
-                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm transition-colors"
-                title={t('detail.resetLayout')}
+                onClick={handleFlocksHelp}
+                className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-red-50 border border-red-100 text-red-700 text-xs rounded-lg hover:bg-red-100 transition-colors"
+                title={t('detail.flocksHelpTitle')}
               >
-                <Layout className="w-3.5 h-3.5" />
-                {t('detail.resetLayout')}
+                <LifeBuoy className="w-3.5 h-3.5" />
+                {t('detail.flocksHelp')}
               </button>
             </div>
 
             {/* MD 描述 */}
             {canvasTab === 'md' && (
-              <div className="absolute inset-0 overflow-y-auto bg-white p-6">
-                {/* 下载 MD 按钮 - 右上角浮动 */}
-                <button
-                  onClick={handleExportMd}
-                  disabled={!workflow.markdownContent}
-                  className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-200 text-gray-600 text-xs rounded-lg hover:bg-gray-50 shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  title={t('detail.downloadMdTitle')}
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  {t('detail.downloadMd')}
-                </button>
-                {workflow.markdownContent ? (
-                  <div className="max-w-3xl mx-auto prose prose-sm prose-gray leading-relaxed">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {workflow.markdownContent}
-                    </ReactMarkdown>
+              <div className="absolute inset-0 flex flex-col bg-white">
+                <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-gray-200 px-4 py-2.5">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <FileText className="h-4 w-4 flex-shrink-0 text-gray-500" />
+                      <h2 className="truncate text-sm font-semibold text-gray-900">{t('detail.editDocTitle')}</h2>
+                      {editDocDirty && (
+                        <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                          {t('detail.editDocUnsaved')}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-0.5 truncate text-[11px] text-gray-400">workflow.edit.md</p>
+                  </div>
+
+                  <div className="flex flex-shrink-0 items-center gap-2">
+                    <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setEditDocMode('edit')}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                          editDocMode === 'edit'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                        {t('detail.editDocModeEdit')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditDocMode('preview')}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                          editDocMode === 'preview'
+                            ? 'bg-white text-gray-900 shadow-sm'
+                            : 'text-gray-500 hover:text-gray-700'
+                        }`}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        {t('detail.editDocModePreview')}
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleGenerateEditDoc}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900"
+                      title={t('detail.generateEditDocTitle')}
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      {editDocDraft.trim() ? t('detail.regenerateEditDoc') : t('detail.generateEditDoc')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportEditDoc}
+                      disabled={!editDocDraft.trim()}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-40"
+                      title={t('detail.downloadMdTitle')}
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      {t('detail.downloadMd')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveEditDoc()}
+                      disabled={!editDocDirty || editDocSaving}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none"
+                    >
+                      <Save className="h-3.5 w-3.5" />
+                      {editDocSaving ? t('detail.editDocSaving') : t('detail.editDocSave')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleGenerateWorkflow}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-slate-800"
+                      title={t('detail.generateWorkflowTitle')}
+                    >
+                      <WorkflowIcon className="h-3.5 w-3.5" />
+                      {t('detail.generateWorkflow')}
+                    </button>
+                  </div>
+                </div>
+
+                {editDocMode === 'edit' ? (
+                  <div className="flex min-h-0 flex-1 flex-col bg-slate-950">
+                    <label htmlFor="workflow-edit-doc" className="sr-only">{t('detail.editDocTextareaLabel')}</label>
+                    <textarea
+                      id="workflow-edit-doc"
+                      value={editDocDraft}
+                      onChange={(event) => setEditDocDraft(event.target.value)}
+                      placeholder={t('detail.editDocPlaceholder')}
+                      className="h-full w-full resize-none border-0 bg-slate-950 px-6 py-5 font-mono text-sm leading-6 text-slate-100 caret-red-300 outline-none selection:bg-red-500/30 placeholder:text-slate-500"
+                      spellCheck={false}
+                    />
+                  </div>
+                ) : editDocDraft.trim() ? (
+                  <div className="min-h-0 flex-1 overflow-y-auto bg-white p-6">
+                    <div className="mx-auto max-w-3xl prose prose-sm prose-gray leading-relaxed">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        {editDocDraft}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 ) : (
-                  <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-400">
-                    <FileText className="w-10 h-10 opacity-40" />
-                    <p className="text-sm">{t('detail.noMdDesc')}</p>
-                    <p className="text-xs">{t('detail.noMdDescHint')}</p>
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 bg-gray-50 text-gray-400">
+                    <FileText className="h-10 w-10 opacity-40" />
+                    <p className="text-sm font-medium text-gray-500">{t('detail.editDocEmpty')}</p>
+                    <p className="max-w-sm text-center text-xs leading-relaxed">{t('detail.editDocEmptyHint')}</p>
+                    <button
+                      type="button"
+                      onClick={handleGenerateEditDoc}
+                      className="mt-1 inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-red-700"
+                    >
+                      <Sparkles className="h-3.5 w-3.5" />
+                      {t('detail.generateEditDoc')}
+                    </button>
                   </div>
                 )}
               </div>
@@ -393,6 +605,10 @@ export default function WorkflowDetail() {
           latestExecution={latestExecution}
           open={panelOpen}
           width={panelWidth}
+          activeTab={rightPanelTab}
+          onActiveTabChange={handleRightPanelTabChange}
+          chatLaunchRequest={chatLaunchRequest}
+          onChatLaunchRequestHandled={handleChatLaunchRequestHandled}
           onLatestExecutionChange={setLatestExecution}
           onExecutionSettled={refreshWorkflowStats}
           onWorkflowUpdated={handleWorkflowUpdated}

@@ -1566,4 +1566,3 @@ async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
         from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
         return await _telegram_inbound_media.download_inbound_media(msg, config)
     return None
-

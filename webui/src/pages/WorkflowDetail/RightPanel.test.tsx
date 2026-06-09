@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
 import RightPanel from './RightPanel';
@@ -11,8 +12,7 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         'detail.rightPanel.tabOverview': '概览',
         'detail.rightPanel.tabChat': 'AI 编辑',
-        'detail.rightPanel.tabRun': '运行',
-        'detail.rightPanel.tabIntegration': '集成',
+        'detail.rightPanel.tabIntegration': '发布',
         'detail.rightPanel.deleteWorkflow': '删除工作流',
         'detail.rightPanel.deleting': '删除中...',
         'detail.rightPanel.deleteConfirmTitle': '删除工作流',
@@ -39,7 +39,6 @@ vi.mock('./tabs/ChatTab', () => ({
 vi.mock('./tabs/RunTab', () => ({
   default: () => <div>run tab</div>,
 }));
-
 vi.mock('./tabs/IntegrationTab', () => ({
   default: () => <div>integration tab</div>,
 }));
@@ -80,5 +79,55 @@ describe('RightPanel', () => {
     );
 
     expect(screen.queryByRole('button', { name: '前往会话列表查看' })).not.toBeInTheDocument();
+  });
+
+  it('不再渲染运行 Tab', () => {
+    render(
+      <RightPanel
+        workflow={makeWorkflow()}
+        open
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: '运行' })).not.toBeInTheDocument();
+  });
+
+  it('支持外部控制当前 Tab', async () => {
+    const user = userEvent.setup();
+    const onActiveTabChange = vi.fn();
+
+    render(
+      <RightPanel
+        workflow={makeWorkflow()}
+        open
+        activeTab="chat"
+        onActiveTabChange={onActiveTabChange}
+      />,
+    );
+
+    expect(screen.getByText('chat tab')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '发布' }));
+
+    expect(onActiveTabChange).toHaveBeenCalledWith('integration');
+    expect(screen.getByText('chat tab')).toBeInTheDocument();
+  });
+
+  it('只在概览 Tab 显示删除工作流按钮', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <RightPanel
+        workflow={makeWorkflow()}
+        open
+        onDelete={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: '删除工作流' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'AI 编辑' }));
+
+    expect(screen.queryByRole('button', { name: '删除工作流' })).not.toBeInTheDocument();
   });
 });

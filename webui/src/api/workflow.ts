@@ -175,6 +175,7 @@ export interface Workflow {
   name: string;
   description?: string;
   markdownContent?: string;
+  editMarkdownContent?: string;
   category: string;
   workflowJson: WorkflowJSON;
   status: 'draft' | 'active' | 'archived';
@@ -250,6 +251,28 @@ export interface WorkflowService {
 }
 
 export type WorkflowServiceDriver = 'local' | 'docker';
+
+export interface WorkflowIntegrationConfig {
+  version: number;
+  kind: string;
+  workflow: {
+    id: string;
+    name?: string;
+    category?: string;
+    source?: string;
+  };
+  updatedAt: number;
+  publish: Record<string, any>;
+  triggers: WorkflowTrigger[];
+  [key: string]: any;
+}
+
+export interface WorkflowIntegrationConfigResponse {
+  ok?: boolean;
+  exists?: boolean;
+  path: string;
+  config: WorkflowIntegrationConfig;
+}
 
 /** Saved syslog listener config (per workflow). */
 export interface SyslogConfig {
@@ -353,6 +376,7 @@ export const workflowAPI = {
     description?: string;
     category?: string;
     workflowJson?: WorkflowJSON;
+    editMarkdownContent?: string;
     status?: 'draft' | 'active' | 'archived';
   }) =>
     client.put<Workflow>(`/api/workflow/${id}`, data),
@@ -401,6 +425,12 @@ export const workflowAPI = {
 
   getService: (id: string) =>
     client.get<WorkflowService | null>(`/api/workflow/${id}/service`),
+
+  getConfig: (id: string) =>
+    client.get<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config`),
+
+  syncConfig: (id: string) =>
+    client.post<WorkflowIntegrationConfigResponse>(`/api/workflow/${id}/config/sync`),
 
   listServices: () =>
     client.get<WorkflowService[]>('/api/workflow-services'),

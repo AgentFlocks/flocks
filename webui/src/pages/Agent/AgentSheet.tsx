@@ -32,6 +32,7 @@ interface AvailableModel {
 
 interface AgentFormData {
   name: string;
+  nameCn: string;
   description: string;
   descriptionCn: string;
   prompt: string;
@@ -59,6 +60,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
+    nameCn: agent?.nameCn ?? '',
     description: agent?.description ?? '',
     descriptionCn: agent?.descriptionCn ?? '',
     prompt: agent?.prompt ?? '',
@@ -163,6 +165,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         await agentAPI.updateModel(agent!.name, model ?? null, formData.temperature);
       } else {
         await agentAPI.update(agent!.name, {
+          nameCn: formData.nameCn,
           description: formData.description || undefined,
           descriptionCn: formData.descriptionCn || undefined,
           prompt: formData.prompt,
@@ -230,6 +233,12 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
             setFormData((prev) => ({
               ...prev,  // preserve tools, skills, modelKey
               name: config.name || prev.name,
+              nameCn:
+                (typeof config.name_cn === 'string'
+                  ? config.name_cn
+                  : typeof config.nameCn === 'string'
+                    ? config.nameCn
+                    : prev.nameCn),
               description: config.description ?? prev.description,
               descriptionCn:
                 (typeof config.description_cn === 'string'
@@ -387,6 +396,25 @@ function AgentFormContent({
             {formData.name}
           </div>
         )}
+      </div>
+
+      {/* Chinese display name */}
+      <div>
+        <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
+          {t('form.nameCn')}
+        </label>
+        <input
+          type="text"
+          value={formData.nameCn}
+          onChange={(e) => update({ nameCn: e.target.value })}
+          disabled={nativeReadOnly}
+          className={`w-full px-4 py-2 border rounded-lg text-sm ${
+            nativeReadOnly
+              ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed'
+              : 'border-gray-300 focus:outline-none focus:ring-2 focus:ring-slate-400'
+          }`}
+          placeholder={t('form.nameCnPlaceholder')}
+        />
       </div>
 
       {/* Description (English) + Chinese UI */}
@@ -682,6 +710,7 @@ function buildRexContext(formData: AgentFormData, isEdit: boolean): string {
 
 **重要约束：**
 - Agent 名称必须是 kebab-case 格式
+- 如果用户提供中文名称，请写入 name_cn 字段
 - mode 固定为 subagent
 - 文件必须写入 ~/.flocks/plugins/agents/
 - 不要与内置 Agent 名称冲突
