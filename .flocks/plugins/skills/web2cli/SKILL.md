@@ -272,15 +272,27 @@ jq -r '.[].method' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json" | sort | un
 jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE_ROOT/captures/${CAPTURE_NAME}_api.json"
 ```
 
-### 8. CLI 工具生成
+### 8. 判断最终产物落点
 
-根据 `references/cli-requirements.md` 的要求，基于抓包结果、认证状态和用户目标，生成 CLI、验证材料和接口文档。
+生成任何 CLI、handler 或最终文件前，必须先判断本次 WebCLI 能力最终应该沉淀到哪里。不要先生成一个孤立 CLI，再在后续步骤才决定是否改成 device tool。
+
+根据用户目标和场景二选一：
+
+- **通用网站、查询脚本、内部系统操作、非设备页接入**：最终主 CLI 放在 skill 的 `scripts/`，按 `references/cli-in-skill.md` 集成为长期维护的 skill / CLI 资产。
+- **安全设备接入、来自设备接入页、需要出现在设备页配置和调用**：最终主实现放在 `tools/device/<plugin_id>/` 下，按 `references/cli-in-device.md` 生成 `_provider.yaml`、工具 YAML 和 handler。CLI 只可作为可选调试/回归入口，不作为设备运行时主路径。
+
+如果用户目标不清楚，先用 `question` 明确最终落点，再继续生成。
+
+### 9. 按目标落点生成可验证实现
+
+#### 9.1 通用 CLI / Skill 场景
 
 生成前必须读取并遵循：
 
 - `$WEB2CLI_SKILL/references/cli-requirements.md`
+- `$WEB2CLI_SKILL/references/cli-in-skill.md`
 
-最终产物必须包含：
+基于抓包结果、认证状态和用户目标，生成 CLI、验证材料和接口文档。阶段性产物至少包含：
 
 - `$CAPTURE_ROOT/<normalized_capture_name>_cli.py`
 - `$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
@@ -288,37 +300,49 @@ jq '.[] | select(.method == "POST") | {url: .url, body: .requestBody}' "$CAPTURE
 
 如果 `CAPTURE_NAME` 包含 `-` 等不能作为 Python 模块名的字符，生成 CLI 文件名时必须规范化为 `_`，例如 `test-domain_cli.py` 应写为 `test_domain_cli.py`。
 
-### 9. CLI工具验证与修改
+随后按 `references/cli-in-skill.md` 将主 CLI 集成到 skill 的 `scripts/`，不要把最终 CLI 保留成一次性抓包文件名。
 
-根据生成的 CLI ，任意选择一个接口调用测试可用性
-- CLI 工具可用性
+#### 9.2 安全设备接入场景
+
+生成前必须读取并遵循：
+
+- `$WEB2CLI_SKILL/references/cli-in-device.md`
+
+基于抓包结果、认证状态和用户目标，生成 device 插件目录：
+
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/_provider.yaml`
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/<domain>.yaml`
+- `$HOME/.flocks/plugins/tools/device/<plugin_id>/<name>.handler.py`
+- `$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json`
+- `$CAPTURE_ROOT/cli-reference.md`
+
+安全设备接入场景不要求先生成 `$CAPTURE_ROOT/<normalized_capture_name>_cli.py`。如确实需要 CLI 做调试或回归，可生成可选 CLI，但必须明确它不是设备运行时主路径，且不要和 handler 独立演进出两套认证/请求逻辑。
+
+### 10. 验证与修改
+
+根据第 8 步确定的目标落点验证可用性：
+
+- 通用 CLI / Skill 场景：用生成的 CLI 任意选择一个接口调用测试可用性
+- 安全设备接入场景：用生成的 handler/device tool 或可选 CLI 任意选择一个低风险接口调用测试可用性
 - 认证状态可用性
 - `verify.json` 的输出约束是否满足
-- method、endpoint、query/body/payload 的一致性，必要时根据${CAPTURE_NAME}_api.json调整
+- method、endpoint、query/body/payload 的一致性，必要时根据 `${CAPTURE_NAME}_api.json` 调整
 
-推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再用生成的 CLI 以默认参数执行一次，确认固定输出列与认证状态都正确。
+推荐先查看 `"$CAPTURE_ROOT/${CAPTURE_NAME}_verify.json"`，再以默认参数执行一次最小验证，确认固定输出列与认证状态都正确。
 
-### 10. 将 WebCLI 能力沉淀为最终产物
+### 11. 将 WebCLI 能力沉淀为最终产物
 
-分为基础层和可选增强层：
+无论主实现放在哪里，都必须保留 skill 级文档入口，供长期维护、认证恢复、重新抓包和排障使用：
 
-#### 基础要求：必须集成到 skill
-
-- 所有 `web2cli` 结果都必须先按 `references/cli-in-skill.md` 集成为可长期维护的 skill / CLI 资产
-- 这是必选步骤，因为认证失效、浏览器恢复、重新抓包、CLI 参数说明和日常排障都依赖 skill 文档入口
 - `references/browser-workflow.md` 必须记录浏览器连接检查、登录步骤、state 保存位置和认证恢复流程
+- `references/cli-reference.md` 必须记录 CLI 或 device handler 的能力、参数、验证方式和回归方法
+- `SKILL.md` 必须说明当前能力最终落点：`scripts/` 或 `tools/device/<plugin_id>/`
 
-#### CLI 放置原则
-
-- 主 CLI 的落点是二选一：要么放在 skill 的 `scripts/`，要么放在 `tools/device/<plugin_id>/` 下
-- 通用网站、查询等场景：优先放在 skill 的 `scripts/`
-- 安全设备接入：按 `references/cli-in-device.md` 将能力整理成 `tools/device/<plugin_id>/` 下的 `_provider.yaml`、工具 YAML 和 handler
-- 不要同时维护两份独立演进的主 CLI，避免能力漂移和认证逻辑分叉
-- 无论主 CLI 放在哪，skill 集成都始终是必选
+注意：skill 文档入口必选，不等于必须把主 CLI 代码也放进 skill 的 `scripts/`。安全设备接入场景下，主实现应以 device handler 为准。
 
 不要只停留在一次性 CLI 或临时抓包结果；最终都要沉淀成可长期维护的资产。
 
-### 11. summary并关闭浏览器 tab
+### 12. summary并关闭浏览器 tab
 
 1. 总结当前生成的 CLI 工具有哪些接口/能力
 2. 确保 CLI 可用后关闭浏览器或 Tab

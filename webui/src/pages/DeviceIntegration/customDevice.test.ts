@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { APIServiceSummary, CustomDeviceApiDraft, CustomDeviceWebCliDraft } from '@/types';
+import type { CustomDeviceApiDraft, CustomDeviceWebCliDraft } from '@/types';
+import type { DeviceTemplate } from '@/api/device';
 import {
   buildCustomDevicePrompt,
   buildCustomDeviceServiceId,
@@ -70,28 +71,32 @@ describe('customDevice helpers', () => {
   });
 
   it('finds matching template by exact or partial name', () => {
-    const templates: APIServiceSummary[] = [
+    const templates: DeviceTemplate[] = [
       {
-        id: 'existing_v1',
+        plugin_id: 'existing_v1',
+        storage_key: 'existing_v1',
+        service_id: 'existing',
         name: 'Existing Device',
-        enabled: true,
-        status: 'unknown',
+        credential_schema: [],
         tool_count: 1,
-        verify_ssl: false,
-        integration_type: 'device',
+        installed: true,
+        state: 'installed',
+        source: 'project',
       },
       {
-        id: 'acme_guard_device_v1',
+        plugin_id: 'acme_guard_device_v1',
+        storage_key: 'acme_guard_device_v1',
+        service_id: 'acme_guard_device',
         name: 'Acme Guard',
-        enabled: true,
-        status: 'unknown',
+        credential_schema: [],
         tool_count: 2,
-        verify_ssl: false,
-        integration_type: 'device',
+        installed: true,
+        state: 'installed',
+        source: 'project',
       },
     ];
 
-    expect(findTemplateForCustomDevice(templates, 'Acme Guard')?.id).toBe('acme_guard_device_v1');
-    expect(findTemplateForCustomDevice(templates, 'Acme')?.id).toBe('acme_guard_device_v1');
+    expect(findTemplateForCustomDevice(templates, 'Acme Guard')?.storage_key).toBe('acme_guard_device_v1');
+    expect(findTemplateForCustomDevice(templates, 'Acme')?.storage_key).toBe('acme_guard_device_v1');
   });
 });

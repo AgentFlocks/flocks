@@ -86,6 +86,15 @@
     },
     "productCount": "{{count}} 种设备",
     "instanceCount": "已接入 {{count}} 台",
+    "installState": {
+      "install": "请先在 FlockHub 安装",
+      "update": "请先在 FlockHub 更新",
+      "broken": "插件不可用",
+      "installed": "已安装",
+      "available": "可安装",
+      "updateAvailable": "可更新",
+      "brokenShort": "不可用"
+    },
     "productHint": "共 {{count}} 款设备，同款设备可多次接入"
   },
 
@@ -185,9 +194,11 @@
       "webcliNext": "你可以继续补充页面操作、抓包目标和认证方式。最终结果应当是可在设备页识别的 WebCLI device 插件；如果需要，也可以额外保留 CLI 作为调试入口。"
     },
     "rex": {
-      "apiHint": "与 Rex 协作生成插件后，可返回设备页查看是否已出现对应 device 插件。若 API 文档不便粘贴，可直接在当前对话中上传。",
-      "webcliHint": "与 Rex 协作完成后，请确认 WebCLI device 插件已生成。完成后可返回设备页继续查看和配置；CLI 仅作为可选调试入口保留。",
+      "apiHint": "上传 API 文档或描述接口；Rex 会先澄清关键缺口，确认后再生成 device 插件。",
+      "webcliHint": "提供产品 URL 和目标页面/操作；Rex 会先澄清登录、权限和风险操作，再生成接入资产。",
       "placeholder": "继续补充接口说明、认证细节或调试信息",
+      "apiPlaceholder": "请提供产品 API 文档",
+      "webcliPlaceholder": "请提供网站地址",
       "pending": "Rex 准备中..."
     },
     "workflow": {
