@@ -141,6 +141,8 @@ export interface SessionChatProps {
   composerTextareaMaxHeight?: number;
   /** Extra content injected between left toolbar controls and right actions */
   centerToolbarSlot?: React.ReactNode;
+  /** Context window size for the current model; enables composer usage ring. */
+  contextWindowTokens?: number | null;
   /**
    * Called when the user sends a message but sessionId is not yet available.
    * The parent should create a session and dispatch the prompt (with the
@@ -191,6 +193,91 @@ type UploadedDocumentAttachmentLike = {
   workspacePath?: string;
   isImage?: boolean;
 };
+
+const APPROX_CHARS_PER_TOKEN = 4;
+
+function countTokensLikeCompaction(text: string | null | undefined): number {
+  if (!text) return 0;
+  return Math.floor(text.length / APPROX_CHARS_PER_TOKEN);
+}
+
+function stringifyToolPayload(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function estimatePartTokens(part: MessagePart): number {
+  if (part.type === 'text') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'reasoning') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'tool' && part.state) {
+    const inputTokens = countTokensLikeCompaction(stringifyToolPayload(part.state.input));
+    const isCompacted = Boolean((part.state.time as { compacted?: boolean } | undefined)?.compacted);
+    const outputTokens = isCompacted
+      ? 10
+      : countTokensLikeCompaction(stringifyToolPayload(part.state.output));
+    return inputTokens + outputTokens;
+  }
+  return 0;
+}
+
+function estimateContextTokens(messages: Message[], draft: string): number {
+  const messageTokens = messages.reduce((total, message) => (
+    total + message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0)
+  ), 0);
+  return messageTokens + countTokensLikeCompaction(draft);
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens >= 10000000 ? 0 : 1)}M`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}K`;
+  return String(tokens);
+}
+
+function ContextUsageRing({ percent, title }: { percent: number; title: string }) {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const radius = 13;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference * (1 - clamped / 100);
+  const strokeClass = clamped >= 90
+    ? 'stroke-red-500'
+    : clamped >= 75
+      ? 'stroke-amber-500'
+      : clamped >= 50
+        ? 'stroke-sky-500'
+        : 'stroke-zinc-400';
+
+  return (
+    <div
+      className="relative inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
+      title={title}
+      aria-label={title}
+    >
+      <svg className="absolute inset-0 h-8 w-8 -rotate-90" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r={radius} fill="none" strokeWidth="2.5" className="stroke-zinc-200" />
+        <circle
+          cx="16"
+          cy="16"
+          r={radius}
+          fill="none"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          className={strokeClass}
+          strokeDasharray={circumference}
+          strokeDashoffset={strokeDashoffset}
+        />
+      </svg>
+    </div>
+  );
+}
 
 function isSuccessfulUploadedDocumentAttachment(
   attachment: UploadedDocumentAttachmentLike,
@@ -732,6 +819,7 @@ export default function SessionChat({
   composerTextareaMinHeight,
   composerTextareaMaxHeight,
   centerToolbarSlot,
+  contextWindowTokens,
   mentionAgents = [],
 }: SessionChatProps) {
   const { t, i18n } = useTranslation('session');
@@ -910,6 +998,20 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+  const estimatedContextTokens = useMemo(
+    () => estimateContextTokens(messages, input),
+    [messages, input],
+  );
+  const contextUsagePercent = contextWindowTokens && contextWindowTokens > 0
+    ? Math.min(100, Math.round((estimatedContextTokens / contextWindowTokens) * 100))
+    : 0;
+  const contextUsageTitle = contextWindowTokens && contextWindowTokens > 0
+    ? t('chat.contextUsageTitle', {
+        used: formatTokenCount(estimatedContextTokens),
+        total: formatTokenCount(contextWindowTokens),
+        percent: contextUsagePercent,
+      })
+    : t('chat.contextUsageUnknown');
 
   // Keep a ref to latest messages so handleAbort can read it without stale closure
   const messagesRef = useRef(messages);
@@ -2584,20 +2686,24 @@ export default function SessionChat({
 
                   <div className="flex-1" />
 
+                  {contextWindowTokens && contextWindowTokens > 0 && (
+                    <ContextUsageRing
+                      percent={contextUsagePercent}
+                      title={contextUsageTitle}
+                    />
+                  )}
+
                   {isStreaming ? (
                     <>
-                      <button
-                        onClick={handleSend}
-                        disabled={!canSend}
-                        title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
-                        className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                          canSend
-                            ? 'bg-sky-500 text-white hover:bg-sky-600 shadow-sm hover:shadow'
-                            : 'bg-zinc-200 text-zinc-400 cursor-not-allowed'
-                        }`}
-                      >
-                        {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
-                      </button>
+                      {canSend && (
+                        <button
+                          onClick={handleSend}
+                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-sky-500 text-white shadow-sm transition-all hover:bg-sky-600 hover:shadow"
+                        >
+                          {sending || hasUploadingFiles ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowUp className="w-4 h-4" strokeWidth={2.5} />}
+                        </button>
+                      )}
                       <button
                         onClick={handleAbort}
                         title={t('chat.stopTitle')}

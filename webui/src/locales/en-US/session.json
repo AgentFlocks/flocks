@@ -61,6 +61,8 @@
     "vision": "Vision",
     "free": "Free",
     "noCost": "No cost",
+    "contextWindow": "Context window: {{value}}",
+    "contextUnknown": "Context window: Unknown",
     "addModel": "Add model"
   },
   "welcome": {
@@ -81,6 +83,8 @@
     "emptyText": "No execution records",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
+    "contextUsageUnknown": "Context usage unknown",
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",

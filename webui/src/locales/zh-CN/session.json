@@ -61,6 +61,8 @@
     "vision": "视觉",
     "free": "免费",
     "noCost": "暂无费用",
+    "contextWindow": "上下文窗口：{{value}}",
+    "contextUnknown": "上下文窗口：未知",
     "addModel": "添加模型"
   },
   "welcome": {
@@ -81,6 +83,8 @@
     "emptyText": "暂无执行记录",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
+    "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",
+    "contextUsageUnknown": "上下文使用量未知",
     "edit": "编辑",
     "editRawHint": "当前显示的是原始未渲染内容，保存后会直接更新这条消息文本。",
     "editRawTitle": "编辑原始内容",

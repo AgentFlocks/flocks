@@ -43,6 +43,8 @@ type ChatModelOption = {
   modelID: string;
   label: string;
   pricingLabel: string;
+  contextLabel: string;
+  contextWindowTokens: number | null;
   supportsVision: boolean | null;
 };
 type ChatModelProviderGroup = {
@@ -148,6 +150,14 @@ export default function SessionPage() {
       return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
     };
 
+    const formatContextWindow = (contextWindow?: number): string => {
+      if (!contextWindow) return t('modelPicker.contextUnknown');
+      const value = contextWindow >= 1000000
+        ? `${(contextWindow / 1000000).toFixed(0)}M`
+        : `${(contextWindow / 1000).toFixed(0)}K`;
+      return t('modelPicker.contextWindow', { value });
+    };
+
     return enabledModelDefinitions.flatMap((model) => {
       const provider = providerById.get(model.provider_id);
       if (!provider) return [];
@@ -158,6 +168,8 @@ export default function SessionPage() {
         modelID: model.id,
         label: model.name || model.id,
         pricingLabel: formatPricing(model.pricing),
+        contextLabel: formatContextWindow(model.limits?.context_window),
+        contextWindowTokens: model.limits?.context_window ?? null,
         supportsVision: typeof model.capabilities?.supports_vision === 'boolean'
           ? model.capabilities.supports_vision
           : null,
@@ -898,6 +910,7 @@ export default function SessionPage() {
           onCreateNewSession={handleCreateSession}
           onStreamingDone={() => setPendingInitialMessage(null)}
           supportsVision={effectiveSupportsVision}
+          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
             <WelcomeScreen onSuggestion={setInput} />
@@ -1073,9 +1086,9 @@ export default function SessionPage() {
                                       className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200"
                                       onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                       onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                      onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
-                                      onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
-                                      onMouseOver={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
+                                      onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                      onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                      onMouseOver={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
                                       onMouseLeave={() => setSelectorTooltip(null)}
                                       onPointerLeave={() => setSelectorTooltip(null)}
                                     >
