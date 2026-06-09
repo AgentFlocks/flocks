@@ -24,14 +24,16 @@ Flocks is an AI-driven SecOps platform built with Python, featuring multi-agent 
 
 ## 3. Installation & Usage
 
-Flocks supports two deployment methods — **choose one**:
+Flocks supports multiple installation methods. Choose the one that best matches your environment.
 
-| Method | Description |
+| Method | Best for |
 |---|---|
-| 3.1 PC Installation | Recommended for local development and production deployment |
-| 3.2 Docker Installation | Out-of-the-box, but agent-browser headed mode is currently unavailable |
+| 3.1 One-command installation | Recommended, fastest setup for macOS / Linux / Windows |
+| 3.2 Source installation | Users who want to inspect or modify the source code |
+| 3.3 Windows EXE installer | Windows x64 users who prefer a graphical installer |
+| 3.4 Docker installation | Containerized deployment; agent-browser headed mode is currently unavailable |
 
-### 3.1 Option 1: PC Installation
+### 3.1 One-command installation
 
 #### 3.1.1 System Requirements
 
@@ -46,12 +48,6 @@ If automatic `npm` installation fails during setup, please install `npm` manuall
 
 #### 3.1.2 Install
 
-> The following installation options are supported. **Choose one** to complete the installation, then proceed to 3.1.3 Start service.
-
----
-
-**Option A: Install with one command (recommended)**
-
 > [!NOTE]
 > **Users in mainland China**: Please follow the installation instructions in the [简体中文](README_zh.md), which provides a mirror-accelerated installation method specifically optimized for users in China.
 
@@ -59,16 +55,26 @@ macOS / Linux
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.sh | bash
 ```
-Creates ./flocks under the current directory
 
 Windows PowerShell (Administrator)
 ```powershell
 powershell -c "irm https://raw.githubusercontent.com/AgentFlocks/flocks/main/install.ps1 | iex"
 ```
 
----
+The installer creates `./flocks` under the current directory.
 
-**Option B: Install from source code**
+#### 3.1.3 Start service
+
+After installation, enter the project directory and start the service:
+
+```bash
+cd flocks
+flocks start
+```
+
+### 3.2 Source installation
+
+#### 3.2.1 Clone source code
 
 If you prefer to inspect the repository before installation, clone it locally and run the installer from the workspace:
 
@@ -76,6 +82,8 @@ If you prefer to inspect the repository before installation, clone it locally an
 git clone https://github.com/AgentFlocks/Flocks.git flocks
 cd flocks
 ```
+
+#### 3.2.2 Install
 
 macOS / Linux
 ```bash
@@ -87,9 +95,15 @@ Windows PowerShell (Administrator)
 powershell -ep Bypass -File .\scripts\install.ps1
 ```
 
----
+#### 3.2.3 Start service
 
-**Option C: Windows installer (EXE, BETA)**
+```bash
+flocks start
+```
+
+### 3.3 Windows EXE installer
+
+#### 3.3.1 Download and install
 
 Flocks provides an **Inno Setup** wizard (`.exe`) for **Windows x64**. Download the installer for your version from the [GitHub Releases](https://github.com/AgentFlocks/flocks/releases) page.
 
@@ -97,42 +111,30 @@ Flocks provides an **Inno Setup** wizard (`.exe`) for **Windows x64**. Download 
 | --- | --- |
 | Windows (x64) | `FlocksSetup-<tag>.exe` |
 
-After installation, use the **Start menu** or optional **desktop** shortcut, or open a **new** terminal and run `flocks start` so updated `PATH` and related environment variables take effect. For more details, see [`packaging/README.md`](packaging/README.md).
+#### 3.3.2 Start service
 
----
+After installation, use the **Start menu** or optional **desktop** shortcut to launch Flocks.
 
-#### 3.1.3 Start service
+You can also open a **new** terminal and run the following command so updated `PATH` and related environment variables take effect:
 
-Use the `flocks` CLI to manage the backend and WebUI together in daemon mode.
-The `start` command builds the WebUI before launch by default; use `flocks restart` when you want an explicit full restart.
-
-```bash
+```powershell
 flocks start
-flocks status
-flocks logs
-flocks restart
-flocks stop
 ```
 
-The default service URLs are:
-- Backend API: `http://127.0.0.1:8000` by default
-- WebUI: `http://127.0.0.1:5173` by default
-- Remote access configurable via `flocks start --webui-host <ip>`
+For more details, see [`packaging/README.md`](packaging/README.md).
 
-Flocks CLI usage: `flocks --help`
-
-### 3.2 Option 2: Docker Installation
+### 3.4 Docker installation
 
 > [!NOTE]
-> In the Docker installation, the agent-browser headed mode is currently unavailable.
+> In the Docker installation, agent-browser headed mode is currently unavailable.
 
-#### 3.2.1 Pull image
+#### 3.4.1 Pull image
 
 ```bash
 docker pull ghcr.io/agentflocks/flocks:latest
 ```
 
-#### 3.2.2 Start service
+#### 3.4.2 Start service
 
 Run the container and mount the host user's `~/.flocks` directory into the container:
 
@@ -159,6 +161,26 @@ docker run -d `
 ```
 
 `EXPOSE` in the image only documents container ports. You still need `-p 8000:8000 -p 5173:5173` to access the service from the host browser.
+
+### 3.5 Common service commands
+
+Use the `flocks` CLI to manage the backend and WebUI together in daemon mode.
+The `start` command builds the WebUI before launch by default; use `flocks restart` when you want an explicit full restart.
+
+```bash
+flocks start
+flocks status
+flocks logs
+flocks restart
+flocks stop
+```
+
+The default service URLs are:
+- Backend API: `http://127.0.0.1:8000` by default
+- WebUI: `http://127.0.0.1:5173` by default
+- Remote access configurable via `flocks start --webui-host <ip>`
+
+Flocks CLI usage: `flocks --help`
 
 ## 4. FAQ
 
