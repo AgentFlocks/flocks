@@ -1,4 +1,5 @@
 name: ti-analyst
+name_cn: 威胁情报智能体
 description: >-
   Threat intelligence analyst subagent for IOC analysis, attribution, and threat actor research.
   Analyzes IPs, domains, and file hashes to assess threat levels, identify attack origins,

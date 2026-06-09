@@ -1,4 +1,5 @@
 name: hephaestus
+name_cn: 深度执行智能体
 description: >-
   Autonomous deep worker. Explores thoroughly with direct tools before acting
   and completes tasks end-to-end without delegating further.

@@ -1,4 +1,5 @@
 name: librarian
+name_cn: 资料检索智能体
 description: >-
   Specialized codebase understanding agent for multi-repository analysis,
   searching remote codebases, retrieving official documentation, and finding

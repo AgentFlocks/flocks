@@ -118,6 +118,9 @@ class AgentInfo(BaseModel):
     model_config = {"populate_by_name": True}
 
     name: str
+    # Chinese display name for localized UI. The canonical ``name`` remains the
+    # stable identifier used by tools, routing, storage, and @mentions.
+    name_cn: Optional[str] = None
     description: Optional[str] = None
     # Chinese UI label; English ``description`` is used for delegation prompts / tooling.
     description_cn: Optional[str] = None

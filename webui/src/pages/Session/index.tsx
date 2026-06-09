@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
@@ -21,7 +21,7 @@ import client from '@/api/client';
 import { defaultModelAPI, modelV2API } from '@/api/provider';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
-import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2 } from '@/types';
 
@@ -42,6 +42,7 @@ type ChatModelOption = {
   providerName: string;
   modelID: string;
   label: string;
+  pricingLabel: string;
   supportsVision: boolean | null;
 };
 type ChatModelProviderGroup = {
@@ -58,14 +59,6 @@ type SelectorTooltip = {
 
 function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
-}
-
-function getAgentSecondaryDescription(agent: Agent, language: string): string {
-  const isZh = language.toLowerCase().replace('_', '-').startsWith('zh');
-  const primary = (isZh ? agent.descriptionCn : agent.description)?.trim();
-  const secondary = (isZh ? agent.description : agent.descriptionCn)?.trim();
-  if (primary && secondary && primary !== secondary) return secondary;
-  return '';
 }
 
 function readLastSelectedSessionId(): string | null {
@@ -90,6 +83,7 @@ function writeLastSelectedSessionId(sessionId: string | null) {
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -147,6 +141,13 @@ export default function SessionPage() {
         .map((provider) => [provider.id, provider]),
     );
 
+    const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
+      if (!pricing) return t('modelPicker.noCost');
+      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
+      const currencySymbol = pricing.currency === 'CNY' ? '¥' : '$';
+      return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
+    };
+
     return enabledModelDefinitions.flatMap((model) => {
       const provider = providerById.get(model.provider_id);
       if (!provider) return [];
@@ -156,12 +157,13 @@ export default function SessionPage() {
         providerName: provider.name || provider.id,
         modelID: model.id,
         label: model.name || model.id,
+        pricingLabel: formatPricing(model.pricing),
         supportsVision: typeof model.capabilities?.supports_vision === 'boolean'
           ? model.capabilities.supports_vision
           : null,
       }];
     });
-  }, [enabledModelDefinitions, providers]);
+  }, [enabledModelDefinitions, providers, t]);
   const groupedChatModelOptions = useMemo<ChatModelProviderGroup[]>(() => {
     const groups = new Map<string, ChatModelProviderGroup>();
 
@@ -356,6 +358,11 @@ export default function SessionPage() {
     if (chatModelOptions.some((option) => option.key === selectedModelKey)) return;
     setSelectedModelKey(chatModelOptions[0].key);
   }, [chatModelOptions, loadingEnabledModels, selectedModelKey]);
+
+  useEffect(() => {
+    if (showAgentOptions || showModelOptions) return;
+    setSelectorTooltip(null);
+  }, [showAgentOptions, showModelOptions]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -905,27 +912,36 @@ export default function SessionPage() {
               >
                 <Bot className="h-3 w-3 shrink-0" />
                 <span className="truncate font-medium">
-                  {formatAgentName(selectedAgentInfo?.name ?? selectedAgent)}
+                  {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
                 </span>
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-200 bg-white shadow-lg">
+                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm">
                   <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5">
                     <div className="min-w-0">
                       <div className="text-xs font-semibold text-zinc-700">{t('agentPicker.title')}</div>
-                      <div className="truncate text-[10px] text-zinc-400">{t('agentPicker.hint')}</div>
+                      <div
+                        className="truncate text-[10px] text-zinc-400"
+                        onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseLeave={() => setSelectorTooltip(null)}
+                        onPointerLeave={() => setSelectorTooltip(null)}
+                      >
+                        {t('agentPicker.hint')}
+                      </div>
                     </div>
-                    <div className="inline-flex shrink-0 items-center rounded-lg border border-zinc-200 bg-zinc-50 p-0.5 text-[10px]">
+                    <div className="inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px]">
                       {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                         <button
                           key={filter}
                           type="button"
                           onClick={() => setAgentSourceFilter(filter)}
-                          className={`rounded-md px-1.5 py-0.5 transition-colors ${
+                          className={`rounded px-1.5 py-0.5 transition-colors ${
                             agentSourceFilter === filter
-                              ? 'bg-zinc-800 text-white'
-                              : 'text-zinc-500 hover:bg-white hover:text-zinc-800'
+                              ? 'bg-zinc-100 text-zinc-900'
+                              : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-800'
                           }`}
                         >
                           {t(`agentPicker.filter.${filter}`)}
@@ -933,33 +949,33 @@ export default function SessionPage() {
                       ))}
                     </div>
                   </div>
-                  <div className="max-h-64 space-y-0.5 overflow-y-auto p-1.5">
+                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
                     {loadingAgents ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : filteredChatAgents.length > 0 ? (
                       filteredChatAgents.map((agent) => {
+                        const displayName = getAgentDisplayName(agent, i18n.language);
                         const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
-                        const secondaryDesc = getAgentSecondaryDescription(agent, i18n.language);
                         return (
                         <button
                           key={agent.name}
                           onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                          className={`w-full min-w-0 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                          className={`w-full min-w-0 rounded-md px-2 py-1.5 text-left transition-colors ${
                             selectedAgent === agent.name
-                              ? 'bg-zinc-100 text-zinc-900'
+                              ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa]'
                               : 'hover:bg-zinc-50 text-zinc-700'
                           }`}
                         >
                           <div className="flex min-w-0 items-center gap-2">
-                            <Bot className="h-3 w-3 shrink-0 text-zinc-400" />
+                            <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600' : 'text-zinc-400'}`} />
                             <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900">
-                              {formatAgentName(agent.name)}
+                              {displayName}
                             </span>
                             <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                               agent.mode === 'primary'
-                                ? 'bg-slate-100 text-slate-600'
+                                ? 'bg-zinc-100 text-zinc-600'
                                 : agent.native
-                                  ? 'bg-blue-50 text-blue-600'
+                                  ? 'bg-zinc-100 text-zinc-600'
                                   : 'bg-teal-50 text-teal-600'
                             }`}>
                               {agent.mode === 'primary'
@@ -969,16 +985,14 @@ export default function SessionPage() {
                                   : t('agentPicker.badge.custom')}
                             </span>
                             <div className="ml-auto flex shrink-0 items-center gap-1">
-                              {selectedAgent === agent.name && (
-                                <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500" />
-                              )}
                               {primaryDesc && (
                                 <span
                                   className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200"
-                                  title={[formatAgentName(agent.name), primaryDesc, secondaryDesc].filter(Boolean).join('\n')}
-                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, formatAgentName(agent.name), [primaryDesc, secondaryDesc].filter(Boolean))}
-                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, formatAgentName(agent.name), [primaryDesc, secondaryDesc].filter(Boolean))}
-                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, formatAgentName(agent.name), [primaryDesc, secondaryDesc].filter(Boolean))}
+                                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
                                   onMouseLeave={() => setSelectorTooltip(null)}
                                   onPointerLeave={() => setSelectorTooltip(null)}
                                 >
@@ -1014,12 +1028,12 @@ export default function SessionPage() {
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-200 bg-white shadow-lg">
+                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm">
                   <div className="border-b border-zinc-100 px-2.5 py-1.5">
                     <div className="text-xs font-semibold text-zinc-700">{t('modelPicker.title')}</div>
                     <div className="truncate text-[10px] text-zinc-400">{t('modelPicker.hint')}</div>
                   </div>
-                  <div className="max-h-64 overflow-y-auto p-1.5">
+                  <div className="h-[13.5rem] overflow-y-auto p-1.5">
                     {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : groupedChatModelOptions.length > 0 ? (
@@ -1027,7 +1041,7 @@ export default function SessionPage() {
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur">
                             <span className="truncate">{group.providerName}</span>
-                            <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] text-zinc-500">
+                            <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
                           </div>
@@ -1040,33 +1054,28 @@ export default function SessionPage() {
                                   setSelectedModelKey(option.key);
                                   setShowModelOptions(false);
                                 }}
-                                className={`w-full rounded-lg px-2 py-1.5 text-left transition-colors ${
+                                className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
-                                    ? 'bg-zinc-100 text-zinc-900'
+                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa]'
                                     : 'text-zinc-700 hover:bg-zinc-50'
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <Cpu className="h-3 w-3 shrink-0 text-zinc-400" />
+                                  <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600' : 'text-zinc-400'}`} />
                                   <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900">{option.label}</span>
-                                  <span className="max-w-[5rem] shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500">
-                                    {option.providerName}
-                                  </span>
                                   {option.supportsVision === true && (
-                                    <span className="shrink-0 rounded bg-sky-50 px-1.5 py-0.5 text-[9px] font-medium text-sky-600">
+                                    <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600">
                                       {t('modelPicker.vision')}
                                     </span>
                                   )}
                                   <div className="ml-auto flex shrink-0 items-center gap-1">
-                                    {selectedModelOption?.key === option.key && (
-                                      <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-zinc-500" />
-                                    )}
                                     <span
                                       className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200"
-                                      title={[option.label, option.providerName, option.modelID].join('\n')}
-                                      onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.providerName, option.modelID])}
-                                      onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.providerName, option.modelID])}
-                                      onMouseOver={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.providerName, option.modelID])}
+                                      onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                      onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                      onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
+                                      onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
+                                      onMouseOver={(event) => showSelectorTooltip(event.currentTarget, option.label, [option.pricingLabel, option.modelID])}
                                       onMouseLeave={() => setSelectorTooltip(null)}
                                       onPointerLeave={() => setSelectorTooltip(null)}
                                     >
@@ -1082,6 +1091,20 @@ export default function SessionPage() {
                     ) : (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
                     )}
+                  </div>
+                  <div className="border-t border-zinc-100 p-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowModelOptions(false);
+                        setSelectorTooltip(null);
+                        navigate('/models');
+                      }}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-900"
+                    >
+                      <Plus className="h-3 w-3" />
+                      {t('modelPicker.addModel')}
+                    </button>
                   </div>
                 </div>
               )}

@@ -16,6 +16,7 @@ export function CreateAgentDialog({
   const { t } = useTranslation(['agent', 'common']);
   const [formData, setFormData] = useState({
     name: '',
+    nameCn: '',
     description: '',
     descriptionCn: '',
     prompt: '',
@@ -77,6 +78,7 @@ export function EditAgentDialog({
   const { t } = useTranslation(['agent', 'common']);
   const [formData, setFormData] = useState({
     name: agent.name,
+    nameCn: agent.nameCn ?? '',
     description: agent.description ?? '',
     descriptionCn: agent.descriptionCn ?? '',
     prompt: agent.prompt ?? '',
@@ -94,6 +96,7 @@ export function EditAgentDialog({
     try {
       setLoading(true);
       await agentAPI.update(agent.name, {
+        nameCn: formData.nameCn,
         description: formData.description || undefined,
         descriptionCn: formData.descriptionCn || undefined,
         prompt: formData.prompt,
@@ -131,6 +134,7 @@ export function EditAgentDialog({
 
 interface FormData {
   name: string;
+  nameCn: string;
   description: string;
   descriptionCn: string;
   prompt: string;
@@ -188,6 +192,17 @@ function AgentFormModal({
                 {formData.name}
               </div>
             )}
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">{t('agent:form.nameCn')}</label>
+            <input
+              type="text"
+              value={formData.nameCn}
+              onChange={(e) => onChange({ ...formData, nameCn: e.target.value })}
+              className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              placeholder={t('agent:form.nameCnPlaceholder')}
+            />
           </div>
 
           <div>

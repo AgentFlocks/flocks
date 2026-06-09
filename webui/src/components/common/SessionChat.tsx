@@ -2562,6 +2562,18 @@ export default function SessionChat({
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={sending}
+                    title={t('chat.upload.selectWithImage')}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <Paperclip className="h-4 w-4" />
+                  </button>
+
+                  <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200" />
+
                   {toolbarSlot}
 
                   {centerToolbarSlot && (
@@ -2571,16 +2583,6 @@ export default function SessionChat({
                   )}
 
                   <div className="flex-1" />
-
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={sending}
-                    title={t('chat.upload.selectWithImage')}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 hover:text-zinc-800 hover:bg-zinc-200/60 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  >
-                    <Paperclip className="w-4 h-4" />
-                  </button>
 
                   {isStreaming ? (
                     <>

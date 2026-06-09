@@ -58,7 +58,10 @@
     "hint": "作为本次对话发送时的模型覆盖",
     "empty": "暂无可用模型",
     "count": "{{count}} 个",
-    "vision": "视觉"
+    "vision": "视觉",
+    "free": "免费",
+    "noCost": "暂无费用",
+    "addModel": "添加模型"
   },
   "welcome": {
     "title": "开始新的对话",

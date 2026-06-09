@@ -2,6 +2,8 @@ import client from './client';
 
 export interface Agent {
   name: string;
+  /** Chinese display name; canonical `name` remains the stable identifier. */
+  nameCn?: string;
   description?: string;
   /** Chinese UI label; English \`description\` is used for delegation/tooling. */
   descriptionCn?: string;
@@ -53,6 +55,7 @@ export const agentAPI = {
 
   create: (data: {
     name: string;
+    nameCn?: string;
     description?: string;
     descriptionCn?: string;
     prompt: string;
@@ -67,6 +70,7 @@ export const agentAPI = {
     client.post<Agent>('/api/agent', data),
 
   update: (name: string, data: {
+    nameCn?: string;
     description?: string;
     descriptionCn?: string;
     prompt?: string;

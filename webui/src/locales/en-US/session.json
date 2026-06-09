@@ -58,7 +58,10 @@
     "hint": "Overrides the model used when sending this chat message",
     "empty": "No available models",
     "count": "{{count}}",
-    "vision": "Vision"
+    "vision": "Vision",
+    "free": "Free",
+    "noCost": "No cost",
+    "addModel": "Add model"
   },
   "welcome": {
     "title": "Start a new conversation",
