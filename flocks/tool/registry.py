@@ -1457,7 +1457,7 @@ class ToolRegistry:
             # device/ — security device asset context
             ("flocks.tool.device", ["device_context_tool"]),
             # channel/ — IM platform messaging
-            ("flocks.tool.channel", ["channel_message"]),
+            ("flocks.tool.channel", ["channel_message", "im_send_message"]),
             # wecom/ — 企业微信 MCP（文档、智能表格）
             ("flocks.tool.wecom", ["wecom_mcp"]),
         ]
